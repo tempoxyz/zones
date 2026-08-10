@@ -74,15 +74,8 @@ async fn test_shield_and_send() -> eyre::Result<()> {
             .connect_http(zone.http_url().clone());
 
         let zone_token = ITIP20::new(ZONE_TOKEN_ADDRESS, &alice_l2_provider);
-        let approval = zone_token
-            .approve(alice.address(), U256::MAX)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(approval.status(), "L2 self-approval failed");
         let receipt = zone_token
-            .transferFrom(alice.address(), bob_address, U256::from(transfer_amount))
+            .transfer(bob_address, U256::from(transfer_amount))
             .send()
             .await?
             .get_receipt()
