@@ -15,7 +15,7 @@ mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::{ZoneBlockExecutor, ZoneTxResult};
-pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
+pub use zone_evm::{ZoneEvm, validate_transaction};
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,

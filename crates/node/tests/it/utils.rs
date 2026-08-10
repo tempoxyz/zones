@@ -3,7 +3,7 @@ use alloy_consensus::Header;
 use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
-use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, TransactionRequest};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
@@ -379,23 +379,36 @@ async fn handle_test_l1_rpc_request(
                 .and_then(|input| const_hex::decode(input.trim_start_matches("0x")).ok())
                 .unwrap_or_default();
 
-            if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
-                serde_json::json!(const_hex::encode_prefixed(
-                    U256::from(enabled_tokens.len()).abi_encode()
-                ))
-            } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
-                let index = input
-                    .get(4..36)
-                    .map(U256::from_be_slice)
-                    .map(|index| index.to::<u64>() as usize);
-                index
-                    .and_then(|index| enabled_tokens.get(index))
-                    .map(|token| serde_json::json!(const_hex::encode_prefixed(token.abi_encode())))
+            if input.starts_with(&IMulticall3::aggregateCall::SELECTOR) {
+                IMulticall3::aggregateCall::abi_decode(&input)
+                    .ok()
+                    .and_then(|aggregate| {
+                        aggregate
+                            .calls
+                            .iter()
+                            .map(|call| {
+                                answer_portal_call(&call.callData, &enabled_tokens)
+                                    .map(alloy_primitives::Bytes::from)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .map(|return_data| {
+                        serde_json::json!(const_hex::encode_prefixed(
+                            IMulticall3::aggregateCall::abi_encode_returns(
+                                &IMulticall3::aggregateReturn {
+                                    blockNumber: U256::ZERO,
+                                    returnData: return_data,
+                                }
+                            )
+                        ))
+                    })
                     .unwrap_or(serde_json::Value::Null)
             } else if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
                 serde_json::json!(const_hex::encode_prefixed(B256::ZERO.abi_encode()))
             } else {
-                serde_json::Value::Null
+                answer_portal_call(&input, &enabled_tokens)
+                    .map(|data| serde_json::json!(const_hex::encode_prefixed(data)))
+                    .unwrap_or(serde_json::Value::Null)
             }
         }
         _ => serde_json::Value::Null,
@@ -412,6 +425,19 @@ async fn handle_test_l1_rpc_request(
         body
     );
     let _ = stream.write_all(response.as_bytes()).await;
+}
+
+/// Answers a [`ZonePortal`] enabled-token view call against the mock registry, either issued
+/// directly or as an inner call of a Multicall3 `aggregate` batch.
+fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8>> {
+    if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
+        Some(U256::from(enabled_tokens.len()).abi_encode())
+    } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
+        let index = input.get(4..36).map(U256::from_be_slice)?.to::<u64>() as usize;
+        enabled_tokens.get(index).map(|token| token.abi_encode())
+    } else {
+        None
+    }
 }
 
 /// Helper to check TIP-403 authorization via TIP-20 operations.
@@ -2344,6 +2370,7 @@ impl L1TestNode {
     pub(crate) async fn encrypt_deposit_for_portal(
         &self,
         portal_address: Address,
+        sender: Address,
         recipient: Address,
         memo: B256,
     ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
@@ -2364,6 +2391,7 @@ impl L1TestNode {
             key_result.yParity,
             recipient,
             memo,
+            sender,
             portal_address,
             key_index,
         )
@@ -2809,7 +2837,7 @@ impl WithdrawalArgs {
         args: RouterDepositArgs,
     ) -> eyre::Result<Self> {
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(args.target_portal, args.recipient, args.memo)
+            .encrypt_deposit_for_portal(args.target_portal, args.router, args.recipient, args.memo)
             .await?;
         Ok(Self::swap_and_deposit_via_router_callback(
             RouterCallbackArgs {
@@ -3197,6 +3225,7 @@ impl ZoneAccount {
             key_result.yParity,
             recipient,
             memo,
+            self.address,
             self.portal_address,
             key_index,
         )
@@ -4668,6 +4697,7 @@ impl L1Fixture {
                         &deposit.tag,
                         Address::ZERO,
                         deposit.key_index,
+                        deposit.sender,
                     ) {
                         self.seed_no_receive_policy_at(block_number, decrypted.to)
                             .expect("encrypted receive-policy fixture seed must be admitted");
@@ -4826,10 +4856,11 @@ impl L1Fixture {
         let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
 
         // HKDF-SHA256 key derivation (matching ecies.rs)
-        let mut info = Vec::with_capacity(84);
+        let mut info = Vec::with_capacity(104);
         info.extend_from_slice(portal_address.as_slice());
         info.extend_from_slice(&key_index.to_be_bytes::<32>());
         info.extend_from_slice(&eph_pub_x.0);
+        info.extend_from_slice(sender.as_slice());
         let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext (deterministic zero nonce)

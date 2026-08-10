@@ -62,6 +62,7 @@ pub mod tip403_proxy;
 #[cfg(feature = "std")]
 pub mod tx_context;
 pub mod zone_fee_manager;
+pub mod zone_state;
 pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};

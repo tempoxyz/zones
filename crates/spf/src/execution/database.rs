@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use revm::{
@@ -30,9 +31,6 @@ pub enum WitnessDatabaseError {
     /// The Zone witness supplied the same bytecode preimage more than once.
     #[error("duplicate bytecode hash in Zone state witness: {code_hash:?}")]
     DuplicateBytecodeHash { code_hash: B256 },
-    /// REVM requested a block hash not supplied by the witness.
-    #[error("missing block hash in witness: {number}")]
-    MissingBlockHash { number: u64 },
     /// The execution inputs assigned two different hashes to one Zone block number.
     #[error("conflicting block hash for {number}: expected {expected:?}, got {actual:?}")]
     ConflictingBlockHash {
@@ -150,7 +148,12 @@ impl Database for WitnessDatabase {
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        Err(WitnessDatabaseError::MissingBlockHash { number })
+        // EIP-2935 makes historical block hashes part of the authenticated Zone state.
+        // Resolve BLOCKHASH through the history contract so the ordinary storage witness
+        // proves the returned value against the parent header's state root.
+        let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+        let value = self.storage(HISTORY_STORAGE_ADDRESS, slot)?;
+        Ok(B256::from(value.to_be_bytes::<32>()))
     }
 }
 

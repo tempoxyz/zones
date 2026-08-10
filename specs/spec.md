@@ -416,7 +416,7 @@ Users can encrypt the recipient and memo of a deposit so that only the sequencer
 The encryption scheme is ECIES with secp256k1:
 
 1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
-2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
+2. The user derives an AES-256 key from the shared secret and the deposit sender using HKDF-SHA256.
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
 4. The user calls `deposit(token, amount, keyIndex, encryptedPayload, tempoRefundRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `tempoRefundRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). In closed access mode, the caller and refund recipient must be allowed; a caller with the `CallbackGateway` role is the exception while gateway mode is enforced. Open access mode skips membership checks. The decrypted `to` address is not checked against Tempo membership. `deposit` also enforces its fee, encryption-key, payload-shape, and TIP-403 checks.
 
@@ -450,7 +450,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 1. **Chaum-Pedersen proof.** The sequencer provides a zero-knowledge proof that the shared secret was correctly derived: "I know `privSeq` such that `pubSeq = privSeq * G` AND `sharedSecretPoint = privSeq * ephemeralPub`." The [Chaum-Pedersen Verify](#chaum-pedersen-verify) precompile checks this proof. The sequencer's public key is looked up from the onchain key history, not supplied by the sequencer, preventing key substitution.
 
-2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, and `ephemeralPubkeyX` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint.
+2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, `ephemeralPubkeyX`, and the public deposit `sender` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint. Binding the sender means replaying a payload from another account derives a different AES key and fails authentication, causing the deposit to bounce back instead of minting to the hidden recipient.
 
 If any step fails (invalid proof, GCM tag mismatch, or invalid decrypted plaintext length), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `tempoRefundRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `deposit` requires a non-zero `tempoRefundRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
@@ -890,9 +890,9 @@ Keychain keys allow session keys and scoped access keys to authenticate to the R
 
 ### Method Access Control
 
-The RPC uses a default-deny model. Any method not explicitly listed returns `-32601` (method not found). Methods fall into four categories:
+The RPC uses a default-deny model. Any method not explicitly listed returns `-32601` (method not found). Exposed methods fall into two categories:
 
-**Allowed.** `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber` and `eth_getBlockByHash` (without full transactions), `eth_syncing`, `eth_coinbase`, `net_version`, `net_listening`, `web3_clientVersion`, `web3_sha3`.
+**Allowed.** `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber` and `eth_getBlockByHash` (without full transactions), `eth_syncing`, `eth_coinbase`, `net_version`, `net_listening`, `web3_clientVersion`, `web3_sha3`, `zone_getAuthorizationTokenInfo`, `zone_getZoneInfo`, and `zone_getEncryptionKey`.
 
 Fee quotes are caller-independent: `eth_gasPrice` returns the fixed T1 gas price and `eth_maxPriorityFeePerGas` returns `0`.
 
@@ -900,30 +900,29 @@ Fee quotes are caller-independent: `eth_gasPrice` returns the fixed T1 gas price
 
 - `eth_getBalance`, `eth_getTransactionCount`: return `0x0` for non-self queries (no error, to avoid leaking account existence).
 - `eth_getTransactionByHash`, `eth_getTransactionReceipt`: return `null` if the caller is not the sender.
-- `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account.
-- `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. Account-indexed reads are then protected by the execution-level access controls described in [Privacy Modifications](#privacy-modifications), including for nested calls. State override sets and block override objects are rejected for non-sequencer callers.
+- `eth_sendRawTransaction`, `eth_sendRawTransactionSync`: reject if the transaction sender does not match the authenticated account.
+- `eth_fillTransaction`: fills but does not sign an unsigned transaction, with the same authenticated `from` enforcement as simulation methods.
+- `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. Account-indexed reads are then protected by the execution-level access controls described in [Privacy Modifications](#privacy-modifications), including for nested calls. State override sets and block override objects are rejected.
 - `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`: filtered to TIP-20 events where the caller is a relevant party (see [Event Filtering](#event-filtering)).
 - `eth_newFilter`, `eth_newBlockFilter`, `eth_uninstallFilter`: allowed, filters are scoped to the authenticated account.
 
-**Restricted (sequencer-only).** Methods that expose raw state, full block data, or transaction-level detail that would break per-account privacy. This includes raw state access (`eth_getStorageAt`, `eth_getCode`, `eth_createAccessList`), full block queries (`eth_getBlockByNumber`/`eth_getBlockByHash` with full transactions, `eth_getBlockReceipts`, `eth_getBlockTransactionCountByNumber`/`Hash`, `eth_getTransactionByBlockNumberAndIndex`/`HashAndIndex`, `eth_getUncleCountByBlockNumber`/`Hash`), and all `debug_*`, `admin_*`, and `txpool_*` namespace methods.
-
-**Disabled.** Methods not available on zones. `eth_getProof` leaks trie structure. `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` enable mempool observation. Uncle query methods (`eth_getUncleByBlockNumberAndIndex`, `eth_getUncleByBlockHashAndIndex`) and mining methods (`eth_mining`, `eth_hashrate`, `eth_getWork`, `eth_submitWork`, `eth_submitHashrate`) do not apply to zones.
+Methods outside this allowlist are not classified separately as restricted or disabled. Raw state and full block endpoints, mining and mempool methods, and all `debug_*`, `admin_*`, and `txpool_*` methods return `-32601`. Sequencers and operators use the unrestricted RPC on port 8545 instead of receiving elevated access through an authorization token. Requests for full transactions through the otherwise-allowed `eth_getBlockByNumber` and `eth_getBlockByHash` methods return `-32005` and must likewise use the unrestricted endpoint.
 
 **Note on timing side channel attacks:** Scoped methods returning empty values could technically be timed to estimate if the values exist. However, (1) Benchmarked timing differences are very small and (2) The values like `transactionHash` etc... can't be correlated to actual user data, so any leaked signal is not material.
 
 ### Block Responses
 
-For non-sequencer callers, block responses are modified:
+Block responses from the redacted RPC are modified:
 
 - The `transactions` field is always an empty array, regardless of the `include_transactions` parameter.
 - Header fields that reveal aggregate execution activity are zeroed or emptied: `gasUsed`, `transactionsRoot`, `receiptsRoot`, `stateRoot`, `extraData`, `logsBloom`, `size`, optional blob gas fields (`blobGasUsed`, `excessBlobGas`), and optional withdrawal fields (`withdrawals`, `withdrawalsRoot`). The Bloom filter summarizes all log topics and emitting addresses in the block, and the other redacted fields reveal transaction count, payload size, state changes, receipt/log activity, blob usage, or withdrawal activity.
 - Public block identity and timing fields such as `number`, `hash`, `parentHash`, `timestamp`, and fee metadata remain visible.
 
-The sequencer receives full block data.
+Sequencers and operators retrieve full block data from the unrestricted RPC on port 8545.
 
 ### Fee History
 
-`eth_feeHistory` uses the underlying node implementation for block range resolution, history limits, and reward percentile validation, then redacts activity-derived fields before returning the response to non-sequencer callers:
+`eth_feeHistory` uses the underlying node implementation for block range resolution, history limits, and reward percentile validation, then redacts activity-derived fields before returning the response:
 
 - `baseFeePerGas` is set to the public zone T0 base fee for every returned entry.
 - `gasUsedRatio`, `baseFeePerBlobGas` and `blobGasUsedRatio` are set to `0`.
@@ -953,7 +952,7 @@ To avoid leaking how much activity occurred in a block, some fields of returned 
 
 WebSocket connections follow the same authorization model. The authorization token is provided during the handshake and scopes all subscriptions for that connection.
 
-- `eth_subscribe("newHeads")`: allowed, pushes block headers with the same header redaction as HTTP block responses for non-sequencer callers.
+- `eth_subscribe("newHeads")`: allowed, pushes block headers with the same header redaction as HTTP block responses.
 - `eth_subscribe("logs")`: scoped to the authenticated account using the same event filtering rules.
 - `eth_subscribe("newPendingTransactions")`: disabled.
 
@@ -995,8 +994,9 @@ There are no state-changing methods via authorization token. Withdrawals require
 | `-32002` | Authorization token expired | Token has expired |
 | `-32003` | Transaction rejected | Sender mismatch on `eth_sendRawTransaction` |
 | `-32004` | Account mismatch | `from` mismatch on `eth_call` / `eth_estimateGas` |
-| `-32005` | Sequencer only | Method requires sequencer access |
-| `-32006` | Method disabled | Method not available on zones |
+| `-32005` | Sequencer only | Full block transactions require the unrestricted operator RPC |
+| `-32006` | Method disabled | WebSocket subscription kind is not available on zones |
+| `-32601` | Method not found | Method is not exposed by the redacted RPC allowlist |
 
 Methods where the user explicitly supplies a mismatched parameter return explicit errors (the user already knows the address they provided). Methods that query about other accounts return silent dummy values (`0x0`, `null`, empty results) to avoid revealing "data exists but you can't see it."
 
@@ -1023,7 +1023,7 @@ The witness contains everything needed to re-execute the batch:
 - **PublicInputs**: `zone_id`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with. For an ordinary batch, `prevBlockHash` is derived from `prev_block_header` and bound through the public `block_transition` output. For the bootstrap proof it is zero and the transition function derives the canonical genesis block from `zone_id`. The bootstrap batch has to continue through at least one non-genesis block.
 - **BatchWitness**: the public inputs, the previous batch's canonical Tempo header (absent for the bootstrap proof), the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
 - **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlps` (a non-empty ordered array for every non-genesis block), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
-- **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included, including the `TempoState.tempoBlockNumber` slot used by the TIP-403 overlay's host-side anchor lookup. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
+- **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included, including EIP-2935 history-contract slots used by `BLOCKHASH` and the `TempoState.tempoBlockNumber` slot used by the TIP-403 overlay's host-side anchor lookup. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
 
 ### Input Schematic
 
@@ -1290,7 +1290,7 @@ The stateless execution function must reject the witness on any failed check, mi
     For an ordinary batch, require `prev_block_header` to be present, compute `initial_prev_block_hash` with Tempo's canonical `TempoHeader` hash function, and require `prev_block_header.state_root == initial_zone_state.state_root`. For the bootstrap proof, require `prev_block_header` to be absent, set `initial_prev_block_hash = 0`, and require `initial_zone_state` to be the predefined pre-genesis state. The returned `block_transition.prev_block_hash` must equal `initial_prev_block_hash`; the verifier binds it to the submitted `BlockTransition`, whose `prevBlockHash` the portal checks against its stored `blockHash`.
 
 2. **Initialize the initial zone-state reader.**
-   Apply the [shared trie proof format](#shared-trie-proof-format) to `zone_state_witness`: index each node in `zone_state_witness.node_pool` by `keccak256(rlp(node))` and create a witness-backed reader rooted at `parent_header.state_root`. As execution first accesses an account or storage slot, derive its key from the operation, prove and decode its trie leaf, and cache the result in the in-memory execution state. For non-empty account code, find its preimage in `zone_state_witness.bytecodes` by the committed code hash. Valid non-membership yields the canonical empty account or zero storage; an unavailable trie node or bytecode preimage is an error.
+   Apply the [shared trie proof format](#shared-trie-proof-format) to `zone_state_witness`: index each node in `zone_state_witness.node_pool` by `keccak256(rlp(node))` and create a witness-backed reader rooted at `parent_header.state_root`. As execution first accesses an account or storage slot, derive its key from the operation, prove and decode its trie leaf, and cache the result in the in-memory execution state. Resolve `BLOCKHASH(n)` through the EIP-2935 history contract at slot `n % 8191`; the corresponding account and storage paths must be present in the Zone state witness. For non-empty account code, find its preimage in `zone_state_witness.bytecodes` by the committed code hash. Valid non-membership yields the canonical empty account or zero storage; an unavailable trie node or bytecode preimage is an error.
 
 3. **Initialize the Tempo state witness.**
    Compute `keccak256(rlp(node))` for each node in `tempo_state_witness.node_pool` and build a hash-to-node index for proof traversal. Decode `tempo_state_witness.initial_tempo_header_rlp`; require its hash and block number to equal `TempoState.tempoBlockHash` and `TempoState.tempoBlockNumber` in the initial zone state. Set the active Tempo trie root to the decoded header's `state_root`.

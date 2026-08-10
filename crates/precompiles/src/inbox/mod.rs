@@ -319,6 +319,16 @@ impl ZoneInbox {
         }
         Ok(self.withdrawal_bounce_backs[token][owner].read()?)
     }
+
+    /// Returns the hash-chain head after the last processed L1 deposit.
+    pub fn processed_deposit_queue_hash(&self) -> tempo_precompiles::Result<B256> {
+        self.processed_deposit_queue_hash.read()
+    }
+
+    /// Returns the number of L1 deposits consumed by the Zone.
+    pub fn processed_deposit_number(&self) -> tempo_precompiles::Result<u64> {
+        self.processed_deposit_number.read()
+    }
 }
 
 /// A queue entry whose nested ABI payload has been validated before execution begins.
@@ -385,6 +395,7 @@ fn recover_encrypted_payload(
         &portal,
         &deposit.keyIndex,
         &deposit.encrypted.ephemeralPubkeyX,
+        &deposit.sender,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;

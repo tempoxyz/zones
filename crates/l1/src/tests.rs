@@ -1041,6 +1041,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         seq_pub_y_parity,
         recipient,
         B256::ZERO,
+        sender,
         portal,
         U256::ZERO,
     )
@@ -1127,6 +1128,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             y_parity,
             recipient,
             B256::ZERO,
+            sender,
             portal,
             key_index,
         )
@@ -1140,6 +1142,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             &encrypted.tag,
             portal,
             key_index,
+            sender,
         )
         .unwrap();
         expected_shared_secrets.push(decrypted.proof.shared_secret);

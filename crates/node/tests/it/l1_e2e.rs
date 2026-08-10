@@ -701,7 +701,12 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
             .await?;
         let portal = ZonePortal::new(portal_address, &provider);
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(portal_address, allowed_account.address(), B256::ZERO)
+            .encrypt_deposit_for_portal(
+                portal_address,
+                l1.user_signer().address(),
+                allowed_account.address(),
+                B256::ZERO,
+            )
             .await?;
         assert!(
             portal
@@ -1214,7 +1219,7 @@ async fn test_cross_zone_router_tempo_refund_recipient() -> eyre::Result<()> {
     let _seq_b = spawn_sequencer(&l1, &zone_b, portal_b, seq_b_signer.clone()).await;
 
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_b, blacklisted_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal(portal_b, router, blacklisted_recipient, B256::ZERO)
         .await?;
 
     let refund_before = l1.balance_of(PATH_USD_ADDRESS, refund_burner).await?;
@@ -1508,6 +1513,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_payload
         .l1
         .encrypt_deposit_for_portal(
             fixture.portal_address,
+            fixture.router,
             fixture.account.address(),
             B256::ZERO,
         )
@@ -1944,7 +1950,7 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
     let tempo_refund_recipient = depositor.address();
     let deposit_amount = 1_000_000u128;
     l1.fund_user(tempo_refund_recipient, deposit_amount).await?;
-    let provider = l1.provider_with_signer(depositor);
+    let provider = l1.provider_with_signer(depositor.clone());
     ITIP20::new(PATH_USD_ADDRESS, &provider)
         .approve(portal_address, U256::MAX)
         .send()
@@ -1958,7 +1964,12 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
     let _sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let portal = ZonePortal::new(portal_address, &provider);
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_address, rejected_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal(
+            portal_address,
+            depositor.address(),
+            rejected_recipient,
+            B256::ZERO,
+        )
         .await?;
     let receipt = portal
         .deposit(
@@ -2079,6 +2090,7 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
         current_entry.yParity,
         current_recipient,
         B256::ZERO,
+        depositor.address(),
         portal_address,
         U256::ONE,
     )
@@ -2112,6 +2124,7 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
         old_y_parity,
         historical_recipient,
         B256::ZERO,
+        depositor.address(),
         portal_address,
         U256::ZERO,
     )
@@ -2227,6 +2240,7 @@ async fn test_deposit_blacklisted_recipient() -> eyre::Result<()> {
             key_result.yParity,
             blacklisted_recipient,
             B256::ZERO,
+            depositor.address(),
             portal_address,
             key_index,
         )
@@ -2345,7 +2359,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
         let portal = ZonePortal::new(portal_address, &dev_provider);
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(portal_address, alice, B256::ZERO)
+            .encrypt_deposit_for_portal(portal_address, l1.dev_address(), alice, B256::ZERO)
             .await?;
         let receipt = portal
             .deposit(
@@ -2450,7 +2464,7 @@ async fn test_deposit_to_blacklisted_recipient_is_accepted_on_l1() -> eyre::Resu
     use tempo_zone_contracts::ZonePortal;
     let portal = ZonePortal::new(portal_address, &depositor_provider);
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_address, blacklisted_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal(portal_address, depositor, blacklisted_recipient, B256::ZERO)
         .await?;
     let receipt = portal
         .deposit(
