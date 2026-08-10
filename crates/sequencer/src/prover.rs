@@ -32,7 +32,7 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider};
+use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ShadowProverMetrics};
 
 /// Number of candidates allowed to wait behind the active validation.
 const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
@@ -124,11 +124,16 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
         zone_provider,
         l1_provider,
     };
+    let metrics = ShadowProverMetrics::default();
 
     tokio::spawn(async move {
         while let Some(job) = receiver.recv().await {
             let started = Instant::now();
-            match validate_candidate(&context, &job).await {
+            let result = validate_candidate(&context, &job).await;
+            metrics
+                .validation_duration_seconds
+                .record(started.elapsed().as_secs_f64());
+            match result {
                 Ok(stats) => {
                     info!(
                         target: "zone::sequencer::prover",

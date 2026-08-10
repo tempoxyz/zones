@@ -5,6 +5,14 @@ use reth_metrics::{
     metrics::{Counter, Gauge, Histogram},
 };
 
+/// Metrics emitted by the shadow prover.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "tempo_zone_shadow_prover")]
+pub(crate) struct ShadowProverMetrics {
+    /// End-to-end latency of a shadow prover validation attempt in seconds.
+    pub(crate) validation_duration_seconds: Histogram,
+}
+
 /// Metrics emitted by the withdrawal processor.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_withdrawal_processor")]
