@@ -68,13 +68,6 @@ on:
         type: string
         required: true
         default: "1000000"
-      swap-mechanism:
-        description: L1 swap implementation used by the neobank fixture.
-        type: choice
-        required: true
-        default: direct-swap
-        options:
-          - direct-swap
       recipient-mode:
         description: Reuse funded recipients or use fresh recipients where the selected flow permits.
         type: choice
@@ -148,6 +141,11 @@ on:
         type: string
         required: false
         default: ""
+      txgen-ref:
+        description: Exact txgen commit SHA; empty resolves the current txgen HEAD.
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -214,7 +212,7 @@ jobs:
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
           INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
-          INPUT_SWAP_MECHANISM: ${{ inputs.swap-mechanism || 'direct-swap' }}
+          INPUT_SWAP_MECHANISM: direct-swap
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
           INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '10000000' }}
           INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
@@ -229,12 +227,15 @@ jobs:
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
           INPUT_TEMPO_REF: de760926aa6520c5e1cdb85f453c206057ea0e72
+          INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '' }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
-          INPUT_TXGEN_REF="$(git ls-remote https://github.com/tempoxyz/txgen HEAD | awk '{print $1}')"
+          if [ -z "$INPUT_TXGEN_REF" ]; then
+            INPUT_TXGEN_REF="$(git ls-remote https://github.com/tempoxyz/txgen HEAD | awk '{print $1}')"
+          fi
 
           neobank_preset="$INPUT_PRESET"
           case "$neobank_preset" in

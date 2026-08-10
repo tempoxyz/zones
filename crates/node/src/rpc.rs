@@ -222,18 +222,18 @@ where
 
 /// Zone-specific debug API.
 #[derive(Clone)]
-pub(crate) struct ZoneDebugApi<E> {
+pub(crate) struct NodeZoneDebugApi<E> {
     eth_api: E,
 }
 
-impl<E> ZoneDebugApi<E> {
+impl<E> NodeZoneDebugApi<E> {
     pub(crate) const fn new(eth_api: E) -> Self {
         Self { eth_api }
     }
 }
 
 #[jsonrpsee::core::async_trait]
-impl<E> ZoneDebugApiServer for ZoneDebugApi<E>
+impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
 where
     E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
 {

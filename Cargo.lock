@@ -13949,6 +13949,7 @@ dependencies = [
  "proptest",
  "reth-chain-state",
  "reth-metrics",
+ "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
  "schnellru",
@@ -13961,6 +13962,10 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
+ "zone-evm",
+ "zone-l1",
+ "zone-rpc",
+ "zone-spf",
 ]
 
 [[package]]
