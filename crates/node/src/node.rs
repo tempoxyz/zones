@@ -10,8 +10,8 @@ use crate::{
     },
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
-        route_backfill_requests, route_backfill_responses, route_events_to_generations,
-        run_role_controller,
+        canonical_recovery_height, route_backfill_requests, route_backfill_responses,
+        route_events_to_generations, run_role_controller,
     },
     rpc::{
         NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi, SequencerRpcContext,
@@ -596,7 +596,7 @@ where
                     .map(|header| header.number())
                     .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
             };
-            let (historical_replay_through, ()) = tokio::try_join!(
+            let (historical_replay_through, portal_leadership) = tokio::try_join!(
                 finalized_replay_boundary,
                 seed_leadership_schedule(
                     &l1_provider,
@@ -611,10 +611,14 @@ where
             schedule.record_applied_anchor(snapshot_anchor);
             install_manifest_forced_recovery(
                 ctx.node.provider(),
+                &l1_provider,
+                self.portal_address,
                 snapshot_anchor,
+                portal_leadership,
                 p2p.manifest(),
                 &schedule,
-            )?;
+            )
+            .await?;
             self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
                 schedule,
                 manifest: p2p.manifest().clone(),
@@ -948,60 +952,118 @@ impl LeadershipSink for ScheduleLeadershipSink {
 
 /// Install the manifest's temporary runtime authority before any role-dependent task starts.
 ///
-/// The selected block must be the persisted canonical head. The schedule was seeded from the
-/// portal at that block's Tempo anchor immediately before this call, so its latest epoch is the
-/// portal state being overridden.
-fn install_manifest_forced_recovery<P>(
+/// The selected block must remain in the persisted canonical chain. Its historical state restores
+/// the original Tempo anchor and portal epoch, while the current portal snapshot distinguishes an
+/// in-progress recovery from a completed directive left in the manifest after restart.
+///
+/// Canonical ancestry is intentionally a local restart check. Cross-node convergence still relies
+/// on the operational invariant that every descendant was produced on the same chain by the
+/// selected, non-equivocating recovery leader.
+async fn install_manifest_forced_recovery<P>(
     provider: &P,
+    l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+    portal_address: Address,
     snapshot_anchor: u64,
+    portal_leadership: Option<LeadershipState>,
     manifest: &ZoneManifest,
     schedule: &LeadershipSchedule,
 ) -> eyre::Result<()>
 where
-    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader> + StateProviderFactory,
 {
     let Some(recovery) = manifest.forced_recovery() else {
         return Ok(());
     };
-    let portal_epoch = schedule.latest().map(|record| record.epoch).ok_or_else(|| {
+    let portal_leadership = portal_leadership.ok_or_else(|| {
         eyre::eyre!(
             "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint"
         )
     })?;
-    let zone_height = provider.best_block_number()?;
-    let zone_header = provider
-        .sealed_header(zone_height)?
-        .ok_or_else(|| eyre::eyre!("local canonical zone header {zone_height} is missing"))?;
-    eyre::ensure!(
-        zone_header.hash() == recovery.recovery_block_hash(),
-        "forced recovery block hash {} does not equal local canonical head {} at height {}",
-        recovery.recovery_block_hash(),
-        zone_header.hash(),
-        zone_height,
-    );
-
-    let recovery_start_tempo_block = snapshot_anchor
+    let recovery_zone_height = canonical_recovery_height(provider, recovery.recovery_block_hash())?;
+    let recovery_anchor = provider
+        .history_by_block_number(recovery_zone_height)?
+        .tempo_block_number()?;
+    let recovery_start_tempo_block = recovery_anchor
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
-    let recovery_epoch = portal_epoch
+
+    let recovery_portal_epoch = if recovery_anchor == snapshot_anchor {
+        portal_leadership.epoch
+    } else {
+        ZonePortal::new(portal_address, l1_provider)
+            .leaderEpoch()
+            .block(alloy_rpc_types_eth::BlockId::number(recovery_anchor))
+            .call()
+            .await
+            .map_err(|err| {
+                eyre::eyre!(
+                    "failed to read portal epoch at recovery Tempo block {recovery_anchor}: {err}"
+                )
+            })?
+    };
+    let recovery_epoch = recovery_portal_epoch
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
-    schedule.install_forced_recovery(
-        recovery_epoch,
-        recovery.leader().clone(),
-        recovery.recovery_block_hash(),
-        recovery_start_tempo_block,
-    )?;
+
+    match forced_recovery_restart_state(recovery_epoch, snapshot_anchor, &portal_leadership)? {
+        ForcedRecoveryRestartState::Completed => {
+            warn!(
+                target: "reth::cli",
+                leader = %recovery.leader(),
+                recovery_epoch,
+                recovery_zone_height,
+                recovery_zone_hash = %recovery.recovery_block_hash(),
+                snapshot_anchor,
+                portal_epoch = portal_leadership.epoch,
+                portal_activation_tempo_block = portal_leadership.activation_tempo_block,
+                "Skipping completed manifest forced recovery; remove the stale directive"
+            );
+            metrics::counter!("zone_forced_recovery_directives_total", "result" => "completed")
+                .increment(1);
+            return Ok(());
+        }
+        ForcedRecoveryRestartState::Install => schedule.install_forced_recovery(
+            recovery_epoch,
+            recovery.leader().clone(),
+            recovery.recovery_block_hash(),
+            recovery_start_tempo_block,
+        )?,
+    };
     info!(
         target: "reth::cli",
         leader = %recovery.leader(),
-        portal_epoch,
-        recovery_zone_height = zone_height,
+        recovery_portal_epoch,
+        recovery_zone_height,
         recovery_zone_hash = %recovery.recovery_block_hash(),
         recovery_start_tempo_block,
+        resumed = snapshot_anchor >= recovery_start_tempo_block,
         "Installed manifest forced recovery"
     );
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedRecoveryRestartState {
+    Install,
+    Completed,
+}
+
+fn forced_recovery_restart_state(
+    recovery_epoch: u64,
+    snapshot_anchor: u64,
+    portal: &LeadershipState,
+) -> eyre::Result<ForcedRecoveryRestartState> {
+    eyre::ensure!(
+        portal.activation_tempo_block <= snapshot_anchor,
+        "portal epoch {} activates at Tempo block {}, after historical snapshot anchor \
+         {snapshot_anchor}",
+        portal.epoch,
+        portal.activation_tempo_block,
+    );
+    if portal.epoch < recovery_epoch {
+        return Ok(ForcedRecoveryRestartState::Install);
+    }
+    Ok(ForcedRecoveryRestartState::Completed)
 }
 
 /// Seed the leadership schedule from the portal snapshot at the local Tempo anchor.
@@ -1013,7 +1075,7 @@ async fn seed_leadership_schedule(
     snapshot_anchor: u64,
     manifest: &Arc<ZoneManifest>,
     schedule: &LeadershipSchedule,
-) -> eyre::Result<()> {
+) -> eyre::Result<Option<LeadershipState>> {
     let block_id = alloy_rpc_types_eth::BlockId::number(snapshot_anchor);
     let portal_code = if snapshot_anchor == 0 {
         Default::default()
@@ -1036,7 +1098,7 @@ async fn seed_leadership_schedule(
             "Portal is not deployed at the local Tempo anchor; leadership stays fenced until \
              the creation block replays"
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
@@ -1063,7 +1125,8 @@ async fn seed_leadership_schedule(
              historical manifest identity; refusing to start without an authenticated leader"
             )
         })?;
-    schedule.publish(LeadershipState::new(epoch, leader_peer.clone(), activation))?;
+    let leadership = LeadershipState::new(epoch, leader_peer.clone(), activation);
+    schedule.publish(leadership.clone())?;
     info!(
         target: "reth::cli",
         snapshot_anchor,
@@ -1073,7 +1136,7 @@ async fn seed_leadership_schedule(
         peer = %leader_peer,
         "Bootstrapped leadership from the finalized portal snapshot"
     );
-    Ok(())
+    Ok(Some(leadership))
 }
 
 impl<N> ZoneAddOns<N>
@@ -1933,6 +1996,75 @@ mod tests {
         assert!(validate_configured_zone_id("test", 7, 7).is_ok());
         assert!(validate_configured_zone_id("test", 0, 7).is_err());
         assert!(validate_configured_zone_id("test", 8, 7).is_err());
+    }
+
+    #[test]
+    fn forced_recovery_installs_before_the_next_portal_epoch() {
+        let state = forced_recovery_restart_state(
+            2,
+            24_284,
+            &LeadershipState::new(1, PrivateKey::from_seed(1).public_key(), 0),
+        )
+        .unwrap();
+
+        assert_eq!(state, ForcedRecoveryRestartState::Install);
+    }
+
+    #[test]
+    fn forced_recovery_restart_preserves_one_window_across_different_heads() {
+        let recovery_leader = PrivateKey::from_seed(2).public_key();
+        let portal_leader = PrivateKey::from_seed(3).public_key();
+        let recovery_epoch = 2;
+        let recovery_start = 23_333;
+        let recovery_hash = alloy_primitives::B256::repeat_byte(0x42);
+
+        let restart_schedule = |snapshot_anchor| {
+            let portal = LeadershipState::new(1, portal_leader.clone(), 0);
+            let schedule = LeadershipSchedule::seeded(LeadershipState::new(
+                portal.epoch,
+                portal_leader.clone(),
+                portal.activation_tempo_block,
+            ));
+            schedule.record_applied_anchor(snapshot_anchor);
+            match forced_recovery_restart_state(recovery_epoch, snapshot_anchor, &portal).unwrap() {
+                ForcedRecoveryRestartState::Install => schedule
+                    .install_forced_recovery(
+                        recovery_epoch,
+                        recovery_leader.clone(),
+                        recovery_hash,
+                        recovery_start,
+                    )
+                    .unwrap(),
+                ForcedRecoveryRestartState::Completed => unreachable!(),
+            };
+            schedule
+        };
+
+        let lagging = restart_schedule(24_284);
+        let advanced = restart_schedule(26_000);
+
+        for (schedule, next_anchor) in [(lagging, 24_285), (advanced, 26_001)] {
+            let recovery = schedule.forced_recovery().unwrap();
+            assert_eq!(recovery.epoch, recovery_epoch);
+            assert_eq!(recovery.recovery_start_tempo_block, recovery_start);
+            assert_eq!(recovery.recovery_block_hash, recovery_hash);
+            assert_eq!(
+                schedule.leader_for(next_anchor).unwrap().leader,
+                recovery_leader
+            );
+        }
+    }
+
+    #[test]
+    fn forced_recovery_is_complete_after_the_portal_activation() {
+        let state = forced_recovery_restart_state(
+            2,
+            29_123,
+            &LeadershipState::new(2, PrivateKey::from_seed(3).public_key(), 27_599),
+        )
+        .unwrap();
+
+        assert_eq!(state, ForcedRecoveryRestartState::Completed);
     }
 
     #[test]
