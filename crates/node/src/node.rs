@@ -545,9 +545,6 @@ where
             )
             .await?
             .erased();
-        let l1_chain_id = l1_provider.get_chain_id().await?;
-        let l1_chain = Chain::from_id(l1_chain_id);
-
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
         if let Some(keys) = self.l1_config.encryption_keys.clone() {
@@ -598,6 +595,7 @@ where
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let mut p2p_runtime = None;
         if let Some(config) = self.p2p_config.take() {
+            let l1_chain_id = l1_provider.get_chain_id().await?;
             let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
@@ -660,7 +658,8 @@ where
                             .await?
                             .erased();
                     if !provider.client().is_local()
-                        && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
+                        && let Some(avg_block_time) =
+                            Chain::from_id(l1_chain_id).average_blocktime_hint()
                     {
                         provider
                             .client()
@@ -782,7 +781,6 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
-                    l1_chain,
                     attestation.store.clone(),
                     prover_config.clone(),
                 )?),
@@ -834,7 +832,6 @@ where
                 self.l1_config.l1_rpc_url,
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
-                l1_chain,
                 sequencer_addr,
                 None,
                 prover_config,
@@ -1111,14 +1108,12 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        l1_chain: Chain,
         attestation_store: AttestationStore,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
-            l1_chain,
             retry_connection_interval,
             zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
@@ -1321,7 +1316,6 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        l1_chain: Chain,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
         prover_config: Option<ShadowProverConfig>,
@@ -1330,7 +1324,6 @@ where
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
-            l1_chain,
             retry_connection_interval,
             zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,

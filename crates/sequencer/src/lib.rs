@@ -94,8 +94,6 @@ pub struct ZoneSequencerConfig {
     pub portal_address: Address,
     /// Tempo L1 RPC URL.
     pub l1_rpc_url: String,
-    /// Resolved Tempo L1 chain used to configure chain-aware provider behavior.
-    pub l1_chain: Chain,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
     /// Fallback interval for reconciling the canonical Zone head.
@@ -153,7 +151,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     // processor use this provider, ensuring nonces are tracked in one place.
     let l1_provider = connect_l1_provider(
         &config.l1_rpc_url,
-        config.l1_chain,
         config.retry_connection_interval,
         signer.clone(),
     )
@@ -221,7 +218,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
 /// Build the shared L1 provider used by all sequencer-side L1 transaction tasks.
 async fn connect_l1_provider(
     l1_rpc_url: &str,
-    l1_chain: Chain,
     retry_connection_interval: Duration,
     signer: PrivateKeySigner,
 ) -> TransportResult<DynProvider<TempoNetwork>> {
@@ -232,6 +228,7 @@ async fn connect_l1_provider(
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
         .erased();
+    let l1_chain = Chain::from_id(provider.get_chain_id().await?);
     if !provider.client().is_local()
         && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
     {
@@ -286,10 +283,10 @@ mod tests {
         );
     }
 
-    async fn serve_block_number(
+    async fn serve_l1_rpc(
         stream: TcpStream,
-        result: &'static str,
-        close_after_response: bool,
+        block_number: &'static str,
+        close_after_block_number: bool,
     ) {
         let mut ws = accept_async(stream).await.unwrap();
         while let Some(message) = ws.next().await {
@@ -298,9 +295,11 @@ mod tests {
                 continue;
             };
             let request: Value = serde_json::from_str(&text).unwrap();
-            if request["method"] != "eth_blockNumber" {
-                continue;
-            }
+            let result = match request["method"].as_str() {
+                Some("eth_chainId") => "0xa5bf",
+                Some("eth_blockNumber") => block_number,
+                _ => continue,
+            };
 
             let response = json!({
                 "jsonrpc": "2.0",
@@ -311,7 +310,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            if close_after_response {
+            if close_after_block_number && request["method"] == "eth_blockNumber" {
                 let _ = ws.close(None).await;
                 break;
             }
@@ -336,24 +335,20 @@ mod tests {
             // listener comes back; Alloy's default 3s interval would miss the
             // test timeout.
             drop(listener);
-            serve_block_number(first_stream, "0x1", true).await;
+            serve_l1_rpc(first_stream, "0x1", true).await;
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let listener = TcpListener::bind(addr).await.unwrap();
             let (second_stream, _) = listener.accept().await.unwrap();
             server_connections.fetch_add(1, Ordering::SeqCst);
-            serve_block_number(second_stream, "0x2", false).await;
+            serve_l1_rpc(second_stream, "0x2", false).await;
         });
 
-        let provider = connect_l1_provider(
-            &url,
-            Chain::from_id(42431),
-            Duration::from_millis(10),
-            PrivateKeySigner::random(),
-        )
-        .await
-        .unwrap();
+        let provider =
+            connect_l1_provider(&url, Duration::from_millis(10), PrivateKeySigner::random())
+                .await
+                .unwrap();
 
         assert_eq!(provider.get_block_number().await.unwrap(), 1);
         assert_eq!(

@@ -3410,7 +3410,6 @@ pub(crate) async fn spawn_sequencer_with_config(
     let config = zone_sequencer::ZoneSequencerConfig {
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
-        l1_chain: alloy_chains::Chain::tempo_mainnet(),
         retry_connection_interval: Duration::from_millis(100),
         zone_poll_interval: Duration::from_secs(1),
         withdrawal_poll_interval: Duration::from_millis(500),
