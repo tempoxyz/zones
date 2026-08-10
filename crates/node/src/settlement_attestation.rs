@@ -288,21 +288,13 @@ async fn validate_settlement_anchor(
     anchor_block_number: u64,
     anchor_block_hash: B256,
 ) -> eyre::Result<()> {
-    eyre::ensure!(
-        anchor_block_number >= tempo_block_number,
-        "proposed L1 anchor predates the zone batch's Tempo block"
-    );
-
     let current_l1_block = context.l1_provider.get_block_number().await?;
-    eyre::ensure!(
-        anchor_block_number < current_l1_block,
-        "proposed L1 anchor is not yet available through EIP-2935"
-    );
-    eyre::ensure!(
-        current_l1_block.saturating_sub(anchor_block_number)
-            < context.anchor_config.history_window(),
-        "proposed L1 anchor fell outside the EIP-2935 history window"
-    );
+    validate_settlement_anchor_height(
+        tempo_block_number,
+        anchor_block_number,
+        current_l1_block,
+        context.anchor_config.history_window(),
+    )?;
 
     let anchor_header = context
         .l1_provider
@@ -328,6 +320,27 @@ async fn validate_settlement_anchor(
     eyre::ensure!(
         tempo_header.hash_slow() == tempo_block_hash,
         "zone batch's Tempo block hash does not match finalized L1"
+    );
+    Ok(())
+}
+
+fn validate_settlement_anchor_height(
+    tempo_block_number: u64,
+    anchor_block_number: u64,
+    current_l1_block: u64,
+    history_window: u64,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        anchor_block_number >= tempo_block_number,
+        "proposed L1 anchor predates the zone batch's Tempo block"
+    );
+    eyre::ensure!(
+        anchor_block_number <= current_l1_block,
+        "proposed L1 anchor is ahead of the current L1 tip"
+    );
+    eyre::ensure!(
+        current_l1_block.saturating_sub(anchor_block_number) < history_window,
+        "proposed L1 anchor fell outside the EIP-2935 history window"
     );
     Ok(())
 }
@@ -575,6 +588,17 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
     use zone_sequencer::attestation::AttestationStore;
+
+    #[test]
+    fn settlement_anchor_accepts_current_tip_and_rejects_future() {
+        validate_settlement_anchor_height(100, 100, 100, 10).unwrap();
+
+        let err = validate_settlement_anchor_height(100, 101, 100, 10).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("proposed L1 anchor is ahead of the current L1 tip")
+        );
+    }
 
     #[tokio::test]
     async fn startup_recovery_retries_first_erroring_boundary() {
