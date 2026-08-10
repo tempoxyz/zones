@@ -440,7 +440,7 @@ where
                     warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill completion");
                     return Ok(());
                 };
-                if tip.zone_height < requested_start {
+                if tip.zone_height.saturating_add(1) < requested_start {
                     warn!(target: "zone::p2p", %peer, request_id, requested_start, tip_height = tip.zone_height, "Backfill peer is behind the requested range; trying other eligible peers");
                     self.job.mark_behind(peer, received_at);
                     self.request_blocks(requested_start).await?;
