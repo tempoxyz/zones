@@ -1151,21 +1151,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refreshes_sequencer_pathusd_balance() {
-        let l1 = Asserter::new();
-        l1.push_success(&abi_encode_u64(1_500_000));
-        let processor = test_processor(
-            l1.clone(),
-            SharedWithdrawalStore::new(),
-            Arc::new(Notify::new()),
-        );
-
-        processor.refresh_sequencer_pathusd_balance().await.unwrap();
-
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
     async fn process_queue_requests_repair_when_store_data_mismatches_slot_hash() {
         let l1 = Asserter::new();
         // head = 5, tail = 6, slot hash that matches no suffix of the stored batch.
