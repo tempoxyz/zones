@@ -913,26 +913,26 @@ struct ScheduleLeadershipSink {
 
 impl LeadershipSink for ScheduleLeadershipSink {
     fn apply_leader_transition(&self, transition: &LeaderTransition) -> eyre::Result<()> {
-        let node = self
+        let leader = self
             .manifest
-            .node_by_secp256k1_address(transition.new_leader)
+            .leader_ed25519_by_secp256k1_address(transition.new_leader)
             .ok_or_else(|| {
                 eyre::eyre!(
-                    "finalized portal leader {} (epoch {}) does not map to any manifest member",
+                    "finalized portal leader {} (epoch {}) does not map to any active or historical manifest identity",
                     transition.new_leader,
                     transition.epoch,
                 )
             })?;
         self.schedule.publish(LeadershipState::new(
             transition.epoch,
-            node.ed25519_public_key().clone(),
+            leader.clone(),
             transition.activation_tempo_block,
         ))?;
         info!(
             target: "reth::cli",
             epoch = transition.epoch,
             leader = %transition.new_leader,
-            peer = %node.ed25519_public_key(),
+            peer = %leader,
             activation_tempo_block = transition.activation_tempo_block,
             "Observed finalized leadership transition"
         );
@@ -1049,24 +1049,22 @@ async fn seed_leadership_schedule(
         !leader.is_zero(),
         "portal {portal_address} has no leader at finalized L1 snapshot block {snapshot_anchor}"
     );
-    let node = manifest.node_by_secp256k1_address(leader).ok_or_else(|| {
-        eyre::eyre!(
-            "finalized portal leader {leader} (epoch {epoch}) does not map to any manifest \
-             member; refusing to start with a divergent topology"
-        )
-    })?;
-    schedule.publish(LeadershipState::new(
-        epoch,
-        node.ed25519_public_key().clone(),
-        activation,
-    ))?;
+    let leader_peer = manifest
+        .leader_ed25519_by_secp256k1_address(leader)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "finalized portal leader {leader} (epoch {epoch}) does not map to any active or \
+             historical manifest identity; refusing to start without an authenticated leader"
+            )
+        })?;
+    schedule.publish(LeadershipState::new(epoch, leader_peer.clone(), activation))?;
     info!(
         target: "reth::cli",
         snapshot_anchor,
         %leader,
         epoch,
         activation_tempo_block = activation,
-        peer = %node.ed25519_public_key(),
+        peer = %leader_peer,
         "Bootstrapped leadership from the finalized portal snapshot"
     );
     Ok(())
@@ -1762,6 +1760,7 @@ mod tests {
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
     use alloy_primitives::{Bytes, Signature, TxKind, U256};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
     use tempo_primitives::transaction::{
@@ -1808,6 +1807,61 @@ mod tests {
         assert!(validate_zone_chain_id(4_217, 7, expected).is_err());
         assert!(validate_zone_chain_id(42_431, 7, expected + 1).is_err());
         assert!(validate_zone_chain_id(42_431, 0, 123).is_err());
+    }
+
+    #[test]
+    fn finalized_replay_resolves_a_retired_leader_identity() {
+        let peer = |seed| PrivateKey::from_seed(seed).public_key();
+        let manifest = ZoneManifest::parse(&format!(
+            "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n\
+             [[nodes]]\nname = \"leader\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x0000000000000000000000000000000000000001\"\naddress = \"127.0.0.1:9200\"\n\
+             [[nodes]]\nname = \"follower-a\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x0000000000000000000000000000000000000002\"\naddress = \"127.0.0.1:9201\"\n\
+             [[nodes]]\nname = \"follower-b\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x0000000000000000000000000000000000000003\"\naddress = \"127.0.0.1:9202\"\n\
+             [[historical_leaders]]\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x0000000000000000000000000000000000000009\"\n",
+            peer(1),
+            peer(1),
+            peer(2),
+            peer(3),
+            peer(9),
+        ))
+        .unwrap();
+        let schedule = manifest.leadership_schedule();
+        schedule
+            .publish(LeadershipState::new(1, peer(1), 0))
+            .unwrap();
+        let sink = ScheduleLeadershipSink {
+            schedule: schedule.clone(),
+            manifest: Arc::new(manifest),
+        };
+
+        sink.apply_leader_transition(&LeaderTransition {
+            previous_leader: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            new_leader: "0x0000000000000000000000000000000000000009"
+                .parse()
+                .unwrap(),
+            epoch: 2,
+            activation_tempo_block: 100,
+        })
+        .unwrap();
+
+        assert_eq!(schedule.leader_for(100).unwrap().leader, peer(9));
+        assert!(
+            sink.apply_leader_transition(&LeaderTransition {
+                previous_leader: "0x0000000000000000000000000000000000000009"
+                    .parse()
+                    .unwrap(),
+                new_leader: "0x0000000000000000000000000000000000000008"
+                    .parse()
+                    .unwrap(),
+                epoch: 3,
+                activation_tempo_block: 200,
+            })
+            .is_err(),
+            "an unknown finalized leader must remain fail closed"
+        );
+        assert_eq!(schedule.latest_observed_epoch(), Some(2));
     }
 
     #[test]

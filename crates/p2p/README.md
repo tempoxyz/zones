@@ -104,9 +104,21 @@ name = "operator-rpc"
 ed25519_public_key = "0xrpc..."
 address = "operator-rpc.zone.internal:9200"
 rpc_only = true
+
+[[historical_leaders]]
+ed25519_public_key = "0xretired-leader..."
+secp256k1_address = "0x4444444444444444444444444444444444444444"
 ```
 
 `rpc_only` defaults to `false`, so existing manifests keep their current meaning.
+
+`historical_leaders` maps a retired Portal sequencer address to the Ed25519 identity that authored
+blocks while that address was leader. Keep an entry while any persisted node checkpoint can still
+precede the leader's removal, or while finalized leadership events that name it may need replay.
+These entries are identity history only: they are excluded from the P2P topology and settlement
+quorum, cannot be selected by `zone_setLeader` or `[forced_recovery]`, and are not checked against
+the Portal's current registered sequencer set. Once every retained checkpoint and replay window is
+past that leader's last epoch, the entry can be removed.
 
 `sequencer_set_version` must exactly match the value reported by `ZonePortal`. Version `0` is
 valid for the initial sequencer set installed atomically by `ZoneFactory`; later
@@ -136,6 +148,7 @@ The manifest loader validates that:
 - the leader is not `rpc_only`;
 - `secp256k1_address` is present on every quorum node and absent on every `rpc_only` node;
 - node names, Ed25519 public keys, and secp256k1 addresses are unique;
+- historical leader addresses do not duplicate another historical or active node address;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
 - the manifest's `zone_id` matches `--zone.id`; and
