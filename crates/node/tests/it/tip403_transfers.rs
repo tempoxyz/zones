@@ -19,7 +19,7 @@ use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox, approve_self,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
     local_dev_zone_account, start_local_zone_with_fixture,
 };
 
@@ -356,17 +356,9 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     // Transfer to Bob. Seed its receive-policy baseline before pool validation.
     fixture.seed_no_receive_policy(bob)?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
-    approve_self(
-        &mut fixture,
-        &zone,
-        &provider,
-        PATH_USD_ADDRESS,
-        dev_address,
-    )
-    .await?;
 
     let pending = tip20
-        .transferFrom(dev_address, bob, U256::from(transfer_amount))
+        .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
