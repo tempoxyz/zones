@@ -71,6 +71,14 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 ITIP20::ITIP20Calls::nonces(call) => {
                     check_caller_or_sequencer(&self.l1, caller, &[call.owner])
                 }
+                // Transfers are disabled during the initial permissioned Zone phase.
+                // Private asset movement is limited to the protocol-managed inbox and outbox paths.
+                ITIP20::ITIP20Calls::transferFrom(_)
+                | ITIP20::ITIP20Calls::transfer(_)
+                | ITIP20::ITIP20Calls::transferWithMemo(_)
+                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
+                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                }
                 // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
                 ITIP20::ITIP20Calls::mint(_)
                 | ITIP20::ITIP20Calls::mintWithMemo(_)
@@ -93,14 +101,6 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 | ITIP20::ITIP20Calls::completeQuoteTokenUpdate(_)
                 | ITIP20::ITIP20Calls::changeTransferPolicyId(_)
                 | ITIP20::ITIP20Calls::burnBlocked(_) => {
-                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
-                }
-                // Transfers are disabled during the initial permissioned Zone phase; private asset
-                // movement is limited to the protocol-managed inbox and outbox paths.
-                ITIP20::ITIP20Calls::transferFrom(_)
-                | ITIP20::ITIP20Calls::transfer(_)
-                | ITIP20::ITIP20Calls::transferWithMemo(_)
-                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
                     CallCheck::Revert(Unauthorized {}.abi_encode().into())
                 }
                 ITIP20::ITIP20Calls::name(_)
