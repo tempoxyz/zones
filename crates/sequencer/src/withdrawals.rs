@@ -361,7 +361,7 @@ impl WithdrawalProcessor {
                 error!(error = %e, "Withdrawal processing cycle failed");
             }
 
-            if let Err(error) = self.refresh_sequencer_pathusd_balance().await {
+            if let Err(error) = self.update_sequencer_metrics().await {
                 warn!(
                     %error,
                     sequencer = %self.config.sequencer_address,
@@ -371,8 +371,8 @@ impl WithdrawalProcessor {
         }
     }
 
-    /// Refresh the sequencer's Tempo L1 PathUSD balance metric.
-    async fn refresh_sequencer_pathusd_balance(&self) -> eyre::Result<()> {
+    /// Update sequencer metrics from Tempo L1 state.
+    async fn update_sequencer_metrics(&self) -> eyre::Result<()> {
         let balance = ITIP20::new(PATH_USD_ADDRESS, &self.provider)
             .balanceOf(self.config.sequencer_address)
             .call()
