@@ -349,8 +349,8 @@ impl BatchSubmitter {
                 (None, anchor_mode, current_l1_block)
             };
         let recent_tempo_block_number = anchor_mode.recent_block_number();
-        // A transaction created after observing head N cannot execute before N+1. Allow the
-        // current-tip anchor and bypass estimation, which incorrectly simulates against state N.
+        // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
+        // cannot land before N+1, so anchoring to the current tip is valid at execution time.
         let anchors_to_current_tip =
             anchor_mode.anchor_block_number(batch.tempo_block_number) == current_l1_block;
 
@@ -426,6 +426,8 @@ impl BatchSubmitter {
             .nonce(nonce)
             .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
             .max_priority_fee_per_gas(0);
+        // Estimation against state N cannot see hash(N), although execution in N+1 can. If this
+        // send does not settle, a retry after the head advances uses normal estimation.
         if anchors_to_current_tip {
             submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
         }
