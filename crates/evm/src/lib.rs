@@ -39,6 +39,7 @@ use alloy_provider::{Provider, ProviderBuilder};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    NextBlockEnvAttributes,
     block::StateDB,
     execute::{BlockAssembler, BlockAssemblerInput},
 };
@@ -560,6 +561,24 @@ pub struct TempoStorageRead {
 /// Copies the Zone chain spec and applies the Tempo hardfork conditions from its parent chain.
 fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneChainSpec> {
     Arc::new(zone.clone().with_tempo_hardforks_from(tempo))
+}
+
+/// Wraps standard next-block attributes with the Zone gas and consensus defaults.
+pub fn next_block_env_attributes(
+    inner: NextBlockEnvAttributes,
+    timestamp_millis_part: u64,
+) -> TempoNextBlockEnvAttributes {
+    let block_gas_limit = inner.gas_limit;
+    TempoNextBlockEnvAttributes {
+        inner,
+        // Zones don't use L1 gas sections. These fields are required by Tempo's
+        // environment but the Zone executor treats the full block limit as shared gas.
+        general_gas_limit: 0,
+        shared_gas_limit: block_gas_limit,
+        timestamp_millis_part,
+        consensus_context: None,
+        subblock_fee_recipients: Default::default(),
+    }
 }
 
 #[cfg(test)]

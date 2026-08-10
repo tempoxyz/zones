@@ -1,6 +1,6 @@
 //! Tempo EVM setup and Zone-block execution.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
 
 use alloy_consensus::{
     Signed, TxLegacy,
@@ -10,13 +10,12 @@ use alloy_eips::{eip2718::Decodable2718 as _, eip4895::Withdrawals};
 use alloy_evm::{
     EvmFactory as _,
     block::{BlockExecutionResult, BlockExecutor as _, BlockExecutorFactory, TxResult as _},
-    eth::EthBlockExecutionCtx,
 };
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolCall as _;
 use reth_chainspec::EthereumHardforks as _;
-use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
+use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes, eth::EthBlockExecutionCtx};
 use revm::{
     database::{State, states::bundle_state::BundleRetention},
     database_interface::bal::EvmDatabaseError,
@@ -48,6 +47,7 @@ pub(crate) struct ExecutedZoneBlock {
     pub(crate) transactions: Vec<TempoTxEnvelope>,
     pub(crate) output: BlockExecutionResult<TempoReceipt>,
     pub(crate) evm_env: alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>,
+    pub(crate) execution_context: TempoBlockExecutionCtx<'static>,
 }
 
 pub(crate) struct BlockReplayContext<'a> {
@@ -106,19 +106,20 @@ pub(crate) fn execute_zone_block(
         portal,
     );
     let attributes = next_block_env_attributes(evm_config.chain_spec(), parent, block)?;
-    let mut env = evm_config
+    let sealed_parent =
+        reth_primitives_traits::SealedHeader::new(parent.clone(), block.parent_hash);
+    let execution_context = evm_config
+        .context_for_next_block(&sealed_parent, attributes.clone())
+        .map_err(|_| Error::EvmEnvironment)?;
+    let mut evm_env = evm_config
         .next_evm_env(parent, &attributes)
         .map_err(|_| Error::EvmEnvironment)?;
     // The Zone ID is verifier-bound independently of the parent Tempo chain specification.
-    env.cfg_env.chain_id = zone_chain_id(zone_id);
-    let assembly_env = env.clone();
-    let block_gas_limit = env.block_env.inner.gas_limit;
-    let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm(&mut *zone_state, env);
-    let mut executor = BlockExecutorFactory::create_executor(
-        &evm_config,
-        evm,
-        next_block_execution_context(config.zone_chain_spec.as_ref(), block, block_gas_limit),
-    );
+    evm_env.cfg_env.chain_id = zone_chain_id(zone_id);
+    let evm = BlockExecutorFactory::evm_factory(&evm_config)
+        .create_evm(&mut *zone_state, evm_env.clone());
+    let mut executor =
+        BlockExecutorFactory::create_executor(&evm_config, evm, execution_context.clone());
 
     executor.apply_pre_execution_changes().map_err(|error| {
         map_block_execution_error(
@@ -163,7 +164,19 @@ pub(crate) fn execute_zone_block(
     Ok(ExecutedZoneBlock {
         transactions,
         output,
-        evm_env: assembly_env,
+        evm_env,
+        // `execution_context` has 'a lifetime, we need to convert it to 'static
+        execution_context: TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                ommers: &[],
+                withdrawals: execution_context
+                    .inner
+                    .withdrawals
+                    .map(|withdrawals| Cow::Owned(withdrawals.into_owned())),
+                ..execution_context.inner
+            },
+            ..execution_context
+        },
     })
 }
 
@@ -183,8 +196,8 @@ pub(crate) fn next_block_env_attributes(
         return Err(crate::WitnessDatabaseError::InvalidTempoHeader.into());
     }
 
-    Ok(TempoNextBlockEnvAttributes {
-        inner: NextBlockEnvAttributes {
+    Ok(zone_evm::next_block_env_attributes(
+        NextBlockEnvAttributes {
             timestamp: block.timestamp,
             suggested_fee_recipient: block.beneficiary,
             prev_randao: B256::ZERO,
@@ -198,39 +211,8 @@ pub(crate) fn next_block_env_attributes(
             extra_data: Bytes::new(),
             slot_number: None,
         },
-        general_gas_limit: 0,
-        shared_gas_limit: block_gas_limit,
-        timestamp_millis_part: header.timestamp_millis_part,
-        consensus_context: None,
-        subblock_fee_recipients: HashMap::new(),
-    })
-}
-
-pub(crate) fn next_block_execution_context(
-    chain_spec: &zone_chainspec::ZoneChainSpec,
-    block: &ZoneBlock,
-    gas_limit: u64,
-) -> TempoBlockExecutionCtx<'static> {
-    TempoBlockExecutionCtx {
-        inner: EthBlockExecutionCtx {
-            parent_hash: block.parent_hash,
-            parent_beacon_block_root: chain_spec
-                .is_cancun_active_at_timestamp(block.timestamp)
-                .then_some(B256::ZERO),
-            ommers: &[],
-            withdrawals: chain_spec
-                .is_shanghai_active_at_timestamp(block.timestamp)
-                .then_some(Cow::Borrowed(&[])),
-            extra_data: Bytes::new(),
-            tx_count_hint: None,
-            slot_number: None,
-        },
-        general_gas_limit: 0,
-        shared_gas_limit: gas_limit,
-        validator_set: None,
-        consensus_context: None,
-        subblock_fee_recipients: HashMap::new(),
-    }
+        header.timestamp_millis_part,
+    ))
 }
 
 fn execute_advance_tempo<'a, 'db, I>(

@@ -34,7 +34,6 @@ use reth_transaction_pool::{
     ValidPoolTransaction, error::InvalidPoolTransactionError,
 };
 use std::{error::Error, sync::Arc, time::Instant};
-use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
@@ -45,7 +44,7 @@ use tempo_transaction_pool::{
 };
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
-use zone_evm::ZoneEvmConfig;
+use zone_evm::{ZoneEvmConfig, next_block_env_attributes};
 use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
@@ -198,8 +197,8 @@ where
 
         let block_gas_limit = parent_header.gas_limit();
 
-        let next_block_env_attributes = TempoNextBlockEnvAttributes {
-            inner: NextBlockEnvAttributes {
+        let next_block_env_attributes = next_block_env_attributes(
+            NextBlockEnvAttributes {
                 timestamp: attributes.timestamp(),
                 suggested_fee_recipient: attributes.suggested_fee_recipient(),
                 prev_randao: attributes.prev_randao(),
@@ -209,14 +208,8 @@ where
                 extra_data: attributes.extra_data(),
                 slot_number: attributes.slot_number(),
             },
-            // Zones don't use L1 gas sections. These fields are required
-            // by TempoNextBlockEnvAttributes but ignored by the zone executor.
-            general_gas_limit: 0,
-            shared_gas_limit: block_gas_limit,
-            timestamp_millis_part: attributes.timestamp_millis_part(),
-            consensus_context: None,
-            subblock_fee_recipients: Default::default(),
-        };
+            attributes.timestamp_millis_part(),
+        );
         let mut builder = self
             .evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)

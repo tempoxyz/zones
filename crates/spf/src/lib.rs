@@ -165,12 +165,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         };
 
         let state_root = zone_state.database.state_root(&zone_state.bundle_state)?;
-        let gas_limit = executed_block.evm_env.block_env.inner.gas_limit;
-        let execution_context = execution::evm::next_block_execution_context(
-            config.zone_chain_spec.as_ref(),
-            block,
-            gas_limit,
-        );
+        let execution_context = executed_block.execution_context;
         let state_provider = NoopProvider::<tempo_chainspec::TempoChainSpec, TempoPrimitives>::new(
             config.zone_chain_spec.inner.clone(),
         );
@@ -1005,7 +1000,7 @@ mod tests {
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::from([0x01]),
+            tempo_header_rlp: witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
