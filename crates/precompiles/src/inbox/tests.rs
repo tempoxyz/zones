@@ -257,7 +257,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
 
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x);
+    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&BOB, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -578,12 +578,48 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
 }
 
 #[test]
+fn non_canonical_encrypted_deposit_is_rejected() {
+    let deposit = Deposit {
+        token: Address::ZERO,
+        sender: Address::ZERO,
+        amount: 0,
+        tempoRefundRecipient: Address::ZERO,
+        keyIndex: U256::ZERO,
+        encrypted: tempo_zone_contracts::DepositPayload {
+            ephemeralPubkeyX: B256::ZERO,
+            ephemeralPubkeyYParity: 0,
+            ciphertext: Bytes::new(),
+            nonce: [0; 12].into(),
+            tag: [0; 16].into(),
+        },
+    };
+    let canonical = deposit.abi_encode();
+    let mut non_canonical = canonical.clone();
+    non_canonical.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    assert!(
+        decode_deposits(vec![QueuedDeposit {
+            depositType: DepositType::Deposit,
+            depositData: canonical.into(),
+        }])
+        .is_ok()
+    );
+    assert!(
+        decode_deposits(vec![QueuedDeposit {
+            depositType: DepositType::Deposit,
+            depositData: non_canonical.into(),
+        }])
+        .is_err()
+    );
+}
+
+#[test]
 fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
     let portal = PORTAL;
-    let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x);
+    let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -658,7 +694,7 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x);
+    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);

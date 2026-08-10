@@ -96,17 +96,17 @@ pub(crate) struct DemoBlacklist {
     portal: Address,
 
     /// Private key (hex) of the token admin / depositor.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Portal admin private key (hex). If not set, reads adminKey from the
     /// explicit or auto-discovered zone.json, then falls back to SEQUENCER_KEY /
     /// sequencerKey for legacy zones.
-    #[arg(long, env = "ADMIN_KEY")]
+    #[arg(long, env = "ADMIN_KEY", hide_env_values = true)]
     admin_key: Option<String>,
 
     /// Sequencer private key (hex). Legacy fallback for zones where admin == sequencer.
-    #[arg(long, env = "SEQUENCER_KEY")]
+    #[arg(long, env = "SEQUENCER_KEY", hide_env_values = true)]
     sequencer_key: Option<String>,
 
     /// Path to zone directory containing zone.json. If omitted, scans
@@ -341,6 +341,7 @@ impl DemoBlacklist {
             token_addr,
             admin,
             admin,
+            admin,
             deposit_amount,
         )
         .await?;
@@ -433,7 +434,16 @@ impl DemoBlacklist {
         println!();
 
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
-        send_deposit(&portal, self.portal, token_addr, target, admin, self.amount).await?;
+        send_deposit(
+            &portal,
+            self.portal,
+            token_addr,
+            target,
+            admin,
+            admin,
+            self.amount,
+        )
+        .await?;
 
         println!("  Waiting for zone to process (expecting DepositFailed)...");
         let bounced =
@@ -463,6 +473,7 @@ impl DemoBlacklist {
             self.portal,
             PATH_USD_ADDRESS,
             target,
+            admin,
             admin,
             gas_fund,
         )
@@ -515,7 +526,16 @@ impl DemoBlacklist {
         println!();
 
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
-        send_deposit(&portal, self.portal, token_addr, target, admin, self.amount).await?;
+        send_deposit(
+            &portal,
+            self.portal,
+            token_addr,
+            target,
+            admin,
+            admin,
+            self.amount,
+        )
+        .await?;
 
         println!("  Waiting for zone to process (expecting DepositProcessed)...");
         let bounced =
@@ -671,6 +691,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
     token: Address,
     to: Address,
     tempo_refund_recipient: Address,
+    sender: Address,
     amount: u128,
 ) -> eyre::Result<()> {
     let (key, key_index) = portal
@@ -682,8 +703,16 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
         .normalized_y_parity()
         .ok_or_else(|| eyre!("unexpected yParity {:#x}", key.yParity))?;
 
-    let enc = encrypt_deposit(&key.x, y_parity, to, B256::ZERO, portal_addr, key_index)
-        .ok_or_else(|| eyre!("ECIES encryption failed"))?;
+    let enc = encrypt_deposit(
+        &key.x,
+        y_parity,
+        to,
+        B256::ZERO,
+        sender,
+        portal_addr,
+        key_index,
+    )
+    .ok_or_else(|| eyre!("ECIES encryption failed"))?;
 
     let payload = DepositPayload {
         ephemeralPubkeyX: enc.eph_pub_x,

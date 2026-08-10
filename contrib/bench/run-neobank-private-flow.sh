@@ -89,6 +89,7 @@ ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/neobank-e2e}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-e2e.json}"
 ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUTPUT/scenario.rendered.yml}"
+ZONES_BENCH_SPF_RANGE="${ZONES_BENCH_SPF_RANGE:-target/zones-benchmark/spf-range.env}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
@@ -123,23 +124,11 @@ case "$ZONES_BENCH_RECIPIENT_MODE" in
     *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
 esac
 case "$ZONES_BENCH_NEOBANK_PRESET" in
-    direct-lifecycle)
-        scenario_file=direct-lifecycle-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
-        leases_per_journey=1
-        ;;
     encrypted-deposit)
         scenario_file=encrypted-deposit-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
-        ;;
-    third-party-recipient)
-        scenario_file=third-party-recipient-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
-        leases_per_journey=2
         ;;
     full-journey)
         scenario_file=private-flow-scenario.yml
@@ -151,12 +140,6 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         scenario_file=private-withdrawal-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
-        leases_per_journey=1
-        ;;
-    rewards-redemption)
-        scenario_file=rewards-redemption-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
         leases_per_journey=1
         ;;
     slippage-bounce)
@@ -180,8 +163,8 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
     *) die "unsupported neobank preset: $ZONES_BENCH_NEOBANK_PRESET" ;;
 esac
 case "$ZONES_BENCH_SWAP_MECHANISM" in
-    direct-swap|simple|stablecoin-dex) ;;
-    *) die "ZONES_BENCH_SWAP_MECHANISM must be direct-swap, simple, or stablecoin-dex" ;;
+    direct-swap) ;;
+    *) die "current Earn only supports ZONES_BENCH_SWAP_MECHANISM=direct-swap" ;;
 esac
 [[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
     die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"
@@ -697,6 +680,9 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
 esac
 
+private_flow_parent_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+[[ "$private_flow_parent_block" =~ ^[0-9]+$ ]] ||
+    die "could not read the Zone head before the measured private flow"
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
@@ -705,6 +691,16 @@ build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$sample_instances" "${scenario_report_args[@]}"
 stage_end private_flow
+private_flow_tip_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+[[ "$private_flow_tip_block" =~ ^[0-9]+$ ]] ||
+    die "could not read the Zone head after the measured private flow"
+(( 10#$private_flow_tip_block > 10#$private_flow_parent_block )) ||
+    die "the measured private flow produced no Zone blocks"
+mkdir -p "$(dirname "$ZONES_BENCH_SPF_RANGE")"
+{
+    printf 'ZONES_BENCH_SPF_FROM_BLOCK=%s\n' "$((10#$private_flow_parent_block + 1))"
+    printf 'ZONES_BENCH_SPF_TO_BLOCK=%s\n' "$((10#$private_flow_tip_block))"
+} >"$ZONES_BENCH_SPF_RANGE"
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
     stage_start slippage_postcondition

@@ -34,14 +34,16 @@ const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// Extra registered signers only warn: deregistering is a cleanup task, and failing on it would
 /// make every membership change a window in which no node can start.
 ///
-/// Skipped when no portal is deployed yet, matching `seed_leadership_schedule`: a zone whose
-/// creation block has not replayed has nothing to reconcile against.
+/// A configured portal must already be deployed at the current L1 tip. The persisted Zone genesis
+/// anchor may still predate portal deployment so the creation block can be replayed; this live-tip
+/// check is deliberately independent of that historical anchor.
 pub(crate) async fn validate_registered_sequencer_set(
     manifest: &zone_p2p::ZoneManifest,
     portal_address: alloy_primitives::Address,
     l1_provider: &alloy_provider::DynProvider<tempo_alloy::TempoNetwork>,
 ) -> eyre::Result<()> {
-    // No portal configured (dev and test harnesses) means there is nothing to reconcile against.
+    // Programmatic synthetic test harnesses use zero to mean no Portal; the production CLI
+    // rejects a zero address before node launch.
     if portal_address.is_zero() {
         info!(target: "zone::p2p", "No ZonePortal configured; skipping the manifest quorum check");
         return Ok(());
@@ -50,14 +52,10 @@ pub(crate) async fn validate_registered_sequencer_set(
         .get_code_at(portal_address)
         .await
         .map_err(|err| eyre::eyre!("failed to check portal {portal_address} deployment: {err}"))?;
-    if portal_code.is_empty() {
-        info!(
-            target: "zone::p2p",
-            %portal_address,
-            "Portal is not deployed yet; skipping the manifest quorum check"
-        );
-        return Ok(());
-    }
+    eyre::ensure!(
+        !portal_code.is_empty(),
+        "ZonePortal {portal_address} is not deployed at the current L1 tip; refusing to start P2P before its sequencer set can be validated"
+    );
 
     // Read at the chain tip rather than the finalized head: a fresh or local L1 may have no
     // finalized block at all, and an unfinalized registration satisfying this check early is
@@ -586,10 +584,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_provider::{ProviderBuilder, mock::Asserter};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
+    use tempo_alloy::TempoNetwork;
+    use zone_p2p::ZoneManifest;
     use zone_sequencer::attestation::AttestationStore;
 
     #[test]
@@ -600,6 +602,66 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("proposed L1 anchor is ahead of the current L1 tip")
+        );
+    }
+
+    fn test_manifest() -> ZoneManifest {
+        let public_keys = [1_u64, 2, 3].map(|seed| PrivateKey::from_seed(seed).public_key());
+        let mut input = format!(
+            "zone_id = 7\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(public_keys[0].as_ref())
+        );
+        for (index, public_key) in public_keys.iter().enumerate() {
+            let number = index + 1;
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{number}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x{number:040x}\"\naddress = \"127.0.0.1:{}\"\n",
+                const_hex::encode_prefixed(public_key.as_ref()),
+                9200 + index,
+            ));
+        }
+        ZoneManifest::parse(&input).expect("valid test manifest")
+    }
+
+    #[tokio::test]
+    async fn undeployed_portal_is_rejected_before_p2p_startup() {
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::new());
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let portal_address = alloy_primitives::Address::repeat_byte(0x11);
+
+        let err = validate_registered_sequencer_set(&test_manifest(), portal_address, &provider)
+            .await
+            .expect_err("an undeployed configured portal must prevent P2P startup");
+
+        assert!(
+            err.to_string().contains(&format!(
+                "ZonePortal {portal_address} is not deployed at the current L1 tip"
+            )),
+            "unexpected error: {err}"
+        );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn synthetic_test_harness_can_skip_an_unconfigured_portal() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+
+        validate_registered_sequencer_set(
+            &test_manifest(),
+            alloy_primitives::Address::ZERO,
+            &provider,
+        )
+        .await
+        .expect("synthetic nodes have no configured ZonePortal");
+
+        assert!(
+            asserter.read_q().is_empty(),
+            "the zero-address test bypass must not issue an L1 request"
         );
     }
 

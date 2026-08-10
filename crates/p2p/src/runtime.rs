@@ -390,14 +390,14 @@ fn run(
         let local_ed25519_public_key = config.ed25519_public_key();
         let leadership = config.leadership();
         let (mut commonware, mut oracle, peers) = network::instantiate(
-            context.clone(),
+            &context,
             &config.manifest,
             config.ed25519_identity.into_private_key(),
             config.listen,
             config.bypass_ip_check,
             network_id,
         )?;
-        oracle.track(0, peers).await;
+        oracle.track(0, peers);
         let (block_sender, block_receiver) =
             commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
         let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
@@ -550,28 +550,29 @@ async fn run_commands(
                     continue;
                 }
 
-                let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
+                let admitted = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
-                        let sent = senders.blocks
-                            .send(Recipients::Some(recipients.clone()), block.clone(), true)
-                            .await
-                            .map_err(|err| eyre::eyre!("failed broadcasting zone block: {err}"))?;
-                        if !sent.is_empty() || recipients.is_empty() {
-                            return Ok::<_, eyre::Report>(sent);
+                        let admitted = senders.blocks.send(
+                            Recipients::Some(recipients.clone()),
+                            block.clone(),
+                            true,
+                        );
+                        if !admitted.is_empty() || recipients.is_empty() {
+                            break admitted;
                         }
-                        debug!(target: "zone::p2p", "No peers are connected; retrying canonical block broadcast");
+                        debug!(target: "zone::p2p", "Canonical block broadcast was not admitted; retrying");
                         tokio::time::sleep(BROADCAST_RETRY_INTERVAL).await;
                     }
                 }).await;
-                let sent = match sent {
-                    Ok(sent) => sent?,
+                let admitted = match admitted {
+                    Ok(admitted) => admitted,
                     Err(_) => {
-                        warn!(target: "zone::p2p", timeout_secs = BROADCAST_RETRY_TIMEOUT.as_secs(), "No peers connected before block broadcast timed out");
+                        warn!(target: "zone::p2p", timeout_secs = BROADCAST_RETRY_TIMEOUT.as_secs(), "Canonical block broadcast was not admitted before timing out");
                         continue;
                     }
                 };
-                if sent.len() != recipients.len() {
-                    debug!(target: "zone::p2p", connected = sent.len(), configured = recipients.len(), "Some peers are not connected; block was not sent to them");
+                if admitted.len() != recipients.len() {
+                    debug!(target: "zone::p2p", admitted = admitted.len(), configured = recipients.len(), "Canonical block broadcast was not admitted for every recipient");
                 }
             }
 
@@ -588,11 +589,10 @@ async fn run_commands(
                 };
                 // Only quorum members sign, so only they are asked. An RPC-only standby that
                 // received a proposal would have nothing to answer it with.
-                senders
-                    .settlement_proposals
-                    .send(Recipients::Some(recipients), proposal, true)
-                    .await
-                    .wrap_err("failed broadcasting settlement proposal")?;
+                let _ =
+                    senders
+                        .settlement_proposals
+                        .send(Recipients::Some(recipients), proposal, true);
             }
 
             P2pCommand::SendSettlementSignature { leader, signature } => {
@@ -606,11 +606,11 @@ async fn run_commands(
                     warn!(target: "zone::p2p", %leader, "Ignoring settlement signature addressed to a peer without retained scheduled leadership");
                     continue;
                 }
-                senders
-                    .settlement_signatures
-                    .send(Recipients::Some(vec![leader]), signature, true)
-                    .await
-                    .wrap_err("failed sending settlement signature")?;
+                let _ = senders.settlement_signatures.send(
+                    Recipients::Some(vec![leader]),
+                    signature,
+                    true,
+                );
             }
 
             P2pCommand::ForwardTransaction {
@@ -661,25 +661,16 @@ async fn run_commands(
                 }
                 let configured = recipients.len();
                 let transaction_size = transaction.len();
-                let sent = match senders
-                    .transactions
-                    .send(Recipients::Some(recipients), transaction, false)
-                    .await
-                {
-                    Ok(sent) => sent,
-                    Err(err) => {
-                        metrics::counter!("zone_p2p_transaction_sends_without_peers_total")
-                            .increment(1);
-                        warn!(target: "zone::p2p", ?transaction_hash, transaction_size_bytes = transaction_size, %err, "Failed to forward transaction to quorum peers; dropping this send attempt");
-                        continue;
-                    }
-                };
-                if sent.is_empty() {
+                let admitted =
+                    senders
+                        .transactions
+                        .send(Recipients::Some(recipients), transaction, false);
+                if admitted.is_empty() {
                     metrics::counter!("zone_p2p_transaction_sends_without_peers_total")
                         .increment(1);
-                    warn!(target: "zone::p2p", ?transaction_hash, configured, transaction_size_bytes = transaction_size, "Forwarded transaction reached no quorum peer (peers disconnected, sender throttled, or outbound queue full); dropping this send attempt");
+                    warn!(target: "zone::p2p", ?transaction_hash, configured, transaction_size_bytes = transaction_size, "Transaction forwarding was not admitted for any quorum peer; dropping this send attempt");
                 } else {
-                    debug!(target: "zone::p2p", ?transaction_hash, connected = sent.len(), configured, transaction_size_bytes = transaction_size, "Forwarded transaction to quorum peers");
+                    debug!(target: "zone::p2p", ?transaction_hash, admitted = admitted.len(), configured, transaction_size_bytes = transaction_size, "Submitted transaction forwarding to quorum peers");
                 }
             }
         }
@@ -815,6 +806,7 @@ mod tests {
     };
 
     use alloy_primitives::{B256, address};
+    use commonware_actor::Feedback;
     use commonware_codec::Encode as _;
     use commonware_cryptography::{
         Signer as _,
@@ -858,8 +850,9 @@ mod tests {
     impl commonware_p2p::Blocker for RecordingBlocker {
         type PublicKey = PublicKey;
 
-        async fn block(&mut self, peer: Self::PublicKey) {
+        fn block(&mut self, peer: Self::PublicKey) -> Feedback {
             self.blocked.lock().unwrap().push(peer);
+            Feedback::Ok
         }
     }
 
@@ -1184,8 +1177,77 @@ mod tests {
         }
         broadcaster.abort();
 
-        // Exercise the complete backfill response path through the real Commonware senders and
-        // receivers. A completed request must also reject a replay with the same request ID.
+        // A responder at the follower's head sends an empty page. Its completion must reach the
+        // follower without causing the coordinator to fan out another request.
+        const LOCAL_BEST: u64 = 6;
+        let level_start = LOCAL_BEST + 1;
+        let follower_commands = handles[1].parts.as_ref().unwrap().backfill.commands.clone();
+        let requester = tokio::spawn(async move {
+            loop {
+                follower_commands
+                    .send(crate::BackfillCommand::Request { start: level_start })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let (requesting_peer, request_id) = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(request) = handles[0]
+                    .parts
+                    .as_mut()
+                    .unwrap()
+                    .backfill
+                    .requests
+                    .recv()
+                    .await
+                {
+                    assert_eq!(request.start, level_start);
+                    return (request.peer, request.request_id);
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive the level-peer backfill request");
+        requester.abort();
+
+        // Let any retry already queued by the test helper be discarded while this request is
+        // still outstanding, before the completion frees the reservation.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let leader_commands = handles[0].parts.as_ref().unwrap().backfill.commands.clone();
+        leader_commands
+            .send(crate::BackfillCommand::Complete {
+                peer: requesting_peer,
+                request_id,
+                tip: test_tip(LOCAL_BEST),
+            })
+            .await
+            .unwrap();
+
+        let level_response = tokio::time::timeout(
+            Duration::from_secs(15),
+            handles[1].parts.as_mut().unwrap().backfill.responses.recv(),
+        )
+        .await
+        .expect("follower did not receive the level-peer completion")
+        .expect("follower backfill response channel closed");
+        assert!(matches!(
+            level_response,
+            crate::BackfillResponse::Completed { tip, .. } if tip == test_tip(LOCAL_BEST)
+        ));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                handles[2].parts.as_mut().unwrap().backfill.requests.recv(),
+            )
+            .await
+            .is_err(),
+            "level-peer completion triggered an unnecessary fallback backfill request"
+        );
+
+        // Exercise a non-empty backfill response through the real Commonware senders and
+        // receivers. Blocks must arrive before the completion, and a completed request must
+        // reject a replay with the same request ID.
         let follower_commands = handles[1].parts.as_ref().unwrap().backfill.commands.clone();
         let requester = tokio::spawn(async move {
             loop {
@@ -1216,8 +1278,9 @@ mod tests {
         .expect("leader did not receive the backfill request");
         requester.abort();
 
+        // Drain any retry already queued by the helper while the request remains reserved.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         let backfill_blocks = [vec![0xf8, 0x02, 0x80], vec![0xf8, 0x03, 0x80]];
-        let leader_commands = handles[0].parts.as_ref().unwrap().backfill.commands.clone();
         for block in &backfill_blocks {
             leader_commands
                 .send(crate::BackfillCommand::SendBlock {
@@ -1257,7 +1320,7 @@ mod tests {
                         assert_eq!(received_blocks, backfill_blocks);
                         return;
                     }
-                    None => panic!("follower event channel closed"),
+                    None => panic!("follower backfill response channel closed"),
                 }
             }
         })
@@ -1687,10 +1750,9 @@ mod tests {
 
     /// Catch-up must reach a reachable quorum follower while the leader is offline.
     ///
-    /// The leader is preferred as the sole source, but a leader that is not connected never
-    /// receives a request, so its outstanding entry is cleared on every attempt and
-    /// `is_unresponsive` never fires. Without widening in the same pass the node would re-pick
-    /// the unreachable leader forever and stay stuck for the whole outage.
+    /// Commonware admission does not prove connectivity, so the offline leader can initially hold
+    /// the sole reservation. Once its inactivity timeout elapses, the request must widen to the
+    /// reachable quorum followers rather than remain stuck for the whole outage.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backfill_reaches_a_quorum_follower_while_the_leader_is_offline() {
         let addresses = [

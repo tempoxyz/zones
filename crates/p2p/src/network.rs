@@ -6,7 +6,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_p2p::{AddressableTrackedPeers, authenticated::lookup};
-use commonware_runtime::{Metrics as _, Quota};
+use commonware_runtime::{Quota, Supervisor as _};
 use commonware_utils::{NZU32, ordered::Map};
 use eyre::WrapErr as _;
 
@@ -100,7 +100,7 @@ fn setup_commonware_config(
 }
 
 pub(crate) fn instantiate(
-    context: commonware_runtime::tokio::Context,
+    context: &commonware_runtime::tokio::Context,
     manifest: &ZoneManifest,
     ed25519_private_key: PrivateKey,
     listen: SocketAddr,
@@ -115,7 +115,7 @@ pub(crate) fn instantiate(
     let local_ed25519_public_key = ed25519_private_key.public_key();
     let config = setup_commonware_config(ed25519_private_key, &namespace, listen, bypass_ip_check);
     let peers = peer_sets(manifest, &local_ed25519_public_key)?;
-    let (network, oracle) = lookup::Network::new(context.with_label("network"), config);
+    let (network, oracle) = lookup::Network::new(context.child("network"), config);
     Ok((network, oracle, peers))
 }
 

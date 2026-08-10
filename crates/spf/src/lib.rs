@@ -41,6 +41,12 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     if witness.zone_blocks.is_empty() {
         return Err(Error::EmptyZoneBatch);
     }
+    if witness.public_inputs.portal != config.portal() {
+        return Err(Error::PortalMismatch {
+            expected: config.portal(),
+            actual: witness.public_inputs.portal,
+        });
+    }
 
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
@@ -139,14 +145,13 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         // used by the subsequent system and user execution in this block.
         tempo_database = tempo_database.with_imported_checkpoint(&block.tempo_header_rlp)?;
         let executed_block = execution::evm::execute_zone_block(
-            config,
             &mut zone_state,
-            &tempo_database,
+            config.evm_config(tempo_database.clone()),
             execution::evm::BlockReplayContext {
                 parent: &previous_header,
                 block_index,
+                parent_chain_id: witness.public_inputs.parent_chain_id,
                 zone_id: witness.public_inputs.zone_id,
-                portal: witness.public_inputs.portal,
             },
             block,
         );
@@ -166,16 +171,13 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
 
         let state_root = zone_state.database.state_root(&zone_state.bundle_state)?;
         let gas_limit = executed_block.evm_env.block_env.inner.gas_limit;
-        let execution_context = execution::evm::next_block_execution_context(
-            config.zone_chain_spec.as_ref(),
-            block,
-            gas_limit,
-        );
+        let execution_context =
+            execution::evm::next_block_execution_context(config.chain_spec(), block, gas_limit);
         let state_provider = NoopProvider::<tempo_chainspec::TempoChainSpec, TempoPrimitives>::new(
-            config.zone_chain_spec.inner.clone(),
+            config.chain_spec().inner.clone(),
         );
         let sealed_parent = SealedHeader::new_unhashed(previous_header.clone());
-        let assembled = TempoBlockAssembler::new(config.zone_chain_spec.inner.clone())
+        let assembled = TempoBlockAssembler::new(config.chain_spec().inner.clone())
             .assemble_block(
                 BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(
                     executed_block.evm_env,
@@ -405,6 +407,9 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> 
 /// Errors emitted by the stateless state transition function.
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    /// The verifier-bound parent and Zone IDs cannot produce a valid chain ID.
+    #[error(transparent)]
+    ZoneChainId(#[from] zone_primitives::constants::ZoneChainIdError),
     /// The Zone MPT witness did not prove one of its supplied reads.
     #[error(transparent)]
     MptValidation(#[from] StatelessSparseTrieError),
@@ -421,6 +426,12 @@ pub enum Error {
     /// A batch must execute at least one Zone block.
     #[error("zone batch contains no blocks")]
     EmptyZoneBatch,
+    /// The prover supplied a portal other than the verifier-selected portal.
+    #[error("Zone portal mismatch: expected {expected:?}, got {actual:?}")]
+    PortalMismatch {
+        expected: alloy_primitives::Address,
+        actual: alloy_primitives::Address,
+    },
     /// The initial Tempo witness header is not the checkpoint stored in the
     /// parent Zone state.
     #[error(
@@ -567,8 +578,8 @@ mod tests {
 
     use super::*;
     use alloy_consensus::Header;
+    use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-    use reth_chainspec::EthChainSpec;
     use reth_evm::ConfigureEvm;
     use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
     use revm::{
@@ -579,13 +590,14 @@ mod tests {
     use tempo_chainspec::TempoHardfork;
     use tempo_evm::TempoBlockEnv;
     use tempo_primitives::TempoHeader;
+    use zone_evm::ZoneEvmConfig;
     use zone_precompiles::L1StorageReader as _;
     use zone_primitives::constants::zone_chain_id;
 
     fn test_config() -> SpfConfig {
-        SpfConfig::new(Arc::new(zone_chainspec::ZoneChainSpec::from(
-            tempo_chainspec::spec::MODERATO.clone(),
-        )))
+        let tempo_chain_spec = tempo_chainspec::spec::MODERATO.clone();
+        let zone_chain_spec = Arc::new(zone_chainspec::ZoneChainSpec::from(tempo_chain_spec));
+        SpfConfig::new(zone_chain_spec, Address::repeat_byte(0x11))
     }
 
     fn minimal_batch_witness() -> BatchWitness {
@@ -601,6 +613,7 @@ mod tests {
 
         BatchWitness {
             public_inputs: PublicInputs {
+                parent_chain_id: 1_337,
                 zone_id: 1,
                 portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
@@ -699,6 +712,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_portal_other_than_the_verifier_selected_portal() {
+        let mut witness = minimal_batch_witness();
+        witness.public_inputs.portal = Address::repeat_byte(0x22);
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash_slow(),
+            timestamp: 0,
+            beneficiary: Address::ZERO,
+            tempo_header_rlp: Bytes::new(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        });
+
+        assert_eq!(
+            prove_zone_batch(&test_config(), witness),
+            Err(Error::PortalMismatch {
+                expected: Address::repeat_byte(0x11),
+                actual: Address::repeat_byte(0x22),
+            })
+        );
+    }
+
+    #[test]
     fn rejects_a_zone_witness_without_the_parent_state_root_node() {
         let database = WitnessDatabase::from_zone_state_witness(
             ZoneStateWitness {
@@ -747,25 +787,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolves_block_hash_from_eip2935_storage_witness() {
+        let number = 42;
+        let hash = B256::repeat_byte(0x42);
+        let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+        let (state_root, witness) = witnessed_account_state(
+            HISTORY_STORAGE_ADDRESS,
+            1,
+            U256::ZERO,
+            alloy_consensus::constants::KECCAK_EMPTY,
+            Vec::new(),
+            Some((slot, U256::from_be_bytes(hash.0))),
+        );
+        let mut database = WitnessDatabase::from_zone_state_witness(witness, state_root).unwrap();
+
+        assert_eq!(database.block_hash(number).unwrap(), hash);
+    }
+
     fn next_block_evm_env(
         config: &SpfConfig,
+        tempo_database: TempoWitnessDatabase,
         parent: &TempoHeader,
         block: &ZoneBlock,
+        parent_chain_id: u64,
         zone_id: u32,
     ) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
-        let evm_config = TempoEvmConfig::new(config.zone_chain_spec.inner.clone());
-        let attributes = next_block_env_attributes(config.zone_chain_spec.as_ref(), parent, block)?;
-        let mut env = evm_config
-            .next_evm_env(parent, &attributes)
-            .map_err(|_| Error::EvmEnvironment)?;
+        let attributes = next_block_env_attributes(config.chain_spec().as_ref(), parent, block)?;
+        let mut env = ZoneEvmConfig::from_composed_chain_spec(
+            config.chain_spec().clone(),
+            tempo_database,
+            config.portal(),
+        )
+        .next_evm_env(parent, &attributes)
+        .map_err(|_| Error::EvmEnvironment)?;
 
         // ZoneEvmConfig applies these overrides after delegating environment
         // construction to TempoEvmConfig. Keep replay identical to production.
-        env.cfg_env.chain_id = zone_chain_id(zone_id);
-        env.block_env.inner.basefee = config
-            .zone_chain_spec
-            .next_block_base_fee(parent, block.timestamp)
-            .unwrap_or_default();
+        env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
         Ok(env)
     }
 
@@ -948,7 +1007,7 @@ mod tests {
 
         let config = test_config();
         let attributes = execution::evm::next_block_env_attributes(
-            config.zone_chain_spec.as_ref(),
+            config.chain_spec().as_ref(),
             &witness.parent_header,
             &block,
         )
@@ -964,16 +1023,25 @@ mod tests {
         );
         assert_eq!(attributes.timestamp_millis_part, 0);
 
+        let tempo_database =
+            TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness.clone())
+                .unwrap();
         let env = next_block_evm_env(
             &config,
+            tempo_database,
             &witness.parent_header,
             &block,
+            witness.public_inputs.parent_chain_id,
             witness.public_inputs.zone_id,
         )
         .unwrap();
         assert_eq!(
             env.cfg_env.chain_id,
-            zone_primitives::constants::zone_chain_id(witness.public_inputs.zone_id)
+            zone_primitives::constants::zone_chain_id(
+                witness.public_inputs.parent_chain_id,
+                witness.public_inputs.zone_id,
+            )
+            .unwrap()
         );
         assert_eq!(env.block_env.inner.basefee, 0);
     }

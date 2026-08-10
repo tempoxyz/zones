@@ -8,7 +8,7 @@ use crate::utils::{
     L1TestNode, PolicySeed, RouterCallbackArgs, RouterDepositArgs, STABLECOIN_DEX_ADDRESS,
     WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, poll_until,
     seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
-    spawn_sequencer_with_config,
+    spawn_sequencer_with_config, start_real_p2p_cluster, start_real_p2p_cluster_with_active_nodes,
 };
 use alloy::{
     primitives::{Address, B256, U256},
@@ -25,6 +25,7 @@ use tempo_zone_contracts::{
     ZonePortal, ZonePortal::Role as PortalRole,
 };
 use zone_node::dev::{ProvisionConfig, provision_zone};
+use zone_primitives::constants::PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT;
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
@@ -173,6 +174,261 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
         None,
         "the leader must prune L1 observations after consuming them"
     );
+
+    Ok(())
+}
+
+/// The quorum path must settle a batch emitted by the real role controller, not merely accept
+/// manually assembled calldata. All three nodes independently execute the boundary, then the
+/// Portal accepts the leader's 2-of-3-or-more certificate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_three_node_quorum_settles_real_batch_boundary() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let cluster = start_real_p2p_cluster(4).await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    eyre::ensure!(
+        portal.sequencerThreshold().call().await? == 2,
+        "Portal threshold is not 2"
+    );
+    for signer in &cluster.attestation_signers {
+        eyre::ensure!(
+            portal.isSequencer(signer.address()).call().await?,
+            "Portal did not register quorum signer {}",
+            signer.address()
+        );
+    }
+
+    let submitted_height: u64 = poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(200),
+        "2-of-3 BatchSubmitted event from the real three-node cluster",
+        || {
+            let portal = &portal;
+            async move {
+                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                if events.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(portal.zoneHeight().call().await?))
+            }
+        },
+    )
+    .await?
+    .try_into()
+    .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
+
+    eyre::ensure!(
+        submitted_height >= 4,
+        "settled before the configured batch boundary"
+    );
+    eyre::ensure!(
+        portal.withdrawalBatchIndex().call().await? >= 1,
+        "real batch boundary did not advance the withdrawal batch index"
+    );
+    cluster.wait_all_at(submitted_height, L1_TIMEOUT).await?;
+    cluster.assert_same_block(submitted_height).await?;
+
+    Ok(())
+}
+
+/// A three-member Portal must settle as soon as its two-signature threshold is met; the missing
+/// third node must neither block settlement nor appear as an unnecessary third certificate entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // The manifest and Portal retain all three registered members, but node C never starts.
+    let cluster = start_real_p2p_cluster_with_active_nodes(4, 2).await?;
+    eyre::ensure!(
+        cluster.nodes.len() == 2 && cluster.attestation_signers.len() == 3,
+        "fixture did not retain a three-member set with exactly two online nodes"
+    );
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    eyre::ensure!(
+        portal.sequencerThreshold().call().await? == 2,
+        "Portal threshold is not 2"
+    );
+    for signer in &cluster.attestation_signers {
+        eyre::ensure!(
+            portal.isSequencer(signer.address()).call().await?,
+            "Portal did not register configured quorum signer {}",
+            signer.address()
+        );
+    }
+
+    let (submitted_height, tx_hash): (U256, B256) = poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(200),
+        "BatchSubmitted event from two online members of a 2-of-3 quorum",
+        || {
+            let portal = &portal;
+            async move {
+                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                let Some((_, log)) = events.first() else {
+                    return Ok(None);
+                };
+                let tx_hash = log
+                    .transaction_hash
+                    .ok_or_else(|| eyre::eyre!("BatchSubmitted log missing transaction hash"))?;
+                Ok(Some((portal.zoneHeight().call().await?, tx_hash)))
+            }
+        },
+    )
+    .await?;
+    let submitted_height = u64::try_from(submitted_height)
+        .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
+
+    let call = fetch_submit_batch_call(&cluster.l1, tx_hash).await?;
+    eyre::ensure!(
+        call.signatures.len() == 2,
+        "expected exactly the 2-of-3 threshold signatures, got {}",
+        call.signatures.len()
+    );
+    eyre::ensure!(
+        call.signatures[0] != call.signatures[1],
+        "submitted certificate contains duplicate signature bytes"
+    );
+    eyre::ensure!(
+        submitted_height >= 4,
+        "settled before the configured batch boundary"
+    );
+    cluster.wait_all_at(submitted_height, L1_TIMEOUT).await?;
+    cluster.assert_same_block(submitted_height).await?;
+
+    Ok(())
+}
+
+async fn fetch_submit_batch_call(
+    l1: &L1TestNode,
+    tx_hash: B256,
+) -> eyre::Result<ZonePortal::submitBatchCall> {
+    let response: serde_json::Value = reqwest::Client::new()
+        .post(l1.http_url().clone())
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getTransactionByHash",
+            "params": [format!("{tx_hash:#x}")],
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    if let Some(error) = response.get("error") {
+        eyre::bail!("eth_getTransactionByHash failed for {tx_hash}: {error}");
+    }
+
+    let tx = response
+        .get("result")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} not found"))?;
+    let input = tx
+        .get("input")
+        .and_then(|value| value.as_str())
+        .filter(|input| *input != "0x")
+        .or_else(|| {
+            tx.get("calls")
+                .and_then(|value| value.as_array())
+                .and_then(|calls| {
+                    calls
+                        .iter()
+                        .filter_map(|call| call.get("input").and_then(|value| value.as_str()))
+                        .find(|input| *input != "0x")
+                })
+        })
+        .ok_or_else(|| eyre::eyre!("submitBatch tx {tx_hash} has no calldata input"))?;
+    let calldata = const_hex::decode(input.strip_prefix("0x").unwrap_or(input)).map_err(|err| {
+        eyre::eyre!("failed to hex-decode submitBatch calldata for {tx_hash}: {err}")
+    })?;
+
+    ZonePortal::submitBatchCall::abi_decode(&calldata)
+        .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))
+}
+
+/// A follower signs only after it can independently reconstruct the leader's batch statement.
+/// Give follower B a conflicting exact-height Portal queue hash before the boundary. The other
+/// follower is independently prevented from replacing B's share, so A remains below the 2-of-3
+/// threshold and the Portal cannot advance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // Leave enough real L1 blocks to install the divergent state before the first batch boundary.
+    let cluster = start_real_p2p_cluster(20).await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    let before = (
+        portal.blockHash().call().await?,
+        portal.zoneHeight().call().await?,
+        portal.withdrawalBatchIndex().call().await?,
+        portal.withdrawalQueueHead().call().await?,
+        portal.withdrawalQueueTail().call().await?,
+        portal.lastProcessedDepositNumber().call().await?,
+    );
+
+    // A newly started subscriber initializes its cache from the zone's L1 genesis anchor, not
+    // from block zero. Its first non-contiguous coverage update resets the cache, which used to
+    // race with the forged entry below and silently erase it. Wait for every member to complete
+    // that initial backfill before choosing a future anchor to corrupt. Wait for the block after
+    // the current tip because the current tip may be the genesis anchor, which is below the cache
+    // coverage floor once the first post-genesis block is ingested.
+    let covered_l1_block = cluster.l1.provider().get_block_number().await? + 1;
+    for node in &cluster.nodes {
+        poll_until(
+            L1_TIMEOUT,
+            Duration::from_millis(50),
+            "initial L1 cache coverage",
+            || async {
+                Ok(node
+                    .l1_state_cache()
+                    .lock()
+                    .has_coverage_at(covered_l1_block)
+                    .then_some(()))
+            },
+        )
+        .await?;
+    }
+
+    let divergent_anchor = cluster.l1.provider().get_block_number().await? + 2;
+    cluster.nodes[1].l1_state_cache().lock().set(
+        cluster.portal_address,
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        divergent_anchor,
+        B256::repeat_byte(0xD1),
+    );
+    cluster.nodes[2].l1_state_cache().lock().set(
+        cluster.portal_address,
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        divergent_anchor,
+        B256::repeat_byte(0xD2),
+    );
+
+    cluster.nodes[0]
+        .wait_for_block_number(20, L1_TIMEOUT)
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let follower_height = cluster.nodes[1].provider().get_block_number().await?;
+    eyre::ensure!(
+        follower_height < 20,
+        "divergent follower unexpectedly imported the leader boundary"
+    );
+    let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+    eyre::ensure!(
+        events.is_empty(),
+        "leader settled despite only its own usable signature"
+    );
+    let after = (
+        portal.blockHash().call().await?,
+        portal.zoneHeight().call().await?,
+        portal.withdrawalBatchIndex().call().await?,
+        portal.withdrawalQueueHead().call().await?,
+        portal.withdrawalQueueTail().call().await?,
+        portal.lastProcessedDepositNumber().call().await?,
+    );
+    eyre::ensure!(after == before, "Portal changed despite rejected quorum");
 
     Ok(())
 }
@@ -701,7 +957,12 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
             .await?;
         let portal = ZonePortal::new(portal_address, &provider);
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(portal_address, allowed_account.address(), B256::ZERO)
+            .encrypt_deposit_for_portal(
+                portal_address,
+                l1.user_signer().address(),
+                allowed_account.address(),
+                B256::ZERO,
+            )
             .await?;
         assert!(
             portal
@@ -1214,7 +1475,7 @@ async fn test_cross_zone_router_tempo_refund_recipient() -> eyre::Result<()> {
     let _seq_b = spawn_sequencer(&l1, &zone_b, portal_b, seq_b_signer.clone()).await;
 
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_b, blacklisted_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal(portal_b, router, blacklisted_recipient, B256::ZERO)
         .await?;
 
     let refund_before = l1.balance_of(PATH_USD_ADDRESS, refund_burner).await?;
@@ -1508,6 +1769,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_payload
         .l1
         .encrypt_deposit_for_portal(
             fixture.portal_address,
+            fixture.router,
             fixture.account.address(),
             B256::ZERO,
         )
@@ -1944,7 +2206,7 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
     let tempo_refund_recipient = depositor.address();
     let deposit_amount = 1_000_000u128;
     l1.fund_user(tempo_refund_recipient, deposit_amount).await?;
-    let provider = l1.provider_with_signer(depositor);
+    let provider = l1.provider_with_signer(depositor.clone());
     ITIP20::new(PATH_USD_ADDRESS, &provider)
         .approve(portal_address, U256::MAX)
         .send()
@@ -1958,7 +2220,12 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
     let _sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let portal = ZonePortal::new(portal_address, &provider);
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_address, rejected_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal(
+            portal_address,
+            depositor.address(),
+            rejected_recipient,
+            B256::ZERO,
+        )
         .await?;
     let receipt = portal
         .deposit(
@@ -2079,6 +2346,7 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
         current_entry.yParity,
         current_recipient,
         B256::ZERO,
+        depositor.address(),
         portal_address,
         U256::ONE,
     )
@@ -2112,6 +2380,7 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
         old_y_parity,
         historical_recipient,
         B256::ZERO,
+        depositor.address(),
         portal_address,
         U256::ZERO,
     )
@@ -2227,6 +2496,7 @@ async fn test_deposit_blacklisted_recipient() -> eyre::Result<()> {
             key_result.yParity,
             blacklisted_recipient,
             B256::ZERO,
+            depositor.address(),
             portal_address,
             key_index,
         )
@@ -2345,7 +2615,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
         let portal = ZonePortal::new(portal_address, &dev_provider);
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(portal_address, alice, B256::ZERO)
+            .encrypt_deposit_for_portal(portal_address, l1.dev_address(), alice, B256::ZERO)
             .await?;
         let receipt = portal
             .deposit(
@@ -2450,7 +2720,7 @@ async fn test_deposit_to_blacklisted_recipient_is_accepted_on_l1() -> eyre::Resu
     use tempo_zone_contracts::ZonePortal;
     let portal = ZonePortal::new(portal_address, &depositor_provider);
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_address, blacklisted_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal(portal_address, depositor, blacklisted_recipient, B256::ZERO)
         .await?;
     let receipt = portal
         .deposit(

@@ -34,7 +34,7 @@ pub(crate) struct SpamDeposits {
     portal: Address,
 
     /// Private key (hex) of the funding/whale account.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Total number of deposits to send.
@@ -181,9 +181,10 @@ impl SpamDeposits {
             );
 
             // Build and sign all deposits (pure computation, no IO)
-            let calldata = self.build_deposit_calldata(whale_addr, &enc_setup)?;
             let mut encoded_txs = Vec::with_capacity(batch_size);
             for signer in signers.iter().take(batch_size) {
+                let calldata =
+                    self.build_deposit_calldata(whale_addr, signer.address(), &enc_setup)?;
                 let nonce_key = U256::from(rand::random::<u128>());
 
                 let tx = tempo_primitives::TempoTransaction {
@@ -288,6 +289,7 @@ impl SpamDeposits {
     fn build_deposit_calldata(
         &self,
         recipient: Address,
+        sender: Address,
         enc_setup: &(B256, u8, U256),
     ) -> eyre::Result<Vec<u8>> {
         let &(pub_x, y_parity, key_index) = enc_setup;
@@ -296,6 +298,7 @@ impl SpamDeposits {
             y_parity,
             recipient,
             B256::ZERO,
+            sender,
             self.portal,
             key_index,
         )

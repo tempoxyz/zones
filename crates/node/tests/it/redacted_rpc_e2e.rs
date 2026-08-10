@@ -27,12 +27,13 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
-    IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20,
+    IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20, ITIP403Registry,
+    TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
 };
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS, STORAGE_CREDITS_ADDRESS,
-    tip20::ITIP20 as PrecompileTip20,
+    tip20::ITIP20 as PrecompileTip20, tip403_registry::ALLOW_ALL_POLICY_ID,
 };
 use tempo_primitives::{
     TempoTxEnvelope,
@@ -700,6 +701,68 @@ async fn test_balance_privacy() -> eyre::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_redacted_rpc().await?;
+    let user = PrivateKeySigner::random();
+    let call = ITIP403Registry::isAuthorizedCall {
+        policyId: ALLOW_ALL_POLICY_ID,
+        user: user.address(),
+    };
+    let data = format!("0x{}", hex::encode(call.abi_encode()));
+    let operator_provider = ctx.zone.provider();
+    let operator_registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &operator_provider);
+
+    // The trusted operator RPC admits the zero caller and executes the TIP-403 read.
+    let zero_caller = operator_registry
+        .isAuthorized(ALLOW_ALL_POLICY_ID, user.address())
+        .from(Address::ZERO)
+        .call()
+        .await?;
+    assert!(zero_caller);
+
+    // The operator RPC still rejects ordinary callers at the precompile boundary.
+    let nonzero_caller = operator_registry
+        .isAuthorized(ALLOW_ALL_POLICY_ID, user.address())
+        .from(user.address())
+        .call()
+        .await;
+    assert!(nonzero_caller.is_err());
+
+    // The redacted RPC rejects an explicit zero caller because it does not match the authenticated
+    // user.
+    let response = ctx
+        .call_as_user(
+            "eth_call",
+            json!([{
+                "from": Address::ZERO,
+                "to": TIP403_REGISTRY_ADDRESS,
+                "data": &data,
+            }, "latest"]),
+            &user,
+        )
+        .await?;
+    assert_eq!(response["error"]["code"], -32004);
+
+    // The redacted RPC fills an omitted `from` with the authenticated nonzero user, which TIP-403
+    // rejects at the precompile boundary.
+    let response = ctx
+        .call_as_user(
+            "eth_call",
+            json!([{
+                "to": TIP403_REGISTRY_ADDRESS,
+                "data": &data,
+            }, "latest"]),
+            &user,
+        )
+        .await?;
+    assert_eq!(response["error"]["code"], -32603);
+    assert_eq!(response["error"]["message"], "execution reverted");
+    Ok(())
+}
+
 /// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf`
 /// and `allowance`, while the configured sequencer retains access.
 #[tokio::test(flavor = "multi_thread")]
@@ -1225,42 +1288,25 @@ async fn test_block_access_control() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Method tier enforcement: restricted → -32005 for all callers,
-/// disabled → -32006 for everyone, unknown → -32601.
+/// Methods outside the redacted RPC allowlist are indistinguishable from unknown methods.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_method_tiers() -> eyre::Result<()> {
+async fn test_unexposed_methods_are_not_found() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let ctx = start_zone_with_redacted_rpc().await?;
     let user_signer = PrivateKeySigner::random();
 
-    // Restricted methods → -32005 for all callers
     for method in [
         "eth_getCode",
         "eth_getStorageAt",
         "eth_getBlockReceipts",
         "debug_traceTransaction",
         "txpool_content",
-    ] {
-        let resp = ctx
-            .call_as_user(method, serde_json::json!([]), &user_signer)
-            .await?;
-        let error = resp
-            .get("error")
-            .unwrap_or_else(|| panic!("{method} should return error"));
-        assert_eq!(
-            error["code"].as_i64().unwrap(),
-            -32005,
-            "{method} should return -32005"
-        );
-    }
-
-    // Disabled methods → -32006 for everyone
-    for method in [
         "eth_subscribe",
         "eth_newPendingTransactionFilter",
         "eth_mining",
         "eth_hashrate",
+        "eth_someNonexistentMethod",
     ] {
         let resp = ctx
             .call_as_user(method, serde_json::json!([]), &user_signer)
@@ -1270,27 +1316,10 @@ async fn test_method_tiers() -> eyre::Result<()> {
             .unwrap_or_else(|| panic!("{method} should return error"));
         assert_eq!(
             error["code"].as_i64().unwrap(),
-            -32006,
-            "{method} should return -32006 (Method disabled)"
+            -32601,
+            "{method} should return -32601"
         );
     }
-
-    // Unknown method → -32601
-    let resp = ctx
-        .call_as_user(
-            "eth_someNonexistentMethod",
-            serde_json::json!([]),
-            &user_signer,
-        )
-        .await?;
-    let error = resp
-        .get("error")
-        .expect("unknown method should return error");
-    assert_eq!(
-        error["code"].as_i64().unwrap(),
-        -32601,
-        "unknown method should return -32601"
-    );
 
     Ok(())
 }

@@ -53,6 +53,7 @@ fragments:
           chain: l1
           action: prepare_encrypted_deposit
           with:
+            sender: { param: sender_address }
             recipient: { param: recipient }
             zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
             portalAddress: "${L1_PORTAL_ADDRESS}"
@@ -136,6 +137,7 @@ fragments:
           chain: l1
           action: prepare_encrypted_deposit
           with:
+            sender: "${ZONES_BENCH_EARN_ROUTER}"
             recipient: { param: recipient }
             zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
             portalAddress: "${L1_PORTAL_ADDRESS}"
@@ -193,7 +195,7 @@ fragments:
         timeout: 45s
         save: request_result
       - id: l1_processed_locator
-        depends_on: [l1_before, request]
+        depends_on: [l1_before, request, request_result]
         wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
@@ -204,8 +206,11 @@ fragments:
             to: "${ZONES_BENCH_EARN_ROUTER}"
             senderTag:
               keccak256_packed:
-                types: [address, bytes32]
-                values: [{ param: sender_address }, { var: request.tx_hash }]
+                types: [address, bytes32, uint64]
+                values:
+                  - { param: sender_address }
+                  - { var: request.tx_hash }
+                  - { var: request_result.args.fallbackNonce }
             token: { param: input_token }
             amount: { param: amount }
             callbackSuccess: true
@@ -225,8 +230,11 @@ fragments:
                 to: "${ZONES_BENCH_EARN_ROUTER}"
                 senderTag:
                   keccak256_packed:
-                    types: [address, bytes32]
-                    values: [{ param: sender_address }, { var: request.tx_hash }]
+                    types: [address, bytes32, uint64]
+                    values:
+                      - { param: sender_address }
+                      - { var: request.tx_hash }
+                      - { var: request_result.args.fallbackNonce }
                 token: { param: input_token }
                 amount: { param: amount }
                 callbackSuccess: true
@@ -283,6 +291,7 @@ fragments:
           chain: l1
           action: prepare_encrypted_deposit
           with:
+            sender: "${ZONES_BENCH_EARN_ROUTER}"
             recipient: { param: recipient }
             zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
             portalAddress: "${L1_PORTAL_ADDRESS}"
@@ -340,7 +349,7 @@ fragments:
         timeout: 45s
         save: request_result
       - id: l1_processed_locator
-        depends_on: [l1_before, request]
+        depends_on: [l1_before, request, request_result]
         wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
@@ -351,8 +360,11 @@ fragments:
             to: "${ZONES_BENCH_EARN_ROUTER}"
             senderTag:
               keccak256_packed:
-                types: [address, bytes32]
-                values: [{ param: sender_address }, { var: request.tx_hash }]
+                types: [address, bytes32, uint64]
+                values:
+                  - { param: sender_address }
+                  - { var: request.tx_hash }
+                  - { var: request_result.args.fallbackNonce }
             token: "${ZONES_BENCH_EARN_TOKEN}"
             amount: { param: amount }
             callbackSuccess: true
@@ -372,8 +384,11 @@ fragments:
                 to: "${ZONES_BENCH_EARN_ROUTER}"
                 senderTag:
                   keccak256_packed:
-                    types: [address, bytes32]
-                    values: [{ param: sender_address }, { var: request.tx_hash }]
+                    types: [address, bytes32, uint64]
+                    values:
+                      - { param: sender_address }
+                      - { var: request.tx_hash }
+                      - { var: request_result.args.fallbackNonce }
                 token: "${ZONES_BENCH_EARN_TOKEN}"
                 amount: { param: amount }
                 callbackSuccess: true
@@ -428,6 +443,7 @@ fragments:
           chain: l1
           action: prepare_encrypted_deposit
           with:
+            sender: "${ZONES_BENCH_EARN_ROUTER}"
             recipient: { param: recipient }
             zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
             portalAddress: "${L1_PORTAL_ADDRESS}"
@@ -485,7 +501,7 @@ fragments:
         timeout: 45s
         save: request_result
       - id: l1_processed_locator
-        depends_on: [l1_before, request]
+        depends_on: [l1_before, request, request_result]
         wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
@@ -496,8 +512,11 @@ fragments:
             to: "${ZONES_BENCH_EARN_ROUTER}"
             senderTag:
               keccak256_packed:
-                types: [address, bytes32]
-                values: [{ param: sender_address }, { var: request.tx_hash }]
+                types: [address, bytes32, uint64]
+                values:
+                  - { param: sender_address }
+                  - { var: request.tx_hash }
+                  - { var: request_result.args.fallbackNonce }
             token: { param: input_token }
             amount: { param: amount }
             callbackSuccess: false
@@ -517,8 +536,11 @@ fragments:
                 to: "${ZONES_BENCH_EARN_ROUTER}"
                 senderTag:
                   keccak256_packed:
-                    types: [address, bytes32]
-                    values: [{ param: sender_address }, { var: request.tx_hash }]
+                    types: [address, bytes32, uint64]
+                    values:
+                      - { param: sender_address }
+                      - { var: request.tx_hash }
+                      - { var: request_result.args.fallbackNonce }
                 token: { param: input_token }
                 amount: { param: amount }
                 callbackSuccess: false

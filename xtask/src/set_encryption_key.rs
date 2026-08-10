@@ -24,7 +24,7 @@ pub(crate) struct SetEncryptionKey {
 
     /// Sequencer private key (hex). Used both as the signing key for the
     /// transaction and as the encryption key to register.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 }
 

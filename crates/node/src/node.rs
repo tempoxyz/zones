@@ -14,10 +14,11 @@ use crate::{
         run_role_controller,
     },
     rpc::{
-        OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneDebugApi, ZoneRpc,
+        NodeZoneDebugApi, OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc,
         ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
+use alloy_chains::Chain;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
@@ -85,10 +86,11 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_rpc::ZoneDebugApiServer;
+use zone_primitives::constants::zone_chain_id;
+use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
-    attestation::AttestationDomain, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
 };
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
@@ -107,6 +109,27 @@ fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
             .any(|id| id.trim().parse() == Ok(chain_id))
             .then(|| DEV.clone()),
     })
+}
+
+fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
+    let expected = zone_chain_id(parent_chain_id, zone_id)?;
+    eyre::ensure!(
+        chain_id == expected,
+        "chain ID mismatch: portal zone ID {zone_id} on parent chain {parent_chain_id} requires chain_id={expected}, but genesis has {chain_id}"
+    );
+    Ok(())
+}
+
+fn validate_configured_zone_id(
+    source: &str,
+    configured_zone_id: u32,
+    portal_zone_id: u32,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        configured_zone_id == portal_zone_id,
+        "zone ID mismatch: {source} has {configured_zone_id}, but portal has {portal_zone_id}"
+    );
+    Ok(())
 }
 
 /// Network primitives for Zone Nodes
@@ -178,6 +201,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
+    /// Run the SPF over finalized candidates in detached, observational mode.
+    pub enable_prover: bool,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -542,6 +567,44 @@ where
             )
             .await?
             .erased();
+        let l1_chain_id = l1_provider.get_chain_id().await?;
+        let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
+        // explicit sentinel because they have no on-chain portal to bind against.
+        if self.portal_address.is_zero() {
+            warn!(
+                target: "reth::cli",
+                "Skipping portal-bound zone identity validation for a zero-address test/dev portal"
+            );
+        } else {
+            let portal_zone_id = ZonePortal::new(self.portal_address, &l1_provider)
+                .zoneId()
+                .call()
+                .await
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to read zone ID from portal {}: {err}",
+                        self.portal_address
+                    )
+                })?;
+
+            validate_configured_zone_id(
+                "--zone.id/redacted RPC configuration",
+                self.redacted_rpc_config.zone_id,
+                portal_zone_id,
+            )?;
+            if let Some(config) = self.sequencer_config.as_ref() {
+                validate_configured_zone_id(
+                    "sequencer configuration",
+                    config.zone_id,
+                    portal_zone_id,
+                )?;
+            }
+            if let Some(config) = self.p2p_config.as_ref() {
+                validate_configured_zone_id("P2P manifest", config.zone_id(), portal_zone_id)?;
+            }
+            validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
+        }
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
@@ -593,7 +656,6 @@ where
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let mut p2p_runtime = None;
         if let Some(config) = self.p2p_config.take() {
-            let l1_chain_id = l1_provider.get_chain_id().await?;
             let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
@@ -645,7 +707,7 @@ where
             let relayer = match individual_signer {
                 Some(signer) => {
                     use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
-                    Some(
+                    let provider =
                         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                             .with_nonce_key_filler()
                             .wallet(alloy_network::EthereumWallet::from(signer))
@@ -654,8 +716,16 @@ where
                                 rpc_connection_config(self.l1_config.retry_connection_interval),
                             )
                             .await?
-                            .erased(),
-                    )
+                            .erased();
+                    if !provider.client().is_local()
+                        && let Some(avg_block_time) =
+                            Chain::from_id(l1_chain_id).average_blocktime_hint()
+                    {
+                        provider
+                            .client()
+                            .set_poll_interval(avg_block_time.mul_f32(0.6));
+                    }
+                    Some(provider)
                 }
                 None => None,
             };
@@ -688,6 +758,12 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let max_response_size = ctx
+            .config
+            .rpc
+            .rpc_max_response_size
+            .get()
+            .saturating_mul(1024 * 1024) as usize;
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -710,7 +786,7 @@ where
                     .modules
                     .merge_configured(operator_zone_api.into_rpc())?;
                 container.modules.merge_configured(
-                    ZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
+                    NodeZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
                 )?;
                 container.modules.merge_http(operator_zone_rpc_module(
                     portal_address,
@@ -720,6 +796,16 @@ where
                 Ok(())
             })
             .await?;
+        let prover_config = self
+            .sequencer_config
+            .as_ref()
+            .filter(|config| config.enable_prover)
+            .map(|config| ShadowProverConfig {
+                parent_chain_id: l1_chain_id,
+                zone_id: config.zone_id,
+                chain_spec: provider.chain_spec(),
+                debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+            });
 
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
@@ -727,7 +813,9 @@ where
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
+            self.l1_config.enabled_tokens.clone(),
             chain_id,
+            max_response_size,
         )
         .await?;
 
@@ -761,6 +849,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    prover_config.clone(),
                 )?),
                 None => None,
             };
@@ -812,6 +901,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                prover_config,
             )
             .await?;
         }
@@ -1086,6 +1176,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
+        prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1102,6 +1193,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            prover_config,
         })
     }
 
@@ -1253,26 +1345,32 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         portal_address: Address,
+        enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
+        max_response_size: usize,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
-        let zone_rpc_url = handle
-            .rpc_server_handles
-            .rpc
-            .http_url()
-            .expect("HTTP RPC server must be enabled for redacted RPC");
+        let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_with_config(
+                &l1_rpc_url,
+                rpc_connection_config(retry_connection_interval),
+            )
+            .await?
+            .erased();
         let redacted_rpc_config = zone_rpc::RedactedRpcConfig {
             listen_addr: ([0, 0, 0, 0], config.redacted_rpc_port).into(),
-            l1_rpc_url,
-            zone_rpc_url,
-            retry_connection_interval,
             zone_id: config.zone_id,
             chain_id,
             max_auth_token_validity: config.max_auth_token_validity,
+            max_response_size,
             zone_portal: portal_address,
         };
-        let api: Arc<dyn ZoneRpcApi> =
-            Arc::new(ZoneRpc::new(eth_handlers, redacted_rpc_config.clone()).await?);
+        let api: Arc<dyn ZoneRpcApi> = Arc::new(ZoneRpc::new(
+            eth_handlers,
+            redacted_rpc_config.clone(),
+            enabled_tokens,
+            l1_provider,
+        ));
         let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
 
@@ -1291,6 +1389,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
+        prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
@@ -1313,6 +1412,7 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
@@ -1708,6 +1808,22 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
+    }
+
+    #[test]
+    fn validates_genesis_chain_id_against_parent_and_zone() {
+        let expected = zone_chain_id(42_431, 7).unwrap();
+        assert!(validate_zone_chain_id(42_431, 7, expected).is_ok());
+        assert!(validate_zone_chain_id(4_217, 7, expected).is_err());
+        assert!(validate_zone_chain_id(42_431, 7, expected + 1).is_err());
+        assert!(validate_zone_chain_id(42_431, 0, 123).is_err());
+    }
+
+    #[test]
+    fn requires_every_configured_zone_id_to_match_the_portal() {
+        assert!(validate_configured_zone_id("test", 7, 7).is_ok());
+        assert!(validate_configured_zone_id("test", 0, 7).is_err());
+        assert!(validate_configured_zone_id("test", 8, 7).is_err());
     }
 
     #[test]

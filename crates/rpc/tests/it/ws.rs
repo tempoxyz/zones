@@ -136,6 +136,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
     }
 
     stub!(net_version);
+    stub!(client_version);
     stub!(syncing);
     stub!(coinbase);
     stub!(gas_price);
@@ -283,12 +284,10 @@ impl TestContext {
         let signer = PrivateKeySigner::random();
         let config = RedactedRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
-            l1_rpc_url: "http://127.0.0.1:1".to_string(),
-            zone_rpc_url: "http://127.0.0.1:1".to_string(),
-            retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+            max_response_size: 160 * 1024 * 1024,
             zone_portal: Address::ZERO,
         };
         let addr = start_redacted_rpc(config, api).await.unwrap();

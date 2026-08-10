@@ -17,7 +17,6 @@ use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
 use futures::{StreamExt, TryStreamExt, stream};
-use serde::Deserialize;
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -29,11 +28,14 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::zone_chain_id;
-use zone_rpc::{ZoneProvider, ZoneProviderConfig};
+use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
+use zone_rpc::{
+    ZoneProvider, ZoneProviderConfig,
+    types::{TempoStorageRead, ZoneExecutionWitness},
+};
 use zone_spf::{
-    BatchOutput, BatchWitness, Error as SpfError, PublicInputs, SpfConfig, TempoStateWitness,
-    ZoneBlock, ZoneStateWitness, prove_zone_batch,
+    BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
+    ZoneStateWitness, prove_zone_batch,
 };
 
 const EIP2935_HISTORY_WINDOW: u64 = 8191;
@@ -159,17 +161,6 @@ struct ExtractedBlock {
     user_transaction_count: usize,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExecutionWitness {
-    #[serde(default)]
-    state: Vec<Bytes>,
-    #[serde(default)]
-    codes: Vec<Bytes>,
-    #[serde(default)]
-    headers: Vec<Bytes>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -216,7 +207,12 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .parse::<PrivateKeySigner>()
         .context("parse private Zone RPC key")?;
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = spf_config(discovery.tempo_chain_id, args.tempo_genesis.as_deref()).await?;
+    let spf_config = spf_config(
+        discovery.tempo_chain_id,
+        args.tempo_genesis.as_deref(),
+        discovery.portal,
+    )
+    .await?;
     let private_zone_provider = connect_private_zone(
         &args.zone_private_rpc_url,
         signer,
@@ -263,8 +259,18 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .iter()
         .filter(|block| block.has_finalization)
         .count();
-    let expected_withdrawal_batch_index = discovery
-        .portal_withdrawal_batch_index
+    let parent_withdrawal_batch_index = withdrawal_batch_index_at(&zone_provider, parent_number)
+        .await
+        .context("read withdrawal batch index from parent Zone state")?;
+    if args.from_block.is_none()
+        && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
+    {
+        bail!(
+            "parent Zone state has withdrawal batch index {parent_withdrawal_batch_index}, but the Tempo portal reports {}",
+            discovery.portal_withdrawal_batch_index,
+        );
+    }
+    let expected_withdrawal_batch_index = parent_withdrawal_batch_index
         .checked_add(u64::try_from(finalization_count).expect("block count fits u64"))
         .ok_or_else(|| eyre!("withdrawal batch index overflow"))?;
     let (zone_head, tempo_head) = tokio::try_join!(
@@ -289,8 +295,19 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("initial checkpoint", started, ());
 
     let started = start_phase("Zone state witness");
-    let zone_state_witness = zone_witnesses(&zone_provider, from_block, to_block).await?;
+    let (zone_state_witness, tempo_reads) =
+        zone_witnesses(&zone_provider, from_block, to_block).await?;
     timings.record("Zone state witness", started, ());
+
+    let started = start_phase("Tempo state witness");
+    let checkpoint_by_zone_block = extracted
+        .iter()
+        .map(|block| (block.input.number, block.checkpoint_number))
+        .collect();
+    let reads = collect_l1_reads(tempo_reads, &checkpoint_by_zone_block)?;
+    let initial_tempo_state_witness =
+        tempo_state_witness(&tempo_provider, &initial_tempo_header, reads).await?;
+    timings.record("Tempo state witness", started, ());
 
     let final_tempo_header = extracted
         .iter()
@@ -304,8 +321,9 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         tempo_anchor(&tempo_provider, &final_tempo_header).await?;
     timings.record("Tempo ancestry", started, ());
 
-    let mut witness = BatchWitness {
+    let witness = BatchWitness {
         public_inputs: PublicInputs {
+            parent_chain_id: discovery.tempo_chain_id,
             zone_id: discovery.zone_id,
             portal: discovery.portal,
             tempo_block_number: final_tempo_header.number(),
@@ -316,55 +334,13 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         parent_header,
         zone_blocks: extracted.iter().map(|block| block.input.clone()).collect(),
         zone_state_witness,
-        tempo_state_witness: TempoStateWitness {
-            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(&initial_tempo_header)),
-            node_pool: Vec::new(),
-        },
+        tempo_state_witness: initial_tempo_state_witness,
         tempo_ancestry_headers,
     };
 
     let started = start_phase("SPF validation");
-    let mut reads = L1Reads::new();
-    let output = loop {
-        match prove_zone_batch(&spf_config, witness.clone()) {
-            Ok(output) => break output,
-            Err(
-                error @ SpfError::MissingTempoStorage {
-                    account,
-                    slot,
-                    block_number,
-                },
-            ) => {
-                let inserted = reads
-                    .entry(block_number)
-                    .or_default()
-                    .entry(account)
-                    .or_default()
-                    .insert(slot);
-                if !inserted {
-                    return Err(error).context("generated witness failed SPF validation");
-                }
-
-                info!(
-                    tempo_block = block_number,
-                    account = %account,
-                    slot = %slot,
-                    "SPF replay discovered an additional Tempo storage proof"
-                );
-                let additional_reads = BTreeMap::from([(
-                    block_number,
-                    BTreeMap::from([(account, BTreeSet::from([slot]))]),
-                )]);
-                let additional =
-                    tempo_state_witness(&tempo_provider, &initial_tempo_header, additional_reads)
-                        .await?;
-                merge_tempo_state_witness(&mut witness.tempo_state_witness, additional)?;
-            }
-            Err(error) => {
-                return Err(error).context("generated witness failed SPF validation");
-            }
-        }
-    };
+    let output = prove_zone_batch(&spf_config, witness.clone())
+        .context("generated witness failed SPF validation")?;
     if output.block_transition.nextBlockHash != next_block_hash {
         bail!(
             "SPF replay produced {}, but Zone block {to_block} has hash {next_block_hash}",
@@ -458,7 +434,7 @@ async fn discover(
         },
         read_portal_snapshot(tempo, portal_address),
     )?;
-    let expected_chain_id = zone_chain_id(zone_id);
+    let expected_chain_id = zone_chain_id(tempo_chain_id, zone_id)?;
     if actual_zone_chain_id != expected_chain_id {
         bail!(
             "Zone portal reports Zone ID {zone_id}, which requires chain ID {expected_chain_id}, but the unrestricted Zone RPC reports {actual_zone_chain_id}"
@@ -874,6 +850,17 @@ async fn initial_tempo_header(
     Ok(header)
 }
 
+async fn withdrawal_batch_index_at(
+    zone: &DynProvider<TempoNetwork>,
+    block_number: u64,
+) -> Result<u64> {
+    let index = zone
+        .get_storage_at(ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT)
+        .block_id(BlockId::number(block_number))
+        .await?;
+    Ok(index.as_limbs()[0])
+}
+
 async fn tempo_header(tempo: &DynProvider<TempoNetwork>, number: u64) -> Result<TempoHeader> {
     let block = tempo
         .get_block_by_number(BlockNumberOrTag::Number(number))
@@ -895,33 +882,29 @@ async fn zone_witnesses(
     zone: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
-) -> Result<ZoneStateWitness> {
-    let witnesses = stream::iter(from..=to)
+) -> Result<(ZoneStateWitness, Vec<(u64, TempoStorageRead)>)> {
+    let results = stream::iter(from..=to)
         .map(|number| async move {
             let started = Instant::now();
-            debug!(zone_block = number, "requesting execution witness");
+            debug!(zone_block = number, "requesting Zone execution witness");
             let witness = zone
                 .client()
-                .request::<_, ExecutionWitness>(
-                    "debug_executionWitness",
+                .request::<_, ZoneExecutionWitness>(
+                    "debug_zoneExecutionWitness",
                     (BlockNumberOrTag::Number(number),),
                 )
                 .await
-                .wrap_err_with(|| format!("debug_executionWitness for Zone block {number}"))?;
-            if witness.headers.len() > 1 {
-                bail!(
-                    "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"
-                );
-            }
+                .wrap_err_with(|| format!("debug_zoneExecutionWitness for Zone block {number}"))?;
             debug!(
                 zone_block = number,
-                state_nodes = witness.state.len(),
-                bytecodes = witness.codes.len(),
-                ancestor_headers = witness.headers.len(),
+                state_nodes = witness.execution_witness.state.len(),
+                bytecodes = witness.execution_witness.codes.len(),
+                ancestor_headers = witness.execution_witness.headers.len(),
+                tempo_storage_reads = witness.tempo_reads.len(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "received execution witness"
+                "received Zone execution witness"
             );
-            Ok::<_, eyre::Report>(witness)
+            Ok::<_, eyre::Report>((number, witness))
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -929,19 +912,44 @@ async fn zone_witnesses(
 
     let mut state = BTreeMap::new();
     let mut codes = BTreeMap::new();
-    for witness in witnesses {
-        for node in witness.state {
+    let mut tempo_reads = Vec::new();
+    for (number, witness) in results {
+        for node in witness.execution_witness.state {
             state.entry(keccak256(&node)).or_insert(node);
         }
-        for code in witness.codes {
+        for code in witness.execution_witness.codes {
             codes.entry(keccak256(&code)).or_insert(code);
         }
+        tempo_reads.extend(witness.tempo_reads.into_iter().map(|read| (number, read)));
     }
 
-    Ok(ZoneStateWitness {
-        node_pool: state.into_values().collect(),
-        bytecodes: codes.into_values().collect(),
-    })
+    Ok((
+        ZoneStateWitness {
+            node_pool: state.into_values().collect(),
+            bytecodes: codes.into_values().collect(),
+        },
+        tempo_reads,
+    ))
+}
+
+fn collect_l1_reads(
+    tempo_reads: Vec<(u64, TempoStorageRead)>,
+    checkpoints: &BTreeMap<u64, u64>,
+) -> Result<L1Reads> {
+    let mut reads = L1Reads::new();
+    for (zone_block, read) in tempo_reads {
+        let checkpoint = checkpoints
+            .get(&zone_block)
+            .copied()
+            .ok_or_else(|| eyre!("missing Tempo checkpoint for Zone block {zone_block}"))?;
+        reads
+            .entry(checkpoint)
+            .or_default()
+            .entry(read.account)
+            .or_default()
+            .insert(read.slot);
+    }
+    Ok(reads)
 }
 
 async fn tempo_state_witness(
@@ -1047,7 +1055,11 @@ async fn tempo_anchor(
     ))
 }
 
-async fn spf_config(tempo_chain_id: u64, genesis_source: Option<&str>) -> Result<SpfConfig> {
+async fn spf_config(
+    tempo_chain_id: u64,
+    genesis_source: Option<&str>,
+    portal: Address,
+) -> Result<SpfConfig> {
     let tempo_spec = match genesis_source {
         Some(source) => {
             let raw = read_genesis(source).await?;
@@ -1065,7 +1077,10 @@ async fn spf_config(tempo_chain_id: u64, genesis_source: Option<&str>) -> Result
             eyre!("unsupported Tempo chain ID {tempo_chain_id}; pass --tempo-genesis <PATH_OR_URL>")
         })?,
     };
-    Ok(SpfConfig::new(Arc::new(ZoneChainSpec::from(tempo_spec))))
+
+    let zone_chain_spec =
+        ZoneChainSpec::from(tempo_spec.clone()).with_tempo_hardforks_from(tempo_spec.as_ref());
+    Ok(SpfConfig::new(Arc::new(zone_chain_spec), portal))
 }
 
 async fn read_genesis(source: &str) -> Result<Vec<u8>> {
@@ -1085,22 +1100,6 @@ async fn read_genesis(source: &str) -> Result<Vec<u8>> {
     tokio::fs::read(source)
         .await
         .wrap_err_with(|| format!("read Tempo genesis file {source}"))
-}
-
-fn merge_tempo_state_witness(
-    witness: &mut TempoStateWitness,
-    additional: TempoStateWitness,
-) -> Result<()> {
-    if witness.initial_tempo_header_rlp != additional.initial_tempo_header_rlp {
-        bail!("cannot merge Tempo witnesses with different initial headers");
-    }
-
-    let mut nodes = BTreeMap::new();
-    for node in witness.node_pool.drain(..).chain(additional.node_pool) {
-        nodes.entry(keccak256(&node)).or_insert(node);
-    }
-    witness.node_pool = nodes.into_values().collect();
-    Ok(())
 }
 
 fn print_summary(
@@ -1195,6 +1194,19 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
+
+    #[test]
+    fn groups_tempo_storage_reads_by_checkpoint() {
+        let account = address!("00000000000000000000000000000000000000aa");
+        let slot = B256::repeat_byte(0x11);
+        let checkpoints = BTreeMap::from([(4_u64, 99_u64)]);
+
+        let reads =
+            collect_l1_reads(vec![(4, TempoStorageRead { account, slot })], &checkpoints).unwrap();
+
+        assert!(reads[&99][&account].contains(&slot));
+    }
 
     #[test]
     fn derives_an_exact_counted_zone_range() {
@@ -1202,29 +1214,6 @@ mod tests {
         assert!(counted_range(0, 20).is_err());
         assert!(counted_range(501, 0).is_err());
         assert!(counted_range(u64::MAX, 2).is_err());
-    }
-
-    #[test]
-    fn merges_and_deduplicates_tempo_witness_nodes() {
-        let header = Bytes::from_static(b"header");
-        let first = Bytes::from_static(b"first");
-        let second = Bytes::from_static(b"second");
-        let mut witness = TempoStateWitness {
-            initial_tempo_header_rlp: header.clone(),
-            node_pool: vec![first.clone()],
-        };
-
-        merge_tempo_state_witness(
-            &mut witness,
-            TempoStateWitness {
-                initial_tempo_header_rlp: header,
-                node_pool: vec![first, second.clone()],
-            },
-        )
-        .unwrap();
-
-        assert_eq!(witness.node_pool.len(), 2);
-        assert!(witness.node_pool.contains(&second));
     }
 
     #[tokio::test]
@@ -1237,12 +1226,16 @@ mod tests {
         ));
         std::fs::write(&path, serde_json::to_vec(&genesis).unwrap()).unwrap();
 
-        let config = spf_config(31_318, path.to_str()).await.unwrap();
-        let mismatch = spf_config(31_319, path.to_str()).await.unwrap_err();
+        let config = spf_config(31_318, path.to_str(), Address::ZERO)
+            .await
+            .unwrap();
+        let mismatch = spf_config(31_319, path.to_str(), Address::ZERO)
+            .await
+            .unwrap_err();
 
         std::fs::remove_file(path).unwrap();
         assert_eq!(
-            config.zone_chain_spec.inner.inner.genesis().config.chain_id,
+            config.chain_spec().inner.inner.genesis().config.chain_id,
             31_318
         );
         assert!(

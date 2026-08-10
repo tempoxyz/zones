@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolValue};
+use alloy_sol_types::{SolCall, SolType, SolValue};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     error::TempoPrecompileError,
@@ -319,6 +319,16 @@ impl ZoneInbox {
         }
         Ok(self.withdrawal_bounce_backs[token][owner].read()?)
     }
+
+    /// Returns the hash-chain head after the last processed L1 deposit.
+    pub fn processed_deposit_queue_hash(&self) -> tempo_precompiles::Result<B256> {
+        self.processed_deposit_queue_hash.read()
+    }
+
+    /// Returns the number of L1 deposits consumed by the Zone.
+    pub fn processed_deposit_number(&self) -> tempo_precompiles::Result<u64> {
+        self.processed_deposit_number.read()
+    }
 }
 
 /// A queue entry whose nested ABI payload has been validated before execution begins.
@@ -347,14 +357,23 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
         match queued.depositType {
             DepositType::WithdrawalBounceBack => {
-                WithdrawalBounceBackDeposit::abi_decode(&queued.depositData)
-                    .map(Self::WithdrawalBounceBack)
+                decode_canonical(&queued.depositData).map(Self::WithdrawalBounceBack)
             }
-            DepositType::Deposit => Deposit::abi_decode(&queued.depositData).map(Self::Deposit),
+            DepositType::Deposit => decode_canonical(&queued.depositData).map(Self::Deposit),
             _ => return Err(ZonePrecompileError::MalformedCalldata),
         }
         .map_err(|_| ZonePrecompileError::MalformedCalldata)
     }
+}
+
+fn decode_canonical<T>(encoded: &[u8]) -> alloy_sol_types::Result<T>
+where
+    T: SolValue + From<<T::SolType as SolType>::RustType>,
+{
+    let value = T::abi_decode(encoded)?;
+    (value.abi_encode().as_slice() == encoded)
+        .then_some(value)
+        .ok_or(alloy_sol_types::Error::ReserMismatch)
 }
 
 fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
@@ -385,6 +404,7 @@ fn recover_encrypted_payload(
         &portal,
         &deposit.keyIndex,
         &deposit.encrypted.ephemeralPubkeyX,
+        &deposit.sender,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;

@@ -3,7 +3,7 @@ use alloy_consensus::Header;
 use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
-use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, TransactionRequest};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
@@ -42,7 +42,7 @@ use tempo_chainspec::{
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -70,11 +70,12 @@ use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
     L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
 };
-use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
+use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 use zone_primitives::constants::{
     PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
+    zone_chain_id as derive_zone_chain_id,
 };
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
@@ -379,23 +380,36 @@ async fn handle_test_l1_rpc_request(
                 .and_then(|input| const_hex::decode(input.trim_start_matches("0x")).ok())
                 .unwrap_or_default();
 
-            if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
-                serde_json::json!(const_hex::encode_prefixed(
-                    U256::from(enabled_tokens.len()).abi_encode()
-                ))
-            } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
-                let index = input
-                    .get(4..36)
-                    .map(U256::from_be_slice)
-                    .map(|index| index.to::<u64>() as usize);
-                index
-                    .and_then(|index| enabled_tokens.get(index))
-                    .map(|token| serde_json::json!(const_hex::encode_prefixed(token.abi_encode())))
+            if input.starts_with(&IMulticall3::aggregateCall::SELECTOR) {
+                IMulticall3::aggregateCall::abi_decode(&input)
+                    .ok()
+                    .and_then(|aggregate| {
+                        aggregate
+                            .calls
+                            .iter()
+                            .map(|call| {
+                                answer_portal_call(&call.callData, &enabled_tokens)
+                                    .map(alloy_primitives::Bytes::from)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .map(|return_data| {
+                        serde_json::json!(const_hex::encode_prefixed(
+                            IMulticall3::aggregateCall::abi_encode_returns(
+                                &IMulticall3::aggregateReturn {
+                                    blockNumber: U256::ZERO,
+                                    returnData: return_data,
+                                }
+                            )
+                        ))
+                    })
                     .unwrap_or(serde_json::Value::Null)
             } else if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
                 serde_json::json!(const_hex::encode_prefixed(B256::ZERO.abi_encode()))
             } else {
-                serde_json::Value::Null
+                answer_portal_call(&input, &enabled_tokens)
+                    .map(|data| serde_json::json!(const_hex::encode_prefixed(data)))
+                    .unwrap_or(serde_json::Value::Null)
             }
         }
         _ => serde_json::Value::Null,
@@ -414,23 +428,58 @@ async fn handle_test_l1_rpc_request(
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-/// Helper to check TIP-403 authorization via TIP-20 operations.
-///
-/// Direct zone calls to TIP-403 registry are forbidden, so tests trigger checks using a TIP20 call.
+/// Answers a [`ZonePortal`] enabled-token view call against the mock registry, either issued
+/// directly or as an inner call of a Multicall3 `aggregate` batch.
+fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8>> {
+    if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
+        Some(U256::from(enabled_tokens.len()).abi_encode())
+    } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
+        let index = input.get(4..36).map(U256::from_be_slice)?.to::<u64>() as usize;
+        enabled_tokens.get(index).map(|token| token.abi_encode())
+    } else {
+        None
+    }
+}
+
+/// Helper to check TIP-403 authorization through the trusted operator RPC.
 pub(crate) struct Check403Registry {
     pub(crate) provider: DynProvider,
     pub(crate) token: Address,
 }
 
 impl Check403Registry {
-    pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
-        let (token, zero) = (ITIP20::new(self.token, &self.provider), U256::ZERO);
-        match role {
-            AuthRole::Transfer => token.transfer(from, zero).from(from).call().await.is_ok(),
-            AuthRole::Sender => token.transfer(to, zero).from(from).call().await.is_ok(),
-            AuthRole::Recipient => token.transfer(from, zero).from(to).call().await.is_ok(),
-            AuthRole::MintRecipient => token.mint(from, zero).from(to).call().await.is_ok(),
+    pub(crate) async fn is_auth_as(&self, account: Address, role: AuthRole) -> bool {
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &self.provider);
+        let Ok(policy) = registry
+            .tokenTransferPolicyId(self.token)
+            .from(Address::ZERO)
+            .call()
+            .await
+        else {
+            return false;
+        };
+        if !policy.isSet {
+            return false;
         }
+        let mut data = match role {
+            AuthRole::Transfer => ITIP403Registry::isAuthorizedCall::SELECTOR,
+            AuthRole::Sender => ITIP403Registry::isAuthorizedSenderCall::SELECTOR,
+            AuthRole::Recipient => ITIP403Registry::isAuthorizedRecipientCall::SELECTOR,
+            AuthRole::MintRecipient => ITIP403Registry::isAuthorizedMintRecipientCall::SELECTOR,
+        }
+        .to_vec();
+        data.extend((policy.policyId, account).abi_encode());
+        self.provider
+            .call(
+                TransactionRequest::default()
+                    .to(TIP403_REGISTRY_ADDRESS)
+                    .from(Address::ZERO)
+                    .input(data.into()),
+            )
+            .await
+            .ok()
+            .and_then(|output| bool::abi_decode(&output).ok())
+            .unwrap_or(false)
     }
 }
 
@@ -594,6 +643,7 @@ where
                 config,
                 signer,
                 provider,
+                None,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
@@ -622,7 +672,7 @@ type RpcApiFactory = dyn Fn(zone_node::rpc::RedactedRpcConfig) -> RpcApiFuture +
 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
-    l1_provider: DynProvider,
+    l1_provider: DynProvider<TempoNetwork>,
     portal_address: Address,
     deposit_queue: DepositQueue,
     enabled_tokens: EnabledTokenRegistry,
@@ -1227,7 +1277,23 @@ impl ZoneTestNode {
             "wss" => l1_http_url.set_scheme("https").expect("valid HTTPS scheme"),
             _ => {}
         }
-        let l1_provider = ProviderBuilder::new().connect_http(l1_http_url).erased();
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http(l1_http_url.clone())
+            .erased();
+        let redacted_l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http(l1_http_url)
+            .erased();
+
+        let (chain_id, zone_id) = if portal_address.is_zero() {
+            (chain_id, 0)
+        } else {
+            let parent_chain_id = l1_provider.get_chain_id().await?;
+            let zone_id = ZonePortal::new(portal_address, &l1_provider)
+                .zoneId()
+                .call()
+                .await?;
+            (derive_zone_chain_id(parent_chain_id, zone_id)?, zone_id)
+        };
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -1243,6 +1309,10 @@ impl ZoneTestNode {
             std::time::Duration::from_millis(100),
         )
         .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks)
+        .with_redacted_rpc(ZoneRedactedRpcConfig {
+            zone_id,
+            ..Default::default()
+        })
         .with_deposit_decryption_keys(
             std::iter::once(SecretKey::from(sequencer_signer.credential()))
                 .chain(additional_decryption_keys),
@@ -1257,10 +1327,10 @@ impl ZoneTestNode {
                 .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         let p2p_enabled = p2p_config.is_some();
-        if p2p_enabled && !is_local_dummy_l1 {
-            // Multi-sequencer harness nodes run against a synthetic L1 RPC that cannot serve
-            // storage reads: every read must come from the seeded cache. Bounded retries turn
-            // a missed seed into a fast, visible failure instead of a silent retry spin.
+        if p2p_enabled && !is_local_dummy_l1 && portal_address.is_zero() {
+            // Synthetic multi-sequencer harness nodes run against an RPC that cannot serve
+            // storage reads: every read must come from the seeded cache. A real Portal must
+            // retain normal L1 retry behavior for its independent attestation reconstruction.
             zone_node = zone_node.with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         let mut leadership = None;
@@ -1272,6 +1342,8 @@ impl ZoneTestNode {
                 schedule.publish(p2p_config.manifest().bootstrap_leadership())?;
             }
             leadership = Some(schedule);
+            let l1_transaction_signer = p2p_config.block_attestation_signer();
+            let zone_id = p2p_config.zone_id();
             // Every multi-sequencer node holds complete sequencer resources; the role
             // controller decides at runtime whether this node's engine and sequencer
             // background tasks are active.
@@ -1279,12 +1351,13 @@ impl ZoneTestNode {
                 .with_p2p(p2p_config)
                 .with_sequencer(ZoneSequencerAddOnsConfig {
                     sequencer_signer: sequencer_signer.clone(),
-                    l1_transaction_signer: None,
-                    zone_id: 0,
+                    l1_transaction_signer,
+                    zone_id,
                     zone_poll_interval: Duration::from_secs(1),
                     batch_anchor_config: Default::default(),
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
+                    enable_prover: false,
                 });
         }
         // Multi-sequencer nodes run the real role controller, which owns the engine; the
@@ -1385,13 +1458,19 @@ impl ZoneTestNode {
         // Build the real redacted RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
+        let rpc_enabled_tokens = enabled_tokens.clone();
+        let rpc_l1_provider = redacted_l1_provider;
         let rpc_api_factory = Arc::new(move |config: zone_node::rpc::RedactedRpcConfig| {
             let eth_handlers = eth_handlers.clone();
+            let enabled_tokens = rpc_enabled_tokens.clone();
+            let l1_provider = rpc_l1_provider.clone();
             Box::pin(async move {
-                Ok(
-                    Arc::new(zone_node::rpc::ZoneRpc::new(eth_handlers, config).await?)
-                        as Arc<dyn zone_node::rpc::ZoneRpcApi>,
-                )
+                Ok(Arc::new(zone_node::rpc::ZoneRpc::new(
+                    eth_handlers,
+                    config,
+                    enabled_tokens,
+                    l1_provider,
+                )) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
             })
                 as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>
         });
@@ -1943,6 +2022,25 @@ impl L1TestNode {
         sequencer: Address,
         config: ZoneCreationConfig,
     ) -> eyre::Result<Address> {
+        self.create_zone_with_admin_sequencers_and_config(
+            factory_address,
+            admin,
+            vec![sequencer],
+            1,
+            config,
+        )
+        .await
+    }
+
+    /// Create a zone with an explicit on-chain settlement signer set and threshold.
+    pub(crate) async fn create_zone_with_admin_sequencers_and_config(
+        &self,
+        factory_address: Address,
+        admin: Address,
+        sequencers: Vec<Address>,
+        threshold: u8,
+        config: ZoneCreationConfig,
+    ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
         use tempo_zone_contracts::ZoneFactory;
 
@@ -1955,8 +2053,8 @@ impl L1TestNode {
                 gatewayMode: config.gateway_mode,
                 allowedAccounts: config.allowed_accounts,
                 zoneGateways: config.zone_gateways,
-                sequencers: vec![sequencer],
-                threshold: 1,
+                sequencers,
+                threshold,
                 rpcUrl: String::new(),
             },
         };
@@ -2343,6 +2441,7 @@ impl L1TestNode {
     pub(crate) async fn encrypt_deposit_for_portal(
         &self,
         portal_address: Address,
+        sender: Address,
         recipient: Address,
         memo: B256,
     ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
@@ -2363,6 +2462,7 @@ impl L1TestNode {
             key_result.yParity,
             recipient,
             memo,
+            sender,
             portal_address,
             key_index,
         )
@@ -2808,7 +2908,7 @@ impl WithdrawalArgs {
         args: RouterDepositArgs,
     ) -> eyre::Result<Self> {
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(args.target_portal, args.recipient, args.memo)
+            .encrypt_deposit_for_portal(args.target_portal, args.router, args.recipient, args.memo)
             .await?;
         Ok(Self::swap_and_deposit_via_router_callback(
             RouterCallbackArgs {
@@ -3196,6 +3296,7 @@ impl ZoneAccount {
             key_result.yParity,
             recipient,
             memo,
+            self.address,
             self.portal_address,
             key_index,
         )
@@ -3288,7 +3389,6 @@ impl ZoneAccount {
                 args.data,
                 args.reveal_to,
             )
-            .gas(WITHDRAWAL_TX_GAS)
             .send()
             .await?
             .get_receipt()
@@ -3376,6 +3476,40 @@ pub(crate) async fn start_local_zone_with_fixture(
     seed_blocks: u64,
 ) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
     let zone = ZoneTestNode::start_local().await?;
+    let fixture = L1Fixture::new();
+
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        zone.enabled_tokens(),
+        Address::ZERO,
+        Address::ZERO,
+        seed_blocks,
+    );
+    Ok((zone, fixture))
+}
+
+/// Start a local Zone whose production payload builder finalizes at the requested cadence.
+///
+/// SPF tests choose the cadence so finalization occurs only in the final block of the proof batch.
+pub(crate) async fn start_local_zone_with_fixture_and_withdrawal_batch_interval(
+    zone_id: u32,
+    seed_blocks: u64,
+    withdrawal_batch_interval_blocks: u64,
+    genesis: Genesis,
+) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
+    let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
+    let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+    let zone = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
+        DUMMY_L1_URL.to_string(),
+        Address::ZERO,
+        zone_primitives::constants::zone_chain_id(1_337, zone_id)?,
+        Some(genesis),
+        signer,
+        withdrawal_batch_interval_blocks,
+        None,
+        true,
+    )
+    .await?;
     let fixture = L1Fixture::new();
 
     fixture.seed_l1_cache(
@@ -3506,6 +3640,202 @@ impl P2pCluster {
         }
         reference.ok_or_else(|| eyre::eyre!("cluster is empty"))
     }
+}
+
+/// A real Tempo L1 and Portal paired with three P2P quorum nodes. Unlike [`P2pCluster`], this
+/// fixture exercises settlement against the actual `ZonePortal` contract rather than synthetic
+/// L1 cache injection.
+pub(crate) struct RealP2pCluster {
+    pub(crate) l1: L1TestNode,
+    pub(crate) portal_address: Address,
+    pub(crate) nodes: Vec<ZoneTestNode>,
+    pub(crate) attestation_signers: Vec<PrivateKeySigner>,
+}
+
+impl RealP2pCluster {
+    /// Wait for every node to independently execute through `height`.
+    pub(crate) async fn wait_all_at(&self, height: u64, timeout: Duration) -> eyre::Result<()> {
+        for node in &self.nodes {
+            node.wait_for_block_number(height, timeout).await?;
+        }
+        Ok(())
+    }
+
+    /// Assert all nodes have the same canonical block at `height`.
+    pub(crate) async fn assert_same_block(
+        &self,
+        height: u64,
+    ) -> eyre::Result<alloy_rpc_types_eth::Header> {
+        let mut reference: Option<alloy_rpc_types_eth::Header> = None;
+        for (index, node) in self.nodes.iter().enumerate() {
+            let block = node
+                .provider()
+                .get_block_by_number(BlockNumberOrTag::Number(height))
+                .await?
+                .ok_or_else(|| eyre::eyre!("node {index} is missing block {height}"))?;
+            match &reference {
+                None => reference = Some(block.header),
+                Some(reference) => eyre::ensure!(
+                    block.header.hash == reference.hash,
+                    "node {index} diverges at height {height}: {} != {}",
+                    block.header.hash,
+                    reference.hash,
+                ),
+            }
+        }
+        reference.ok_or_else(|| eyre::eyre!("cluster is empty"))
+    }
+}
+
+/// Start a three-member P2P quorum against a real Tempo L1 and a Portal registered with the
+/// exact per-node attestation keys. The short interval keeps tests focused on the first real
+/// batch boundary instead of ordinary long-running block production.
+pub(crate) async fn start_real_p2p_cluster(
+    withdrawal_batch_interval_blocks: u64,
+) -> eyre::Result<RealP2pCluster> {
+    start_real_p2p_cluster_with_active_nodes(withdrawal_batch_interval_blocks, 3).await
+}
+
+/// Start a three-member P2P quorum against a real Tempo L1, launching only `active_nodes` of
+/// its configured members. This lets an integration test prove that a reachable 2-of-3 quorum
+/// settles without waiting for the offline third member.
+pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
+    withdrawal_batch_interval_blocks: u64,
+    active_nodes: usize,
+) -> eyre::Result<RealP2pCluster> {
+    eyre::ensure!(
+        (2..=3).contains(&active_nodes),
+        "real P2P test cluster requires two or three active nodes, got {active_nodes}"
+    );
+
+    fn available_address() -> eyre::Result<SocketAddr> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        Ok(listener.local_addr()?)
+    }
+
+    let l1 = L1TestNode::start().await?;
+    let addresses = [
+        available_address()?,
+        available_address()?,
+        available_address()?,
+    ];
+    let identities = [
+        Ed25519PrivateKey::from_seed(301),
+        Ed25519PrivateKey::from_seed(302),
+        Ed25519PrivateKey::from_seed(303),
+    ];
+    let public_keys = identities.each_ref().map(|key| key.public_key());
+    let attestation_keys = [301_u64, 302, 303].map(|key| format!("0x{key:064x}"));
+    let attestation_signers = attestation_keys
+        .each_ref()
+        .map(|key| key.parse::<PrivateKeySigner>().expect("valid test signer"));
+
+    let factory = l1.native_zone_factory().await?;
+    let portal_address = l1
+        .create_zone_with_admin_sequencers_and_config(
+            factory,
+            l1.admin_address(),
+            attestation_signers
+                .iter()
+                .map(PrivateKeySigner::address)
+                .collect(),
+            2,
+            ZoneCreationConfig::open(),
+        )
+        .await?;
+    for signer in &attestation_signers {
+        // Tempo's test genesis funds only the dev key. Settlement is submitted from the
+        // individual registered quorum key, so each member needs a gas balance of its own.
+        l1.fund_user(signer.address(), 10_000_000).await?;
+    }
+    let encryption_key = SecretKey::from(attestation_signers[0].credential());
+    l1.set_sequencer_encryption_key_with_signer(
+        portal_address,
+        &encryption_key,
+        attestation_signers[0].clone(),
+    )
+    .await?;
+
+    let portal = ZonePortal::new(portal_address, l1.provider());
+    let zone_id = portal.zoneId().call().await?;
+    let (genesis, _) = build_l1_anchored_genesis(l1.http_url(), portal_address).await?;
+    let chain_id = next_unique_chain_id();
+
+    let config_dir = std::env::temp_dir().join(format!(
+        "tempo-zone-real-p2p-test-{}-{}",
+        std::process::id(),
+        next_unique_chain_id()
+    ));
+    std::fs::create_dir_all(&config_dir)?;
+    let manifest_path = config_dir.join("manifest.toml");
+    let mut manifest = format!(
+        "zone_id = {zone_id}\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
+        const_hex::encode_prefixed(public_keys[0].as_ref())
+    );
+    for (index, ((public_key, signer), address)) in public_keys
+        .iter()
+        .zip(&attestation_signers)
+        .zip(addresses)
+        .enumerate()
+    {
+        manifest.push_str(&format!(
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref()),
+            signer.address(),
+        ));
+    }
+    std::fs::write(&manifest_path, manifest)?;
+
+    let mut configs = Vec::with_capacity(3);
+    for (index, role) in [(0, Role::Leader), (1, Role::Follower), (2, Role::Follower)] {
+        let key_path = config_dir.join(format!("node-{index}.key"));
+        std::fs::write(
+            &key_path,
+            const_hex::encode_prefixed(identities[index].encode().as_ref()),
+        )?;
+        let secp256k1_key_path = config_dir.join(format!("node-{index}-secp256k1.key"));
+        std::fs::write(&secp256k1_key_path, &attestation_keys[index])?;
+        configs.push(P2pConfig::load(
+            &manifest_path,
+            &key_path,
+            Some(&secp256k1_key_path),
+            addresses[index],
+            false,
+            zone_id,
+            Some(role),
+        )?);
+    }
+    let _ = std::fs::remove_dir_all(&config_dir);
+
+    let mut nodes = Vec::with_capacity(active_nodes);
+    for (index, config) in configs.into_iter().take(active_nodes).enumerate() {
+        let additional_decryption_keys = if index == 0 {
+            Vec::new()
+        } else {
+            vec![SecretKey::from(attestation_signers[0].credential())]
+        };
+        nodes.push(
+            ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
+                l1.ws_url().to_string(),
+                portal_address,
+                chain_id,
+                Some(genesis.clone()),
+                attestation_signers[index].clone(),
+                withdrawal_batch_interval_blocks,
+                Some(config),
+                false,
+                additional_decryption_keys,
+            )
+            .await?,
+        );
+    }
+
+    Ok(RealP2pCluster {
+        l1,
+        portal_address,
+        nodes,
+        attestation_signers: attestation_signers.to_vec(),
+    })
 }
 
 /// Start a three-node multi-sequencer cluster with identical genesis state and authenticated
@@ -4218,12 +4548,10 @@ pub(crate) async fn start_zone_with_redacted_rpc() -> eyre::Result<RedactedRpcTe
 
     let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
-        l1_rpc_url: DUMMY_L1_URL.to_string(),
-        zone_rpc_url: zone.http_url().to_string(),
-        retry_connection_interval: Duration::from_millis(100),
         zone_id: 0,
         chain_id,
         max_auth_token_validity: zone_node::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+        max_response_size: 160 * 1024 * 1024,
         zone_portal: Address::ZERO,
     };
 
@@ -4262,12 +4590,10 @@ async fn start_zone_with_redacted_rpc_l1_inner() -> eyre::Result<RedactedRpcL1Te
 
     let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
-        l1_rpc_url: l1.http_url().to_string(),
-        zone_rpc_url: zone.http_url().to_string(),
-        retry_connection_interval: Duration::from_millis(100),
         zone_id: 1,
         chain_id,
         max_auth_token_validity: zone_node::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+        max_response_size: 160 * 1024 * 1024,
         zone_portal: portal_address,
     };
 
@@ -4634,6 +4960,7 @@ impl L1Fixture {
                         &deposit.tag,
                         Address::ZERO,
                         deposit.key_index,
+                        deposit.sender,
                     ) {
                         self.seed_no_receive_policy_at(block_number, decrypted.to)
                             .expect("encrypted receive-policy fixture seed must be admitted");
@@ -4792,10 +5119,11 @@ impl L1Fixture {
         let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
 
         // HKDF-SHA256 key derivation (matching ecies.rs)
-        let mut info = Vec::with_capacity(84);
+        let mut info = Vec::with_capacity(104);
         info.extend_from_slice(portal_address.as_slice());
         info.extend_from_slice(&key_index.to_be_bytes::<32>());
         info.extend_from_slice(&eph_pub_x.0);
+        info.extend_from_slice(sender.as_slice());
         let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext (deterministic zero nonce)

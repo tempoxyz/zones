@@ -27,7 +27,7 @@ pub(crate) struct Deposit {
     portal: Address,
 
     /// Private key (hex) for signing the deposit transaction.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// TIP-20 token address to deposit.
@@ -100,6 +100,7 @@ impl Deposit {
             seq_pub_y_parity,
             to,
             self.memo,
+            sender,
             self.portal,
             key_index,
         )

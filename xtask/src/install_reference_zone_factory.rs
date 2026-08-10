@@ -14,7 +14,14 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
 };
-use tempo_contracts::precompiles::INITIAL_FACTORY_OWNER;
+use tempo_contracts::{
+    precompiles::INITIAL_FACTORY_OWNER,
+    zones::{
+        ZONE_MESSENGER_RUNTIME as TEMPO_ZONE_MESSENGER_RUNTIME,
+        ZONE_PORTAL_RUNTIME as TEMPO_ZONE_PORTAL_RUNTIME,
+        ZONE_VERIFIER_RUNTIME as TEMPO_ZONE_VERIFIER_RUNTIME,
+    },
+};
 use tempo_zone_contracts::{
     ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_PORTAL_PREFIX,
     ZONE_VERIFIER_ADDRESS,
@@ -205,26 +212,41 @@ fn install_native_zone_factory(
         }
     }
 
-    for (name, address, code) in [
+    for (name, address, code, tempo_code) in [
         (
             "ZonePortal implementation",
             ZONE_PORTAL_IMPL_ADDRESS,
             artifacts.portal,
+            TEMPO_ZONE_PORTAL_RUNTIME,
         ),
-        ("Verifier", ZONE_VERIFIER_ADDRESS, artifacts.verifier),
-        ("ZoneMessenger", ZONE_MESSENGER_ADDRESS, artifacts.messenger),
+        (
+            "Verifier",
+            ZONE_VERIFIER_ADDRESS,
+            artifacts.verifier,
+            TEMPO_ZONE_VERIFIER_RUNTIME,
+        ),
+        (
+            "ZoneMessenger",
+            ZONE_MESSENGER_ADDRESS,
+            artifacts.messenger,
+            TEMPO_ZONE_MESSENGER_RUNTIME,
+        ),
     ] {
         let expected = GenesisAccount::default()
             .with_nonce(Some(1))
             .with_code(Some(code));
+        let tempo_runtime = GenesisAccount::default().with_code(Some(tempo_code));
         match genesis.alloc.get(&address) {
             None => {
                 genesis.alloc.insert(address, expected);
             }
-            Some(existing) => ensure!(
-                existing == &expected,
-                "refusing to replace conflicting {name} allocation at {address}"
-            ),
+            Some(existing) if existing == &expected => {}
+            Some(existing) if existing == &tempo_runtime => {
+                genesis.alloc.insert(address, expected);
+            }
+            Some(_) => {
+                eyre::bail!("refusing to replace conflicting {name} allocation at {address}");
+            }
         }
     }
     Ok(())
@@ -268,6 +290,74 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "genesis cannot allocate reserved ZonePortal address 0x5ad0000000000000000000000000000000000001"
+        );
+    }
+
+    #[test]
+    fn replaces_pinned_tempo_shared_runtimes() {
+        let owner = address!("0x0000000000000000000000000000000000000001");
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            ZONE_FACTORY_ADDRESS,
+            native_factory_account(INITIAL_FACTORY_OWNER),
+        );
+        for (address, code) in [
+            (ZONE_PORTAL_IMPL_ADDRESS, TEMPO_ZONE_PORTAL_RUNTIME),
+            (ZONE_VERIFIER_ADDRESS, TEMPO_ZONE_VERIFIER_RUNTIME),
+            (ZONE_MESSENGER_ADDRESS, TEMPO_ZONE_MESSENGER_RUNTIME),
+        ] {
+            genesis
+                .alloc
+                .insert(address, GenesisAccount::default().with_code(Some(code)));
+        }
+
+        let artifacts = NativeArtifacts {
+            portal: Bytes::from_static(&[1]),
+            verifier: Bytes::from_static(&[2]),
+            messenger: Bytes::from_static(&[3]),
+        };
+        install_native_zone_factory(&mut genesis, owner, artifacts).unwrap();
+
+        assert_eq!(
+            genesis.alloc[&ZONE_FACTORY_ADDRESS],
+            native_factory_account(owner)
+        );
+        for (address, code) in [
+            (ZONE_PORTAL_IMPL_ADDRESS, Bytes::from_static(&[1])),
+            (ZONE_VERIFIER_ADDRESS, Bytes::from_static(&[2])),
+            (ZONE_MESSENGER_ADDRESS, Bytes::from_static(&[3])),
+        ] {
+            assert_eq!(
+                genesis.alloc[&address],
+                GenesisAccount::default()
+                    .with_nonce(Some(1))
+                    .with_code(Some(code))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_shared_runtime() {
+        let owner = address!("0x0000000000000000000000000000000000000001");
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            ZONE_PORTAL_IMPL_ADDRESS,
+            GenesisAccount::default().with_code(Some(Bytes::from_static(&[0xff]))),
+        );
+
+        let error = install_native_zone_factory(
+            &mut genesis,
+            owner,
+            NativeArtifacts {
+                portal: Bytes::from_static(&[1]),
+                verifier: Bytes::from_static(&[2]),
+                messenger: Bytes::from_static(&[3]),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "refusing to replace conflicting ZonePortal implementation allocation at 0x5AD1000000000000000000000000000000000000"
         );
     }
 }
