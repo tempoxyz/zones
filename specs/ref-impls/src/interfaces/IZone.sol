@@ -833,9 +833,13 @@ interface IZonePortal {
     /// @notice Get the sequencer's current encryption public key for deposits
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+    /// @return pubkey The Ethereum address derived from the public key
+    function sequencerEncryptionKey()
+        external
+        view
+        returns (bytes32 x, uint8 yParity, address pubkey);
 
-    /// @notice Set the sequencer's encryption public key. Only callable by sequencer.
+    /// @notice Set the sequencer's encryption public key. Only callable by an active sequencer or admin.
     /// @dev Appends to key history. The new key becomes active at the current Tempo block.
     /// @param x The X coordinate of the secp256k1 public key
     /// @param yParity The Y coordinate parity (0x02 or 0x03)

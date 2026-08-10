@@ -188,7 +188,7 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero threshold no greater than the set size.
 - May be replaced atomically by the admin together with the threshold. The configuration nonce starts at `0`; each later replacement increments `sequencerSetVersion` and invalidates certificates from earlier configurations.
 - Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
-- Hold the encryption private keys used to decrypt [deposits](#deposits).
+- Hold the encryption private keys corresponding to the portal's encryption public keys and used to decrypt [deposits](#deposits).
 
 A zone MAY include its admin in the sequencer set. The protocol still treats each privileged call as belonging to its role.
 
@@ -210,7 +210,7 @@ The following table lists every privileged action and the role authorized to inv
 | `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setMaxTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **admin or any active sequencer** |
 | `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer with a threshold certificate** |
 | `processWithdrawals(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
@@ -223,7 +223,7 @@ Rationale notes:
 
 - **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
 - **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
-- **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key.
+- **Encryption public-key management is admin- or sequencer-authorized**. Both paths require a proof of possession from the corresponding encryption private key, so neither role can register a public key it cannot decrypt with.
 - **Zone-side system calls** to `ZoneOutbox` use `msg.sender == address(0)`. Withdrawal finalization is system-only; sequencers may call the gas-rate and withdrawal-limit setters directly.
 - **Withdrawal processing is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
 
@@ -1881,7 +1881,8 @@ interface IZonePortal {
 
     // Encryption keys
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+    function sequencerEncryptionKey()
+        external view returns (bytes32 x, uint8 yParity, address pubkey);
     
     function encryptionKeyCount() external view returns (uint256);
     function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);

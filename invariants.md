@@ -29,7 +29,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-ADMIN-NONZERO` | Portal `admin != address(0)` for every zone | 🟡 | Token governance can become permanently unavailable |
 | `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can govern tokens and access modes or set `zoneGasRate`, `maxTempoGasRate`, and `bouncebackGas` | 🟡 | A sequencer or user can enable malicious assets, reopen paused deposits, alter access policy, or exceed governance fee bounds |
-| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set `tempoGasRate`, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
+| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only a registered sequencer can set `tempoGasRate`, set RPC URL, submit batches, and process withdrawals; the portal admin or a registered sequencer can set encryption keys | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
 | `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `maxTempoGasRate` never exceed `MAX_GAS_FEE_RATE`, and `tempoGasRate` never exceeds the finalized `maxTempoGasRate` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
 
 ### Token Registry and Supply

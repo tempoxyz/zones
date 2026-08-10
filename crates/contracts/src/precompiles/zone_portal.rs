@@ -306,7 +306,10 @@ crate::sol! {
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
 
-        function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+        function sequencerEncryptionKey()
+            external
+            view
+            returns (bytes32 x, uint8 yParity, address pubkey);
 
         function encryptionKeyCount() external view returns (uint256);
         function encryptionKeyAt(uint256 index)
@@ -448,10 +451,23 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
             .block(alloy_rpc_types_eth::BlockId::number(block_number))
             .call()
             .await?;
+        let mut compressed = [0; 33];
+        compressed[0] = key.yParity;
+        compressed[1..].copy_from_slice(key.x.as_slice());
+        let verifying_key =
+            k256::ecdsa::VerifyingKey::from_sec1_bytes(&compressed).map_err(|err| {
+                alloy_contract::Error::TransportError(
+                    alloy_transport::TransportErrorKind::custom_str(&format!(
+                        "invalid Portal encryption public key: {err}"
+                    ))
+                    .into(),
+                )
+            })?;
         Ok((
             ZonePortal::sequencerEncryptionKeyReturn {
                 x: key.x,
                 yParity: key.yParity,
+                pubkey: alloy_signer::utils::public_key_to_address(&verifying_key),
             },
             key.keyIndex,
         ))
@@ -465,15 +481,20 @@ mod tests {
     use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
     use alloy_sol_types::SolCall;
     use alloy_transport::mock::Asserter;
+    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 
     #[tokio::test]
     async fn encryption_key_reads_key_and_index_from_one_snapshot() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
         let block_number = 42_u64;
+        let private_key = k256::SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let compressed = private_key.public_key().to_encoded_point(true);
+        let verifying_key =
+            k256::ecdsa::VerifyingKey::from_sec1_bytes(compressed.as_bytes()).unwrap();
         let expected = ZonePortal::encryptionKeyAtBlockReturn {
-            x: B256::repeat_byte(0x11),
-            yParity: 1,
+            x: B256::from_slice(compressed.x().unwrap()),
+            yParity: compressed.as_bytes()[0],
             keyIndex: U256::from(7),
         };
 
@@ -487,6 +508,10 @@ mod tests {
 
         assert_eq!(key.x, expected.x);
         assert_eq!(key.yParity, expected.yParity);
+        assert_eq!(
+            key.pubkey,
+            alloy_signer::utils::public_key_to_address(&verifying_key)
+        );
         assert_eq!(key_index, expected.keyIndex);
         assert!(asserter.read_q().is_empty());
     }
