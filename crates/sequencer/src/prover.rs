@@ -607,7 +607,7 @@ async fn resolve_anchor(
 ) -> Result<Anchor> {
     let tip = provider.get_block_number().await?;
     ensure!(
-        checkpoint_number < tip,
+        checkpoint_number <= tip,
         "Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}"
     );
     let gap = tip - checkpoint_number;
