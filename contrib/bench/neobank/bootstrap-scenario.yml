@@ -42,6 +42,7 @@ scenario:
         chain: l1
         action: prepare_encrypted_deposit
         with:
+          sender: { var: account.address }
           recipient: "${ZONES_BENCH_SEQUENCER_ADDRESS}"
           zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
           portalAddress: "${L1_PORTAL_ADDRESS}"
