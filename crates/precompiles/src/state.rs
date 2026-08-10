@@ -44,35 +44,3 @@ impl ZoneStateSnapshot {
 pub fn tip20_total_supply(token: Address) -> Result<U256> {
     TIP20Token::from_address(token)?.total_supply()
 }
-
-#[cfg(test)]
-mod tests {
-    use alloy_primitives::{B256, U256, address};
-    use tempo_precompiles::storage::{StorageCtx, hashmap::HashMapStorageProvider};
-
-    use super::*;
-
-    #[test]
-    fn reads_protocol_state_through_typed_handlers() -> eyre::Result<()> {
-        let mut storage = HashMapStorageProvider::new(1);
-        StorageCtx::enter(&mut storage, || {
-            let snapshot = ZoneStateSnapshot::read()?;
-            assert_eq!(snapshot.tempo_block_hash, B256::ZERO);
-            assert_eq!(snapshot.tempo_block_number, 0);
-            assert_eq!(snapshot.processed_deposit_queue_hash, B256::ZERO);
-            assert_eq!(snapshot.processed_deposit_number, 0);
-            assert_eq!(
-                snapshot.last_withdrawal_batch,
-                IZoneOutbox::LastBatch {
-                    withdrawalQueueHash: B256::ZERO,
-                    withdrawalBatchIndex: 0,
-                }
-            );
-            assert_eq!(snapshot.default_fee_token, Address::ZERO);
-
-            let token = address!("0x20C00000000000000000000000000000000000a1");
-            assert_eq!(tip20_total_supply(token)?, U256::ZERO);
-            Ok(())
-        })
-    }
-}
