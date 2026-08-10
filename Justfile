@@ -205,6 +205,16 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         --stablecoin-dex "{{dex}}"
 
 [group('zone')]
+[doc('Checks an Earn router and its ZonePortal closed-loop configuration, then prints Account roles for manual review. Requires L1_RPC_URL.')]
+verify-closed-loop earn_router:
+    #!/bin/bash
+    set -euo pipefail
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    cargo run -p tempo-xtask -- verify-closed-loop \
+        --l1-rpc-url "$L1_RPC" \
+        --earn-router "{{earn_router}}"
+
+[group('zone')]
 [doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
 demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
     #!/bin/bash
