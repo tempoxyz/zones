@@ -813,6 +813,7 @@ provision_up() {
         --engine.share-execution-cache-with-payload-builder
         --builder.enable-prewarming
         --builder.gaslimit "$l1_gas_limit"
+        --rpc.eth-proof-window 1024
         --rpc.max-connections 10000
         --txpool.pending-max-count 200000
         --txpool.basefee-max-count 200000
