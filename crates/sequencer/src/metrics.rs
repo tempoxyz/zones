@@ -9,8 +9,23 @@ use reth_metrics::{
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_prover")]
 pub(crate) struct ProverMetrics {
-    /// End-to-end latency of a shadow prover validation attempt in seconds.
+    /// End-to-end latency of a prover validation attempt in seconds.
     pub(crate) validation_duration_seconds: Histogram,
+
+    /// Number of finalized batch candidates that failed prover validation.
+    pub(crate) validation_failure_total: Counter,
+
+    /// Number of finalized batch candidates that passed prover validation.
+    pub(crate) validation_success_total: Counter,
+
+    /// Encoded witness size for a successfully validated batch candidate.
+    pub(crate) witness_bytes: Histogram,
+
+    /// Number of Zone state trie nodes in a successfully validated batch witness.
+    pub(crate) zone_state_nodes: Histogram,
+
+    /// Number of Tempo state trie nodes in a successfully validated batch witness.
+    pub(crate) tempo_state_nodes: Histogram,
 }
 
 /// Metrics emitted by the withdrawal processor.

@@ -135,6 +135,14 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                 .record(started.elapsed().as_secs_f64());
             match result {
                 Ok(stats) => {
+                    metrics.validation_success_total.increment(1);
+                    metrics.witness_bytes.record(stats.witness_bytes as f64);
+                    metrics
+                        .zone_state_nodes
+                        .record(stats.zone_state_nodes as f64);
+                    metrics
+                        .tempo_state_nodes
+                        .record(stats.tempo_state_nodes as f64);
                     info!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
@@ -149,6 +157,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                     );
                 }
                 Err(err) => {
+                    metrics.validation_failure_total.increment(1);
                     error!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
