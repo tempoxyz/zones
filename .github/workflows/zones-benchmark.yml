@@ -166,6 +166,9 @@ env:
 jobs:
   authorize:
     name: Resolve benchmark request
+    # Scheduled benchmarks use upstream-only infrastructure and credentials.
+    # Private copies can still run an explicitly dispatched benchmark.
+    if: github.repository == 'tempoxyz/zones' || github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
       neobank-preset: ${{ steps.config.outputs.neobank-preset }}

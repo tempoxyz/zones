@@ -20,6 +20,9 @@ env:
 jobs:
   build-test-artifacts:
     name: build test artifacts
+    # Keep private-copy PR validation while avoiding a full test run for every
+    # hourly mirror update to its main branch.
+    if: github.repository == 'tempoxyz/zones' || github.event_name != 'push'
     runs-on: depot-ubuntu-latest-16
     timeout-minutes: 30
     permissions:
@@ -142,7 +145,9 @@ jobs:
   test-success:
     name: test success
     runs-on: ubuntu-latest
-    if: always()
+    if: >-
+      always() &&
+      (github.repository == 'tempoxyz/zones' || github.event_name != 'push')
     permissions: {}
     needs:
       - build-test-artifacts
