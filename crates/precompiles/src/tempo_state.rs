@@ -143,12 +143,12 @@ impl TempoState {
     }
 
     /// Returns the currently finalized Tempo block number from Zone state.
-    pub(crate) fn tempo_block_number(&mut self) -> tempo_precompiles::Result<u64> {
+    pub fn tempo_block_number(&mut self) -> tempo_precompiles::Result<u64> {
         self.tempo_block_number.read()
     }
 
     /// Returns the currently finalized Tempo block hash from Zone state.
-    pub(crate) fn tempo_block_hash(&mut self) -> tempo_precompiles::Result<B256> {
+    pub fn tempo_block_hash(&mut self) -> tempo_precompiles::Result<B256> {
         self.tempo_block_hash.read()
     }
 

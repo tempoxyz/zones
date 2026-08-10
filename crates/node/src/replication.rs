@@ -576,16 +576,12 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                     P2pEvent::Started { .. } => {}
                     P2pEvent::SettlementSignatureReceived { follower, signature } => {
                         let result = async {
-                            let store = attestation
-                                .store
-                                .as_ref()
-                                .ok_or_eyre("leader has no attestation store")?;
                             store_follower_settlement_signature(
                                 &provider,
                                 &follower,
                                 &signature,
                                 &attestation,
-                                store,
+                                &attestation.store,
                             ).await
                         }.await;
                         match result {

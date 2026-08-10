@@ -165,7 +165,7 @@ scenario:
       save: offramp_result
 
     - id: offramp_processed
-      depends_on: [l1_before_offramp, offramp]
+      depends_on: [l1_before_offramp, offramp, offramp_result]
       wait_log:
         chain: l1
         from_block: { var: l1_before_offramp.block_number }
@@ -176,8 +176,11 @@ scenario:
           to: "${ZONES_BENCH_BRIDGE_WALLET}"
           senderTag:
             keccak256_packed:
-              types: [address, bytes32]
-              values: [{ var: account.address }, { var: offramp.tx_hash }]
+              types: [address, bytes32, uint64]
+              values:
+                - { var: account.address }
+                - { var: offramp.tx_hash }
+                - { var: offramp_result.args.fallbackNonce }
           token: "${ZONES_BENCH_DLUSD}"
           amount: { var: earn_redeem.zone_return.processed.args.amount }
           callbackSuccess: true

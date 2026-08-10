@@ -136,6 +136,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
     }
 
     stub!(net_version);
+    stub!(client_version);
     stub!(syncing);
     stub!(coinbase);
     stub!(gas_price);

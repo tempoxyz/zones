@@ -21,7 +21,7 @@ pub mod types;
 mod ws;
 
 pub use config::RedactedRpcConfig;
-pub use debug::ZoneDebugApiServer;
+pub use debug::{ZoneDebugApi, ZoneDebugApiRpcServer};
 pub use handlers::ZoneRpcApi;
 pub use provider::{ZoneProvider, ZoneProviderConfig};
 pub use server::start_redacted_rpc;

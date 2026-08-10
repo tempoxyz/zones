@@ -13,10 +13,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use std::{
-    sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{sync::Arc, time::Instant};
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
     KeyInfo, SignatureType as KeyInfoSignatureType,
 };
@@ -27,7 +24,7 @@ use tempo_primitives::transaction::{
 use tracing::info;
 
 use crate::{
-    auth::{self, AuthContext},
+    auth::{self, AuthContext, now_unix_seconds},
     config::RedactedRpcConfig,
     error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
@@ -289,13 +286,6 @@ pub(crate) fn validate_keychain_key_info(key_info: &KeyInfo) -> Result<(), Authe
     Ok(())
 }
 
-pub(crate) fn now_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::authenticate_token;
@@ -372,6 +362,7 @@ mod tests {
         stub!(block_number);
         stub!(chain_id);
         stub!(net_version);
+        stub!(client_version);
         stub!(syncing);
         stub!(coinbase);
         stub!(gas_price);

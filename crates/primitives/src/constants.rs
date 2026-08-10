@@ -127,7 +127,7 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
 /// # Range safety
 ///
 /// EIP-2294 and ENSIP-11 reserve bit 31 (`0x8000_0000`) for coin-type flags,
-/// making chain IDs ≥ 2^31 (2,147,483,647) unsafe in parts of the ecosystem
+/// making chain IDs ≥ 2^31 (2,147,483,648) unsafe in parts of the ecosystem
 /// (ENS multi-chain address resolution, some JavaScript tooling that uses
 /// 32-bit integers, etc.).
 ///

@@ -48,6 +48,7 @@ impl L1BlockDeposits {
                         &d.tag,
                         portal_address,
                         d.key_index,
+                        d.sender,
                     );
 
                     if let Some(dec) = dec {

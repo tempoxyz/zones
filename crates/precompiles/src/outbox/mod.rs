@@ -29,7 +29,8 @@ use crate::{
     storage::{L1State, L1StorageReader},
 };
 
-const MAX_CALLBACK_DATA_SIZE: usize = 1024;
+/// Maximum callback payload accepted by the Zone Outbox.
+pub const MAX_CALLBACK_DATA_SIZE: usize = 1024;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
 
 /// Returns whether `calldata` is a canonical `finalizeWithdrawalBatch` call.
@@ -395,7 +396,8 @@ impl ZoneOutbox {
         Ok(pending)
     }
 
-    fn last_batch(&self) -> TempoResult<IZoneOutbox::LastBatch> {
+    /// Returns the last finalized withdrawal batch from Zone state.
+    pub fn last_batch(&self) -> TempoResult<IZoneOutbox::LastBatch> {
         Ok(IZoneOutbox::LastBatch {
             withdrawalQueueHash: self.withdrawal_queue_hash.read()?,
             withdrawalBatchIndex: self.withdrawal_batch_index.read()?,
