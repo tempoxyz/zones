@@ -127,6 +127,7 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
     let recipient = address!("0x000000000000000000000000000000000000B0B0");
     let token_address = address!("0x20C0000000000000000000000000000000CC0001");
     let deposit_amount = 1_000_000u128;
+    let transfer_amount = 100_000u128;
 
     let block = fixture.next_block();
     let deposit = L1Fixture::make_deposit_for_block(token_address, sender, sender, deposit_amount);
@@ -157,7 +158,7 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
 
     // Stateful RPC simulation uses ZoneEvmConfig and therefore the L1 overlay.
     let simulated = token
-        .transferFrom(sender, recipient, U256::ZERO)
+        .transfer(recipient, U256::from(transfer_amount))
         .fee_token(token_address)
         .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
         .max_priority_fee_per_gas(0)
@@ -167,7 +168,7 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
     assert!(simulated, "the anchored policy should allow execution");
 
     let pending = token
-        .transferFrom(sender, recipient, U256::ZERO)
+        .transfer(recipient, U256::from(transfer_amount))
         .fee_token(token_address)
         .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
         .max_priority_fee_per_gas(0)
@@ -179,8 +180,15 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
     let receipt = pending.get_receipt().await?;
     assert!(
         receipt.status(),
-        "permitted transferFrom should succeed with direct fee collection"
+        "transfer should succeed without FeeAMM liquidity"
     );
+    zone.wait_for_balance(
+        token_address,
+        recipient,
+        U256::from(transfer_amount),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
 
     Ok(())
 }
