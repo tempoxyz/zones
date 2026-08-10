@@ -107,6 +107,24 @@ impl std::fmt::Display for JsonRpcError {
 }
 
 impl JsonRpcError {
+    /// Serialized response exceeded the configured response limit (-32008).
+    pub fn response_too_large(limit: usize) -> Self {
+        Self {
+            code: -32008,
+            message: "Response is too big".to_string(),
+            data: Some(Value::String(format!("Exceeded max limit of {limit}"))),
+        }
+    }
+
+    /// Serialized batch response exceeded the configured response limit (-32011).
+    pub fn batch_response_too_large(limit: usize) -> Self {
+        Self {
+            code: -32011,
+            message: "The batch response was too large".to_string(),
+            data: Some(Value::String(format!("Exceeded max limit of {limit}"))),
+        }
+    }
+
     /// Method not found (-32601).
     pub fn method_not_found() -> Self {
         Self {

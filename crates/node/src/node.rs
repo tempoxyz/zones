@@ -758,6 +758,12 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let max_response_size = ctx
+            .config
+            .rpc
+            .rpc_max_response_size
+            .get()
+            .saturating_mul(1024 * 1024) as usize;
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -809,6 +815,7 @@ where
             self.l1_config.portal_address,
             self.l1_config.enabled_tokens.clone(),
             chain_id,
+            max_response_size,
         )
         .await?;
 
@@ -1340,6 +1347,7 @@ where
         portal_address: Address,
         enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
+        max_response_size: usize,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -1354,6 +1362,7 @@ where
             zone_id: config.zone_id,
             chain_id,
             max_auth_token_validity: config.max_auth_token_validity,
+            max_response_size,
             zone_portal: portal_address,
         };
         let api: Arc<dyn ZoneRpcApi> = Arc::new(ZoneRpc::new(

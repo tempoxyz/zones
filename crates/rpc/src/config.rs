@@ -18,6 +18,11 @@ pub struct RedactedRpcConfig {
     /// This may be configured lower than the protocol default to tighten local
     /// policy, but it must not exceed the protocol maximum.
     pub max_auth_token_validity: Duration,
+    /// Maximum serialized JSON-RPC response size in bytes.
+    ///
+    /// The node sets this from reth's `rpc.max-response-size` so the regular and redacted
+    /// transports enforce the same response budget.
+    pub max_response_size: usize,
     /// The ZonePortal contract address on L1 (used for querying deposits, not for auth tokens).
     pub zone_portal: alloy_primitives::Address,
 }
