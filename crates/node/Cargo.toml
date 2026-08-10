@@ -151,5 +151,4 @@ test-utils = [
   "tempo-precompiles/test-utils",
   "tempo-transaction-pool/test-utils",
   "zone-evm/test-utils",
-  "zone-precompiles/test-utils",
 ]

@@ -72,7 +72,10 @@ use zone_l1::{
 };
 use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
-use zone_precompiles::{ITIP403PolicyProbe, TIP403_POLICY_PROBE_ADDRESS, ZONE_FEE_MANAGER_ADDRESS};
+use zone_precompiles::{
+    ZONE_FEE_MANAGER_ADDRESS,
+    tip403_proxy::probe::{ITIP403Probe, TIP403_PROBE_ADDRESS},
+};
 use zone_primitives::constants::{
     PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
 };
@@ -448,29 +451,20 @@ pub(crate) struct Check403Registry {
 
 impl Check403Registry {
     pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
-        let role = match role {
-            AuthRole::Transfer => ITIP403PolicyProbe::Role::Transfer,
-            AuthRole::Sender => ITIP403PolicyProbe::Role::Sender,
-            AuthRole::Recipient => ITIP403PolicyProbe::Role::Recipient,
-            AuthRole::MintRecipient => ITIP403PolicyProbe::Role::MintRecipient,
-        };
-        let call = ITIP403PolicyProbe::isAuthorizedCall {
+        let call = ITIP403Probe::isAuthorizedCall {
             token: self.token,
             account: from,
-            caller: to,
-            role,
+            role: role as u8,
         };
-        let request = TransactionRequest::default()
-            .to(TIP403_POLICY_PROBE_ADDRESS)
+        let tx = TransactionRequest::default()
+            .to(TIP403_PROBE_ADDRESS)
             .from(to)
             .input(call.abi_encode().into());
         self.provider
-            .call(request)
+            .call(tx)
             .await
             .ok()
-            .and_then(|output| {
-                ITIP403PolicyProbe::isAuthorizedCall::abi_decode_returns(&output).ok()
-            })
+            .and_then(|output| ITIP403Probe::isAuthorizedCall::abi_decode_returns(&output).ok())
             .unwrap_or(false)
     }
 }
@@ -1284,7 +1278,6 @@ impl ZoneTestNode {
             4,
             std::time::Duration::from_millis(100),
         )
-        .with_test_tip403_policy_probe()
         .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks)
         .with_deposit_decryption_keys(
             std::iter::once(SecretKey::from(sequencer_signer.credential()))

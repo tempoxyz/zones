@@ -8,6 +8,9 @@ use crate::execution::{CallCheck, CallRules};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod probe;
+
 alloy_sol_types::sol! {
     /// Returned when the zone registry is called through its external EVM interface.
     #[derive(Debug, PartialEq, Eq)]
