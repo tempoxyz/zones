@@ -33,6 +33,7 @@ mkdir -p "$OUT_DIR"
 
 build_args=(
   --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
+  --build-arg "GIT_SHA=$COMMIT"
   --build-arg "VERSION=$VERSION"
 )
 if [[ -n "$DEBIAN_SNAPSHOT" ]]; then

@@ -22,7 +22,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     emitter.add_instructions(&git_builder)?;
 
     emitter.emit_and_set()?;
-    let sha = env::var("VERGEN_GIT_SHA")?;
+    let sha = env::var("VERGEN_GIT_SHA").or_else(|_| env::var("ZONE_GIT_SHA"))?;
+    println!("cargo:rustc-env=VERGEN_GIT_SHA={sha}");
     let sha_short = &sha[0..7];
 
     let is_dirty = env::var("VERGEN_GIT_DIRTY").is_ok_and(|dirty| dirty == "true");
