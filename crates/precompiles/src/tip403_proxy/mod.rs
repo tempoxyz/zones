@@ -9,24 +9,25 @@ use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 
 alloy_sol_types::sol! {
-    /// Returned when the zone registry is called through its external EVM interface.
+    /// Returned when a nonzero caller accesses the registry through its EVM interface.
     #[derive(Debug, PartialEq, Eq)]
     error OnlyPrecompiles();
 }
 
-/// Rejects all EVM calls to the registry.
+/// Restricts EVM calls to the registry.
 ///
-/// Other precompiles use the TIP-403 implementation directly rather than issuing an EVM call, so
-/// every call reaching this adapter is external. External access is disabled because registry
-/// reads may require fetching finalized L1 state; exposing them through RPC simulation endpoints
-/// could let untrusted callers force repeated L1 reads and consume sequencer resources. Test builds
-/// admit the zero address so integration tests can query the registry through RPC.
+/// Registry reads may fetch finalized L1 state, so allowing arbitrary simulations would let RPC
+/// clients repeatedly consume operator resources. The zero address is reserved for simulations on
+/// the trusted operator RPC, so that endpoint must not be exposed to untrusted callers. The public
+/// redacted RPC binds every simulation to its authenticated caller and therefore cannot call it.
+///
+/// Other precompiles bypass this EVM adapter and invoke the TIP-403 implementation directly.
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
-        #[cfg(any(test, feature = "test-utils"))]
-        if _caller.is_zero() {
+    fn admit(&self, _data: &[u8], caller: Address) -> CallCheck {
+        // Operator simulations use `address(0)`. Public RPC simulations cannot select this caller.
+        if caller.is_zero() {
             return CallCheck::Continue;
         }
         CallCheck::Revert(OnlyPrecompiles {}.abi_encode().into())

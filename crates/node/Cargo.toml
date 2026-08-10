@@ -150,5 +150,4 @@ test-utils = [
   "reth-transaction-pool/test-utils",
   "tempo-precompiles/test-utils",
   "tempo-transaction-pool/test-utils",
-  "zone-precompiles/test-utils",
 ]

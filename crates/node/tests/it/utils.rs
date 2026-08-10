@@ -440,7 +440,7 @@ fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8
     }
 }
 
-/// Helper to check TIP-403 authorization through the test-only zero-address RPC path.
+/// Helper to check TIP-403 authorization through the trusted operator RPC.
 pub(crate) struct Check403Registry {
     pub(crate) provider: DynProvider,
     pub(crate) token: Address,
