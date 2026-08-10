@@ -73,8 +73,6 @@ use tempo_zone_contracts::{
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_precompiles::create_outbox_precompile;
-#[cfg(any(test, feature = "test-utils"))]
-use zone_precompiles::tip403_proxy::probe::{TIP403_PROBE_ADDRESS, create_tip403_policy_probe};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -141,9 +139,10 @@ where
             Some(create_tip403_precompile(&tip403_env))
         });
         #[cfg(any(test, feature = "test-utils"))]
-        precompiles.apply_precompile(&TIP403_PROBE_ADDRESS, |_| {
-            Some(create_tip403_policy_probe(&env))
-        });
+        precompiles.apply_precompile(
+            &zone_precompiles::tip403_proxy::probe::TIP403_PROBE_ADDRESS,
+            |_| Some(zone_precompiles::tip403_proxy::probe::create_tip403_policy_probe(&env)),
+        );
         let tip20_l1 = l1.clone();
         let nonce_l1 = l1.clone();
         let account_keychain_l1 = l1.clone();
