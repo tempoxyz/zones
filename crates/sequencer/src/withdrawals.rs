@@ -37,12 +37,13 @@ use alloy_provider::{DynProvider, Provider};
 use futures::{StreamExt, stream::FuturesUnordered};
 use parking_lot::Mutex;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt};
+use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     abi::{self, EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
-    metrics::WithdrawalProcessorMetrics,
+    metrics::{SequencerMetrics, WithdrawalProcessorMetrics},
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
     settlement::{WITHDRAWAL_QUEUE_CAPACITY, find_processed_offset},
 };
@@ -283,6 +284,7 @@ pub struct WithdrawalProcessor {
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
+    sequencer_metrics: SequencerMetrics,
 }
 
 impl WithdrawalProcessor {
@@ -307,6 +309,7 @@ impl WithdrawalProcessor {
             notify,
             repair_notify,
             metrics: WithdrawalProcessorMetrics::default(),
+            sequencer_metrics: SequencerMetrics::default(),
         }
     }
 
@@ -354,10 +357,30 @@ impl WithdrawalProcessor {
                 }
             }
 
+            if let Err(error) = self.refresh_sequencer_pathusd_balance().await {
+                warn!(
+                    %error,
+                    sequencer = %self.config.sequencer_address,
+                    "Failed to refresh sequencer PathUSD balance metric"
+                );
+            }
+
             if let Err(e) = self.process_queue().await {
                 error!(error = %e, "Withdrawal processing cycle failed");
             }
         }
+    }
+
+    /// Refresh the sequencer's Tempo L1 PathUSD balance metric.
+    async fn refresh_sequencer_pathusd_balance(&self) -> eyre::Result<()> {
+        let balance = ITIP20::new(PATH_USD_ADDRESS, &self.provider)
+            .balanceOf(self.config.sequencer_address)
+            .call()
+            .await?;
+        self.sequencer_metrics
+            .pathusd_balance
+            .set(f64::from(balance));
+        Ok(())
     }
 
     /// Drain the portal's withdrawal queue on Tempo L1, slot by slot, until the
@@ -1124,6 +1147,21 @@ mod tests {
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
             .expect("missing head slot should request a monitor resync");
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refreshes_sequencer_pathusd_balance() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(1_500_000));
+        let processor = test_processor(
+            l1.clone(),
+            SharedWithdrawalStore::new(),
+            Arc::new(Notify::new()),
+        );
+
+        processor.refresh_sequencer_pathusd_balance().await.unwrap();
+
         assert!(l1.read_q().is_empty());
     }
 
