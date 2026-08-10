@@ -242,6 +242,6 @@ mod tests {
 
         let max_generic_chain_id = zone_chain_id(MAX_GENERIC_PARENT_CHAIN_ID, u32::MAX).unwrap();
         let max_legacy_v = max_generic_chain_id * 2 + 36;
-        assert!(max_legacy_v <= (1 << 53) - 1);
+        assert!(max_legacy_v < (1 << 53));
     }
 }
