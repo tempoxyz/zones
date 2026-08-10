@@ -743,9 +743,10 @@ jobs:
             exit 1
           fi
           "$samply_path" --version
-          if samply record --help | grep -q -- '--presymbolicate'; then
+          samply_help="$(samply record --help)"
+          if grep -Eq '^[[:space:]]+--presymbolicate([[:space:]]|$)' <<< "$samply_help"; then
             echo "ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG=--presymbolicate" >> "$GITHUB_ENV"
-          elif samply record --help | grep -q -- '--unstable-presymbolicate'; then
+          elif grep -Eq '^[[:space:]]+--unstable-presymbolicate([[:space:]]|$)' <<< "$samply_help"; then
             echo "ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG=--unstable-presymbolicate" >> "$GITHUB_ENV"
           else
             echo "Samply does not support presymbolication" >&2
