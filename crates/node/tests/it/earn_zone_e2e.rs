@@ -699,7 +699,7 @@ impl EarnZoneFixture {
 
         let (key_index, encrypted) = self
             .l1
-            .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
+            .encrypt_deposit_for_portal(self.portal, self.user.address(), recipient, B256::ZERO)
             .await?;
         let balance_before = self.zone.balance_of(token, recipient).await?;
         let receipt = ZonePortal::new(self.portal, provider)
@@ -731,7 +731,7 @@ impl EarnZoneFixture {
     ) -> eyre::Result<Bytes> {
         let (key_index, encrypted) = self
             .l1
-            .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
+            .encrypt_deposit_for_portal(self.portal, self.router, recipient, B256::ZERO)
             .await?;
         let action_id = keccak256(encrypted.ciphertext.as_ref());
         let zone_return = EarnZoneReturn {
@@ -1293,7 +1293,7 @@ impl EarnZoneFixture {
 
         let (key_index, encrypted) = self
             .l1
-            .encrypt_deposit_for_portal(self.portal, user, B256::ZERO)
+            .encrypt_deposit_for_portal(self.portal, user, user, B256::ZERO)
             .await?;
         let private_before = self.zone.balance_of(self.earn_share, user).await?;
         let public_before = EarnShare::new(self.earn_share, self.l1.provider())

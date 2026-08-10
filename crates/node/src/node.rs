@@ -14,7 +14,7 @@ use crate::{
         run_role_controller,
     },
     rpc::{
-        OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneDebugApi, ZoneRpc,
+        NodeZoneDebugApi, OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc,
         ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
@@ -85,10 +85,10 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_rpc::ZoneDebugApiServer;
+use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
-    attestation::AttestationDomain, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
 };
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
@@ -178,6 +178,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
+    /// Run the SPF over finalized candidates in detached, observational mode.
+    pub enable_prover: bool,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -688,6 +690,11 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let prover_settings = self
+            .sequencer_config
+            .as_ref()
+            .filter(|config| config.enable_prover)
+            .map(|config| (config.zone_id, ctx.node.evm_config().clone()));
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -710,7 +717,7 @@ where
                     .modules
                     .merge_configured(operator_zone_api.into_rpc())?;
                 container.modules.merge_configured(
-                    ZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
+                    NodeZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
                 )?;
                 container.modules.merge_http(operator_zone_rpc_module(
                     portal_address,
@@ -720,6 +727,11 @@ where
                 Ok(())
             })
             .await?;
+        let prover_config = prover_settings.map(|(zone_id, evm_config)| ShadowProverConfig {
+            zone_id,
+            evm_config,
+            debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+        });
 
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
@@ -727,6 +739,7 @@ where
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
+            self.l1_config.enabled_tokens.clone(),
             chain_id,
         )
         .await?;
@@ -761,6 +774,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    prover_config.clone(),
                 )?),
                 None => None,
             };
@@ -812,6 +826,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                prover_config,
             )
             .await?;
         }
@@ -1086,6 +1101,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
+        prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1102,6 +1118,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            prover_config,
         })
     }
 
@@ -1253,6 +1270,7 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         portal_address: Address,
+        enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
@@ -1271,8 +1289,9 @@ where
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
         };
-        let api: Arc<dyn ZoneRpcApi> =
-            Arc::new(ZoneRpc::new(eth_handlers, redacted_rpc_config.clone()).await?);
+        let api: Arc<dyn ZoneRpcApi> = Arc::new(
+            ZoneRpc::new(eth_handlers, redacted_rpc_config.clone(), enabled_tokens).await?,
+        );
         let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
 
@@ -1291,6 +1310,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
+        prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
@@ -1313,6 +1333,7 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;

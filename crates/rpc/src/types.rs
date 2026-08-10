@@ -346,91 +346,75 @@ pub struct SetLeaderResponse {
     pub requested_leader: Address,
 }
 
-/// Method access tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MethodTier {
-    /// Available to all authenticated callers.
-    Public,
-    /// Only available to the sequencer.
-    Restricted,
-    /// Disabled on the redacted RPC.
-    Disabled,
+macro_rules! define_methods {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// JSON-RPC method exposed by the redacted RPC.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum Method {
+            $($variant,)+
+        }
+
+        impl Method {
+            #[cfg(test)]
+            pub(crate) const ALL: &'static [Self] = &[
+                $(Self::$variant,)+
+            ];
+
+            /// Parse an exposed JSON-RPC method name into the authoritative method registry.
+            pub(crate) fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            /// Exposed method name, also used as its bounded metrics label.
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            /// Normalize a raw method name into the bounded metrics label set.
+            pub(crate) fn metric_label(name: &str) -> &'static str {
+                Self::from_name(name).map(Self::name).unwrap_or("unknown")
+            }
+        }
+    };
 }
 
-/// Classify a JSON-RPC method into its access tier.
-///
-/// Returns `None` if the method is unknown.
-pub fn classify_method(method: &str) -> Option<MethodTier> {
-    match method {
-        // Public read methods — no privacy redaction needed
-        "eth_blockNumber"
-        | "eth_chainId"
-        | "eth_gasPrice"
-        | "eth_getBalance"
-        | "eth_getTransactionCount"
-        | "eth_call"
-        | "eth_estimateGas"
-        | "eth_feeHistory"
-        | "eth_maxPriorityFeePerGas"
-        | "eth_getBlockByNumber"
-        | "eth_getBlockByHash"
-        | "eth_syncing"
-        | "eth_coinbase"
-        | "net_version"
-        | "net_listening"
-        | "web3_clientVersion"
-        | "web3_sha3"
-        | "zone_getAuthorizationTokenInfo"
-        | "zone_getZoneInfo"
-        | "zone_getEncryptionKey" => Some(MethodTier::Public),
-
-        // Fetch-then-check: public but redacted based on caller identity
-        "eth_getTransactionByHash"
-        | "eth_getTransactionReceipt"
-        | "eth_getLogs"
-        | "eth_getFilterLogs"
-        | "eth_getFilterChanges"
-        | "eth_newFilter"
-        | "eth_newBlockFilter"
-        | "eth_uninstallFilter" => Some(MethodTier::Public),
-
-        // Transaction preparation: public (scoped to caller's account)
-        "eth_fillTransaction" => Some(MethodTier::Public),
-
-        // Transaction submission: public (caller sends their own txs)
-        "eth_sendRawTransaction" | "eth_sendRawTransactionSync" => Some(MethodTier::Public),
-
-        // Sequencer-only — raw state inspection and full block data bypass privacy scoping
-        "eth_getCode"
-        | "eth_getStorageAt"
-        | "eth_getBlockReceipts"
-        | "eth_sendTransaction"
-        | "eth_createAccessList"
-        | "eth_getBlockTransactionCountByNumber"
-        | "eth_getBlockTransactionCountByHash"
-        | "eth_getTransactionByBlockNumberAndIndex"
-        | "eth_getTransactionByBlockHashAndIndex"
-        | "eth_getUncleCountByBlockNumber"
-        | "eth_getUncleCountByBlockHash" => Some(MethodTier::Restricted),
-
-        // Disabled (mempool observation, mining, subscriptions not supported via HTTP)
-        "eth_getProof"
-        | "eth_newPendingTransactionFilter"
-        | "eth_getUncleByBlockNumberAndIndex"
-        | "eth_getUncleByBlockHashAndIndex"
-        | "eth_mining"
-        | "eth_hashrate"
-        | "eth_getWork"
-        | "eth_submitWork"
-        | "eth_submitHashrate"
-        | "eth_subscribe"
-        | "eth_unsubscribe" => Some(MethodTier::Disabled),
-
-        _ if method.starts_with("admin_") => Some(MethodTier::Restricted),
-        _ if method.starts_with("debug_") => Some(MethodTier::Restricted),
-        _ if method.starts_with("txpool_") => Some(MethodTier::Restricted),
-        _ => None,
-    }
+define_methods! {
+    EthBlockNumber => "eth_blockNumber",
+    EthChainId => "eth_chainId",
+    EthGasPrice => "eth_gasPrice",
+    EthGetBalance => "eth_getBalance",
+    EthGetTransactionCount => "eth_getTransactionCount",
+    EthCall => "eth_call",
+    EthEstimateGas => "eth_estimateGas",
+    EthFeeHistory => "eth_feeHistory",
+    EthMaxPriorityFeePerGas => "eth_maxPriorityFeePerGas",
+    EthGetBlockByNumber => "eth_getBlockByNumber",
+    EthGetBlockByHash => "eth_getBlockByHash",
+    EthSyncing => "eth_syncing",
+    EthCoinbase => "eth_coinbase",
+    NetVersion => "net_version",
+    NetListening => "net_listening",
+    Web3ClientVersion => "web3_clientVersion",
+    Web3Sha3 => "web3_sha3",
+    ZoneGetAuthorizationTokenInfo => "zone_getAuthorizationTokenInfo",
+    ZoneGetZoneInfo => "zone_getZoneInfo",
+    ZoneGetEncryptionKey => "zone_getEncryptionKey",
+    EthGetTransactionByHash => "eth_getTransactionByHash",
+    EthGetTransactionReceipt => "eth_getTransactionReceipt",
+    EthGetLogs => "eth_getLogs",
+    EthGetFilterLogs => "eth_getFilterLogs",
+    EthGetFilterChanges => "eth_getFilterChanges",
+    EthNewFilter => "eth_newFilter",
+    EthNewBlockFilter => "eth_newBlockFilter",
+    EthUninstallFilter => "eth_uninstallFilter",
+    EthFillTransaction => "eth_fillTransaction",
+    EthSendRawTransaction => "eth_sendRawTransaction",
+    EthSendRawTransactionSync => "eth_sendRawTransactionSync",
 }
 
 /// Pre-serialized JSON `null`.

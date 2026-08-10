@@ -88,6 +88,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
         y_parity,
         recipient,
         B256::ZERO,
+        depositor,
         portal_address,
         key_index,
     )

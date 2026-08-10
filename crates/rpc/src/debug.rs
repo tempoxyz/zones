@@ -5,13 +5,36 @@ use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 
 use crate::types::ZoneExecutionWitness;
 
-/// Debug methods that extend reth's standard execution-witness API for Zones.
+/// In-process Zone debug API contract.
+#[jsonrpsee::core::async_trait]
+pub trait ZoneDebugApi: Send + Sync {
+    /// Replays a Zone block and returns its execution witness and Tempo L1 storage reads.
+    async fn zone_execution_witness(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<ZoneExecutionWitness>;
+}
+
+/// JSON-RPC transport adapter for [`ZoneDebugApi`].
 #[rpc(server, namespace = "debug")]
-pub trait ZoneDebugApi {
+pub trait ZoneDebugApiRpc {
     /// Replays a Zone block and returns its execution witness and Tempo L1 storage reads.
     #[method(name = "zoneExecutionWitness")]
     async fn zone_execution_witness(
         &self,
         block: BlockNumberOrTag,
     ) -> RpcResult<ZoneExecutionWitness>;
+}
+
+#[jsonrpsee::core::async_trait]
+impl<T> ZoneDebugApiRpcServer for T
+where
+    T: ZoneDebugApi + 'static,
+{
+    async fn zone_execution_witness(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<ZoneExecutionWitness> {
+        ZoneDebugApi::zone_execution_witness(self, block).await
+    }
 }

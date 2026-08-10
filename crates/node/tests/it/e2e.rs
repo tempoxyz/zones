@@ -988,7 +988,6 @@ async fn submit_withdrawals(
                 )
                 .nonce(nonce + offset as u64)
                 .gas_price(TEMPO_T0_BASE_FEE as u128)
-                .gas(WITHDRAWAL_TX_GAS)
                 .send()
                 .await?,
         );
