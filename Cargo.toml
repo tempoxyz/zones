@@ -175,6 +175,7 @@ revm = { version = "42.0.1", features = [
 
 # alloy
 alloy = { version = "2.3.0", default-features = false }
+alloy-chains = "0.2.36"
 alloy-consensus = { version = "2.3.0", default-features = false }
 alloy-contract = { version = "2.3.0", default-features = false }
 alloy-eips = { version = "2.3.0", default-features = false }

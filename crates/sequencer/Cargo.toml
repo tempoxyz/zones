@@ -28,6 +28,7 @@ reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
 
 # alloy
+alloy-chains.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-network.workspace = true

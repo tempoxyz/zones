@@ -13696,6 +13696,7 @@ name = "zone-node"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-chains",
  "alloy-consensus",
  "alloy-contract",
  "alloy-eips",
@@ -13929,6 +13930,7 @@ dependencies = [
 name = "zone-sequencer"
 version = "0.1.0"
 dependencies = [
+ "alloy-chains",
  "alloy-consensus",
  "alloy-eips",
  "alloy-network",

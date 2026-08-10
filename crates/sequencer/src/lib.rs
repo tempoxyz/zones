@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy_chains::NamedChain;
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
@@ -93,6 +94,8 @@ pub struct ZoneSequencerConfig {
     pub portal_address: Address,
     /// Tempo L1 RPC URL.
     pub l1_rpc_url: String,
+    /// Resolved Tempo L1 chain used to configure chain-aware provider behavior.
+    pub l1_chain: NamedChain,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
     /// Fallback interval for reconciling the canonical Zone head.
@@ -150,6 +153,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     // processor use this provider, ensuring nonces are tracked in one place.
     let l1_provider = connect_l1_provider(
         &config.l1_rpc_url,
+        config.l1_chain,
         config.retry_connection_interval,
         signer.clone(),
     )
@@ -217,12 +221,14 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
 /// Build the shared L1 provider used by all sequencer-side L1 transaction tasks.
 async fn connect_l1_provider(
     l1_rpc_url: &str,
+    l1_chain: NamedChain,
     retry_connection_interval: Duration,
     signer: PrivateKeySigner,
 ) -> TransportResult<DynProvider<TempoNetwork>> {
     let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .with_nonce_key_filler()
+        .with_chain(l1_chain)
         .wallet(wallet)
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
@@ -246,6 +252,26 @@ mod tests {
         time::{Duration, timeout},
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    #[test]
+    fn chain_metadata_sets_remote_poll_interval() {
+        let client = alloy_rpc_client::RpcClient::new(
+            alloy_transport::mock::MockTransport::new(alloy_transport::mock::Asserter::new()),
+            false,
+        );
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .with_nonce_key_filler()
+            .with_chain(NamedChain::TempoModerato)
+            .wallet(alloy_network::EthereumWallet::from(
+                PrivateKeySigner::random(),
+            ))
+            .connect_client(client);
+
+        assert_eq!(
+            provider.client().poll_interval(),
+            Duration::from_millis(300)
+        );
+    }
 
     async fn serve_block_number(
         stream: TcpStream,
@@ -307,12 +333,21 @@ mod tests {
             serve_block_number(second_stream, "0x2", false).await;
         });
 
-        let provider =
-            connect_l1_provider(&url, Duration::from_millis(10), PrivateKeySigner::random())
-                .await
-                .unwrap();
+        let provider = connect_l1_provider(
+            &url,
+            NamedChain::TempoModerato,
+            Duration::from_millis(10),
+            PrivateKeySigner::random(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(provider.get_block_number().await.unwrap(), 1);
+        assert_eq!(
+            provider.client().poll_interval(),
+            Duration::from_millis(250),
+            "chain metadata must not override Alloy's local transport interval"
+        );
 
         let second_block = timeout(Duration::from_secs(2), provider.get_block_number())
             .await

@@ -18,6 +18,7 @@ use crate::{
         ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
+use alloy_chains::NamedChain;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
@@ -107,6 +108,20 @@ fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
             .any(|id| id.trim().parse() == Ok(chain_id))
             .then(|| DEV.clone()),
     })
+}
+
+/// Resolve Alloy's chain metadata for a supported Tempo L1 chain ID.
+///
+/// Custom Tempo dev chain IDs use Tempo's block-time hint while retaining their configured ID
+/// for transaction signing and protocol domain separation.
+fn alloy_chain_for_tempo_l1(chain_id: u64) -> Option<NamedChain> {
+    tempo_chain_spec_for_l1(chain_id)?;
+    Some(
+        NamedChain::try_from(chain_id)
+            .ok()
+            .filter(|chain| chain.is_tempo())
+            .unwrap_or(NamedChain::Tempo),
+    )
 }
 
 /// Network primitives for Zone Nodes
@@ -544,6 +559,9 @@ where
             )
             .await?
             .erased();
+        let l1_chain_id = l1_provider.get_chain_id().await?;
+        let l1_chain = alloy_chain_for_tempo_l1(l1_chain_id)
+            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
@@ -595,7 +613,6 @@ where
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let mut p2p_runtime = None;
         if let Some(config) = self.p2p_config.take() {
-            let l1_chain_id = l1_provider.get_chain_id().await?;
             let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
@@ -650,6 +667,7 @@ where
                     Some(
                         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                             .with_nonce_key_filler()
+                            .with_chain(l1_chain)
                             .wallet(alloy_network::EthereumWallet::from(signer))
                             .connect_with_config(
                                 &self.l1_config.l1_rpc_url,
@@ -773,6 +791,7 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
+                    l1_chain,
                     attestation.store.clone(),
                     prover_config.clone(),
                 )?),
@@ -824,6 +843,7 @@ where
                 self.l1_config.l1_rpc_url,
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
+                l1_chain,
                 sequencer_addr,
                 None,
                 prover_config,
@@ -1100,12 +1120,14 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
+        l1_chain: NamedChain,
         attestation_store: AttestationStore,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
+            l1_chain,
             retry_connection_interval,
             zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
@@ -1308,6 +1330,7 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
+        l1_chain: NamedChain,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
         prover_config: Option<ShadowProverConfig>,
@@ -1316,6 +1339,7 @@ where
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
+            l1_chain,
             retry_connection_interval,
             zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
@@ -1722,11 +1746,24 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
+        assert_eq!(alloy_chain_for_tempo_l1(4217), Some(NamedChain::Tempo));
+        assert_eq!(
+            alloy_chain_for_tempo_l1(42431),
+            Some(NamedChain::TempoModerato)
+        );
+        assert_eq!(alloy_chain_for_tempo_l1(1337), Some(NamedChain::Tempo));
+        assert_eq!(alloy_chain_for_tempo_l1(31337), Some(NamedChain::Tempo));
+        assert_eq!(alloy_chain_for_tempo_l1(999_999), None);
 
         // SAFETY: test-only env mutation; no other test reads this variable.
         unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
         assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
+        assert_eq!(
+            alloy_chain_for_tempo_l1(31318),
+            Some(NamedChain::TempoDevnet)
+        );
+        assert_eq!(alloy_chain_for_tempo_l1(31319), Some(NamedChain::Tempo));
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
     }
