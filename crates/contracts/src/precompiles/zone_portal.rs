@@ -10,6 +10,17 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 use zone_primitives::constants::EMPTY_SENTINEL;
 
+/// Maximum number of deposits that may remain unprocessed in the portal queue.
+pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+/// Maximum number of token enablements imported from one Tempo block.
+pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
+/// Maximum UTF-8 byte length of an enabled token name.
+pub const MAX_TOKEN_NAME_BYTES: usize = 64;
+/// Maximum UTF-8 byte length of an enabled token symbol.
+pub const MAX_TOKEN_SYMBOL_BYTES: usize = 31;
+/// Maximum UTF-8 byte length of an enabled token currency code.
+pub const MAX_TOKEN_CURRENCY_BYTES: usize = 31;
+
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
     contract ZonePortal {
@@ -90,6 +101,9 @@ crate::sol! {
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
+        event DepositsPaused(address indexed token);
+        event DepositsResumed(address indexed token);
+        event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(
             bytes32 x,

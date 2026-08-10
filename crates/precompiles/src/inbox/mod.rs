@@ -59,6 +59,16 @@ pub struct ZoneInbox {
 }
 
 impl ZoneInbox {
+    /// Returns the hash-chain head after the last processed L1 deposit.
+    pub fn processed_deposit_queue_hash(&self) -> tempo_precompiles::Result<B256> {
+        self.processed_deposit_queue_hash.read()
+    }
+
+    /// Returns the number of L1 deposits consumed by the Zone.
+    pub fn processed_deposit_number(&self) -> tempo_precompiles::Result<u64> {
+        self.processed_deposit_number.read()
+    }
+
     /// Initialize the precompile account marker without changing protocol storage.
     pub fn initialize(&mut self) -> tempo_precompiles::Result<()> {
         self.__initialize()
