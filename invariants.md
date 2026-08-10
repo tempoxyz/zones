@@ -37,6 +37,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-TOKEN-ENABLEMENT-APPEND-ONLY` | Once enabled, a token remains enabled and remains in the append-only enabled token list | 🔴 | Withdrawals can be disabled after deposits, breaking the non-custodial bridge guarantee |
+| `TEMPO-ZONE-TOKEN-ENABLEMENT-BINDING` | Every non-genesis `advanceTempo` hashes the exact ordered token-address and metadata delta from `ZoneInbox.processedTokenEnablementHash`, requires equality with `ZonePortal.tokenEnablementHash` at the final imported Tempo state, and initializes all entries before processing deposits | 🔴 | A sequencer can omit or alter an irreversible enablement, causing enabled-token deposits to bounce permanently and locking the asset out of the zone |
 | `TEMPO-ZONE-TOKEN-DEPOSIT-PAUSE-ONLY` | Pausing a token only disables new deposits; withdrawals for enabled tokens remain requestable and processable | 🔴 | Admin can lock users inside the zone by pausing deposits |
 | `TEMPO-ZONE-MESSENGER-AUTH` | The shared messenger only relays when `msg.sender == ZoneFactory.zones(zoneId).portal` | 🟡 | A caller can spoof a source zone or invoke receiver callbacks outside the portal-controlled withdrawal path |
 | `TEMPO-ZONE-SUPPLY-SOLVENCY` | For each token, zone-side total supply equals accepted deposits plus withdrawal bounce-backs minus requested withdrawals minus deposit bounce-backs | 🔴 | The zone can mint unbacked tokens or burn user funds without matching L1 release |
