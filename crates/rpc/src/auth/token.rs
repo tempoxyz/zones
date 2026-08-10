@@ -1,9 +1,10 @@
 use alloy_primitives::{Address, B256, hex, keccak256};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use super::now_unix_seconds;
 use crate::error::AuthError;
 
-/// Magic prefix: "TempoZoneRPC" left-padded to 32 bytes.
+/// Magic prefix: "TempoZoneRPC" followed by zero bytes to fill 32 bytes.
 const TEMPO_ZONE_RPC_MAGIC: [u8; 32] = {
     let mut buf = [0u8; 32];
     let s = b"TempoZoneRPC";
@@ -77,7 +78,9 @@ impl AuthorizationToken {
         }
 
         let fields_start = blob.len() - TOKEN_FIELDS_LEN;
-        let fields = &blob[fields_start..];
+        let fields: &[u8; TOKEN_FIELDS_LEN] = blob[fields_start..]
+            .try_into()
+            .expect("token fields have a fixed length");
         let signature = blob[..fields_start].to_vec();
 
         let version = fields[0];
@@ -86,15 +89,7 @@ impl AuthorizationToken {
         let issued_at = u64::from_be_bytes(fields[13..21].try_into().unwrap());
         let expires_at = u64::from_be_bytes(fields[21..29].try_into().unwrap());
 
-        // Build the signing digest
-        let mut msg = Vec::with_capacity(32 + TOKEN_FIELDS_LEN);
-        msg.extend_from_slice(&TEMPO_ZONE_RPC_MAGIC);
-        msg.push(version);
-        msg.extend_from_slice(&zone_id.to_be_bytes());
-        msg.extend_from_slice(&chain_id.to_be_bytes());
-        msg.extend_from_slice(&issued_at.to_be_bytes());
-        msg.extend_from_slice(&expires_at.to_be_bytes());
-        let digest = keccak256(&msg);
+        let digest = token_digest(fields);
 
         Ok(Self {
             version,
@@ -126,6 +121,21 @@ impl AuthorizationToken {
         expected_chain_id: u64,
         max_auth_token_validity: Duration,
     ) -> Result<(), AuthError> {
+        self.validate_at(
+            expected_zone_id,
+            expected_chain_id,
+            max_auth_token_validity,
+            now_unix_seconds(),
+        )
+    }
+
+    fn validate_at(
+        &self,
+        expected_zone_id: u32,
+        expected_chain_id: u64,
+        max_auth_token_validity: Duration,
+        now: u64,
+    ) -> Result<(), AuthError> {
         if self.version != 0 {
             return Err(AuthError::UnsupportedVersion(self.version));
         }
@@ -135,14 +145,13 @@ impl AuthorizationToken {
         if self.chain_id != expected_chain_id {
             return Err(AuthError::ChainIdMismatch);
         }
-        if self.expires_at.saturating_sub(self.issued_at) > max_auth_token_validity.as_secs() {
+        let validity = self
+            .expires_at
+            .checked_sub(self.issued_at)
+            .ok_or(AuthError::ExpiresBeforeIssued)?;
+        if validity > max_auth_token_validity.as_secs() {
             return Err(AuthError::WindowTooLarge);
         }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_secs();
 
         if self.expires_at <= now {
             return Err(AuthError::Expired);
@@ -174,12 +183,17 @@ pub fn build_token_fields(
     fields[13..21].copy_from_slice(&issued_at.to_be_bytes());
     fields[21..29].copy_from_slice(&expires_at.to_be_bytes());
 
-    let mut msg = Vec::with_capacity(32 + TOKEN_FIELDS_LEN);
-    msg.extend_from_slice(&TEMPO_ZONE_RPC_MAGIC);
-    msg.extend_from_slice(&fields);
-    let digest = keccak256(&msg);
+    let digest = token_digest(&fields);
 
     (fields, digest)
+}
+
+/// Build the signing digest from the canonical fixed-width token fields.
+fn token_digest(fields: &[u8; TOKEN_FIELDS_LEN]) -> B256 {
+    let mut msg = Vec::with_capacity(32 + TOKEN_FIELDS_LEN);
+    msg.extend_from_slice(&TEMPO_ZONE_RPC_MAGIC);
+    msg.extend_from_slice(fields);
+    keccak256(&msg)
 }
 
 /// Parse a hex-encoded authorization token from the header value.
@@ -187,4 +201,90 @@ pub fn parse_auth_header(header_value: &str) -> Result<AuthorizationToken, AuthE
     let hex_str = header_value.strip_prefix("0x").unwrap_or(header_value);
     let blob = hex::decode(hex_str).map_err(|_| AuthError::InvalidHex)?;
     AuthorizationToken::parse(&blob)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ZONE_ID: u32 = 42;
+    const CHAIN_ID: u64 = 1_337;
+    const NOW: u64 = 1_700_000_000;
+
+    fn token(issued_at: u64, expires_at: u64) -> AuthorizationToken {
+        let (fields, _) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
+        let mut blob = vec![0u8; 65];
+        blob.extend_from_slice(&fields);
+        AuthorizationToken::parse(&blob).unwrap()
+    }
+
+    fn validate_at(token: &AuthorizationToken, now: u64) -> Result<(), AuthError> {
+        token.validate_at(ZONE_ID, CHAIN_ID, DEFAULT_MAX_AUTH_TOKEN_VALIDITY, now)
+    }
+
+    #[test]
+    fn digest_and_wire_format_remain_compatible() {
+        let (fields, digest) = build_token_fields(
+            0x0102_0304,
+            0x0506_0708_090a_0b0c,
+            0x0d0e_0f10_1112_1314,
+            0x1516_1718_191a_1b1c,
+        );
+
+        assert_eq!(
+            hex::encode(fields),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c"
+        );
+        assert_eq!(
+            digest,
+            "0xf827387a933f40dfedece81ba4933feaef89e98a269f52f4f54dda2f1dac4171"
+                .parse::<B256>()
+                .unwrap()
+        );
+
+        let mut blob = vec![0xabu8; 65];
+        blob.extend_from_slice(&fields);
+        let parsed = AuthorizationToken::parse(&blob).unwrap();
+        assert_eq!(parsed.signature, vec![0xabu8; 65]);
+        assert_eq!(parsed.digest, digest);
+    }
+
+    #[test]
+    fn rejects_expiry_before_issuance() {
+        let token = token(NOW + 1, NOW);
+        assert!(matches!(
+            validate_at(&token, NOW),
+            Err(AuthError::ExpiresBeforeIssued)
+        ));
+    }
+
+    #[test]
+    fn zero_length_window_is_valid_until_its_expiry() {
+        let timestamp = NOW + 1;
+        let token = token(timestamp, timestamp);
+
+        assert!(validate_at(&token, NOW).is_ok());
+        assert!(matches!(
+            validate_at(&token, timestamp),
+            Err(AuthError::Expired)
+        ));
+    }
+
+    #[test]
+    fn accepts_maximum_validity_window() {
+        let token = token(NOW, NOW + DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS);
+        assert!(validate_at(&token, NOW).is_ok());
+    }
+
+    #[test]
+    fn enforces_future_issuance_skew_boundary() {
+        let at_limit = token(NOW + 60, NOW + 61);
+        assert!(validate_at(&at_limit, NOW).is_ok());
+
+        let past_limit = token(NOW + 61, NOW + 62);
+        assert!(matches!(
+            validate_at(&past_limit, NOW),
+            Err(AuthError::IssuedInFuture)
+        ));
+    }
 }

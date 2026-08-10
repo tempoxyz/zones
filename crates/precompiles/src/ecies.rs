@@ -124,7 +124,7 @@ pub fn compute_ecdh_proof(
 ///
 /// This implements the full ECIES flow:
 /// 1. ECDH: compute `sharedSecret = privSeq * ephemeralPub`
-/// 2. HKDF-SHA256: derive AES key from shared secret
+/// 2. HKDF-SHA256: derive AES key from shared secret and deposit sender
 /// 3. AES-256-GCM: decrypt ciphertext and verify tag
 /// 4. Parse plaintext into `(to, memo)`
 /// 5. Generate Chaum-Pedersen proof of correct shared secret derivation
@@ -139,11 +139,12 @@ pub fn decrypt_deposit(
     tag: &[u8; 16],
     portal_address: Address,
     key_index: alloy_primitives::U256,
+    sender: Address,
 ) -> Option<DecryptedDeposit> {
     let proof = compute_ecdh_proof(sequencer_privkey, ephemeral_pub_x, ephemeral_pub_y_parity)?;
 
     // HKDF-SHA256: derive AES key
-    let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x);
+    let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x, &sender);
     let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
     // AES-256-GCM decrypt
@@ -412,13 +413,14 @@ pub fn decrypt_authenticated_withdrawal(
 /// 1. Recover sequencer public key from `(seq_pub_x, seq_pub_y_parity)`
 /// 2. Generate ephemeral key pair
 /// 3. ECDH: `sharedSecret = ephPriv * sequencerPub`
-/// 4. HKDF-SHA256: derive AES key
+/// 4. HKDF-SHA256: derive AES key from the shared secret and deposit sender
 /// 5. AES-256-GCM encrypt `[to(20) | memo(32) | padding(12)]`
 pub fn encrypt_deposit(
     seq_pub_x: &B256,
     seq_pub_y_parity: u8,
     to: Address,
     memo: B256,
+    sender: Address,
     portal_address: Address,
     key_index: alloy_primitives::U256,
 ) -> Option<EncryptedDepositArgs> {
@@ -438,7 +440,7 @@ pub fn encrypt_deposit(
     let shared_secret_x: [u8; 32] = ss_enc.x()?.as_slice().try_into().ok()?;
 
     // 4. HKDF key derivation
-    let info = hkdf_info(&portal_address, &key_index, &eph_pub_x);
+    let info = hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender);
     let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
     // 5. Encrypt plaintext with random nonce
@@ -594,16 +596,19 @@ pub fn build_authenticated_withdrawal_plaintext(
     Withdrawal::authenticated_sender_plaintext(*sender, *tx_hash)
 }
 
-/// Build the 84-byte HKDF info parameter: `[portal(20) | key_index(32) | eph_pub_x(32)]`.
+/// Build the 104-byte HKDF info parameter:
+/// `[portal(20) | key_index(32) | eph_pub_x(32) | sender(20)]`.
 pub fn hkdf_info(
     portal: &Address,
     key_index: &alloy_primitives::U256,
     eph_pub_x: &B256,
-) -> [u8; 84] {
-    let mut info = [0u8; 84];
+    sender: &Address,
+) -> [u8; 104] {
+    let mut info = [0u8; 104];
     info[..20].copy_from_slice(portal.as_slice());
     info[20..52].copy_from_slice(&key_index.to_be_bytes::<32>());
     info[52..84].copy_from_slice(&eph_pub_x.0);
+    info[84..].copy_from_slice(sender.as_slice());
     info
 }
 
@@ -791,8 +796,26 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong key should fail decryption");
+    }
+
+    #[test]
+    fn test_ecies_decrypt_wrong_sender() {
+        let f = EncryptedDepositFixture::new();
+        let result = decrypt_deposit(
+            &f.seq_key,
+            &f.eph_pub_x,
+            f.eph_pub_y_parity,
+            &f.ciphertext,
+            &f.nonce,
+            &f.tag,
+            f.portal,
+            f.key_index,
+            Address::repeat_byte(0xEE),
+        );
+        assert!(result.is_none(), "wrong sender should fail decryption");
     }
 
     #[test]
@@ -810,6 +833,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "tampered ciphertext should fail");
     }
@@ -829,6 +853,7 @@ mod tests {
             &tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "tampered tag should fail");
     }
@@ -847,6 +872,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong nonce should fail");
     }
@@ -865,6 +891,7 @@ mod tests {
             &f.tag,
             wrong_portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong portal address should fail");
     }
@@ -883,6 +910,7 @@ mod tests {
             &f.tag,
             f.portal,
             wrong_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong key_index should fail");
     }
@@ -900,6 +928,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "invalid y parity should fail");
     }
@@ -918,6 +947,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "invalid ephemeral x should fail");
     }
@@ -936,7 +966,7 @@ mod tests {
             let shared = AffinePoint::from(ProjectivePoint::from(f.eph_pub) * seq_scalar);
             let ss_enc = shared.to_encoded_point(true);
             let ss_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
-            let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x);
+            let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x, &f.sender);
             hkdf_sha256(&ss_x, b"ecies-aes-key", &info)
         };
         let (ct, nonce, tag) = crate::test_utils::encrypt_plaintext(&aes_key, &short_plaintext);
@@ -950,6 +980,7 @@ mod tests {
             &tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong plaintext length should fail");
     }
@@ -997,11 +1028,20 @@ mod tests {
 
         let to = Address::repeat_byte(0x42);
         let memo = B256::repeat_byte(0xAB);
+        let sender = Address::repeat_byte(0xCD);
         let portal = Address::repeat_byte(0x01);
         let key_index = U256::from(7u64);
 
-        let enc = super::encrypt_deposit(&seq_pub_x, seq_pub_y_parity, to, memo, portal, key_index)
-            .expect("encryption should succeed");
+        let enc = super::encrypt_deposit(
+            &seq_pub_x,
+            seq_pub_y_parity,
+            to,
+            memo,
+            sender,
+            portal,
+            key_index,
+        )
+        .expect("encryption should succeed");
 
         let dec = super::decrypt_deposit(
             &seq_key,
@@ -1012,6 +1052,7 @@ mod tests {
             &enc.tag,
             portal,
             key_index,
+            sender,
         )
         .expect("decryption should succeed");
 

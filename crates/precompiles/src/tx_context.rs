@@ -1,8 +1,8 @@
 //! Transaction execution context for authenticated withdrawals.
 //!
 //! The zone outbox needs the real hash and effective fee payer of the currently executing user
-//! transaction. The block executor publishes both into a thread-local context before EVM
-//! execution. The native outbox and transaction-context precompile read the same context.
+//! transaction. The Zone EVM publishes both into a thread-local context before EVM execution. The
+//! native outbox and transaction-context precompile read the same context.
 
 use std::{cell::RefCell, thread_local};
 
@@ -44,7 +44,7 @@ pub fn set_current_transaction(tx_hash: B256, fee_payer: Address) -> Transaction
     TransactionContextGuard
 }
 
-/// Return the current transaction hash and effective fee payer, when published by the executor.
+/// Return the current transaction hash and effective fee payer, when published by the EVM.
 pub(crate) fn current_transaction() -> Option<(B256, Address)> {
     CURRENT_TRANSACTION.with(|slot| {
         slot.borrow()

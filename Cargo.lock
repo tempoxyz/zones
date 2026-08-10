@@ -11770,7 +11770,6 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "const-hex",
- "futures",
  "serde",
  "tokio",
  "zone-primitives",
@@ -13769,6 +13768,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "vergen",
+ "vergen-git2",
  "zeroize",
  "zone-chainspec",
  "zone-evm",
@@ -13898,6 +13899,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-signer",
  "alloy-signer-local",
+ "alloy-sol-types",
  "axum",
  "base64 0.22.1",
  "eyre",
@@ -13947,6 +13949,7 @@ dependencies = [
  "proptest",
  "reth-chain-state",
  "reth-metrics",
+ "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
  "schnellru",
@@ -13959,6 +13962,10 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
+ "zone-evm",
+ "zone-l1",
+ "zone-rpc",
+ "zone-spf",
 ]
 
 [[package]]

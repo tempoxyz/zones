@@ -166,7 +166,6 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
             alloy_primitives::Bytes::new(),
         )
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(WITHDRAWAL_TX_GAS)
         .send()
         .await?;
     fixture.inject_empty_block(zone.deposit_queue());

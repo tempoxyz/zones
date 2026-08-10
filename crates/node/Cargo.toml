@@ -40,14 +40,15 @@ reth-ethereum = { workspace = true, features = [
   "node",
   "cli",
 ], optional = true }
+reth-evm.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
+reth-node-core.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-evm.workspace = true
-reth-revm.workspace = true
+reth-revm = { workspace = true, features = ["witness"] }
 reth-rpc.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
@@ -86,6 +87,10 @@ tracing.workspace = true
 url = { version = "2", optional = true }
 zeroize = { workspace = true, optional = true }
 
+[build-dependencies]
+vergen.workspace = true
+vergen-git2.workspace = true
+
 [dev-dependencies]
 zone-node = { path = ".", features = ["test-utils"] }
 
@@ -108,7 +113,6 @@ commonware-cryptography.workspace = true
 p256.workspace = true
 rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
-reth-node-core.workspace = true
 reth-tracing.workspace = true
 reth-trie-common.workspace = true
 reqwest.workspace = true
