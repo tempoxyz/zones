@@ -482,6 +482,7 @@ jobs:
       ZONES_BENCH_REPORT: target/zones-benchmark/report-neobank-e2e.json
       ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-input.json
       ZONES_BENCH_SPF_PROFILE: target/zones-benchmark/spf-profile.json.gz
+      ZONES_BENCH_SPF_PROFILE_URL: target/zones-benchmark/spf-profile-url.txt
       ZONES_BENCH_SPF_REPORT: target/zones-benchmark/spf-report.txt
       ZONES_BENCH_SPF_SUMMARY: target/zones-benchmark/spf-summary.md
       ZONES_BENCH_SPF_RANGE: target/zones-benchmark/spf-range.env
@@ -735,23 +736,22 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
-      - name: Check Samply profiling support
+      - name: Install Samply profiler
         run: |
           set -euo pipefail
-          if ! samply_path="$(command -v samply)"; then
-            echo "Samply is not installed on this benchmark runner" >&2
-            exit 1
+          samply_help="$(samply record --help 2>/dev/null || true)"
+          if ! grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"; then
+            cargo install samply \
+              --git https://github.com/DaniPopes/samply \
+              --branch edge \
+              --locked \
+              --force
           fi
+          samply_path="$(command -v samply)"
           "$samply_path" --version
           samply_help="$(samply record --help)"
-          if grep -Eq '^[[:space:]]+--presymbolicate([[:space:]]|$)' <<< "$samply_help"; then
-            echo "ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG=--presymbolicate" >> "$GITHUB_ENV"
-          elif grep -Eq '^[[:space:]]+--unstable-presymbolicate([[:space:]]|$)' <<< "$samply_help"; then
-            echo "ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG=--unstable-presymbolicate" >> "$GITHUB_ENV"
-          else
-            echo "Samply does not support presymbolication" >&2
-            exit 1
-          fi
+          grep -Eq '^[[:space:]]+--presymbolicate([[:space:]]|$)' <<< "$samply_help"
+          grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"
           for setting in perf_event_paranoid kptr_restrict; do
             path="/proc/sys/kernel/$setting"
             if [[ -r "$path" ]]; then
@@ -805,7 +805,8 @@ jobs:
           samply_args=(
             record
             --save-only
-            "$ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG"
+            --presymbolicate
+            --share
             --output "$ZONES_BENCH_SPF_PROFILE"
           )
           set +e
@@ -828,6 +829,16 @@ jobs:
               >> target/zones-benchmark/spf.log
             spf_status=1
           fi
+          profile_url="$(sed -n \
+            's#^View it at: \(https://profiler\.firefox\.com/public/[^[:space:]]*\)$#\1#p' \
+            target/zones-benchmark/spf.log | tail -n 1)"
+          if (( spf_status == 0 )) && [[ -z "$profile_url" ]]; then
+            echo "Samply did not return a Firefox Profiler URL" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          elif [[ -n "$profile_url" ]]; then
+            printf '%s\n' "$profile_url" > "$ZONES_BENCH_SPF_PROFILE_URL"
+          fi
           if (( spf_status == 0 )) &&
              [[ "$ZONES_BENCH_NEOBANK_PRESET" != encrypted-deposit ]] &&
              ! grep -Eq '^  User transactions: +[1-9][0-9]*$' "$ZONES_BENCH_SPF_REPORT"
@@ -841,6 +852,8 @@ jobs:
             echo "## SPF benchmark"
             echo
             if (( spf_status == 0 )); then
+              echo "[Open the CPU profile in Firefox Profiler]($profile_url)"
+              echo
               echo '```text'
               cat "$ZONES_BENCH_SPF_REPORT"
               echo '```'
