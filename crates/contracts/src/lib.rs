@@ -53,8 +53,28 @@ pub use precompiles::*;
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
-    use alloy_sol_types::{SolCall, SolValue};
+    use alloy_primitives::{B256, Bytes, U256, address, b256, keccak256};
+    use alloy_sol_types::{SolCall, SolEvent, SolValue};
+
+    #[test]
+    fn observer_event_topics_match_protocol_interface() {
+        assert_eq!(
+            ZonePortal::DepositsPaused::SIGNATURE_HASH,
+            b256!("eb225a736fbfee3f85ccb72bdf84ff0396ab358b7970e2cc351ab3e3fd92358d")
+        );
+        assert_eq!(
+            ZonePortal::DepositsResumed::SIGNATURE_HASH,
+            b256!("22ab73af03f04a21e91c7923327f99279b7f5d07d9551762c39bccdf051f1fe9")
+        );
+        assert_eq!(
+            ZonePortal::RpcUrlUpdated::SIGNATURE_HASH,
+            b256!("f4e00967b25e707df96d88676243b33be84847ef27615af8ef91290b52294fc6")
+        );
+        assert_eq!(
+            IZoneInbox::DepositRejected::SIGNATURE_HASH,
+            b256!("4620415fad9c416306a56ca0ee640b3418628a5f2e45ddde3ddf7452a7a654fb")
+        );
+    }
 
     #[test]
     fn test_withdrawal_bounce_back_abi_encode_vs_params() {
