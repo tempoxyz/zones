@@ -86,7 +86,7 @@ pub(crate) trait CallRules: 'static {
     }
 
     /// Applies pure Zone-specific admission rules before storage setup.
-    fn admit(&self, _data: &[u8], _caller: Address, _tx_origin: Address) -> CallCheck {
+    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -112,7 +112,6 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
-        let tx_origin = input.internals.tx_origin();
         if input.gas < input_cost(data.len()) {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
@@ -139,24 +138,21 @@ pub(crate) fn create_precompile(
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
-
         if fixed_gas.is_some() {
             // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
             // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
             storage.set_tip1060_storage_credits(false);
         }
 
-        let mut result = StorageCtx::enter(&mut storage, || {
-            match rules.admit(data, caller, tx_origin) {
-                CallCheck::Continue => execute(data, caller),
-                CallCheck::Revert(output) => {
-                    let s = StorageCtx::default();
-                    let output = s.revert_output(output);
-                    add_input_cost(s, data, Ok(output))
-                }
-                CallCheck::Error(CallRuleError::Tempo(error)) => {
-                    StorageCtx::default().error_result(error)
-                }
+        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
+            CallCheck::Continue => execute(data, caller),
+            CallCheck::Revert(output) => {
+                let s = StorageCtx::default();
+                let output = s.revert_output(output);
+                add_input_cost(s, data, Ok(output))
+            }
+            CallCheck::Error(CallRuleError::Tempo(error)) => {
+                StorageCtx::default().error_result(error)
             }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
@@ -196,7 +192,7 @@ mod tests {
     use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
-    type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address, Address)>>>;
+    type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
 
     struct RecordingRules(RuleRecord);
 
@@ -205,12 +201,11 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, data: &[u8], caller: Address, tx_origin: Address) -> CallCheck {
+        fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(data),
                 selector_from_calldata(data),
                 caller,
-                tx_origin,
             ));
             CallCheck::Continue
         }
@@ -262,7 +257,6 @@ mod tests {
         let mut outer = test_storage_provider(&mut outer_ctx, 777, false);
         let calldata = [0xde, 0xad, 0xbe, 0xef, 0x01];
         let caller = Address::repeat_byte(0x22);
-        let tx_origin = inner_ctx.tx.caller;
         let output = StorageCtx::enter(&mut outer, || {
             let output = precompile
                 .call(input(&mut inner_ctx, &calldata, caller, FIXED_GAS))
@@ -274,12 +268,7 @@ mod tests {
         assert_eq!(output.gas_used, FIXED_GAS);
         assert_eq!(
             *recorded_rule.borrow(),
-            Some((
-                calldata.into(),
-                Some([0xde, 0xad, 0xbe, 0xef]),
-                caller,
-                tx_origin
-            ))
+            Some((calldata.into(), Some([0xde, 0xad, 0xbe, 0xef]), caller))
         );
         assert_eq!(*recorded_execute.borrow(), Some((calldata.into(), caller)));
     }
@@ -373,7 +362,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, _data: &[u8], _caller: Address, _tx_origin: Address) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
             self.0.set(true);
             CallCheck::Revert(Bytes::from_static(b"denied"))
         }

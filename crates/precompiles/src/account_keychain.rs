@@ -23,7 +23,7 @@ impl<P> AccountKeychainRules<P> {
 }
 
 impl<P: L1StorageReader> CallRules for AccountKeychainRules<P> {
-    fn admit(&self, data: &[u8], caller: Address, _tx_origin: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
         let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode(data) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
@@ -86,12 +86,12 @@ mod tests {
     ) {
         for caller in [owner, sequencer] {
             assert!(matches!(
-                rules.admit(&call.clone().abi_encode(), caller, caller),
+                rules.admit(&call.clone().abi_encode(), caller),
                 CallCheck::Continue
             ));
         }
         assert!(matches!(
-            rules.admit(&call.abi_encode(), outsider, outsider),
+            rules.admit(&call.abi_encode(), outsider),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -184,7 +184,6 @@ mod tests {
         assert!(matches!(
             rules.admit(
                 &IAccountKeychain::getTransactionKeyCall {}.abi_encode(),
-                caller,
                 caller
             ),
             CallCheck::Continue
@@ -195,7 +194,6 @@ mod tests {
                     keyId: Address::repeat_byte(0x22),
                 }
                 .abi_encode(),
-                caller,
                 caller
             ),
             CallCheck::Continue

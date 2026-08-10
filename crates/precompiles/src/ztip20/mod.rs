@@ -10,7 +10,6 @@
 
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError, SolInterface};
-use tempo_contracts::MULTICALL3_ADDRESS;
 use tempo_precompiles::tip20::{IRolesAuth, ITIP20};
 use tempo_zone_contracts::Unauthorized;
 
@@ -60,7 +59,7 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
     }
 
     /// Apply zone privacy and selector restrictions before upstream execution.
-    fn admit(&self, data: &[u8], caller: Address, tx_origin: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
@@ -100,11 +99,7 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 | ITIP20::ITIP20Calls::transfer(_)
                 | ITIP20::ITIP20Calls::transferWithMemo(_)
                 | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
-                    if caller != tx_origin && caller != MULTICALL3_ADDRESS {
-                        CallCheck::Continue
-                    } else {
-                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
-                    }
+                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
                 }
                 ITIP20::ITIP20Calls::name(_)
                 | ITIP20::ITIP20Calls::symbol(_)
@@ -150,7 +145,7 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, Bytes, U256, address};
+    use alloy::primitives::{Address, B256, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
@@ -185,14 +180,14 @@ mod tests {
 
     fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller, caller),
+            rules.admit(&call.abi_encode(), caller),
             CallCheck::Continue
         ));
     }
 
     fn assert_unauthorized(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller, caller),
+            rules.admit(&call.abi_encode(), caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -345,28 +340,45 @@ mod tests {
     }
 
     #[test]
-    fn transfers_require_an_internal_non_multicall_caller() {
+    fn all_transfer_calls_are_disallowed() {
         let rules = rules();
-        let origin = Address::repeat_byte(0x11);
-        let contract = Address::repeat_byte(0x22);
-        let transfer = ITIP20::transferCall {
-            to: Address::repeat_byte(0x33),
-            amount: U256::from(1),
-        }
-        .abi_encode();
+        let caller = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let amount = U256::from(1);
+        let memo = B256::repeat_byte(0x33);
+        let calls = [
+            ITIP20::transferCall {
+                to: recipient,
+                amount,
+            }
+            .abi_encode(),
+            ITIP20::transferFromCall {
+                from: caller,
+                to: recipient,
+                amount,
+            }
+            .abi_encode(),
+            ITIP20::transferWithMemoCall {
+                to: recipient,
+                amount,
+                memo,
+            }
+            .abi_encode(),
+            ITIP20::transferFromWithMemoCall {
+                from: caller,
+                to: recipient,
+                amount,
+                memo,
+            }
+            .abi_encode(),
+        ];
 
-        assert!(matches!(
-            rules.admit(&transfer, origin, origin),
-            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
-        ));
-        assert!(matches!(
-            rules.admit(&transfer, contract, origin),
-            CallCheck::Continue
-        ));
-        assert!(matches!(
-            rules.admit(&transfer, MULTICALL3_ADDRESS, origin),
-            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
-        ));
+        for call in calls {
+            assert!(matches!(
+                rules.admit(&call, caller),
+                CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+            ));
+        }
     }
 
     #[test]

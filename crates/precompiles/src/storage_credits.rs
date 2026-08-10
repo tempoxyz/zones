@@ -23,7 +23,7 @@ impl<P> StorageCreditsRules<P> {
 }
 
 impl<P: L1StorageReader> CallRules for StorageCreditsRules<P> {
-    fn admit(&self, data: &[u8], caller: Address, _tx_origin: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
         let Ok(call) = IStorageCredits::IStorageCreditsCalls::abi_decode(data) else {
             return CallCheck::Continue;
         };
@@ -83,12 +83,12 @@ mod tests {
             ] {
                 for caller in [owner, sequencer] {
                     assert!(matches!(
-                        rules.admit(&call.abi_encode(), caller, caller),
+                        rules.admit(&call.abi_encode(), caller),
                         CallCheck::Continue
                     ));
                 }
                 assert!(matches!(
-                    rules.admit(&call.abi_encode(), outsider, outsider),
+                    rules.admit(&call.abi_encode(), outsider),
                     CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
                 ));
             }
@@ -103,13 +103,12 @@ mod tests {
         assert!(matches!(
             rules.admit(
                 &IStorageCredits::setBudgetCall { credits: 7 }.abi_encode(),
-                caller,
                 caller
             ),
             CallCheck::Continue
         ));
         assert!(matches!(
-            rules.admit(&IStorageCredits::balanceOfCall::SELECTOR, caller, caller),
+            rules.admit(&IStorageCredits::balanceOfCall::SELECTOR, caller),
             CallCheck::Continue
         ));
     }
