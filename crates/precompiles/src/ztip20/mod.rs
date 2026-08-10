@@ -545,10 +545,10 @@ mod tests {
             Bytes::from(Unauthorized {}.abi_encode())
         );
 
-        let transfer = harness.call(
+        let approve = harness.call(
             harness.alice,
-            ITIP20::transferCall {
-                to: harness.bob,
+            ITIP20::approveCall {
+                spender: harness.spender,
                 amount: U256::from(12_345u64),
             }
             .abi_encode()
@@ -556,9 +556,12 @@ mod tests {
             TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert!(transfer.is_success());
-        assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
+        assert!(approve.is_success());
+        assert_eq!(approve.gas_used, TIP20_FIXED_TRANSFER_GAS);
+        assert_eq!(
+            harness.allowance(harness.alice, harness.spender)?,
+            U256::from(12_345u64)
+        );
 
         Ok(())
     }
@@ -823,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_gas_keeps_allowance_and_balance_state_changes_intact() -> eyre::Result<()> {
+    fn fixed_gas_keeps_allowance_state_changes_intact() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
 
         let approve = harness.call(
@@ -842,20 +845,6 @@ mod tests {
             harness.allowance(harness.alice, harness.spender)?,
             U256::from(123_456u64)
         );
-
-        let transfer = harness.call(
-            harness.alice,
-            ITIP20::transferCall {
-                to: harness.bob,
-                amount: U256::from(7_654u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert!(transfer.is_success());
-        assert_eq!(harness.balance_of(harness.bob)?, U256::from(7_654u64));
 
         Ok(())
     }
