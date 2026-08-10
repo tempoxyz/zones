@@ -299,6 +299,7 @@ crate::sol! {
         function isTokenEnabled(address token) external view returns (bool);
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
+        function tokenEnablementHash() external view returns (bytes32);
         function zoneGasRate() external view returns (uint128);
         function maxTempoGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);

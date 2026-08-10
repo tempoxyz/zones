@@ -5,7 +5,7 @@ use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
 use alloy_rlp::Encodable;
-use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, TransactionRequest};
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, TransactionRequest};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use commonware_codec::Encode as _;
@@ -2792,15 +2792,21 @@ async fn build_l1_anchored_genesis(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
-    let default_fee_token = if portal_address.is_zero() {
-        PATH_USD_ADDRESS
+    let (default_fee_token, token_enablement_hash) = if portal_address.is_zero() {
+        (PATH_USD_ADDRESS, B256::ZERO)
     } else {
-        ZonePortal::new(portal_address, &l1_provider)
-            .enabledTokenAt(U256::ZERO)
-            .call()
-            .await?
+        let portal = ZonePortal::new(portal_address, &l1_provider);
+        (
+            portal.enabledTokenAt(U256::ZERO).call().await?,
+            portal.tokenEnablementHash().call().await?,
+        )
     };
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
+    zone_node::genesis::l1_anchored_genesis(
+        l1_header,
+        portal_address,
+        default_fee_token,
+        token_enablement_hash,
+    )
 }
 
 /// Build a zone test genesis anchored to a specific L1 block number.
@@ -2817,15 +2823,36 @@ async fn build_l1_anchored_genesis_at_block(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
-    let default_fee_token = if portal_address.is_zero() {
-        PATH_USD_ADDRESS
+    let (default_fee_token, token_enablement_hash) = if portal_address.is_zero() {
+        (PATH_USD_ADDRESS, B256::ZERO)
     } else {
-        ZonePortal::new(portal_address, &l1_provider)
-            .enabledTokenAt(U256::ZERO)
-            .call()
-            .await?
+        let block_id = BlockId::number(block_number);
+        let portal_code = l1_provider
+            .get_code_at(portal_address)
+            .block_id(block_id)
+            .await?;
+        if portal_code.is_empty() {
+            // The anchor predates portal creation. The initial TokenEnabled event must be
+            // replayed from the creation block, so leave the commitment unbootstrapped.
+            (PATH_USD_ADDRESS, B256::ZERO)
+        } else {
+            let portal = ZonePortal::new(portal_address, &l1_provider);
+            (
+                portal
+                    .enabledTokenAt(U256::ZERO)
+                    .block(block_id)
+                    .call()
+                    .await?,
+                portal.tokenEnablementHash().block(block_id).call().await?,
+            )
+        }
     };
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
+    zone_node::genesis::l1_anchored_genesis(
+        l1_header,
+        portal_address,
+        default_fee_token,
+        token_enablement_hash,
+    )
 }
 
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.

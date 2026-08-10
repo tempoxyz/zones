@@ -210,6 +210,10 @@ contract ZonePortal is IZonePortal {
     uint64 internal _tokenEnableCountBlock;
     uint64 internal _tokensEnabledInCurrentBlock;
 
+    /// @notice Append-only commitment to every enabled token and its metadata.
+    /// @dev Stored at slot 26 so the existing portal layout remains unchanged.
+    bytes32 public tokenEnablementHash;
+
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
@@ -602,6 +606,8 @@ contract ZonePortal is IZonePortal {
             revert TokenTransferPolicyNotSet();
         }
 
+        tokenEnablementHash =
+            keccak256(abi.encode(tokenEnablementHash, _token, name, symbol, currency));
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
         _enabledTokens.push(_token);
 

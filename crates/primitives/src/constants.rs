@@ -67,6 +67,9 @@ pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
 /// ZonePortal storage slot 6: `_tokenConfigs` mapping.
 pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 
+/// ZonePortal storage slot 26: append-only token-enablement commitment.
+pub const PORTAL_TOKEN_ENABLEMENT_HASH_SLOT: B256 = B256::with_last_byte(26);
+
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
@@ -99,6 +102,9 @@ pub const ZONE_INBOX_PROCESSED_NUMBER_SLOT: U256 = {
     le[0] = 1;
     U256::from_le_bytes(le)
 };
+
+/// ZoneInbox storage slot 3: `processedTokenEnablementHash` (bytes32).
+pub const ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT: B256 = B256::with_last_byte(3);
 
 /// ZoneOutbox storage slot 1: `_withdrawalQueueHash` (bytes32).
 ///

@@ -356,6 +356,7 @@ interface IZoneTxContext {
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
 //            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
 //   slot 25: _tokensEnabledInCurrentBlock (uint64)
+//   slot 26: tokenEnablementHash (bytes32)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -366,6 +367,7 @@ bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(5));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
+bytes32 constant PORTAL_TOKEN_ENABLEMENT_HASH_SLOT = bytes32(uint256(26));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
@@ -797,6 +799,9 @@ interface IZonePortal {
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
 
+    /// @notice Append-only commitment to enabled token addresses and metadata
+    function tokenEnablementHash() external view returns (bytes32);
+
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
     function enableToken(address token) external;
@@ -1107,6 +1112,7 @@ interface IZoneInbox {
     /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
+    error InvalidTokenEnablementHash();
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error InvalidWithdrawalBounceBack();
@@ -1125,6 +1131,9 @@ interface IZoneInbox {
     function processedDepositQueueHash() external view returns (bytes32);
 
     function processedDepositNumber() external view returns (uint64);
+
+    /// @notice Append-only commitment already applied by the zone
+    function processedTokenEnablementHash() external view returns (bytes32);
 
     function refunds(address token, address owner) external view returns (uint128);
 

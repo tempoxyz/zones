@@ -20,6 +20,7 @@ import {
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     QueuedDeposit,
     WithdrawalBounceBackDeposit,
     ZONE_OUTBOX
@@ -742,6 +743,23 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decryptions, enabledTokens);
     }
 
+    function _tokenEnablementHash(EnabledToken[] memory enabledTokens)
+        internal
+        pure
+        returns (bytes32 hash)
+    {
+        for (uint256 i; i < enabledTokens.length; ++i) {
+            EnabledToken memory token = enabledTokens[i];
+            hash = keccak256(
+                abi.encode(hash, token.token, token.name, token.symbol, token.currency)
+            );
+        }
+    }
+
+    function _setTokenEnablementHash(bytes32 hash) internal {
+        tempoState.setMockStorageValue(mockPortal, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT, hash);
+    }
+
     function _mockTokenActivation(address token) internal {
         bytes32 issuerRole = keccak256("ISSUER_ROLE");
         vm.mockCall(token, abi.encodeWithSelector(IZoneToken.initialize.selector), abi.encode());
@@ -751,8 +769,8 @@ contract ZoneInboxTest is Test {
         vm.mockCall(token, abi.encodeWithSelector(IZoneToken.grantRole.selector), abi.encode());
     }
 
-    /// @notice Advancing accepts an enabled token even if the portal has not enabled it.
-    function test_advanceTempo_enabledTokenNotPortalEnabled_accepts() public {
+    /// @notice Advancing rejects a token that is absent from the portal commitment.
+    function test_advanceTempo_enabledTokenNotPortalEnabled_reverts() public {
         address token = address(0x777);
         vm.etch(token, hex"00");
         _mockTokenActivation(token);
@@ -762,11 +780,12 @@ contract ZoneInboxTest is Test {
             EnabledToken({ token: token, name: "Token", symbol: "TOK", currency: "USD" });
 
         vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.InvalidTokenEnablementHash.selector);
         _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), enabledTokens);
     }
 
-    /// @notice Advancing accepts duplicate enabled token entries.
-    function test_advanceTempo_duplicateEnabledToken_accepts() public {
+    /// @notice Advancing rejects duplicate entries when the portal commitment contains one token.
+    function test_advanceTempo_duplicateEnabledToken_reverts() public {
         address token = address(0x777);
         vm.etch(token, hex"00");
         _mockTokenActivation(token);
@@ -775,9 +794,71 @@ contract ZoneInboxTest is Test {
         enabledTokens[0] =
             EnabledToken({ token: token, name: "Token", symbol: "TOK", currency: "USD" });
         enabledTokens[1] = enabledTokens[0];
+        EnabledToken[] memory portalTokens = new EnabledToken[](1);
+        portalTokens[0] = enabledTokens[0];
+        _setTokenEnablementHash(_tokenEnablementHash(portalTokens));
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.InvalidTokenEnablementHash.selector);
+        _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), enabledTokens);
+    }
+
+    /// @notice Metadata is part of the authenticated enablement commitment.
+    function test_advanceTempo_tokenMetadataMismatch_reverts() public {
+        address token = address(0x778);
+        vm.etch(token, hex"00");
+        _mockTokenActivation(token);
+
+        EnabledToken[] memory supplied = new EnabledToken[](1);
+        supplied[0] = EnabledToken({ token: token, name: "Token", symbol: "TOK", currency: "USD" });
+        EnabledToken[] memory portalTokens = new EnabledToken[](1);
+        portalTokens[0] =
+            EnabledToken({ token: token, name: "Different Token", symbol: "TOK", currency: "USD" });
+        _setTokenEnablementHash(_tokenEnablementHash(portalTokens));
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.InvalidTokenEnablementHash.selector);
+        _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), supplied);
+    }
+
+    /// @notice The ordered token sequence is authenticated, not just its members.
+    function test_advanceTempo_tokenOrderMismatch_reverts() public {
+        address tokenA = address(0x778);
+        address tokenB = address(0x779);
+        vm.etch(tokenA, hex"00");
+        vm.etch(tokenB, hex"00");
+        _mockTokenActivation(tokenA);
+        _mockTokenActivation(tokenB);
+
+        EnabledToken[] memory supplied = new EnabledToken[](2);
+        supplied[0] = EnabledToken({ token: tokenB, name: "B", symbol: "B", currency: "USD" });
+        supplied[1] = EnabledToken({ token: tokenA, name: "A", symbol: "A", currency: "USD" });
+        EnabledToken[] memory portalTokens = new EnabledToken[](2);
+        portalTokens[0] = supplied[1];
+        portalTokens[1] = supplied[0];
+        _setTokenEnablementHash(_tokenEnablementHash(portalTokens));
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.InvalidTokenEnablementHash.selector);
+        _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), supplied);
+    }
+
+    /// @notice A matching commitment initializes the token before deposits are processed.
+    function test_advanceTempo_matchingTokenCommitment_initializesToken() public {
+        address token = address(0x77a);
+        vm.etch(token, hex"00");
+        _mockTokenActivation(token);
+
+        EnabledToken[] memory enabledTokens = new EnabledToken[](1);
+        enabledTokens[0] =
+            EnabledToken({ token: token, name: "Token", symbol: "TOK", currency: "USD" });
+        bytes32 expectedHash = _tokenEnablementHash(enabledTokens);
+        _setTokenEnablementHash(expectedHash);
 
         vm.prank(sequencer);
         _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), enabledTokens);
+
+        assertEq(inbox.processedTokenEnablementHash(), expectedHash);
     }
 
     /// @notice Claiming with no refund returns zero and mints nothing.

@@ -27,6 +27,7 @@ import {
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     Role,
     Withdrawal,
     WithdrawalBounceBackDeposit,
@@ -322,6 +323,10 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
         assertEq(ZonePortal(proxyA).verifier(), verifierA);
         assertEq(ZonePortal(proxyA).blockHash(), bytes32(0));
+        assertEq(
+            ZonePortal(proxyA).tokenEnablementHash(),
+            keccak256(abi.encode(bytes32(0), initialToken, "Initial Token", "INITIAL", "USD"))
+        );
         _assertTip1091Storage(proxyA, ZonePortal(proxyA).sequencerAt(0));
 
         assertEq(ZonePortal(proxyB).zoneId(), 2);
@@ -4990,6 +4995,15 @@ contract ZonePortalTest is BaseTest {
             uint64(uint256(activationSlot)),
             portal.leaderActivationTempoBlock(),
             "slot 24: leaderActivationTempoBlock mismatch"
+        );
+
+        // --- Slot 26: token enablement commitment ---
+        bytes32 tokenEnablementHashSlot =
+            vm.load(address(portal), PORTAL_TOKEN_ENABLEMENT_HASH_SLOT);
+        assertEq(
+            tokenEnablementHashSlot,
+            portal.tokenEnablementHash(),
+            "slot 26: tokenEnablementHash mismatch"
         );
     }
 

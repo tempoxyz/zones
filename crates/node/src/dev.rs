@@ -14,7 +14,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
-use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal};
 use zone_primitives::constants::zone_chain_id;
 use zone_sequencer::register_encryption_key;
 
@@ -140,13 +140,21 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
     let zone_id = zone_created.zoneId;
     let portal = zone_created.portal;
+    let token_enablement_hash = ZonePortal::new(portal, &provider)
+        .tokenEnablementHash()
+        .call()
+        .await?;
     let parent_chain_id = provider.get_chain_id().await?;
     let chain_id = zone_chain_id(parent_chain_id, zone_id)?;
 
     register_encryption_key(&provider, portal, &dev_key).await?;
 
-    let (mut genesis, anchor_block_number) =
-        crate::genesis::l1_anchored_genesis(&anchor_header, portal, initial_token)?;
+    let (mut genesis, anchor_block_number) = crate::genesis::l1_anchored_genesis(
+        &anchor_header,
+        portal,
+        initial_token,
+        token_enablement_hash,
+    )?;
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {

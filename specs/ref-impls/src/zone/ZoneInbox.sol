@@ -18,6 +18,7 @@ import {
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     QueuedDeposit,
     WithdrawalBounceBackDeposit,
     ZONE_OUTBOX
@@ -52,6 +53,9 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice Refunds parked after a withdrawal-bounce-back mint reverts on the zone.
     mapping(address token => mapping(address owner => uint128 amount)) private _refunds;
+
+    /// @notice Last portal token-enablement commitment applied by this zone.
+    bytes32 public processedTokenEnablementHash;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -178,6 +182,19 @@ contract ZoneInbox is IZoneInbox {
         okm = _hmacSha256(abi.encodePacked(prk), expandInput);
     }
 
+    function _hashTokenEnablement(
+        bytes32 previousHash,
+        EnabledToken memory token
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(previousHash, token.token, token.name, token.symbol, token.currency)
+        );
+    }
+
     function _readEncryptionKey(uint256 keyIndex) internal view returns (bytes32 x, uint8 yParity) {
         uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
         uint256 slotX = base + (keyIndex * 2);
@@ -215,6 +232,19 @@ contract ZoneInbox is IZoneInbox {
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
 
+        // Authenticate the complete append-only token-enablement delta before activating any
+        // token or processing any deposit.
+        bytes32 nextTokenEnablementHash = processedTokenEnablementHash;
+        for (uint256 i = 0; i < enabledTokens.length; i++) {
+            nextTokenEnablementHash =
+                _hashTokenEnablement(nextTokenEnablementHash, enabledTokens[i]);
+        }
+        bytes32 tempoTokenEnablementHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT);
+        if (nextTokenEnablementHash != tempoTokenEnablementHash) {
+            revert InvalidTokenEnablementHash();
+        }
+
         // Activate new tokens directly in the Inbox.
         for (uint256 i = 0; i < enabledTokens.length; i++) {
             EnabledToken calldata t = enabledTokens[i];
@@ -226,6 +256,9 @@ contract ZoneInbox is IZoneInbox {
             token.grantRole(issuerRole, address(this));
             token.grantRole(issuerRole, ZONE_OUTBOX);
             emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
+        }
+        if (enabledTokens.length != 0) {
+            processedTokenEnablementHash = nextTokenEnablementHash;
         }
 
         // Step 2: Process deposits and build hash chain
