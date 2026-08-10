@@ -459,8 +459,7 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
                 alloy_contract::Error::TransportError(
                     alloy_transport::TransportErrorKind::custom_str(&format!(
                         "invalid Portal encryption public key: {err}"
-                    ))
-                    .into(),
+                    )),
                 )
             })?;
         Ok((
