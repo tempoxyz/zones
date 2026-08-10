@@ -55,6 +55,7 @@ mod account_keychain;
 pub mod inbox;
 mod nonce;
 pub mod receive_policy_guard;
+pub mod state;
 pub mod storage;
 mod storage_credits;
 pub mod tempo_state;
