@@ -1405,7 +1405,7 @@ impl ZoneTestNode {
             deposit_decryption_keys.apply_rotation(&EncryptionKeyRotation {
                 x: B256::from_slice(encoded.x().expect("compressed fixture key has x")),
                 y_parity: encoded.as_bytes()[0],
-                expected: encryption_key_address(
+                pubkey: encryption_key_address(
                     B256::from_slice(encoded.x().expect("compressed fixture key has x")),
                     encoded.as_bytes()[0],
                 )?,

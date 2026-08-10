@@ -1749,7 +1749,7 @@ interface IZonePortal {
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(
-        bytes32 x, uint8 yParity, address expected, uint256 keyIndex, uint64 activationBlock
+        bytes32 x, uint8 yParity, address pubkey, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);

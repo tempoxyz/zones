@@ -1051,7 +1051,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         .apply_rotation(&EncryptionKeyRotation {
             x: seq_pub_x,
             y_parity: seq_pub_y_parity,
-            expected: encryption_key_address(seq_pub_x, seq_pub_y_parity).unwrap(),
+            pubkey: encryption_key_address(seq_pub_x, seq_pub_y_parity).unwrap(),
             key_index: U256::ZERO,
             activation_block: block_number,
         })
@@ -1120,7 +1120,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             .apply_rotation(&EncryptionKeyRotation {
                 x,
                 y_parity,
-                expected: encryption_key_address(x, y_parity).unwrap(),
+                pubkey: encryption_key_address(x, y_parity).unwrap(),
                 key_index,
                 activation_block: key_index.to::<u64>() + 10,
             })
@@ -1463,14 +1463,14 @@ fn encryption_key_updated_log(
     portal: Address,
     x: B256,
     y_parity: u8,
-    expected: Address,
+    pubkey: Address,
     key_index: U256,
     activation_block: u64,
 ) -> Log {
     let event = crate::abi::ZonePortal::SequencerEncryptionKeyUpdated {
         x,
         yParity: y_parity,
-        expected,
+        pubkey,
         keyIndex: key_index,
         activationBlock: activation_block,
     };
@@ -1489,13 +1489,13 @@ fn encryption_key_event_binds_private_key_to_portal_index() {
     let private_key = k256::SecretKey::from_slice(&[0x42; 32]).unwrap();
     let public_key = private_key.public_key();
     let (x, y_parity) = crate::precompiles::ecies::compressed_x_and_parity(public_key.as_affine());
-    let expected = encryption_key_address(x, y_parity).unwrap();
+    let pubkey = encryption_key_address(x, y_parity).unwrap();
     let key_index = U256::from(7);
     let mut events = L1PortalEvents::default();
 
     events
         .push_log(
-            &encryption_key_updated_log(portal, x, y_parity, expected, key_index, 77),
+            &encryption_key_updated_log(portal, x, y_parity, pubkey, key_index, 77),
             77,
         )
         .unwrap();
@@ -1505,7 +1505,7 @@ fn encryption_key_event_binds_private_key_to_portal_index() {
         vec![EncryptionKeyRotation {
             x,
             y_parity,
-            expected,
+            pubkey,
             key_index,
             activation_block: 77,
         }]

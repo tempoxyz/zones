@@ -25,7 +25,7 @@ pub struct EncryptionKeyRotation {
     /// Compressed public-key prefix (`0x02` or `0x03`).
     pub y_parity: u8,
     /// Ethereum address derived from the compressed public key.
-    pub expected: Address,
+    pub pubkey: Address,
     /// Index assigned by the Portal's append-only key history.
     pub key_index: U256,
     /// L1 block at which this key became current.
@@ -195,7 +195,7 @@ impl L1PortalEvents {
             ZonePortalEvents::SequencerEncryptionKeyUpdated(event) => {
                 info!(
                     l1_block = block_number,
-                    expected = %event.expected,
+                    pubkey = %event.pubkey,
                     key_index = %event.keyIndex,
                     activation_block = event.activationBlock,
                     "Sequencer encryption key rotated on L1"
@@ -203,7 +203,7 @@ impl L1PortalEvents {
                 self.encryption_key_rotations.push(EncryptionKeyRotation {
                     x: event.x,
                     y_parity: event.yParity,
-                    expected: event.expected,
+                    pubkey: event.pubkey,
                     key_index: event.keyIndex,
                     activation_block: event.activationBlock,
                 });
