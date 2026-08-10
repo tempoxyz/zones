@@ -90,8 +90,6 @@ pub(crate) struct EncodedPersistedBlock {
 /// Interface used by the replication task to keep track of blocks that are persisted vs broadcast
 pub(crate) trait PersistedBlockSource: Clone + Send + Sync + 'static {
     fn last_block_number(&self) -> eyre::Result<u64>;
-    /// The canonical head, which may be ahead of the persisted head (reth persists lazily).
-    fn canonical_block_number(&self) -> eyre::Result<u64>;
     fn persisted_block_stream(&self) -> BoxStream<'static, PersistedTip>;
     fn encoded_block_by_number(&self, number: u64) -> eyre::Result<EncodedPersistedBlock>;
 }
@@ -102,10 +100,6 @@ where
 {
     fn last_block_number(&self) -> eyre::Result<u64> {
         Ok(BlockNumReader::last_block_number(self)?)
-    }
-
-    fn canonical_block_number(&self) -> eyre::Result<u64> {
-        Ok(BlockNumReader::best_block_number(self)?)
     }
 
     fn persisted_block_stream(&self) -> BoxStream<'static, PersistedTip> {
@@ -171,22 +165,22 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
             () = stop.cancelled() => {
                 // The block generation is stopping (leader demotion). Flush all persisted
                 // blocks to ensure the new leader can take over properly.
-                match provider.canonical_block_number() {
-                    Ok(canonical) => {
+                match provider.last_block_number() {
+                    Ok(persisted) => {
                         if let Err(err) = broadcast_persisted_range(
                             &provider,
                             &commands,
                             &mut last_broadcast,
-                            canonical,
+                            persisted,
                             None,
                         )
                         .await
                         {
-                            tracing::error!(target: "zone::p2p", %err, "Failed flushing canonical zone blocks on stop");
+                            tracing::error!(target: "zone::p2p", %err, "Failed flushing persisted zone blocks on stop");
                         }
                     }
                     Err(err) => {
-                        tracing::error!(target: "zone::p2p", %err, "Failed reading the canonical zone head for the stop flush");
+                        tracing::error!(target: "zone::p2p", %err, "Failed reading the persisted zone head for the stop flush");
                     }
                 }
                 debug!(target: "zone::p2p", "Persisted block broadcaster stopped");
@@ -1269,10 +1263,6 @@ mod tests {
             })
         }
 
-        fn canonical_block_number(&self) -> eyre::Result<u64> {
-            Ok(self.tip.number)
-        }
-
         fn persisted_block_stream(&self) -> futures::stream::BoxStream<'static, PersistedTip> {
             stream::iter([self.tip]).boxed()
         }
@@ -1284,6 +1274,27 @@ mod tests {
                 hash: self.tip.hash,
                 encoded: vec![number as u8],
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct DemotionSource {
+        encoded_reads: Arc<AtomicUsize>,
+        persisted: u64,
+    }
+
+    impl PersistedBlockSource for DemotionSource {
+        fn last_block_number(&self) -> eyre::Result<u64> {
+            Ok(self.persisted)
+        }
+
+        fn persisted_block_stream(&self) -> futures::stream::BoxStream<'static, PersistedTip> {
+            stream::pending().boxed()
+        }
+
+        fn encoded_block_by_number(&self, number: u64) -> eyre::Result<EncodedPersistedBlock> {
+            self.encoded_reads.fetch_add(1, Ordering::SeqCst);
+            eyre::bail!("stop flush tried to read unpersisted block {number}")
         }
     }
 
@@ -1668,6 +1679,23 @@ mod tests {
             command_rx.recv().await,
             Some(P2pCommand::BroadcastBlock(vec![1]))
         );
+        assert_eq!(command_rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn demotion_flush_stops_at_the_persisted_head() {
+        let encoded_reads = Arc::new(AtomicUsize::new(0));
+        let source = DemotionSource {
+            encoded_reads: encoded_reads.clone(),
+            persisted: 1,
+        };
+        let (commands, mut command_rx) = tokio::sync::mpsc::channel(1);
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+
+        broadcast_persisted_blocks(source, commands, stop).await;
+
+        assert_eq!(encoded_reads.load(Ordering::SeqCst), 0);
         assert_eq!(command_rx.recv().await, None);
     }
 
