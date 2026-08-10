@@ -17,7 +17,7 @@ use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_regist
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, approve_self, seed_raw_tip403_policy,
+    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
     seed_raw_tip403_token_policy, start_local_zone_with_fixture,
 };
 
@@ -62,16 +62,8 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     fixture.seed_no_receive_policy(bob)?;
 
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
-    approve_self(
-        &mut fixture,
-        &zone,
-        &alice_provider,
-        PATH_USD_ADDRESS,
-        alice,
-    )
-    .await?;
     let pending = tip20
-        .transferFrom(alice, bob, U256::from(transfer_amount))
+        .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
