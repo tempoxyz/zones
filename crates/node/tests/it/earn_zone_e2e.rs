@@ -603,9 +603,7 @@ impl EarnZoneFixture {
             provider,
             token: self.earn_share,
         };
-        let recipient_authorized = registry
-            .is_auth_as(account, self.user.address(), AuthRole::Recipient)
-            .await;
+        let recipient_authorized = registry.is_auth_as(account, AuthRole::Recipient).await;
         eyre::ensure!(
             recipient_authorized == eligible,
             "Zone did not mirror Earn recipient eligibility for policy {} and {account}: actual={recipient_authorized}, expected={eligible}",

@@ -195,10 +195,10 @@ async fn test_policy_proxy_whitelist_authorization() -> eyre::Result<()> {
     let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob], 1, 5)?;
 
     // Alice is whitelisted → authorized
-    let alice_authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
+    let alice_authorized = registry.is_auth_as(alice, AuthRole::Transfer).await;
     assert!(alice_authorized, "alice should be authorized (whitelisted)");
     // Bob is NOT in whitelist → not authorized (fail-closed)
-    let bob_authorized = registry.is_auth_as(bob, bob, AuthRole::Transfer).await;
+    let bob_authorized = registry.is_auth_as(bob, AuthRole::Transfer).await;
     assert!(
         !bob_authorized,
         "bob should NOT be authorized (not in whitelist)"
@@ -233,14 +233,14 @@ async fn test_policy_proxy_blacklist_authorization() -> eyre::Result<()> {
     let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob], 1, 5)?;
 
     // Alice is in blacklist → NOT authorized
-    let alice_authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
+    let alice_authorized = registry.is_auth_as(alice, AuthRole::Transfer).await;
     assert!(
         !alice_authorized,
         "alice should NOT be authorized (blacklisted)"
     );
 
     // Bob is NOT in blacklist → authorized
-    let bob_authorized = registry.is_auth_as(bob, bob, AuthRole::Transfer).await;
+    let bob_authorized = registry.is_auth_as(bob, AuthRole::Transfer).await;
     assert!(bob_authorized, "bob should be authorized (not blacklisted)");
 
     Ok(())
@@ -275,11 +275,11 @@ async fn test_policy_proxy_compound_policy() -> eyre::Result<()> {
     let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob], 1, 10)?;
 
     // Alice is in sender whitelist → authorized as sender
-    let alice_sender = registry.is_auth_as(alice, alice, AuthRole::Sender).await;
+    let alice_sender = registry.is_auth_as(alice, AuthRole::Sender).await;
     assert!(alice_sender, "alice should be authorized as sender");
 
     // Bob is in recipient blacklist → NOT authorized as recipient
-    let bob_recipient = registry.is_auth_as(bob, alice, AuthRole::Recipient).await;
+    let bob_recipient = registry.is_auth_as(bob, AuthRole::Recipient).await;
     assert!(
         !bob_recipient,
         "bob should NOT be authorized as recipient (blacklisted)"
@@ -301,7 +301,7 @@ async fn test_policy_proxy_builtin_policies() -> eyre::Result<()> {
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
     assert!(
-        !registry.is_auth_as(alice, alice, AuthRole::Transfer).await,
+        !registry.is_auth_as(alice, AuthRole::Transfer).await,
         "policy 0 should reject all"
     );
 
@@ -309,7 +309,7 @@ async fn test_policy_proxy_builtin_policies() -> eyre::Result<()> {
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_tempo_block_number(2, DEFAULT_TIMEOUT).await?;
     assert!(
-        registry.is_auth_as(alice, alice, AuthRole::Transfer).await,
+        registry.is_auth_as(alice, AuthRole::Transfer).await,
         "policy 1 should allow all"
     );
 
@@ -379,21 +379,21 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
         fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob, carol], 1, 10)?;
 
     // Alice: whitelisted as sender + NOT in recipient blacklist → true
-    let alice_auth = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
+    let alice_auth = registry.is_auth_as(alice, AuthRole::Transfer).await;
     assert!(
         alice_auth,
         "alice should be authorized (passes both sender and recipient checks)"
     );
 
     // Bob: NOT in sender whitelist → false (short-circuits before recipient check)
-    let bob_auth = registry.is_auth_as(bob, bob, AuthRole::Transfer).await;
+    let bob_auth = registry.is_auth_as(bob, AuthRole::Transfer).await;
     assert!(
         !bob_auth,
         "bob should NOT be authorized (not in sender whitelist)"
     );
 
     // Carol is whitelisted as sender but blacklisted as recipient, so transfer auth fails.
-    let carol_auth = registry.is_auth_as(carol, carol, AuthRole::Transfer).await;
+    let carol_auth = registry.is_auth_as(carol, AuthRole::Transfer).await;
     assert!(
         !carol_auth,
         "carol should NOT be authorized (passes sender but fails recipient blacklist)"
@@ -424,7 +424,7 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
 
-    let authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
+    let authorized = registry.is_auth_as(alice, AuthRole::Transfer).await;
     assert!(authorized, "alice should be authorized at block 1");
 
     // Step 2: materialize block-2 state before accepting block 2, then query at anchor 2.
@@ -440,7 +440,7 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_tempo_block_number(2, DEFAULT_TIMEOUT).await?;
 
-    let authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
+    let authorized = registry.is_auth_as(alice, AuthRole::Transfer).await;
     assert!(!authorized, "alice should NOT be authorized at block 2");
 
     // Step 3: materialize the compound policy before accepting block 3.
@@ -454,7 +454,7 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
 
     // Policy 10 uses the block-2 whitelist where Alice was removed.
-    let authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
+    let authorized = registry.is_auth_as(alice, AuthRole::Transfer).await;
     assert!(!authorized, "compound policy 10 should reject alice");
 
     Ok(())

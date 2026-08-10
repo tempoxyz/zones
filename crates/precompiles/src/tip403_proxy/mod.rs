@@ -8,9 +8,6 @@ use crate::execution::{CallCheck, CallRules};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 
-#[cfg(any(test, feature = "test-utils"))]
-pub mod probe;
-
 alloy_sol_types::sol! {
     /// Returned when the zone registry is called through its external EVM interface.
     #[derive(Debug, PartialEq, Eq)]
@@ -22,11 +19,16 @@ alloy_sol_types::sol! {
 /// Other precompiles use the TIP-403 implementation directly rather than issuing an EVM call, so
 /// every call reaching this adapter is external. External access is disabled because registry
 /// reads may require fetching finalized L1 state; exposing them through RPC simulation endpoints
-/// could let untrusted callers force repeated L1 reads and consume sequencer resources.
+/// could let untrusted callers force repeated L1 reads and consume sequencer resources. Test builds
+/// admit the zero address so integration tests can query the registry through RPC.
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
     fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+        #[cfg(any(test, feature = "test-utils"))]
+        if _caller.is_zero() {
+            return CallCheck::Continue;
+        }
         CallCheck::Revert(OnlyPrecompiles {}.abi_encode().into())
     }
 }
@@ -100,13 +102,15 @@ mod tests {
     }
 
     #[test]
-    fn all_evm_callers_are_rejected_by_admission() {
+    fn only_zero_address_is_admitted() {
+        let data = ITIP403Registry::policyIdCounterCall {}.abi_encode();
+        assert!(matches!(
+            Tip403Rules.admit(&data, Address::ZERO),
+            CallCheck::Continue
+        ));
         for caller in [CALLER, Address::repeat_byte(0x20)] {
             assert!(matches!(
-                Tip403Rules.admit(
-                    &ITIP403Registry::policyIdCounterCall {}.abi_encode(),
-                    caller,
-                ),
+                Tip403Rules.admit(&data, caller),
                 CallCheck::Revert(data) if data == OnlyPrecompiles {}.abi_encode()
             ));
         }

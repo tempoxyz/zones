@@ -42,7 +42,7 @@ use tempo_chainspec::{
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -72,10 +72,7 @@ use zone_l1::{
 };
 use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
-use zone_precompiles::{
-    ZONE_FEE_MANAGER_ADDRESS,
-    tip403_proxy::probe::{ITIP403Probe, TIP403_PROBE_ADDRESS},
-};
+use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 use zone_primitives::constants::{
     PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
 };
@@ -443,28 +440,44 @@ fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8
     }
 }
 
-/// Helper to check TIP-403 authorization through the explicitly registered test probe.
+/// Helper to check TIP-403 authorization through the test-only zero-address RPC path.
 pub(crate) struct Check403Registry {
     pub(crate) provider: DynProvider,
     pub(crate) token: Address,
 }
 
 impl Check403Registry {
-    pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
-        let call = ITIP403Probe::isAuthorizedCall {
-            token: self.token,
-            account: from,
-            role: role as u8,
+    pub(crate) async fn is_auth_as(&self, account: Address, role: AuthRole) -> bool {
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &self.provider);
+        let Ok(policy) = registry
+            .tokenTransferPolicyId(self.token)
+            .from(Address::ZERO)
+            .call()
+            .await
+        else {
+            return false;
         };
-        let tx = TransactionRequest::default()
-            .to(TIP403_PROBE_ADDRESS)
-            .from(to)
-            .input(call.abi_encode().into());
+        if !policy.isSet {
+            return false;
+        }
+        let mut data = match role {
+            AuthRole::Transfer => ITIP403Registry::isAuthorizedCall::SELECTOR,
+            AuthRole::Sender => ITIP403Registry::isAuthorizedSenderCall::SELECTOR,
+            AuthRole::Recipient => ITIP403Registry::isAuthorizedRecipientCall::SELECTOR,
+            AuthRole::MintRecipient => ITIP403Registry::isAuthorizedMintRecipientCall::SELECTOR,
+        }
+        .to_vec();
+        data.extend((policy.policyId, account).abi_encode());
         self.provider
-            .call(tx)
+            .call(
+                TransactionRequest::default()
+                    .to(TIP403_REGISTRY_ADDRESS)
+                    .from(Address::ZERO)
+                    .input(data.into()),
+            )
             .await
             .ok()
-            .and_then(|output| ITIP403Probe::isAuthorizedCall::abi_decode_returns(&output).ok())
+            .and_then(|output| bool::abi_decode(&output).ok())
             .unwrap_or(false)
     }
 }
