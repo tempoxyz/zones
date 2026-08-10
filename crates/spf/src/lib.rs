@@ -13,6 +13,7 @@ use reth_storage_api::noop::NoopProvider;
 use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
 use tempo_evm::{TempoBlockAssembler, TempoEvmConfig};
 use tempo_primitives::{TempoHeader, TempoPrimitives};
+use zone_evm::ZoneEvmConfig;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
 use zone_primitives::constants::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_HASH_SLOT,
@@ -100,6 +101,13 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         });
     }
 
+    let mut evm_config = ZoneEvmConfig::new(
+        config.zone_chain_spec.clone(),
+        config.zone_chain_spec.inner.clone(),
+        tempo_database.clone(),
+        witness.public_inputs.portal,
+    );
+
     // Each block is checked against the canonical Tempo header produced by its
     // predecessor. Replay feeds the execution result through Tempo's block
     // assembler, which derives the aggregate logs bloom from the receipts.
@@ -138,15 +146,15 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         // block's timestamp. An imported Tempo header changes the L1 reader
         // used by the subsequent system and user execution in this block.
         tempo_database = tempo_database.with_imported_checkpoint(&block.tempo_header_rlp)?;
+        evm_config = evm_config.with_l1_provider(tempo_database.clone());
         let executed_block = execution::evm::execute_zone_block(
             config,
             &mut zone_state,
-            &tempo_database,
+            &evm_config,
             execution::evm::BlockReplayContext {
                 parent: &previous_header,
                 block_index,
                 zone_id: witness.public_inputs.zone_id,
-                portal: witness.public_inputs.portal,
             },
             block,
         );

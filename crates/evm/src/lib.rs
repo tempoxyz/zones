@@ -345,6 +345,12 @@ where
         );
         (config, reader)
     }
+
+    /// Replaces the L1 provider in this config with the given provider.
+    pub fn with_l1_provider(mut self, l1_provider: L1) -> Self {
+        self.zone_factory.l1_reader = l1_provider;
+        self
+    }
 }
 
 impl ZoneEvmConfig {
