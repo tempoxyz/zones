@@ -29,7 +29,10 @@ use tempo_precompiles::{
     dispatch::selector_from_calldata,
     error::TempoPrecompileError,
     input_cost,
-    storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    storage::{
+        PrecompileStorageProvider, StorageCtx, actions::StorageActions,
+        evm::EvmPrecompileStorageProvider,
+    },
     storage_credits::NonCreditableSlots,
 };
 
@@ -137,6 +140,12 @@ pub(crate) fn create_precompile(
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
 
+        if fixed_gas.is_some() {
+            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
+            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
+            storage.set_tip1060_storage_credits(false);
+        }
+
         let mut result = StorageCtx::enter(&mut storage, || {
             match rules.admit(data, caller, tx_origin) {
                 CallCheck::Continue => execute(data, caller),
@@ -152,6 +161,8 @@ pub(crate) fn create_precompile(
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
+            // Disable refunds to not leak any data about previous storage values.
+            output.gas_refunded = 0;
         }
         result
     })
@@ -274,7 +285,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: re-enable once zones allow user transfers"]
     fn fixed_gas_disables_storage_credits_and_discards_refunds() {
         let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         cfg.spec = TempoHardfork::T8;
