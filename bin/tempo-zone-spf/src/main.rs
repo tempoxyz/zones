@@ -28,7 +28,7 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
 use zone_rpc::{
     ZoneProvider, ZoneProviderConfig,
     types::{TempoStorageRead, ZoneExecutionWitness},
@@ -254,8 +254,18 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .iter()
         .filter(|block| block.has_finalization)
         .count();
-    let expected_withdrawal_batch_index = discovery
-        .portal_withdrawal_batch_index
+    let parent_withdrawal_batch_index = withdrawal_batch_index_at(&zone_provider, parent_number)
+        .await
+        .context("read withdrawal batch index from parent Zone state")?;
+    if args.from_block.is_none()
+        && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
+    {
+        bail!(
+            "parent Zone state has withdrawal batch index {parent_withdrawal_batch_index}, but the Tempo portal reports {}",
+            discovery.portal_withdrawal_batch_index,
+        );
+    }
+    let expected_withdrawal_batch_index = parent_withdrawal_batch_index
         .checked_add(u64::try_from(finalization_count).expect("block count fits u64"))
         .ok_or_else(|| eyre!("withdrawal batch index overflow"))?;
     let (zone_head, tempo_head) = tokio::try_join!(
@@ -832,6 +842,17 @@ async fn initial_tempo_header(
         );
     }
     Ok(header)
+}
+
+async fn withdrawal_batch_index_at(
+    zone: &DynProvider<TempoNetwork>,
+    block_number: u64,
+) -> Result<u64> {
+    let index = zone
+        .get_storage_at(ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT)
+        .block_id(BlockId::number(block_number))
+        .await?;
+    Ok(index.as_limbs()[0])
 }
 
 async fn tempo_header(tempo: &DynProvider<TempoNetwork>, number: u64) -> Result<TempoHeader> {
