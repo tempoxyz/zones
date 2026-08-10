@@ -58,6 +58,8 @@ pub mod receive_policy_guard;
 pub mod storage;
 mod storage_credits;
 pub mod tempo_state;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod tip403_policy_probe;
 pub mod tip403_proxy;
 #[cfg(feature = "std")]
 pub mod tx_context;
@@ -72,6 +74,10 @@ pub use outbox::{ZoneOutbox, is_finalize_withdrawal_batch_calldata};
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
+#[cfg(any(test, feature = "test-utils"))]
+pub use tip403_policy_probe::{
+    ITIP403PolicyProbe, TIP403_POLICY_PROBE_ADDRESS, create_tip403_policy_probe,
+};
 pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
 use alloy_evm::precompiles::DynPrecompile;

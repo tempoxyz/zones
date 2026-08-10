@@ -7,6 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-utils = ["zone-precompiles/test-utils"]
+
 [lints]
 workspace = true
 

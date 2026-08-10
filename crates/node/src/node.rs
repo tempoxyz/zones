@@ -223,6 +223,8 @@ pub struct ZoneNode {
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
+    #[cfg(any(test, feature = "test-utils"))]
+    test_tip403_policy_probe: bool,
 }
 
 impl ZoneNode {
@@ -271,6 +273,8 @@ impl ZoneNode {
             sequencer_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
+            #[cfg(any(test, feature = "test-utils"))]
+            test_tip403_policy_probe: false,
         }
     }
 
@@ -314,6 +318,13 @@ impl ZoneNode {
     /// harnesses — must opt in so node startup knows the Zone chain can advance.
     pub fn with_external_deposit_consumer(mut self) -> Self {
         self.external_deposit_consumer = true;
+        self
+    }
+
+    /// Enables the TIP-403 policy probe for an explicitly configured test node.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_test_tip403_policy_probe(mut self) -> Self {
+        self.test_tip403_policy_probe = true;
         self
     }
 
@@ -1425,6 +1436,9 @@ where
             self.l1_state_cache.clone(),
             self.enabled_tokens.clone(),
         );
+        #[cfg(any(test, feature = "test-utils"))]
+        let executor_builder =
+            executor_builder.with_test_tip403_policy_probe(self.test_tip403_policy_probe);
         let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
             payload_factory = payload_factory.with_withdrawal_reveal_encryptor(encryptor);
@@ -1487,6 +1501,8 @@ pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: L1StateCache,
     enabled_tokens: EnabledTokenRegistry,
+    #[cfg(any(test, feature = "test-utils"))]
+    test_tip403_policy_probe: bool,
 }
 
 impl ZoneExecutorBuilder {
@@ -1500,7 +1516,15 @@ impl ZoneExecutorBuilder {
             l1_state_provider_config,
             l1_state_cache,
             enabled_tokens,
+            #[cfg(any(test, feature = "test-utils"))]
+            test_tip403_policy_probe: false,
         }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn with_test_tip403_policy_probe(mut self, enabled: bool) -> Self {
+        self.test_tip403_policy_probe = enabled;
+        self
     }
 }
 
@@ -1530,6 +1554,12 @@ where
             l1_provider,
             portal_address,
         );
+        #[cfg(any(test, feature = "test-utils"))]
+        let evm_config = if self.test_tip403_policy_probe {
+            evm_config.with_tip403_policy_probe()
+        } else {
+            evm_config
+        };
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)

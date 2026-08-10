@@ -28,6 +28,8 @@ use crate::{
         create_zone_fee_manager_precompile, tx_context::ZoneTxContext,
     },
 };
+#[cfg(any(test, feature = "test-utils"))]
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
     block::BlockExecutorFactory,
@@ -75,12 +77,28 @@ use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_precompiles::create_outbox_precompile;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
+#[cfg(any(test, feature = "test-utils"))]
+type TestPrecompileFactory = Arc<dyn Fn(&ZonePrecompileEnv) -> DynPrecompile + Send + Sync>;
 
 /// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
     l1_reader: L1,
     portal_address: Address,
+    #[cfg(any(test, feature = "test-utils"))]
+    test_precompiles: Vec<(Address, TestPrecompileFactory)>,
+}
+
+impl<L1: fmt::Debug> fmt::Debug for ZoneEvmFactory<L1> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("ZoneEvmFactory");
+        debug
+            .field("l1_reader", &self.l1_reader)
+            .field("portal_address", &self.portal_address);
+        #[cfg(any(test, feature = "test-utils"))]
+        debug.field("test_precompiles", &self.test_precompiles.len());
+        debug.finish()
+    }
 }
 
 impl<L1> ZoneEvmFactory<L1>
@@ -92,7 +110,28 @@ where
         Self {
             l1_reader,
             portal_address,
+            #[cfg(any(test, feature = "test-utils"))]
+            test_precompiles: Vec::new(),
         }
+    }
+
+    /// Adds explicitly enabled test-only precompiles.
+    ///
+    /// Registration panics if an entry collides with an eagerly registered production precompile.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_test_precompiles<F>(
+        mut self,
+        entries: impl IntoIterator<Item = (Address, F)>,
+    ) -> Self
+    where
+        F: Fn(&ZonePrecompileEnv) -> DynPrecompile + Send + Sync + 'static,
+    {
+        self.test_precompiles.extend(
+            entries
+                .into_iter()
+                .map(|(address, create)| (address, Arc::new(create) as TestPrecompileFactory)),
+        );
+        self
     }
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>>(
@@ -138,6 +177,16 @@ where
         precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
             Some(create_tip403_precompile(&tip403_env))
         });
+        #[cfg(any(test, feature = "test-utils"))]
+        for (address, create) in &self.test_precompiles {
+            precompiles.apply_precompile(address, |existing| {
+                assert!(
+                    existing.is_none(),
+                    "test precompile address {address} collides with a production precompile"
+                );
+                Some(create(&env))
+            });
+        }
         let tip20_l1 = l1.clone();
         let nonce_l1 = l1.clone();
         let account_keychain_l1 = l1.clone();
@@ -318,6 +367,16 @@ where
             zone_factory,
             block_assembler,
         }
+    }
+
+    /// Explicitly enables the test-only TIP-403 policy probe.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_tip403_policy_probe(mut self) -> Self {
+        self.zone_factory = self.zone_factory.with_test_precompiles([(
+            zone_precompiles::TIP403_POLICY_PROBE_ADDRESS,
+            zone_precompiles::create_tip403_policy_probe as fn(&ZonePrecompileEnv) -> DynPrecompile,
+        )]);
+        self
     }
 
     /// Returns the Zone chain specification.
