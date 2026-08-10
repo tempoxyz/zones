@@ -10,7 +10,6 @@ use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, U256, address};
 use tempo_primitives::TempoHeader;
 use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, tempo_state, zone_fee_manager};
-use zone_primitives::constants::ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT;
 
 /// Bundled zone dev genesis artifact.
 pub const GENESIS_TEMPLATE_JSON: &str = include_str!("../assets/zone-dev-genesis.json");
@@ -28,6 +27,9 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
 }
 
 /// Builds a zone genesis anchored to a real L1 block.
+///
+/// `l1_header` must predate deployment of `portal_address`, so the Zone replays the portal-creation
+/// block and derives all protocol state from its events.
 ///
 /// Applies three patches to the [template](genesis_template):
 ///
@@ -48,7 +50,6 @@ pub fn l1_anchored_genesis(
     l1_header: &TempoHeader,
     portal_address: Address,
     default_fee_token: Address,
-    token_enablement_hash: B256,
 ) -> eyre::Result<(Genesis, u64)> {
     let genesis_block_number = l1_header.inner.number;
 
@@ -73,21 +74,7 @@ pub fn l1_anchored_genesis(
         B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
     );
 
-    // Patch 2: bootstrap the token-enablement commitment in ZoneInbox. The initial token was
-    // enabled when the portal was created, before the zone begins replaying L1 events.
-    let zone_inbox_account = genesis
-        .alloc
-        .get_mut(&ZONE_INBOX_ADDRESS)
-        .ok_or_else(|| eyre::eyre!("ZoneInbox not found in genesis alloc"))?;
-    zone_inbox_account
-        .storage
-        .get_or_insert_with(Default::default)
-        .insert(
-            ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
-            token_enablement_hash,
-        );
-
-    // Patch 3: portal address immutables in ZoneInbox.
+    // Patch 2: portal address immutables in ZoneInbox.
     if !portal_address.is_zero() {
         let needle = [0u8; 32]; // Address::ZERO left-padded to 32 bytes
         let mut replacement = [0u8; 32];
@@ -114,7 +101,7 @@ pub fn l1_anchored_genesis(
         }
     }
 
-    // Patch 4: canonical default fee token.
+    // Patch 3: canonical default fee token.
     let fee_manager_account = genesis
         .alloc
         .get_mut(&ZONE_FEE_MANAGER_ADDRESS)
@@ -182,11 +169,9 @@ mod tests {
         let l1_header = TempoHeader::default();
         let portal = address!("0x00000000000000000000000000000000deadbeef");
         let default_fee_token = address!("0x20c0000000000000000000000000000000001234");
-        let token_enablement_hash = B256::repeat_byte(0x42);
 
         let (genesis, genesis_block_number) =
-            l1_anchored_genesis(&l1_header, portal, default_fee_token, token_enablement_hash)
-                .unwrap();
+            l1_anchored_genesis(&l1_header, portal, default_fee_token).unwrap();
         assert_eq!(genesis_block_number, l1_header.inner.number);
 
         let storage = genesis.alloc[&TEMPO_STATE_ADDRESS]
@@ -196,12 +181,6 @@ mod tests {
         assert_eq!(
             storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes())],
             l1_header.hash_slow(),
-        );
-
-        let inbox_storage = genesis.alloc[&ZONE_INBOX_ADDRESS].storage.as_ref().unwrap();
-        assert_eq!(
-            inbox_storage[&ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT],
-            token_enablement_hash,
         );
 
         let fee_manager_storage = genesis.alloc[&ZONE_FEE_MANAGER_ADDRESS]
