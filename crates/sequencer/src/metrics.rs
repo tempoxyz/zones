@@ -17,8 +17,29 @@ pub(crate) struct SequencerMetrics {
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_prover")]
 pub(crate) struct ProverMetrics {
+    /// Time a finalized batch candidate spends waiting for the prover worker.
+    pub(crate) queue_duration_seconds: Histogram,
+
     /// End-to-end latency of a prover validation attempt in seconds.
     pub(crate) validation_duration_seconds: Histogram,
+
+    /// Time spent loading and decoding canonical Zone blocks.
+    pub(crate) zone_inputs_duration_seconds: Histogram,
+
+    /// Time spent generating and combining Zone execution witnesses.
+    pub(crate) zone_witness_duration_seconds: Histogram,
+
+    /// Time spent fetching and validating Tempo checkpoints and ancestry.
+    pub(crate) tempo_headers_duration_seconds: Histogram,
+
+    /// Time spent fetching and combining Tempo state proofs.
+    pub(crate) tempo_witness_duration_seconds: Histogram,
+
+    /// Time spent executing the SPF over a generated batch witness.
+    pub(crate) spf_execution_duration_seconds: Histogram,
+
+    /// Time spent comparing SPF output with the finalized batch candidate.
+    pub(crate) output_validation_duration_seconds: Histogram,
 
     /// Number of finalized batch candidates that failed prover validation.
     pub(crate) validation_failure_total: Counter,
