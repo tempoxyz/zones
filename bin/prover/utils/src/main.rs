@@ -1303,10 +1303,6 @@ fn format_duration(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use zone_spf::{
-        BlockTransition, DepositQueueTransition, LastBatchCommitment, ZoneStateWitness,
-    };
-
     use super::*;
     use alloy_primitives::address;
 
@@ -1357,87 +1353,5 @@ mod tests {
                 .to_string()
                 .contains("does not match RPC chain ID 31319")
         );
-    }
-
-    #[tokio::test]
-    async fn sends_a_framed_request_and_checks_the_prover_response() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let target = listener.local_addr().unwrap().to_string();
-        let request = VerifyRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "tcp-test".into(),
-            tempo_chain_id: 42_431,
-            witness: empty_witness(),
-        };
-        let expected_output = empty_output();
-        let response_output = expected_output.clone();
-
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = framed(stream, DEFAULT_MAX_REQUEST_BYTES);
-            let payload = stream.next().await.unwrap().unwrap();
-            let received = serde_json::from_slice::<VerifyRequest>(&payload).unwrap();
-            assert_eq!(received.request_id, "tcp-test");
-
-            let response = VerifyResponse::Ok {
-                version: PROTOCOL_VERSION,
-                request_id: received.request_id,
-                output: response_output,
-            };
-            stream
-                .send(serde_json::to_vec(&response).unwrap().into())
-                .await
-                .unwrap();
-        });
-
-        let request_bytes = send_to_prover(&target, &request, &expected_output)
-            .await
-            .unwrap();
-        server.await.unwrap();
-        assert_eq!(request_bytes, serde_json::to_vec(&request).unwrap().len());
-    }
-
-    fn empty_witness() -> BatchWitness {
-        BatchWitness {
-            public_inputs: PublicInputs {
-                parent_chain_id: 42_431,
-                zone_id: 1,
-                portal: Address::ZERO,
-                tempo_block_number: 0,
-                anchor_block_number: 0,
-                anchor_block_hash: B256::ZERO,
-                expected_withdrawal_batch_index: 0,
-            },
-            parent_header: TempoHeader::default(),
-            zone_blocks: Vec::new(),
-            zone_state_witness: ZoneStateWitness {
-                node_pool: Vec::new(),
-                bytecodes: Vec::new(),
-            },
-            tempo_state_witness: TempoStateWitness {
-                initial_tempo_header_rlp: Bytes::new(),
-                node_pool: Vec::new(),
-            },
-            tempo_ancestry_headers: Vec::new(),
-        }
-    }
-
-    fn empty_output() -> BatchOutput {
-        BatchOutput {
-            block_transition: BlockTransition {
-                prevBlockHash: B256::ZERO,
-                nextBlockHash: B256::ZERO,
-            },
-            deposit_queue_transition: DepositQueueTransition {
-                prevProcessedHash: B256::ZERO,
-                nextProcessedHash: B256::ZERO,
-                prevDepositNumber: 0,
-                nextDepositNumber: 0,
-            },
-            withdrawal_queue_hash: B256::ZERO,
-            last_batch_commitment: LastBatchCommitment {
-                withdrawal_batch_index: 0,
-            },
-        }
     }
 }

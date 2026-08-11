@@ -63,9 +63,7 @@ impl Cli {
 
         #[cfg(target_os = "linux")]
         {
-            linux::serve(self.port, self.max_request_bytes, specs)
-                .await
-                .map_err(Into::into)
+            linux::serve(self.port, self.max_request_bytes, specs).await
         }
 
         #[cfg(not(target_os = "linux"))]
