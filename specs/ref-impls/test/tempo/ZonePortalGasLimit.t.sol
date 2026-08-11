@@ -2,7 +2,6 @@
 pragma solidity ^0.8.13;
 
 import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfaces/IZone.sol";
-import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -123,7 +122,7 @@ contract ZonePortalGasLimitTest is Test {
             callbackData: "test",
             encryptedSender: ""
         });
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.store(address(portal), bytes32(WITHDRAWAL_QUEUE_TAIL_SLOT), bytes32(uint256(1)));
         vm.store(address(portal), _withdrawalQueueSlot(0), wHash);
@@ -285,7 +284,7 @@ contract ZonePortalGasLimitTest is Test {
 
     function _storeSingleWithdrawal(Withdrawal memory w) internal {
         vm.store(address(portal), bytes32(WITHDRAWAL_QUEUE_TAIL_SLOT), bytes32(uint256(1)));
-        vm.store(address(portal), _withdrawalQueueSlot(0), keccak256(abi.encode(w, EMPTY_SENTINEL)));
+        vm.store(address(portal), _withdrawalQueueSlot(0), keccak256(abi.encode(w, bytes32(0))));
     }
 
     function _singleWithdrawal(Withdrawal memory withdrawal)

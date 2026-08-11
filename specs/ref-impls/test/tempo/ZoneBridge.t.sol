@@ -31,7 +31,6 @@ import {
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
-import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
@@ -457,8 +456,8 @@ contract ZoneBridgeTest is BaseTest {
         if (pendingWithdrawals.length == 0) return bytes32(0);
 
         // Build from newest to oldest (so oldest ends up outermost)
-        // Innermost element wraps EMPTY_SENTINEL
-        queueHash = EMPTY_SENTINEL;
+        // Innermost element terminates at zero
+        queueHash = bytes32(0);
         for (uint256 i = pendingWithdrawals.length; i > 0;) {
             unchecked {
                 i--;
@@ -572,7 +571,7 @@ contract ZoneBridgeTest is BaseTest {
         // Verify L1 queue updated
         assertEq(l1Portal.withdrawalBatchIndex(), 2);
         Withdrawal memory w = _withdrawal(1, alice, alice, withdrawAmount, bytes32(0), 0, alice, "");
-        bytes32 expectedQueueHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 expectedQueueHash = keccak256(abi.encode(w, bytes32(0)));
         // Withdrawal should be in slot 0 (first batch with withdrawals)
         assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
         assertEq(l1Portal.withdrawalQueueTail(), 1);
@@ -632,10 +631,10 @@ contract ZoneBridgeTest is BaseTest {
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "withdrawals"));
         _sequencerSubmitBatch(processedHash);
 
-        // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
+        // Build expected queue hash (oldest = outermost, innermost terminates at zero)
         Withdrawal memory w0 = _withdrawal(1, alice, alice, 500e6, bytes32(0), 0, alice, "");
         Withdrawal memory w1 = _withdrawal(2, bob, bob, 1000e6, bytes32(0), 0, bob, "");
-        bytes32 innerHash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 innerHash = keccak256(abi.encode(w1, bytes32(0)));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
         // Both withdrawals are in slot 0 (same batch)
         assertEq(l1Portal.withdrawalQueueSlot(0), queueHash);
@@ -1197,7 +1196,7 @@ contract ZoneBridgeTest is BaseTest {
             callbackData: "",
             encryptedSender: ""
         });
-        bytes32 expectedQueueHash = keccak256(abi.encode(bounce, EMPTY_SENTINEL));
+        bytes32 expectedQueueHash = keccak256(abi.encode(bounce, bytes32(0)));
         assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
 
         l1Portal.processWithdrawals(_singleWithdrawal(bounce), bytes32(0));

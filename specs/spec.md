@@ -671,7 +671,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 A withdrawal batch ends with exactly one call to `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox` in the final block of that batch. The block builder includes this as the last transaction using the zone system caller (`msg.sender == address(0)`), and the `blockNumber` argument must match the current zone block number. The encrypted-senders array carries one sequencer-supplied ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`); `senderTag` is recomputed by the outbox from the queued withdrawal sender, transaction hash, and fallback nonce. This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
 
 ```
-withdrawalQueueHash = EMPTY_SENTINEL
+withdrawalQueueHash = 0
 for i from (count - 1) down to 0:
     withdrawalQueueHash = keccak256(abi.encode(withdrawals[i], withdrawalQueueHash))
 ```

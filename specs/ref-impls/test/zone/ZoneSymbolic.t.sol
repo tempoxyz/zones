@@ -2,11 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
-import {
-    EMPTY_SENTINEL,
-    WithdrawalQueue,
-    WithdrawalQueueLib
-} from "../../src/libraries/WithdrawalQueueLib.sol";
+import { WithdrawalQueue, WithdrawalQueueLib } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortalTest } from "../tempo/ZonePortal.t.sol";
 import { ZoneOutboxTest } from "./ZoneOutbox.t.sol";
 import { Test } from "forge-std/Test.sol";
@@ -118,15 +114,8 @@ contract WithdrawalQueueSymbolic is Test {
     }
 
     /// @notice A valid non-empty enqueue advances tail and length by exactly one.
-    function check_enqueueAdvancesTailAndLength(
-        uint256 _head,
-        uint256 _tail,
-        bytes32 h
-    )
-        external
-    {
+    function check_enqueueAdvancesTailAndLength(uint256 _head, uint256 _tail, bytes32 h) external {
         vm.assume(h != bytes32(0));
-        vm.assume(h != EMPTY_SENTINEL);
         vm.assume(_tail >= _head);
         vm.assume(_tail < type(uint256).max); // tail + 1 cannot overflow
 

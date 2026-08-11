@@ -3,10 +3,6 @@ pragma solidity ^0.8.13;
 
 import { Withdrawal } from "../interfaces/IZone.sol";
 
-/// @dev Sentinel value for empty slots. Using 0xff...ff instead of 0x00 to avoid
-///      clearing storage (which would refund gas and create incentive issues).
-bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
-
 /// @dev Sentinel returned by `enqueue` (and emitted in `BatchSubmitted`) when a batch
 ///      carries no withdrawals and therefore consumes no queue index. Logical queue
 ///      indices are monotonically increasing counters that can never reach this value.
@@ -23,7 +19,7 @@ uint256 constant NO_QUEUE_INDEX = type(uint256).max;
 struct WithdrawalQueue {
     uint256 head; // logical index of oldest unprocessed batch
     uint256 tail; // logical index where next batch will write
-    mapping(uint256 => bytes32) slots; // hash chains per batch (EMPTY_SENTINEL = empty)
+    mapping(uint256 => bytes32) slots; // hash chains per batch (zero = empty)
 }
 
 /// @title WithdrawalQueueLib
@@ -40,6 +36,7 @@ library WithdrawalQueueLib {
 
     error NoWithdrawalsInQueue();
     error InvalidWithdrawalHash();
+
     /// @notice Add a batch's withdrawals to the queue
     /// @dev Called during submitBatch. The batch's withdrawal hash chain goes into
     ///      the slot at tail, then tail advances.
@@ -57,10 +54,6 @@ library WithdrawalQueueLib {
         if (withdrawalQueueHash == bytes32(0)) {
             return NO_QUEUE_INDEX;
         }
-        if (withdrawalQueueHash == EMPTY_SENTINEL) {
-            revert InvalidWithdrawalHash();
-        }
-
         uint256 tail = queue.tail;
 
         queue.slots[tail] = withdrawalQueueHash;
@@ -91,13 +84,11 @@ library WithdrawalQueueLib {
 
         bytes32 currentSlot = queue.slots[head];
 
-        if (currentSlot == EMPTY_SENTINEL || remainingQueue == EMPTY_SENTINEL) {
+        if (currentSlot == bytes32(0)) {
             revert InvalidWithdrawalHash();
         }
 
-        bytes32 expectedRemainingQueue =
-            remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
-        if (keccak256(abi.encode(withdrawal, expectedRemainingQueue)) != currentSlot) {
+        if (keccak256(abi.encode(withdrawal, remainingQueue)) != currentSlot) {
             revert InvalidWithdrawalHash();
         }
 

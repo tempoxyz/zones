@@ -3,7 +3,6 @@ pragma solidity ^0.8.13;
 
 import { Withdrawal } from "../../src/interfaces/IZone.sol";
 import {
-    EMPTY_SENTINEL,
     NO_QUEUE_INDEX,
     WithdrawalQueue,
     WithdrawalQueueLib
@@ -87,7 +86,7 @@ contract WithdrawalQueueLibTest is Test {
 
     function test_enqueue_singleBatch() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         uint256 assignedIndex = harness.enqueue(wHash);
 
@@ -123,15 +122,6 @@ contract WithdrawalQueueLibTest is Test {
         uint256 assignedIndex = harness.enqueue(bytes32(0));
 
         assertEq(assignedIndex, NO_QUEUE_INDEX);
-        assertEq(harness.head(), 0);
-        assertEq(harness.tail(), 0);
-        assertFalse(harness.hasWithdrawals());
-    }
-
-    function test_enqueue_revertsForEmptySentinel() public {
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
-        harness.enqueue(EMPTY_SENTINEL);
-
         assertEq(harness.head(), 0);
         assertEq(harness.tail(), 0);
         assertFalse(harness.hasWithdrawals());
@@ -173,7 +163,7 @@ contract WithdrawalQueueLibTest is Test {
 
     function test_enqueue_afterDequeueUsesNextLogicalIndex() public {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 h1 = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 h1 = keccak256(abi.encode(w1, bytes32(0)));
 
         // Build a backlog.
         harness.enqueue(h1);
@@ -202,7 +192,7 @@ contract WithdrawalQueueLibTest is Test {
 
     function test_dequeue_singleWithdrawal() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         harness.enqueue(wHash);
 
@@ -218,8 +208,8 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        // Build queue: w1 outermost, w2 innermost (wraps EMPTY_SENTINEL)
-        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        // Build queue: w1 outermost, w2 innermost (terminates at zero)
+        bytes32 innerHash = keccak256(abi.encode(w2, bytes32(0)));
         bytes32 batchHash = keccak256(abi.encode(w1, innerHash));
 
         harness.enqueue(batchHash);
@@ -239,8 +229,8 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        bytes32 h1 = keccak256(abi.encode(w1, EMPTY_SENTINEL));
-        bytes32 h2 = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 h1 = keccak256(abi.encode(w1, bytes32(0)));
+        bytes32 h2 = keccak256(abi.encode(w2, bytes32(0)));
 
         harness.enqueue(h1);
         harness.enqueue(h2);
@@ -267,7 +257,7 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        bytes32 h1 = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 h1 = keccak256(abi.encode(w1, bytes32(0)));
         harness.enqueue(h1);
 
         // Try to dequeue w2 (wrong withdrawal)
@@ -279,7 +269,7 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 innerHash = keccak256(abi.encode(w2, bytes32(0)));
         bytes32 batchHash = keccak256(abi.encode(w1, innerHash));
 
         harness.enqueue(batchHash);
@@ -289,27 +279,15 @@ contract WithdrawalQueueLibTest is Test {
         harness.dequeue(w1, keccak256("wrongHash"));
     }
 
-    function test_dequeue_revertsIfRemainingQueueIsEmptySentinel() public {
+    function test_dequeue_revertsIfCurrentSlotIsEmpty() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
-        harness.enqueue(wHash);
-
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
-        harness.dequeue(w, EMPTY_SENTINEL);
-
-        assertEq(harness.head(), 0);
-        assertEq(harness.slots(0), wHash);
-    }
-
-    function test_dequeue_revertsIfCurrentSlotIsEmptySentinel() public {
-        Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        harness.setRawState(0, 1, 0, EMPTY_SENTINEL);
+        harness.setRawState(0, 1, 0, bytes32(0));
 
         vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
         harness.dequeue(w, bytes32(0));
 
         assertEq(harness.head(), 0);
-        assertEq(harness.slots(0), EMPTY_SENTINEL);
+        assertEq(harness.slots(0), bytes32(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -340,7 +318,7 @@ contract WithdrawalQueueLibTest is Test {
 
         bytes32[] memory hs = new bytes32[](4);
         for (uint256 i = 0; i < 4; i++) {
-            hs[i] = keccak256(abi.encode(ws[i], EMPTY_SENTINEL));
+            hs[i] = keccak256(abi.encode(ws[i], bytes32(0)));
         }
 
         // Build a backlog and then advance the head.
@@ -376,7 +354,7 @@ contract WithdrawalQueueLibTest is Test {
 
         for (uint256 i = 0; i < TEST_BATCH_COUNT; i++) {
             withdrawals[i] = _makeWithdrawal(alice, bob, uint128(i + 1));
-            harness.enqueue(keccak256(abi.encode(withdrawals[i], EMPTY_SENTINEL)));
+            harness.enqueue(keccak256(abi.encode(withdrawals[i], bytes32(0))));
             assertEq(harness.length(), i + 1);
         }
 
@@ -396,7 +374,7 @@ contract WithdrawalQueueLibTest is Test {
     function test_dequeue_clearsSlotWhenExhausted() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
 
-        harness.enqueue(keccak256(abi.encode(w, EMPTY_SENTINEL)));
+        harness.enqueue(keccak256(abi.encode(w, bytes32(0))));
         harness.dequeue(w, bytes32(0));
 
         assertEq(harness.slots(0), bytes32(0));
@@ -417,7 +395,7 @@ contract WithdrawalQueueLibTest is Test {
                 address(uint160(uint256(keccak256(abi.encode(seed, "to", i))))),
                 amount
             );
-            harness.enqueue(keccak256(abi.encode(withdrawals[i], EMPTY_SENTINEL)));
+            harness.enqueue(keccak256(abi.encode(withdrawals[i], bytes32(0))));
             assertEq(harness.length(), i + 1);
         }
 

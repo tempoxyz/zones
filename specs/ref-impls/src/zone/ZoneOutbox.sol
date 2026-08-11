@@ -23,7 +23,6 @@ import {
 } from "../interfaces/IZone.sol";
 
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
-import { EMPTY_SENTINEL } from "../libraries/WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
@@ -425,7 +424,7 @@ contract ZoneOutbox is IZoneOutbox {
         // So oldest ends up outermost, matching Tempo expectations.
         // Process the oldest withdrawals first (FIFO).
         if (count > 0) {
-            withdrawalQueueHash = EMPTY_SENTINEL;
+            withdrawalQueueHash = bytes32(0);
 
             for (uint256 i = count; i > 0;) {
                 uint256 index = i - 1;
