@@ -64,7 +64,7 @@ library WithdrawalQueueLib {
     /// @notice Pop the next withdrawal from the queue
     /// @dev Verifies the withdrawal is at the head of the current slot and advances.
     ///      When a slot is exhausted (remainingQueue would be empty), we clear it
-    ///      to reclaim a TIP-1060 storage credit and advance head.
+    ///      to mint a TIP-1060 storage credit and advance head.
     /// @param queue The withdrawal queue
     /// @param withdrawal The withdrawal to pop (must be at head of current slot)
     /// @param remainingQueue The hash of the remaining queue after this withdrawal
