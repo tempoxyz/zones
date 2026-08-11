@@ -53,9 +53,11 @@ fn extra_data() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::OperatorWeb3Api;
+    use reth_rpc_api::Web3ApiServer as _;
 
-    #[test]
-    fn uses_tempo_zone_version_defaults() {
+    #[tokio::test]
+    async fn uses_tempo_zone_version_defaults() {
         init_version_metadata();
         let metadata = version_metadata();
 
@@ -80,5 +82,15 @@ mod tests {
         );
         assert_eq!(client_version(), metadata.p2p_client_version);
         assert_ne!(client_version(), "reth-test");
+
+        let rpc_client_version = OperatorWeb3Api
+            .into_rpc()
+            .call::<_, String>(
+                "web3_clientVersion",
+                jsonrpsee::core::EmptyServerParams::new(),
+            )
+            .await
+            .expect("operator client version should be available");
+        assert_eq!(rpc_client_version, client_version());
     }
 }

@@ -14,8 +14,9 @@ use crate::{
         run_role_controller,
     },
     rpc::{
-        NodeZoneDebugApi, OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc,
-        ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
+        NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi, SequencerRpcContext,
+        ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
+        start_redacted_rpc,
     },
 };
 use alloy_chains::Chain;
@@ -42,6 +43,7 @@ use reth_node_builder::{
 };
 use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
+use reth_rpc_api::Web3ApiServer as _;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
@@ -783,6 +785,10 @@ where
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
+                container.modules.add_or_replace_if_module_configured(
+                    reth_rpc_builder::RethRpcModule::Web3,
+                    OperatorWeb3Api.into_rpc(),
+                )?;
                 container
                     .modules
                     .merge_configured(operator_zone_api.into_rpc())?;

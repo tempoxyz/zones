@@ -29,6 +29,7 @@ use reth_evm::{ConfigureEvm as _, execute::Executor as _};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
+use reth_rpc_api::Web3ApiServer;
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcConvert,
@@ -218,6 +219,21 @@ where
         }
     })?;
     Ok(module)
+}
+
+/// Operator Web3 API backed by the globally initialized Zone version metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OperatorWeb3Api;
+
+#[jsonrpsee::core::async_trait]
+impl Web3ApiServer for OperatorWeb3Api {
+    async fn client_version(&self) -> RpcResult<String> {
+        Ok(crate::version::client_version().to_owned())
+    }
+
+    fn sha3(&self, input: Bytes) -> RpcResult<B256> {
+        Ok(keccak256(input))
+    }
 }
 
 /// Zone-specific debug API.

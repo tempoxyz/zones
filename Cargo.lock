@@ -13799,6 +13799,7 @@ dependencies = [
  "reth-provider",
  "reth-revm",
  "reth-rpc",
+ "reth-rpc-api",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
  "reth-rpc-eth-types",
