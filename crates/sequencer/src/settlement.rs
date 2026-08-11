@@ -27,10 +27,7 @@ use std::{collections::BTreeMap, fmt, sync::OnceLock};
 
 use crate::{
     ZoneSequencerProvider,
-    abi::{
-        self, BlockTransition, DepositQueueTransition, EMPTY_SENTINEL, IZoneInbox, IZoneOutbox,
-        ZonePortal,
-    },
+    abi::{self, BlockTransition, DepositQueueTransition, IZoneInbox, IZoneOutbox, ZonePortal},
     attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
@@ -72,9 +69,6 @@ const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 /// observing N can only execute in N+1 or later, where that hash is available. Eight certificate
 /// signatures still fit comfortably within this limit.
 const SUBMIT_BATCH_GAS_LIMIT: u64 = 2_000_000;
-
-/// Maximum number of pending withdrawal queue slots in the portal ring buffer.
-pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
 
 /// Maximum block span for one bounded log query.
 ///
@@ -507,14 +501,11 @@ impl BatchSubmitter {
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
     ///
-    /// The portal and chain identifiers are immutable, so the first call includes and caches
-    /// them. Sequencer membership, verifier configuration, and queue state are deliberately
-    /// refreshed on every submission.
+    /// The portal and chain identifiers are immutable, so the first call includes and caches them.
+    /// Sequencer membership and verifier configuration are deliberately refreshed on every submission.
     async fn read_submission_metadata(&self, signer: Address) -> Result<PortalSubmissionMetadata> {
         if let Some(stable) = self.stable_portal_metadata.get().copied() {
             let (
-                queue_head,
-                queue_tail,
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -523,8 +514,6 @@ impl BatchSubmitter {
             ) = self
                 .l1_provider
                 .multicall()
-                .add(self.portal.withdrawalQueueHead())
-                .add(self.portal.withdrawalQueueTail())
                 .add(self.portal.withdrawalBatchIndex())
                 .add(self.portal.sequencerSetVersion())
                 .add(self.portal.sequencerThreshold())
@@ -532,10 +521,8 @@ impl BatchSubmitter {
                 .add(self.portal.verifier())
                 .aggregate()
                 .await?;
-            return Self::build_submission_metadata(
-                RawPortalSubmissionMetadata {
-                    queue_head,
-                    queue_tail,
+            return Ok(Self::build_submission_metadata(
+                PortalSubmissionState {
                     withdrawal_batch_index,
                     sequencer_set_version,
                     sequencer_threshold,
@@ -543,12 +530,10 @@ impl BatchSubmitter {
                     verifier,
                 },
                 stable,
-            );
+            ));
         }
 
         let (
-            queue_head,
-            queue_tail,
             withdrawal_batch_index,
             sequencer_set_version,
             sequencer_threshold,
@@ -559,8 +544,6 @@ impl BatchSubmitter {
         ) = self
             .l1_provider
             .multicall()
-            .add(self.portal.withdrawalQueueHead())
-            .add(self.portal.withdrawalQueueTail())
             .add(self.portal.withdrawalBatchIndex())
             .add(self.portal.sequencerSetVersion())
             .add(self.portal.sequencerThreshold())
@@ -577,10 +560,8 @@ impl BatchSubmitter {
                 .map_err(|_| eyre::eyre!("Tempo L1 chain ID overflow"))?,
         };
         let _ = self.stable_portal_metadata.set(stable);
-        Self::build_submission_metadata(
-            RawPortalSubmissionMetadata {
-                queue_head,
-                queue_tail,
+        Ok(Self::build_submission_metadata(
+            PortalSubmissionState {
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -588,29 +569,21 @@ impl BatchSubmitter {
                 verifier,
             },
             stable,
-        )
+        ))
     }
 
     fn build_submission_metadata(
-        raw: RawPortalSubmissionMetadata,
+        state: PortalSubmissionState,
         stable: StablePortalMetadata,
-    ) -> Result<PortalSubmissionMetadata> {
-        Ok(PortalSubmissionMetadata {
-            queue_head: raw
-                .queue_head
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue head overflow"))?,
-            queue_tail: raw
-                .queue_tail
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue tail overflow"))?,
-            withdrawal_batch_index: raw.withdrawal_batch_index,
+    ) -> PortalSubmissionMetadata {
+        PortalSubmissionMetadata {
+            withdrawal_batch_index: state.withdrawal_batch_index,
             stable,
-            sequencer_set_version: raw.sequencer_set_version,
-            sequencer_threshold: raw.sequencer_threshold,
-            signer_is_sequencer: raw.signer_is_sequencer,
-            verifier: raw.verifier,
-        })
+            sequencer_set_version: state.sequencer_set_version,
+            sequencer_threshold: state.sequencer_threshold,
+            signer_is_sequencer: state.signer_is_sequencer,
+            verifier: state.verifier,
+        }
     }
 
     fn validate_submission_metadata(
@@ -637,13 +610,6 @@ impl BatchSubmitter {
                 metadata.sequencer_threshold == 1,
                 "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {}",
                 metadata.sequencer_threshold
-            );
-        }
-        if !batch.withdrawal_queue_hash.is_zero() {
-            let pending = metadata.queue_tail.saturating_sub(metadata.queue_head);
-            eyre::ensure!(
-                pending < WITHDRAWAL_QUEUE_CAPACITY,
-                "withdrawal queue full ({pending} pending slots, capacity {WITHDRAWAL_QUEUE_CAPACITY})"
             );
         }
         Ok(())
@@ -1037,7 +1003,7 @@ impl BatchSubmitter {
         // Step 5: read the head slot's current on-chain hash (for partial processing detection).
         let head_slot_hash = self
             .portal
-            .withdrawalQueueSlot(U256::from(head % WITHDRAWAL_QUEUE_CAPACITY))
+            .withdrawalQueueSlot(U256::from(head))
             .call()
             .await?;
 
@@ -1191,9 +1157,7 @@ struct StablePortalMetadata {
     chain_id: u64,
 }
 
-struct RawPortalSubmissionMetadata {
-    queue_head: U256,
-    queue_tail: U256,
+struct PortalSubmissionState {
     withdrawal_batch_index: u64,
     sequencer_set_version: u64,
     sequencer_threshold: u8,
@@ -1203,8 +1167,6 @@ struct RawPortalSubmissionMetadata {
 
 #[derive(Debug, Clone, Copy)]
 struct PortalSubmissionMetadata {
-    queue_head: u64,
-    queue_tail: u64,
     withdrawal_batch_index: u64,
     stable: StablePortalMetadata,
     sequencer_set_version: u64,
@@ -1445,7 +1407,7 @@ pub(crate) fn find_processed_offset(
         return Some(withdrawals.len());
     }
 
-    let mut hash = EMPTY_SENTINEL;
+    let mut hash = B256::ZERO;
     for (offset, withdrawal) in withdrawals.iter().enumerate().rev() {
         hash = withdrawal.hash_with_tail(hash);
         if hash == current_slot_hash {
@@ -2185,8 +2147,6 @@ mod tests {
         let submitter = BatchSubmitter::new(portal_address, provider);
 
         asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(U256::from(3)),
-            abi_word(U256::from(5)),
             abi_word(7_u64),
             abi_word(11_u64),
             abi_word(U256::from(1)),
@@ -2196,8 +2156,6 @@ mod tests {
             abi_word(U256::from(42431)),
         ]));
         let first = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(first.queue_head, 3);
-        assert_eq!(first.queue_tail, 5);
         assert_eq!(first.withdrawal_batch_index, 7);
         assert_eq!(first.sequencer_set_version, 11);
         assert!(first.signer_is_sequencer);
@@ -2207,8 +2165,6 @@ mod tests {
 
         let next_verifier = Address::repeat_byte(0x55);
         asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(U256::from(4)),
-            abi_word(U256::from(6)),
             abi_word(8_u64),
             abi_word(12_u64),
             abi_word(U256::from(1)),
@@ -2216,8 +2172,6 @@ mod tests {
             abi_word(next_verifier),
         ]));
         let second = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(second.queue_head, 4);
-        assert_eq!(second.queue_tail, 6);
         assert_eq!(second.withdrawal_batch_index, 8);
         assert_eq!(second.sequencer_set_version, 12);
         assert!(!second.signer_is_sequencer);
@@ -2246,8 +2200,6 @@ mod tests {
             withdrawal_batch_index: 1,
         };
         let metadata = PortalSubmissionMetadata {
-            queue_head: 0,
-            queue_tail: 0,
             withdrawal_batch_index: 0,
             stable: StablePortalMetadata {
                 zone_id: 1,
@@ -2340,7 +2292,7 @@ mod tests {
     #[test]
     fn finds_processed_offset_for_empty_queue() {
         assert_eq!(find_processed_offset(&[], B256::ZERO), Some(0));
-        assert_eq!(find_processed_offset(&[], EMPTY_SENTINEL), None);
+        assert_eq!(find_processed_offset(&[], B256::random()), None);
     }
 
     #[test]
@@ -2408,7 +2360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_batch_events_by_logical_index_across_ring_wrap() {
+    async fn finds_batch_events_by_logical_index_beyond_legacy_capacity() {
         use alloy_provider::ProviderBuilder;
         use alloy_transport::mock::Asserter;
 

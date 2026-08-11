@@ -8,7 +8,6 @@ pub use ZonePortal::{
 use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
-use zone_primitives::constants::EMPTY_SENTINEL;
 
 /// Maximum number of deposits accepted by a portal in one Tempo block.
 pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
@@ -228,7 +227,7 @@ crate::sol! {
         function lastSyncedTempoBlockNumber() external view returns (uint64);
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
-        function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
+        function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32);
         function calculateDepositFee() external view returns (uint128 fee);
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
@@ -631,17 +630,13 @@ impl Withdrawal {
     /// The hash chain has the oldest withdrawal at the outermost layer for efficient FIFO removal:
     ///
     /// ```text
-    /// hash = keccak256(encode(w[0], keccak256(encode(w[1], keccak256(encode(w[2], EMPTY_SENTINEL))))))
+    /// hash = keccak256(encode(w[0], keccak256(encode(w[1], keccak256(encode(w[2], 0))))))
     /// ```
     ///
     /// Building proceeds from the newest (innermost) to the oldest (outermost).
     /// Returns `B256::ZERO` if `withdrawals` is empty.
     pub fn queue_hash(withdrawals: &[Self]) -> B256 {
-        if withdrawals.is_empty() {
-            return B256::ZERO;
-        }
-
-        let mut hash = EMPTY_SENTINEL;
+        let mut hash = B256::ZERO;
         for withdrawal in withdrawals.iter().rev() {
             hash = withdrawal.hash_with_tail(hash);
         }

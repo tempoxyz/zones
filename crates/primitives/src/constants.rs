@@ -3,9 +3,6 @@
 use alloy_primitives::{Address, B256, U256, address};
 use tempo_hardfork::constants::{mainnet::MAINNET_CHAIN_ID, moderato::MODERATO_CHAIN_ID};
 
-/// Sentinel value for empty withdrawal queue slots.
-pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
-
 /// Sentinel emitted as `BatchSubmitted.withdrawalQueueIndex` when a batch carried no
 /// withdrawals and therefore consumed no queue index (`NO_QUEUE_INDEX` in Solidity).
 pub const NO_QUEUE_INDEX: U256 = U256::MAX;

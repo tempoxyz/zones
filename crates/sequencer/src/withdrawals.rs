@@ -42,10 +42,10 @@ use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    abi::{self, EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
+    abi::{self, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
     metrics::{SequencerMetrics, WithdrawalProcessorMetrics},
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
-    settlement::{WITHDRAWAL_QUEUE_CAPACITY, find_processed_offset},
+    settlement::find_processed_offset,
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
 
@@ -470,13 +470,13 @@ impl WithdrawalProcessor {
             // already consumed.
             let slot_hash = self
                 .portal
-                .withdrawalQueueSlot(U256::from(head_val % WITHDRAWAL_QUEUE_CAPACITY))
+                .withdrawalQueueSlot(U256::from(head_val))
                 .call()
                 .await?;
 
-            if slot_hash == EMPTY_SENTINEL {
-                // The slot was fully consumed and head advanced between our reads.
-                // Re-check on the next cycle.
+            if slot_hash.is_zero() {
+                // Exhausting a slot clears it before advancing the head. The head advanced between
+                // our bounds read and this slot read, so re-check on the next cycle.
                 debug!(
                     slot = head_val,
                     "Head slot already consumed; skipping cycle"
@@ -841,7 +841,6 @@ enum SubmitOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::EMPTY_SENTINEL;
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_provider::{Provider, ProviderBuilder};
     use alloy_sol_types::SolValue;
@@ -887,7 +886,7 @@ mod tests {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
         let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
-        let expected = keccak256((w, EMPTY_SENTINEL).abi_encode_params());
+        let expected = keccak256((w, B256::ZERO).abi_encode_params());
         assert_eq!(hash, expected);
     }
 
@@ -898,7 +897,7 @@ mod tests {
 
         let hash = abi::Withdrawal::queue_hash(&[w0.clone(), w1.clone()]);
 
-        let inner = keccak256((w1, EMPTY_SENTINEL).abi_encode_params());
+        let inner = keccak256((w1, B256::ZERO).abi_encode_params());
         let expected = keccak256((w0, inner).abi_encode_params());
         assert_eq!(hash, expected);
     }
@@ -917,8 +916,8 @@ mod tests {
             encryptedSender: Default::default(),
         };
 
-        let tuple_value_hash = keccak256((w.clone(), EMPTY_SENTINEL).abi_encode());
-        let param_hash = keccak256((w, EMPTY_SENTINEL).abi_encode_params());
+        let tuple_value_hash = keccak256((w.clone(), B256::ZERO).abi_encode());
+        let param_hash = keccak256((w, B256::ZERO).abi_encode_params());
 
         assert_ne!(
             tuple_value_hash, param_hash,
@@ -1184,14 +1183,14 @@ mod tests {
     #[tokio::test]
     async fn process_queue_skips_cycle_when_head_slot_already_consumed() {
         let l1 = Asserter::new();
-        // head = 5, tail = 6, slot already contains EMPTY_SENTINEL (head advanced
-        // between our head read and the slot read).
+        // head = 5, tail = 6, but slot 5 is already cleared because head advanced
+        // between our bounds read and the slot read.
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(5),
             abi_encode_u64(6),
         ]));
         l1.push_success(&abi_encode_u64(0));
-        l1.push_success(&abi_encode_b256(EMPTY_SENTINEL));
+        l1.push_success(&abi_encode_b256(B256::ZERO));
 
         let store = SharedWithdrawalStore::new();
         store.lock().add_batch(
