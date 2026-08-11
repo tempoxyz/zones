@@ -84,19 +84,13 @@ library WithdrawalQueueLib {
 
         bytes32 currentSlot = queue.slots[head];
 
-        if (currentSlot == bytes32(0)) {
-            revert InvalidWithdrawalHash();
-        }
-
         if (keccak256(abi.encode(withdrawal, remainingQueue)) != currentSlot) {
             revert InvalidWithdrawalHash();
         }
 
+        queue.slots[head] = remainingQueue;
         if (remainingQueue == bytes32(0)) {
-            delete queue.slots[head];
             queue.head = head + 1;
-        } else {
-            queue.slots[head] = remainingQueue;
         }
     }
 
