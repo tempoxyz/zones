@@ -823,13 +823,10 @@ mod tests {
         zone_id: u32,
     ) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
         let attributes = next_block_env_attributes(config.chain_spec().as_ref(), parent, block)?;
-        let mut env = ZoneEvmConfig::from_composed_chain_spec(
-            config.chain_spec().clone(),
-            tempo_database,
-            config.portal(),
-        )
-        .next_evm_env(parent, &attributes)
-        .map_err(|_| Error::EvmEnvironment)?;
+        let mut env =
+            ZoneEvmConfig::new(config.chain_spec().clone(), tempo_database, config.portal())
+                .next_evm_env(parent, &attributes)
+                .map_err(|_| Error::EvmEnvironment)?;
 
         // ZoneEvmConfig applies these overrides after delegating environment
         // construction to TempoEvmConfig. Keep replay identical to production.

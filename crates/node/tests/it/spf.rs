@@ -17,7 +17,7 @@ use alloy::{
 };
 use reth_chainspec::EthChainSpec as _;
 use reth_trie_common::{EMPTY_ROOT_HASH, HashBuilder, Nibbles, TrieAccount, proof::ProofRetainer};
-use tempo_chainspec::spec::{DEV, TEMPO_T0_BASE_FEE};
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     storage::StorageKey as _,
@@ -244,7 +244,7 @@ async fn spf_rejects_uncomposed_spec_for_migrated_policy_transaction() -> eyre::
     let witness = built.batch_witness(&config, zone_state_witness, tempo_state_nodes);
 
     let uncomposed_config = SpfConfig::new(
-        Arc::new(ZoneChainSpec::from_genesis(genesis.clone())),
+        Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?),
         Address::ZERO,
     );
     let uncomposed = prove_zone_batch(&uncomposed_config, witness.clone());
