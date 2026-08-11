@@ -70,6 +70,10 @@ const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 /// signatures still fit comfortably within this limit.
 const SUBMIT_BATCH_GAS_LIMIT: u64 = 2_000_000;
 
+/// Maximum number of pending withdrawal slots reconstructed in one recovery page.
+/// Bounds L1 topic filters and temporary withdrawal data without limiting the on-chain FIFO.
+pub(crate) const WITHDRAWAL_RECOVERY_PAGE_SIZE: u64 = 100;
+
 /// Maximum block span for one bounded log query.
 ///
 /// Native Zone reads no longer use this limit; it remains the bound for L1 portal log recovery.
@@ -916,15 +920,15 @@ impl BatchSubmitter {
         ))
     }
 
-    /// Re-populate the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
-    /// after a sequencer restart.
+    /// Re-populate one page of the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
+    /// after a sequencer restart or page refill.
     ///
     /// The L1 portal stores only hash chains, not the actual [`Withdrawal`](abi::Withdrawal)
     /// structs. This method reconstructs them by:
     ///
     /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
-    ///    to determine which slots are still pending.
-    /// 2. Querying the `BatchSubmitted` event for each pending slot (plus the
+    ///    to determine which bounded page starts at the current head.
+    /// 2. Querying the `BatchSubmitted` event for each slot in that page (plus the
     ///    predecessor for zone block range boundaries) via the indexed
     ///    `withdrawalQueueIndex` topic.
     /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
@@ -934,32 +938,35 @@ impl BatchSubmitter {
     ///    detection.
     /// 6. Verifying the hash chain and trimming already-processed withdrawals.
     ///
-    /// Returns a map of portal_slot → verified withdrawals ready to be stored.
+    /// Returns one bounded page of verified withdrawals starting at the portal head.
     #[instrument(skip_all, fields(portal = %self.portal_address))]
     pub async fn fetch_pending_withdrawals<P: ZoneSequencerProvider>(
         &self,
         zone_provider: &P,
         outbox_address: Address,
     ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
-        // Step 1: read pending slot range from the L1 portal.
+        // Step 1: read pending slot range from the L1 portal and bound this recovery page.
         let (head, tail) = self.read_portal_withdrawal_queue_bounds().await?;
+        let page_tail = tail.min(head.saturating_add(WITHDRAWAL_RECOVERY_PAGE_SIZE));
 
         if head >= tail {
-            info!(head, tail, "No pending withdrawals to restore");
+            info!(head, tail = tail, "No pending withdrawals to restore");
             return Ok(BTreeMap::new());
         }
 
         info!(
             head,
             tail,
+            page_tail,
             pending = tail - head,
-            "Restoring pending withdrawals"
+            page_slots = page_tail - head,
+            "Restoring pending withdrawal page"
         );
 
-        // Step 2: query BatchSubmitted events for pending slots [head, tail)
+        // Step 2: query BatchSubmitted events for this page [head, page_tail)
         // plus the predecessor (head-1) by their indexed withdrawalQueueIndex.
         let events = self
-            .find_batch_events_by_index(head.saturating_sub(1), tail)
+            .find_batch_events_by_index(head.saturating_sub(1), page_tail)
             .await?;
 
         // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
@@ -979,7 +986,7 @@ impl BatchSubmitter {
 
         // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
         let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
-        for portal_slot in head..tail {
+        for portal_slot in head..page_tail {
             if !events.contains_key(&portal_slot) {
                 continue;
             }
@@ -1010,9 +1017,9 @@ impl BatchSubmitter {
         // Guard: verify the queue didn't change during the multi-RPC replay.
         let (head2, tail2) = self.read_portal_withdrawal_queue_bounds().await?;
 
-        if head2 != head || tail2 != tail {
+        if head2 != head || tail2 < page_tail {
             eyre::bail!(
-                "withdrawal queue changed during restore ({}..{} -> {}..{}), retry on next startup",
+                "withdrawal queue changed during page restore ({}..{} -> {}..{}), retry from the current head",
                 head,
                 tail,
                 head2,
@@ -1021,7 +1028,7 @@ impl BatchSubmitter {
         }
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
-        resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash)
+        resolve_pending_slots(head, page_tail, &events, &slot_withdrawals, head_slot_hash)
     }
 
     /// Fetch `BatchSubmitted` events for logical queue indices `[first_index, tail)`
