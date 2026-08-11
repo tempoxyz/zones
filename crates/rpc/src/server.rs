@@ -9,11 +9,11 @@ use axum::{
     Router,
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
-use std::{sync::Arc, time::Instant};
+use std::{io, sync::Arc, time::Instant};
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
     KeyInfo, SignatureType as KeyInfoSignatureType,
 };
@@ -81,18 +81,93 @@ pub async fn start_redacted_rpc(
     Ok(local_addr)
 }
 
-/// Result of processing a JSON-RPC text payload (single or batch).
-pub(crate) enum RpcResult {
-    Single(JsonRpcResponse),
-    Batch(Vec<JsonRpcResponse>),
-}
+/// Pre-serialized JSON-RPC response body.
+pub(crate) struct RpcResult(String);
 
 impl IntoResponse for RpcResult {
     fn into_response(self) -> axum::response::Response {
-        match self {
-            Self::Single(resp) => axum::Json(resp).into_response(),
-            Self::Batch(resps) => axum::Json(resps).into_response(),
+        ([(header::CONTENT_TYPE, "application/json")], self.0).into_response()
+    }
+}
+
+impl RpcResult {
+    fn single(response: JsonRpcResponse, max_response_size: usize) -> Self {
+        Self(serialize_response_with_limit(response, max_response_size))
+    }
+}
+
+fn serialize_response(response: JsonRpcResponse) -> String {
+    serde_json::to_string(&response).expect("JsonRpcResponse serialization is infallible")
+}
+
+pub(crate) fn append_batch_response(
+    batch: &mut String,
+    response: JsonRpcResponse,
+    max_response_size: usize,
+) -> Result<(), String> {
+    let response = serialize_response_with_limit(response, max_response_size);
+    if batch.len().saturating_add(response.len()).saturating_add(1) > max_response_size {
+        return Err(serialize_response(JsonRpcResponse::error(
+            serde_json::Value::Null,
+            JsonRpcError::batch_response_too_large(max_response_size),
+        )));
+    }
+    batch.push_str(&response);
+    batch.push(',');
+    Ok(())
+}
+
+pub(crate) fn serialize_response_with_limit(
+    response: JsonRpcResponse,
+    max_response_size: usize,
+) -> String {
+    let id = response.id.clone();
+    let mut writer = BoundedWriter::new(max_response_size);
+    if serde_json::to_writer(&mut writer, &response).is_ok() {
+        String::from_utf8(writer.into_bytes())
+            .expect("serde_json only emits valid UTF-8 response bytes")
+    } else {
+        serialize_response(JsonRpcResponse::error(
+            id,
+            JsonRpcError::response_too_large(max_response_size),
+        ))
+    }
+}
+
+/// Writer that refuses to buffer more than the configured response size.
+struct BoundedWriter {
+    max_len: usize,
+    bytes: Vec<u8>,
+}
+
+impl BoundedWriter {
+    fn new(max_len: usize) -> Self {
+        Self {
+            max_len,
+            bytes: Vec::with_capacity(128.min(max_len)),
         }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl io::Write for &mut BoundedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "response size limit exceeded",
+            ));
+        }
+
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -102,43 +177,64 @@ pub(crate) async fn process_rpc_text(
     text: &str,
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
+    max_response_size: usize,
 ) -> RpcResult {
     let trimmed = text.trim_start();
 
     if trimmed.starts_with('[') {
         match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
-            Ok(requests) if requests.is_empty() => RpcResult::Single(JsonRpcResponse::error(
-                serde_json::Value::Null,
-                JsonRpcError::parse_error("empty batch"),
-            )),
-            Ok(requests) if requests.len() > MAX_BATCH_SIZE => {
-                RpcResult::Single(JsonRpcResponse::error(
+            Ok(requests) if requests.is_empty() => RpcResult::single(
+                JsonRpcResponse::error(
+                    serde_json::Value::Null,
+                    JsonRpcError::parse_error("empty batch"),
+                ),
+                max_response_size,
+            ),
+            Ok(requests) if requests.len() > MAX_BATCH_SIZE => RpcResult::single(
+                JsonRpcResponse::error(
                     serde_json::Value::Null,
                     JsonRpcError::invalid_params(format!(
                         "batch too large ({} > {MAX_BATCH_SIZE})",
                         requests.len()
                     )),
-                ))
-            }
+                ),
+                max_response_size,
+            ),
             Ok(requests) => {
-                let mut responses = Vec::with_capacity(requests.len());
+                let mut responses = String::from("[");
                 for req in &requests {
-                    responses.push(dispatch_request(req, auth, api).await);
+                    let response = dispatch_request(req, auth, api).await;
+                    if let Err(error) =
+                        append_batch_response(&mut responses, response, max_response_size)
+                    {
+                        return RpcResult(error);
+                    }
                 }
-                RpcResult::Batch(responses)
+                responses.pop();
+                responses.push(']');
+                RpcResult(responses)
             }
-            Err(e) => RpcResult::Single(JsonRpcResponse::error(
-                serde_json::Value::Null,
-                JsonRpcError::parse_error(format!("parse error: {e}")),
-            )),
+            Err(e) => RpcResult::single(
+                JsonRpcResponse::error(
+                    serde_json::Value::Null,
+                    JsonRpcError::parse_error(format!("parse error: {e}")),
+                ),
+                max_response_size,
+            ),
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => RpcResult::Single(dispatch_request(&request, auth, api).await),
-            Err(e) => RpcResult::Single(JsonRpcResponse::error(
-                serde_json::Value::Null,
-                JsonRpcError::parse_error(format!("parse error: {e}")),
-            )),
+            Ok(request) => RpcResult::single(
+                dispatch_request(&request, auth, api).await,
+                max_response_size,
+            ),
+            Err(e) => RpcResult::single(
+                JsonRpcResponse::error(
+                    serde_json::Value::Null,
+                    JsonRpcError::parse_error(format!("parse error: {e}")),
+                ),
+                max_response_size,
+            ),
         }
     }
 }
@@ -190,9 +286,14 @@ async fn handle_rpc(
         }
     };
 
-    process_rpc_text(body_str, &auth, state.api.as_ref())
-        .await
-        .into_response()
+    process_rpc_text(
+        body_str,
+        &auth,
+        state.api.as_ref(),
+        state.config.max_response_size,
+    )
+    .await
+    .into_response()
 }
 
 /// Authenticate the request using the `X-Authorization-Token` header.
@@ -288,13 +389,16 @@ pub(crate) fn validate_keychain_key_info(key_info: &KeyInfo) -> Result<(), Authe
 
 #[cfg(test)]
 mod tests {
-    use super::authenticate_token;
+    use super::{
+        append_batch_response, authenticate_token, serialize_response,
+        serialize_response_with_limit,
+    };
     use crate::{
         RedactedRpcConfig,
         auth::build_token_fields,
         error::AuthenticateError,
         handlers::ZoneRpcApi,
-        types::{BoxEyreFut, BoxFut, JsonRpcError},
+        types::{BoxEyreFut, BoxFut, JsonRpcError, JsonRpcResponse, to_raw},
     };
     use alloy_primitives::{Address, Bytes};
     use axum::http::StatusCode;
@@ -393,14 +497,59 @@ mod tests {
     fn test_config() -> RedactedRpcConfig {
         RedactedRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
-            l1_rpc_url: "http://127.0.0.1:1".to_string(),
-            zone_rpc_url: "http://127.0.0.1:1".to_string(),
-            retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
             max_auth_token_validity: crate::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+            max_response_size: 160 * 1024 * 1024,
             zone_portal: PORTAL,
         }
+    }
+
+    #[test]
+    fn oversized_response_matches_jsonrpsee_error() {
+        let response = JsonRpcResponse::success(
+            serde_json::json!(7),
+            to_raw(&"x".repeat(128)).expect("test response serializes"),
+        );
+
+        let response = serialize_response_with_limit(response, 64);
+        let response: serde_json::Value =
+            serde_json::from_str(&response).expect("response is valid JSON");
+
+        assert_eq!(response["id"], serde_json::json!(7));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32008));
+        assert_eq!(response["error"]["message"], "Response is too big");
+        assert_eq!(response["error"]["data"], "Exceeded max limit of 64");
+    }
+
+    #[test]
+    fn batch_response_limit_is_aggregate() {
+        let response = JsonRpcResponse::success(
+            serde_json::json!(1),
+            to_raw(&"result").expect("test response serializes"),
+        );
+        let serialized = serialize_response(response.clone());
+        // Exactly enough bytes for `[response]`, but not for a second response.
+        let max_response_size = serialized.len() + 2;
+        let mut batch = String::from("[");
+
+        append_batch_response(&mut batch, response.clone(), max_response_size)
+            .expect("one response fits");
+        let error = append_batch_response(&mut batch, response, max_response_size)
+            .expect_err("aggregate batch response exceeds the limit");
+        let error: serde_json::Value =
+            serde_json::from_str(&error).expect("response is valid JSON");
+
+        assert_eq!(error["id"], serde_json::Value::Null);
+        assert_eq!(error["error"]["code"], serde_json::json!(-32011));
+        assert_eq!(
+            error["error"]["message"],
+            "The batch response was too large"
+        );
+        assert_eq!(
+            error["error"]["data"],
+            format!("Exceeded max limit of {max_response_size}")
+        );
     }
 
     #[tokio::test]

@@ -28,6 +28,11 @@ env:
 jobs:
   build-and-push:
     name: Build and Push Docker Images
+    # Private copies retain PR image builds, but must not publish shared images
+    # or run the upstream's scheduled refreshes.
+    if: >-
+      github.repository == 'tempoxyz/zones' ||
+      (github.event_name != 'schedule' && github.event_name != 'push')
     runs-on: depot-ubuntu-latest-16
     permissions:
       contents: read
@@ -79,6 +84,7 @@ jobs:
             type=ref,event=pr
 
       - name: Log in to Container Registry
+        if: github.repository == 'tempoxyz/zones'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -92,12 +98,12 @@ jobs:
         uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
         with:
           files: |
-            docker-bake.hcl
+            docker/docker-bake.hcl
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
           # Scheduled builds refresh moving external tools and base images. All
           # commit/tag/manual builds can safely reuse Depot's content-addressed
           # layer cache and will still invalidate layers when inputs change.

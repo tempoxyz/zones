@@ -1,5 +1,5 @@
 // Override targets for profiling builds with frame pointers enabled
-// Variables inherited from docker-bake.hcl when files are merged
+// Variables inherited from docker/docker-bake.hcl when files are merged
 
 variable "VERGEN_GIT_SHA" {
   default = ""
@@ -10,7 +10,7 @@ variable "VERGEN_GIT_SHA_SHORT" {
 }
 
 target "chef" {
-  dockerfile = "Dockerfile.chef"
+  dockerfile = "docker/Dockerfile.chef"
   context = "."
   platforms = ["linux/amd64"]
   args = {
@@ -21,7 +21,7 @@ target "chef" {
 }
 
 target "_common" {
-  dockerfile = "Dockerfile"
+  dockerfile = "docker/Dockerfile"
   context = "."
   contexts = {
     chef = "target:chef"

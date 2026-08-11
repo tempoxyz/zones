@@ -133,7 +133,10 @@ fn deploy_contract(
 
 /// Build an EVM with the zone contracts deployed in-memory (same as xtask generate_zone_genesis).
 fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
-    setup_zone_evm_with_contracts_for_portal(zone_chain_id(1), Address::repeat_byte(0xbb))
+    setup_zone_evm_with_contracts_for_portal(
+        zone_chain_id(4217, 1).unwrap(),
+        Address::repeat_byte(0xbb),
+    )
 }
 
 fn setup_zone_evm_with_contracts_for_portal(

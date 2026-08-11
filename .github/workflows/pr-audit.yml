@@ -17,17 +17,20 @@ jobs:
   # Label-triggered audit -> read-only shared reusable
   audit:
     if: >-
+      github.repository == 'tempoxyz/zones' &&
       (
+        (
         github.event_name == 'pull_request' &&
         (
           github.event.label.name == 'cyclops' ||
           github.event.label.name == 'agentic-audit'
         )
-      ) ||
-      (
-        github.event_name == 'pull_request_target' ||
-        github.event_name == 'pull_request_review' ||
-        github.event_name == 'merge_group'
+        ) ||
+        (
+          github.event_name == 'pull_request_target' ||
+          github.event_name == 'pull_request_review' ||
+          github.event_name == 'merge_group'
+        )
       )
     permissions:
       contents: read
@@ -47,6 +50,7 @@ jobs:
   # Comment-command audit -> caller-owned privileged job using the composite
   audit-comment:
     if: >-
+      github.repository == 'tempoxyz/zones' &&
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       (

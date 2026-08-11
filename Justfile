@@ -103,7 +103,7 @@ send-deposit amount="1000000" to="" memo="0x000000000000000000000000000000000000
         TO=$(cast wallet address "$PK")
     fi
     ARGS="--amount {{amount}} --token {{token}} --memo {{memo}} --to $TO --zone-rpc-url {{rpc}}"
-    cargo run -p tempo-xtask -- deposit --private-key "$PK" $ARGS
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- deposit $ARGS
 
 [group('zone')]
 [doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...). Set ZONE_FACTORY to override the Moderato default.')]
@@ -172,13 +172,12 @@ create-zone name token="" access_enforced="false" gateway_enforced="false":
     for gateway in "${GATEWAYS[@]}"; do
         [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
     done
-    cargo run -p tempo-xtask -- create-zone \
+    ZONE_FACTORY_OWNER_KEY="$PK" cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
         --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
-        --private-key "$PK" \
         "${CREATE_ARGS[@]}"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
 
@@ -198,10 +197,9 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
     fi
     echo "Building Solidity specs..."
     (cd specs/ref-impls && forge build --skip test) || true
-    cargo run -p tempo-xtask -- deploy-router \
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- deploy-router \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
-        --private-key "$PK" \
         --stablecoin-dex "{{dex}}"
 
 [group('zone')]
@@ -228,11 +226,10 @@ demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
         echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
         exit 1
     fi
-    cargo run -p tempo-xtask -- demo-swap-and-deposit \
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- demo-swap-and-deposit \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
         --zone-rpc-url "{{rpc}}" \
-        --private-key "$PK" \
         --amount "{{amount}}" \
         --tick "{{tick}}"
 
@@ -255,10 +252,13 @@ zone-up name reset="false" profile="dev" args="":
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
-    SEQ_KEY="${SEQUENCER_KEY:-$(jq -r '.sequencerKey // empty' "$ZONE_JSON")}"
-    if [[ -z "$SEQ_KEY" ]]; then
-        echo "Error: SEQUENCER_KEY env var not set and not found in $ZONE_JSON" >&2
+    SEQ_KEY_FILE="${SEQUENCER_KEY_FILE:-}"
+    if [[ -z "$SEQ_KEY_FILE" ]] && ! jq -e '.sequencerKey? | strings | select(length > 0)' "$ZONE_JSON" > /dev/null; then
+        echo "Error: SEQUENCER_KEY_FILE env var not set and no sequencer key found in $ZONE_JSON" >&2
         exit 1
+    fi
+    if [[ -z "$SEQ_KEY_FILE" ]]; then
+        SEQ_KEY_FILE=<(jq -r '.sequencerKey' "$ZONE_JSON")
     fi
     DATADIR="/tmp/tempo-zone-{{name}}"
     if [[ "{{reset}}" = "true" ]]; then
@@ -283,7 +283,7 @@ zone-up name reset="false" profile="dev" args="":
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer \
-                      --sequencer-key "$SEQ_KEY" \
+                      --sequencer-key-file "$SEQ_KEY_FILE" \
                       {{args}}
 
 [group('zone')]
@@ -746,6 +746,7 @@ check-balance-redacted name token="0x20C0000000000000000000000000000000000000" r
 deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     #!/bin/bash
     set -euo pipefail
+    umask 077
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     OUTPUT="generated/{{name}}"
@@ -830,13 +831,12 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     for gateway in "${GATEWAYS[@]}"; do
         [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
     done
-    cargo run -p tempo-xtask -- create-zone \
+    ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
         --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
-        --private-key "$SEQUENCER_KEY" \
         "${CREATE_ARGS[@]}"
     echo ""
 
@@ -857,10 +857,9 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
 
     # Step 5: Register sequencer encryption key on the portal
     echo "Step 5: Registering sequencer encryption key on ZonePortal..."
-    cargo run -p tempo-xtask -- set-encryption-key \
+    PRIVATE_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- set-encryption-key \
         --l1-rpc-url "$HTTP_RPC" \
-        --portal "$PORTAL" \
-        --private-key "$SEQUENCER_KEY"
+        --portal "$PORTAL"
     echo ""
 
     # Step 6: Display summary
@@ -909,7 +908,7 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer \
-                      --sequencer-key "$SEQUENCER_KEY"
+                      --sequencer-key-file <(jq -r '.sequencerKey' "$OUTPUT/zone.json")
 
 [group('zone')]
 [doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000')]
@@ -918,7 +917,7 @@ spam-deposits total="20" per-block="10" amount="1000000" token="0x20C00000000000
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
-    cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- spam-deposits $ARGS
 
 [group('zone')]
 [doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY for the token admin/depositor, L1_PORTAL_ADDRESS, and portal admin authority via ADMIN_KEY or matching generated/<name>/zone.json adminKey.')]

@@ -36,7 +36,8 @@ use tracing::warn;
 use crate::{
     auth::{self, AuthContext, AuthError},
     server::{
-        MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request, validate_keychain_key_info,
+        MAX_BATCH_SIZE, RpcState, append_batch_response, authenticate_token, dispatch_request,
+        serialize_response_with_limit, validate_keychain_key_info,
     },
     subscription::WsSubscriptionStream,
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
@@ -111,6 +112,10 @@ impl WsSession {
         self.pending_subscription_count = self.pending_subscription_count.saturating_sub(1);
         self.subscriptions
             .insert(subscription_id, ActiveSubscription { task });
+    }
+
+    fn discard_pending_subscriptions(&mut self, count: usize) {
+        self.pending_subscription_count = self.pending_subscription_count.saturating_sub(count);
     }
 
     fn cleanup(self) {
@@ -371,48 +376,55 @@ async fn process_ws_text(
     session: &mut WsSession,
 ) -> (String, Vec<PendingSubscription>) {
     let trimmed = text.trim_start();
+    let max_response_size = state.config.max_response_size;
 
     if trimmed.starts_with('[') {
         match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
             Ok(requests) if requests.is_empty() => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::parse_error("empty batch"),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(Value::Null, JsonRpcError::parse_error("empty batch")),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
             Ok(requests) if requests.len() > MAX_BATCH_SIZE => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::invalid_params(format!(
-                        "batch too large ({} > {MAX_BATCH_SIZE})",
-                        requests.len()
-                    )),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(
+                        Value::Null,
+                        JsonRpcError::invalid_params(format!(
+                            "batch too large ({} > {MAX_BATCH_SIZE})",
+                            requests.len()
+                        )),
+                    ),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
             Ok(requests) => {
-                let mut responses = Vec::with_capacity(requests.len());
+                let mut responses = String::from("[");
                 let mut pending_subscriptions = Vec::new();
                 for req in &requests {
                     let result = dispatch_ws_request(req, auth, state, session).await;
-                    responses.push(result.response);
                     pending_subscriptions.extend(result.pending_subscriptions);
+                    if let Err(error) =
+                        append_batch_response(&mut responses, result.response, max_response_size)
+                    {
+                        session.discard_pending_subscriptions(pending_subscriptions.len());
+                        return (error, Vec::new());
+                    }
                 }
-                (
-                    serde_json::to_string(&responses)
-                        .expect("JsonRpcResponse serialization is infallible"),
-                    pending_subscriptions,
-                )
+                responses.pop();
+                responses.push(']');
+                (responses, pending_subscriptions)
             }
             Err(err) => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::parse_error(format!("parse error: {err}")),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(
+                        Value::Null,
+                        JsonRpcError::parse_error(format!("parse error: {err}")),
+                    ),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
         }
@@ -421,17 +433,18 @@ async fn process_ws_text(
             Ok(request) => {
                 let result = dispatch_ws_request(&request, auth, state, session).await;
                 (
-                    serde_json::to_string(&result.response)
-                        .expect("JsonRpcResponse serialization is infallible"),
+                    serialize_response_with_limit(result.response, max_response_size),
                     result.pending_subscriptions,
                 )
             }
             Err(err) => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::parse_error(format!("parse error: {err}")),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(
+                        Value::Null,
+                        JsonRpcError::parse_error(format!("parse error: {err}")),
+                    ),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
         }
@@ -567,11 +580,13 @@ async fn handle_ws_session(
                         if !try_queue_notification(
                             &notifications,
                             &close_session,
-                            serde_json::to_string(&JsonRpcResponse::error(
-                                Value::Null,
-                                JsonRpcError::parse_error("invalid UTF-8"),
-                            ))
-                            .expect("JsonRpcResponse serialization is infallible"),
+                            serialize_response_with_limit(
+                                JsonRpcResponse::error(
+                                    Value::Null,
+                                    JsonRpcError::parse_error("invalid UTF-8"),
+                                ),
+                                state.config.max_response_size,
+                            ),
                         ) {
                             break;
                         }

@@ -21,7 +21,7 @@
 //! number that IS within the EIP-2935 window, and the proof must include a
 //! block header chain linking that anchor back to `tempoBlockNumber`.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
@@ -136,6 +136,12 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     latest_observed_zone_block: u64,
     /// Detached, observational SPF worker.
     shadow_prover: Option<ShadowProver>,
+}
+
+struct PortalResyncSnapshot {
+    portal_anchor: crate::settlement::PortalZoneAnchor,
+    previous_snapshot: ZoneBlockSnapshot,
+    pending_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
 impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
@@ -320,19 +326,30 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// local store with that result. Used during startup and after a portal
     /// resync when local withdrawal data may be stale or missing.
     async fn restore_pending_withdrawals_from_chain(&self) -> Result<()> {
-        let pending = match self
+        let pending = self.fetch_pending_withdrawals_from_chain().await?;
+        self.replace_pending_withdrawals(pending);
+        Ok(())
+    }
+
+    async fn fetch_pending_withdrawals_from_chain(
+        &self,
+    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+        match self
             .batch_submitter
             .fetch_pending_withdrawals(&self.provider, self.config.outbox_address)
             .await
         {
-            Ok(pending) => pending,
+            Ok(pending) => Ok(pending),
             Err(err) => {
                 self.metrics
                     .withdrawal_store_restore_failure_total
                     .increment(1);
-                return Err(err);
+                Err(err)
             }
-        };
+        }
+    }
+
+    fn replace_pending_withdrawals(&self, pending: BTreeMap<u64, Vec<abi::Withdrawal>>) {
         let restored_withdrawals = pending.values().map(Vec::len).sum::<usize>();
         let reconciled_first_slot = pending.keys().next().copied();
         let reconciled_last_slot = pending.keys().next_back().copied();
@@ -363,8 +380,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 "Cleared stale withdrawal batches after restoring pending withdrawals from chain"
             );
         }
-
-        Ok(())
     }
 
     /// Repair monitor state after the withdrawal processor reports a missing head slot.
@@ -673,23 +688,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let store = self.withdrawal_store.lock();
             store.summary()
         };
-        let portal_anchor = resolve_portal_zone_anchor(
-            &self.provider,
-            self.config.portal_address,
-            self.batch_submitter.l1_provider(),
-        )
-        .await
-        .wrap_err("failed to resolve portal-confirmed zone block during resync")?;
+        let snapshot = self.build_portal_resync_snapshot().await?;
+        let portal_anchor = snapshot.portal_anchor;
         let portal_hash = portal_anchor.block_hash;
         let last_submitted_zone_block = portal_anchor.block_number;
-        let previous_snapshot = Self::snapshot_at_or_genesis(
-            &self.provider,
-            self.config.inbox_address,
-            last_submitted_zone_block,
-        )
-        .wrap_err("failed to read portal-confirmed zone commitments")?;
-        let deposit_hash = previous_snapshot.processed_deposit_hash;
-        let deposit_number = previous_snapshot.processed_deposit_number;
+        let deposit_hash = snapshot.previous_snapshot.processed_deposit_hash;
+        let deposit_number = snapshot.previous_snapshot.processed_deposit_number;
 
         warn!(
             old_prev_block_hash = %old_hash,
@@ -710,6 +714,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         self.latest_observed_zone_block = last_submitted_zone_block;
         self.prev_processed_deposit_hash = deposit_hash;
         self.prev_processed_deposit_number = deposit_number;
+        self.replace_pending_withdrawals(snapshot.pending_withdrawals);
         self.metrics
             .latest_zone_block_submitted_to_l1
             .set(last_submitted_zone_block as f64);
@@ -717,23 +722,45 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         if let Some(store) = &self.config.attestation_store {
             store.remove_submitted(last_submitted_zone_block);
         }
-        if let Err(e) = self.restore_pending_withdrawals_from_chain().await {
-            let (stale_store_batches, stale_store_first_slot, stale_store_last_slot) = {
-                let mut store = self.withdrawal_store.lock();
-                let summary = store.summary();
-                store.replace_batches(Default::default());
-                summary
-            };
-            error!(
-                error = %e,
-                stale_store_batches,
-                stale_store_first_slot,
-                stale_store_last_slot,
-                "Failed to restore pending withdrawals during portal resync; cleared local withdrawal store"
+
+        Ok(last_submitted_zone_block)
+    }
+
+    async fn build_portal_resync_snapshot(&self) -> Result<PortalResyncSnapshot> {
+        let portal_anchor = resolve_portal_zone_anchor(
+            &self.provider,
+            self.config.portal_address,
+            self.batch_submitter.l1_provider(),
+        )
+        .await
+        .wrap_err("failed to resolve portal-confirmed zone block during resync")?;
+        let previous_snapshot = Self::snapshot_at_or_genesis(
+            &self.provider,
+            self.config.inbox_address,
+            portal_anchor.block_number,
+        )
+        .wrap_err("failed to read portal-confirmed zone commitments")?;
+        let pending_withdrawals = self.fetch_pending_withdrawals_from_chain().await?;
+
+        let confirmed_portal_anchor = resolve_portal_zone_anchor(
+            &self.provider,
+            self.config.portal_address,
+            self.batch_submitter.l1_provider(),
+        )
+        .await
+        .wrap_err("failed to confirm portal-confirmed zone block during resync")?;
+        if confirmed_portal_anchor != portal_anchor {
+            eyre::bail!(
+                "portal anchor changed while building resync snapshot: initial={portal_anchor:?}, \
+                 confirmed={confirmed_portal_anchor:?}"
             );
         }
 
-        Ok(last_submitted_zone_block)
+        Ok(PortalResyncSnapshot {
+            portal_anchor,
+            previous_snapshot,
+            pending_withdrawals,
+        })
     }
 
     fn snapshot_at_or_genesis(
@@ -1020,6 +1047,7 @@ mod tests {
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
+        l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), zone);
 
@@ -1044,6 +1072,7 @@ mod tests {
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
+        l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         monitor.withdrawal_store.lock().add_withdrawal(
@@ -1071,7 +1100,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resync_clears_stale_withdrawal_store_when_restore_fails() {
+    async fn resync_preserves_last_known_good_state_when_restore_fails() {
         let l1 = Asserter::new();
         let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
         let confirmed_zone_block = 42;
@@ -1083,6 +1112,11 @@ mod tests {
         l1.push_failure_msg("tail read failed");
 
         let mut monitor = test_monitor(l1.clone(), zone);
+        let old_hash = monitor.prev_zone_block_hash;
+        let old_last_submitted = monitor.last_submitted_zone_block;
+        let old_latest_observed = monitor.latest_observed_zone_block;
+        let old_deposit_hash = monitor.prev_processed_deposit_hash;
+        let old_deposit_number = monitor.prev_processed_deposit_number;
         monitor.withdrawal_store.lock().add_withdrawal(
             3,
             abi::Withdrawal {
@@ -1098,14 +1132,75 @@ mod tests {
             },
         );
 
-        let anchor = monitor.resync_from_portal().await.unwrap();
+        let error = monitor.resync_from_portal().await.unwrap_err();
 
-        assert_eq!(anchor, confirmed_zone_block);
+        assert!(error.to_string().contains("head read failed"));
         let store = monitor.withdrawal_store.lock();
-        assert_eq!(store.batch_count(), 0);
-        assert_eq!(monitor.prev_zone_block_hash, portal_hash);
-        assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
-        assert_eq!(monitor.prev_processed_deposit_hash, confirmed_deposit_hash);
+        assert_eq!(store.batch_count(), 1);
+        assert_eq!(monitor.prev_zone_block_hash, old_hash);
+        assert_eq!(monitor.last_submitted_zone_block, old_last_submitted);
+        assert_eq!(monitor.latest_observed_zone_block, old_latest_observed);
+        assert_eq!(monitor.prev_processed_deposit_hash, old_deposit_hash);
+        assert_eq!(monitor.prev_processed_deposit_number, old_deposit_number);
+    }
+
+    #[tokio::test]
+    async fn resync_preserves_last_known_good_state_when_portal_anchor_changes() {
+        let l1 = Asserter::new();
+        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
+        let changed_portal_hash = B256::from(U256::from(8).to_be_bytes::<32>());
+        let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
+        let mut changed_header = TempoHeader::default();
+        changed_header.inner.number = 43;
+        zone.add_block(
+            changed_portal_hash,
+            Block {
+                header: changed_header,
+                body: Default::default(),
+            },
+        );
+
+        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(7),
+            abi_encode_u64(7),
+        ]));
+        l1.push_success(&abi_encode_b256(changed_portal_hash));
+
+        let mut monitor = test_monitor(l1.clone(), zone);
+        let old_hash = monitor.prev_zone_block_hash;
+        let old_last_submitted = monitor.last_submitted_zone_block;
+        let old_latest_observed = monitor.latest_observed_zone_block;
+        let old_deposit_hash = monitor.prev_processed_deposit_hash;
+        let old_deposit_number = monitor.prev_processed_deposit_number;
+        monitor.withdrawal_store.lock().add_withdrawal(
+            3,
+            abi::Withdrawal {
+                token: Address::repeat_byte(0x10),
+                senderTag: B256::repeat_byte(0x11),
+                to: Address::repeat_byte(0x12),
+                amount: 100,
+                memo: B256::ZERO,
+                gasLimit: 0,
+                fallbackNonce: 1,
+                callbackData: Default::default(),
+                encryptedSender: Default::default(),
+            },
+        );
+
+        let error = monitor.resync_from_portal().await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("portal anchor changed while building resync snapshot")
+        );
+        assert_eq!(monitor.withdrawal_store.lock().batch_count(), 1);
+        assert_eq!(monitor.prev_zone_block_hash, old_hash);
+        assert_eq!(monitor.last_submitted_zone_block, old_last_submitted);
+        assert_eq!(monitor.latest_observed_zone_block, old_latest_observed);
+        assert_eq!(monitor.prev_processed_deposit_hash, old_deposit_hash);
+        assert_eq!(monitor.prev_processed_deposit_number, old_deposit_number);
     }
 
     #[tokio::test]
@@ -1122,6 +1217,7 @@ mod tests {
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
+        l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {
@@ -1168,6 +1264,7 @@ mod tests {
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
+        l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {

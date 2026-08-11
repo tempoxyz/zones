@@ -37,12 +37,13 @@ use alloy_provider::{DynProvider, Provider};
 use futures::{StreamExt, stream::FuturesUnordered};
 use parking_lot::Mutex;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt};
+use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     abi::{self, EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
-    metrics::WithdrawalProcessorMetrics,
+    metrics::{SequencerMetrics, WithdrawalProcessorMetrics},
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
     settlement::{WITHDRAWAL_QUEUE_CAPACITY, find_processed_offset},
 };
@@ -283,6 +284,7 @@ pub struct WithdrawalProcessor {
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
+    sequencer_metrics: SequencerMetrics,
 }
 
 impl WithdrawalProcessor {
@@ -307,6 +309,7 @@ impl WithdrawalProcessor {
             notify,
             repair_notify,
             metrics: WithdrawalProcessorMetrics::default(),
+            sequencer_metrics: SequencerMetrics::default(),
         }
     }
 
@@ -357,7 +360,27 @@ impl WithdrawalProcessor {
             if let Err(e) = self.process_queue().await {
                 error!(error = %e, "Withdrawal processing cycle failed");
             }
+
+            if let Err(error) = self.update_sequencer_metrics().await {
+                warn!(
+                    %error,
+                    sequencer = %self.config.sequencer_address,
+                    "Failed to refresh sequencer PathUSD balance metric"
+                );
+            }
         }
+    }
+
+    /// Update sequencer metrics from Tempo L1 state.
+    async fn update_sequencer_metrics(&self) -> eyre::Result<()> {
+        let balance = ITIP20::new(PATH_USD_ADDRESS, &self.provider)
+            .balanceOf(self.config.sequencer_address)
+            .call()
+            .await?;
+        self.sequencer_metrics
+            .pathusd_balance
+            .set(f64::from(balance));
+        Ok(())
     }
 
     /// Drain the portal's withdrawal queue on Tempo L1, slot by slot, until the

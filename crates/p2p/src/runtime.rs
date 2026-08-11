@@ -1177,8 +1177,77 @@ mod tests {
         }
         broadcaster.abort();
 
-        // Exercise the complete backfill response path through the real Commonware senders and
-        // receivers. A completed request must also reject a replay with the same request ID.
+        // A responder at the follower's head sends an empty page. Its completion must reach the
+        // follower without causing the coordinator to fan out another request.
+        const LOCAL_BEST: u64 = 6;
+        let level_start = LOCAL_BEST + 1;
+        let follower_commands = handles[1].parts.as_ref().unwrap().backfill.commands.clone();
+        let requester = tokio::spawn(async move {
+            loop {
+                follower_commands
+                    .send(crate::BackfillCommand::Request { start: level_start })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let (requesting_peer, request_id) = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(request) = handles[0]
+                    .parts
+                    .as_mut()
+                    .unwrap()
+                    .backfill
+                    .requests
+                    .recv()
+                    .await
+                {
+                    assert_eq!(request.start, level_start);
+                    return (request.peer, request.request_id);
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive the level-peer backfill request");
+        requester.abort();
+
+        // Let any retry already queued by the test helper be discarded while this request is
+        // still outstanding, before the completion frees the reservation.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let leader_commands = handles[0].parts.as_ref().unwrap().backfill.commands.clone();
+        leader_commands
+            .send(crate::BackfillCommand::Complete {
+                peer: requesting_peer,
+                request_id,
+                tip: test_tip(LOCAL_BEST),
+            })
+            .await
+            .unwrap();
+
+        let level_response = tokio::time::timeout(
+            Duration::from_secs(15),
+            handles[1].parts.as_mut().unwrap().backfill.responses.recv(),
+        )
+        .await
+        .expect("follower did not receive the level-peer completion")
+        .expect("follower backfill response channel closed");
+        assert!(matches!(
+            level_response,
+            crate::BackfillResponse::Completed { tip, .. } if tip == test_tip(LOCAL_BEST)
+        ));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                handles[2].parts.as_mut().unwrap().backfill.requests.recv(),
+            )
+            .await
+            .is_err(),
+            "level-peer completion triggered an unnecessary fallback backfill request"
+        );
+
+        // Exercise a non-empty backfill response through the real Commonware senders and
+        // receivers. Blocks must arrive before the completion, and a completed request must
+        // reject a replay with the same request ID.
         let follower_commands = handles[1].parts.as_ref().unwrap().backfill.commands.clone();
         let requester = tokio::spawn(async move {
             loop {
@@ -1209,8 +1278,9 @@ mod tests {
         .expect("leader did not receive the backfill request");
         requester.abort();
 
+        // Drain any retry already queued by the helper while the request remains reserved.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         let backfill_blocks = [vec![0xf8, 0x02, 0x80], vec![0xf8, 0x03, 0x80]];
-        let leader_commands = handles[0].parts.as_ref().unwrap().backfill.commands.clone();
         for block in &backfill_blocks {
             leader_commands
                 .send(crate::BackfillCommand::SendBlock {
@@ -1250,7 +1320,7 @@ mod tests {
                         assert_eq!(received_blocks, backfill_blocks);
                         return;
                     }
-                    None => panic!("follower event channel closed"),
+                    None => panic!("follower backfill response channel closed"),
                 }
             }
         })

@@ -5,6 +5,58 @@ use reth_metrics::{
     metrics::{Counter, Gauge, Histogram},
 };
 
+/// Metrics emitted for the sequencer account.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "tempo_zone_sequencer")]
+pub(crate) struct SequencerMetrics {
+    /// Current PathUSD balance of the sequencer account on Tempo L1, in base units.
+    pub(crate) pathusd_balance: Gauge,
+}
+
+/// Metrics emitted by the prover.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "tempo_zone_prover")]
+pub(crate) struct ProverMetrics {
+    /// Time a finalized batch candidate spends waiting for the prover worker.
+    pub(crate) queue_duration_seconds: Histogram,
+
+    /// End-to-end latency of a prover validation attempt in seconds.
+    pub(crate) validation_duration_seconds: Histogram,
+
+    /// Time spent loading and decoding canonical Zone blocks.
+    pub(crate) zone_inputs_duration_seconds: Histogram,
+
+    /// Time spent generating and combining Zone execution witnesses.
+    pub(crate) zone_witness_duration_seconds: Histogram,
+
+    /// Time spent fetching and validating Tempo checkpoints and ancestry.
+    pub(crate) tempo_headers_duration_seconds: Histogram,
+
+    /// Time spent fetching and combining Tempo state proofs.
+    pub(crate) tempo_witness_duration_seconds: Histogram,
+
+    /// Time spent executing the SPF over a generated batch witness.
+    pub(crate) spf_execution_duration_seconds: Histogram,
+
+    /// Time spent comparing SPF output with the finalized batch candidate.
+    pub(crate) output_validation_duration_seconds: Histogram,
+
+    /// Number of finalized batch candidates that failed prover validation.
+    pub(crate) validation_failure_total: Counter,
+
+    /// Number of finalized batch candidates that passed prover validation.
+    pub(crate) validation_success_total: Counter,
+
+    /// Encoded witness size for a successfully validated batch candidate.
+    pub(crate) witness_bytes: Histogram,
+
+    /// Number of Zone state trie nodes in a successfully validated batch witness.
+    pub(crate) zone_state_nodes: Histogram,
+
+    /// Number of Tempo state trie nodes in a successfully validated batch witness.
+    pub(crate) tempo_state_nodes: Histogram,
+}
+
 /// Metrics emitted by the withdrawal processor.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_withdrawal_processor")]

@@ -24,7 +24,7 @@ use tempo_zone_contracts::{
 };
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info};
-use zone_evm::ZoneEvmConfig;
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
@@ -32,7 +32,7 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider};
+use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
 
 /// Number of candidates allowed to wait behind the active validation.
 const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
@@ -43,10 +43,12 @@ type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
 pub struct ShadowProverConfig {
+    /// Parent Tempo chain ID bound into SPF public inputs.
+    pub parent_chain_id: u64,
     /// Zone identifier bound into SPF public inputs.
     pub zone_id: u32,
-    /// The exact EVM configuration used by the node.
-    pub evm_config: ZoneEvmConfig,
+    /// Chain spec used to configure the SPF.
+    pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
 }
@@ -55,8 +57,9 @@ impl fmt::Debug for ShadowProverConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ShadowProverConfig")
+            .field("parent_chain_id", &self.parent_chain_id)
             .field("zone_id", &self.zone_id)
-            .field("evm_config", &self.evm_config)
+            .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
             .finish()
     }
@@ -72,6 +75,7 @@ struct ProverJob {
     from: u64,
     to: u64,
     batch: BatchData,
+    enqueued_at: Instant,
 }
 
 #[derive(Debug)]
@@ -116,7 +120,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
         queue_capacity = SHADOW_PROVER_QUEUE_CAPACITY,
         "Shadow prover enabled"
     );
-    let (sender, mut receiver) = mpsc::channel(SHADOW_PROVER_QUEUE_CAPACITY);
+    let (sender, mut receiver) = mpsc::channel::<ProverJob>(SHADOW_PROVER_QUEUE_CAPACITY);
     let context = ProverContext {
         config,
         portal,
@@ -124,12 +128,28 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
         zone_provider,
         l1_provider,
     };
+    let metrics = ProverMetrics::default();
 
     tokio::spawn(async move {
         while let Some(job) = receiver.recv().await {
+            metrics
+                .queue_duration_seconds
+                .record(job.enqueued_at.elapsed().as_secs_f64());
             let started = Instant::now();
-            match validate_candidate(&context, &job).await {
+            let result = validate_candidate(&context, &job, &metrics).await;
+            metrics
+                .validation_duration_seconds
+                .record(started.elapsed().as_secs_f64());
+            match result {
                 Ok(stats) => {
+                    metrics.validation_success_total.increment(1);
+                    metrics.witness_bytes.record(stats.witness_bytes as f64);
+                    metrics
+                        .zone_state_nodes
+                        .record(stats.zone_state_nodes as f64);
+                    metrics
+                        .tempo_state_nodes
+                        .record(stats.tempo_state_nodes as f64);
                     info!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
@@ -144,6 +164,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                     );
                 }
                 Err(err) => {
+                    metrics.validation_failure_total.increment(1);
                     error!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
@@ -151,7 +172,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         prev_block_hash = %job.batch.prev_block_hash,
                         next_block_hash = %job.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
-                        error = %err,
+                        error = ?err,
                         "Shadow prover failed to validate finalized batch candidate"
                     );
                 }
@@ -169,6 +190,7 @@ impl ShadowProver {
             from,
             to,
             batch: batch.clone(),
+            enqueued_at: Instant::now(),
         }) {
             error!(
                 target: "zone::sequencer::prover",
@@ -190,6 +212,7 @@ impl ShadowProver {
 async fn validate_candidate<P: ZoneSequencerProvider>(
     context: &ProverContext<P>,
     job: &ProverJob,
+    metrics: &ProverMetrics,
 ) -> Result<ValidationStats> {
     ensure!(
         job.batch.zone_height == job.to,
@@ -202,11 +225,14 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         "first Zone batch must use the zero portal prev_block_hash sentinel, found {}",
         job.batch.prev_block_hash
     );
+
     let zone_provider = context.zone_provider.clone();
     let from = job.from;
     let to = job.to;
     let expected_prev_hash = job.batch.prev_block_hash;
     let expected_next_hash = job.batch.next_block_hash;
+
+    let started = Instant::now();
     let zone_inputs = tokio::task::spawn_blocking(move || {
         build_zone_inputs(
             &zone_provider,
@@ -218,48 +244,70 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     })
     .await
     .context("Zone input worker panicked")??;
+    metrics
+        .zone_inputs_duration_seconds
+        .record(started.elapsed().as_secs_f64());
 
+    let started = Instant::now();
     let (zone_state_witness, tempo_reads) =
         zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
+    metrics
+        .zone_witness_duration_seconds
+        .record(started.elapsed().as_secs_f64());
 
-    let initial_tempo_header = tempo_header(&context.l1_provider, zone_inputs.initial_tempo_number)
-        .await
-        .context("fetch initial Tempo checkpoint")?;
-    ensure!(
-        initial_tempo_header.hash_slow() == zone_inputs.initial_tempo_hash,
-        "parent Zone state commits Tempo block {} hash {}, but L1 returned {}",
-        zone_inputs.initial_tempo_number,
-        zone_inputs.initial_tempo_hash,
-        initial_tempo_header.hash_slow()
-    );
+    let started = Instant::now();
+    let (initial_tempo_header, final_tempo_header, anchor) = async {
+        let initial_tempo_header =
+            tempo_header(&context.l1_provider, zone_inputs.initial_tempo_number)
+                .await
+                .context("fetch initial Tempo checkpoint")?;
+        ensure!(
+            initial_tempo_header.hash_slow() == zone_inputs.initial_tempo_hash,
+            "parent Zone state commits Tempo block {} hash {}, but L1 returned {}",
+            zone_inputs.initial_tempo_number,
+            zone_inputs.initial_tempo_hash,
+            initial_tempo_header.hash_slow()
+        );
 
-    let final_tempo_header = zone_inputs
-        .blocks
-        .last()
-        .map(|block| decode_tempo_header(&block.tempo_header_rlp))
-        .transpose()?
-        .unwrap_or_else(|| initial_tempo_header.clone());
-    ensure!(
-        final_tempo_header.number() == job.batch.tempo_block_number,
-        "candidate Tempo block is {}, but the final advanceTempo header is {}",
-        job.batch.tempo_block_number,
-        final_tempo_header.number()
-    );
+        let final_tempo_header = zone_inputs
+            .blocks
+            .last()
+            .map(|block| decode_tempo_header(&block.tempo_header_rlp))
+            .transpose()?
+            .unwrap_or_else(|| initial_tempo_header.clone());
+        ensure!(
+            final_tempo_header.number() == job.batch.tempo_block_number,
+            "candidate Tempo block is {}, but the final advanceTempo header is {}",
+            job.batch.tempo_block_number,
+            final_tempo_header.number()
+        );
 
-    let anchor = resolve_anchor(
-        &context.l1_provider,
-        final_tempo_header.number(),
-        final_tempo_header.hash_slow(),
-        context.anchor_config,
-    )
+        let anchor = resolve_anchor(
+            &context.l1_provider,
+            final_tempo_header.number(),
+            final_tempo_header.hash_slow(),
+            context.anchor_config,
+        )
+        .await?;
+        Ok::<_, eyre::Report>((initial_tempo_header, final_tempo_header, anchor))
+    }
     .await?;
+    metrics
+        .tempo_headers_duration_seconds
+        .record(started.elapsed().as_secs_f64());
 
-    let reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
-    let tempo_state_witness =
-        tempo_state_witness(&context.l1_provider, &initial_tempo_header, reads).await?;
-
+    let started = Instant::now();
+    let tempo_state_witness = async {
+        let reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
+        tempo_state_witness(&context.l1_provider, &initial_tempo_header, reads).await
+    }
+    .await?;
+    metrics
+        .tempo_witness_duration_seconds
+        .record(started.elapsed().as_secs_f64());
     let witness = BatchWitness {
         public_inputs: PublicInputs {
+            parent_chain_id: context.config.parent_chain_id,
             zone_id: context.config.zone_id,
             portal: context.portal,
             tempo_block_number: final_tempo_header.number(),
@@ -274,14 +322,22 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_ancestry_headers: anchor.ancestry_headers,
     };
 
-    let spf_config = SpfConfig::new(context.config.evm_config.chain_spec().clone());
+    let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
+    let started = Instant::now();
     let attempt = witness.clone();
     let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
         .await
         .context("SPF worker panicked")?
         .context("SPF rejected generated witness")?;
+    metrics
+        .spf_execution_duration_seconds
+        .record(started.elapsed().as_secs_f64());
 
+    let started = Instant::now();
     compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
+    metrics
+        .output_validation_duration_seconds
+        .record(started.elapsed().as_secs_f64());
 
     Ok(ValidationStats {
         witness_bytes: witness_size(&witness),
@@ -562,12 +618,11 @@ async fn tempo_state_witness(
         .collect::<Vec<_>>();
     let proofs = stream::iter(requests)
         .map(|(block, account, slots)| async move {
-            let proof = provider
+            provider
                 .get_proof(account, slots)
                 .block_id(BlockId::number(block))
                 .await
-                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))?;
-            Ok::<_, eyre::Report>(proof)
+                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -607,7 +662,7 @@ async fn resolve_anchor(
 ) -> Result<Anchor> {
     let tip = provider.get_block_number().await?;
     ensure!(
-        checkpoint_number < tip,
+        checkpoint_number <= tip,
         "Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}"
     );
     let gap = tip - checkpoint_number;

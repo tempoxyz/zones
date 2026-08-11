@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy_chains::Chain;
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
@@ -227,6 +228,14 @@ async fn connect_l1_provider(
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
         .erased();
+    let l1_chain = Chain::from_id(provider.get_chain_id().await?);
+    if !provider.client().is_local()
+        && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
+    {
+        provider
+            .client()
+            .set_poll_interval(avg_block_time.mul_f32(0.6));
+    }
 
     Ok(provider)
 }
@@ -259,20 +268,22 @@ mod tests {
                 continue;
             };
             let request: Value = serde_json::from_str(&text).unwrap();
-            if request["method"] != "eth_blockNumber" {
-                continue;
-            }
+            let rpc_result = match request["method"].as_str() {
+                Some("eth_chainId") => "0xa5bf",
+                Some("eth_blockNumber") => result,
+                _ => continue,
+            };
 
             let response = json!({
                 "jsonrpc": "2.0",
                 "id": request["id"].clone(),
-                "result": result,
+                "result": rpc_result,
             });
             ws.send(Message::Text(response.to_string().into()))
                 .await
                 .unwrap();
 
-            if close_after_response {
+            if close_after_response && request["method"] == "eth_blockNumber" {
                 let _ = ws.close(None).await;
                 break;
             }
@@ -313,6 +324,11 @@ mod tests {
                 .unwrap();
 
         assert_eq!(provider.get_block_number().await.unwrap(), 1);
+        assert_eq!(
+            provider.client().poll_interval(),
+            Duration::from_millis(250),
+            "chain metadata must not override Alloy's local transport interval"
+        );
 
         let second_block = timeout(Duration::from_secs(2), provider.get_block_number())
             .await

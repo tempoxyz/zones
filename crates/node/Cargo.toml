@@ -50,6 +50,7 @@ reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-revm = { workspace = true, features = ["witness"] }
 reth-rpc.workspace = true
+reth-rpc-api.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-rpc-eth-types.workspace = true
@@ -60,6 +61,7 @@ reth-transaction-pool.workspace = true
 reth-trie-common.workspace = true
 
 # alloy
+alloy-chains.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-genesis.workspace = true
@@ -130,6 +132,7 @@ url = "2"
 
 [features]
 default = []
+asm-keccak = ["alloy-primitives/asm-keccak"]
 cli = [
   "dep:clap",
   "dep:reth-consensus",
@@ -140,6 +143,7 @@ cli = [
   "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]
+keccak-cache-global = ["alloy-primitives/keccak-cache-global"]
 test-utils = [
   "reth-chainspec/test-utils",
   "reth-ethereum?/test-utils",

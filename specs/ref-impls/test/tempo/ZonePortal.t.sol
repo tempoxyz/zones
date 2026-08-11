@@ -523,6 +523,41 @@ contract ZonePortalTest is BaseTest {
     bytes32 public constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
     uint64 public genesisTempoBlockNumber;
 
+    struct QuorumBatch {
+        uint64 tempoBlockNumber;
+        uint64 recentTempoBlockNumber;
+        BlockTransition blockTransition;
+        DepositQueueTransition depositQueueTransition;
+        bytes32 withdrawalQueueHash;
+        bytes verifierConfig;
+        uint256 nextZoneHeight;
+    }
+
+    struct SettlementAttestationInput {
+        uint32 zoneId;
+        uint64 sequencerSetVersion;
+        uint256 zoneHeight;
+        uint256 withdrawalBatchIndex;
+        address verifier;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        BlockTransition blockTransition;
+        DepositQueueTransition depositQueueTransition;
+        bytes32 withdrawalQueueHash;
+        bytes verifierConfig;
+    }
+
+    struct PortalSettlementState {
+        bytes32 blockHash;
+        uint256 zoneHeight;
+        uint64 withdrawalBatchIndex;
+        uint256 withdrawalQueueHead;
+        uint256 withdrawalQueueTail;
+        uint64 lastProcessedDepositNumber;
+        uint64 lastSyncedTempoBlockNumber;
+    }
+
     function setUp() public override {
         super.setUp();
 
@@ -612,6 +647,16 @@ contract ZonePortalTest is BaseTest {
 
     function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
         signers = _sequencerSet();
+        _activateSequencerSet(portal, signers, quorum);
+    }
+
+    function _activateSequencerSet(
+        ZonePortal target,
+        address[] memory signers,
+        uint8 quorum
+    )
+        internal
+    {
         // The portal rejects a set that drops the active leader, so rotation is three steps:
         // add the replacements, transfer leadership, then remove the old leader.
         address[] memory joint = new address[](signers.length + 1);
@@ -620,12 +665,12 @@ contract ZonePortalTest is BaseTest {
         }
         joint[signers.length] = sequencer;
         vm.prank(admin);
-        portal.setSequencerSet(joint, quorum);
+        target.setSequencerSet(joint, quorum);
         vm.roll(block.number + 1);
         vm.prank(sequencer);
-        portal.setLeader(signers[0], portal.leaderEpoch());
+        target.setLeader(signers[0], target.leaderEpoch());
         vm.prank(admin);
-        portal.setSequencerSet(signers, quorum);
+        target.setSequencerSet(signers, quorum);
     }
 
     function _attestationDigest(
@@ -642,30 +687,59 @@ contract ZonePortalTest is BaseTest {
         view
         returns (bytes32)
     {
+        return _attestationDigestFor(
+            portal,
+            block.chainid,
+            SettlementAttestationInput({
+                zoneId: portal.zoneId(),
+                sequencerSetVersion: portal.sequencerSetVersion(),
+                zoneHeight: height,
+                withdrawalBatchIndex: portal.withdrawalBatchIndex() + 1,
+                verifier: portal.verifier(),
+                tempoBlockNumber: tempoBlockNumber,
+                anchorBlockNumber: anchorBlockNumber,
+                anchorBlockHash: anchorBlockHash,
+                blockTransition: blockTransition,
+                depositQueueTransition: depositQueueTransition,
+                withdrawalQueueHash: withdrawalQueueHash,
+                verifierConfig: verifierConfig
+            })
+        );
+    }
+
+    function _attestationDigestFor(
+        ZonePortal target,
+        uint256 chainId,
+        SettlementAttestationInput memory attestation
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
         bytes32 domainSeparator = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
                 keccak256("ZonePortal"),
                 keccak256("1"),
-                block.chainid,
-                address(portal)
+                chainId,
+                address(target)
             )
         );
         bytes32 structHash = keccak256(
             abi.encode(
                 SETTLEMENT_ATTESTATION_TYPEHASH,
-                portal.zoneId(),
-                portal.sequencerSetVersion(),
-                height,
-                portal.withdrawalBatchIndex() + 1,
-                portal.verifier(),
-                tempoBlockNumber,
-                anchorBlockNumber,
-                anchorBlockHash,
-                keccak256(abi.encode(blockTransition)),
-                keccak256(abi.encode(depositQueueTransition)),
-                withdrawalQueueHash,
-                keccak256(verifierConfig)
+                attestation.zoneId,
+                attestation.sequencerSetVersion,
+                attestation.zoneHeight,
+                attestation.withdrawalBatchIndex,
+                attestation.verifier,
+                attestation.tempoBlockNumber,
+                attestation.anchorBlockNumber,
+                attestation.anchorBlockHash,
+                keccak256(abi.encode(attestation.blockTransition)),
+                keccak256(abi.encode(attestation.depositQueueTransition)),
+                attestation.withdrawalQueueHash,
+                keccak256(attestation.verifierConfig)
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
@@ -680,6 +754,211 @@ contract ZonePortalTest is BaseTest {
         signatures = new bytes[](2);
         signatures[0] = _sign(SIGNER_A_KEY, digest);
         signatures[1] = _sign(SIGNER_B_KEY, digest);
+    }
+
+    function _quorumSignatures(
+        bytes32 digest,
+        uint256 firstSigner,
+        uint256 secondSigner
+    )
+        internal
+        returns (bytes[] memory signatures)
+    {
+        signatures = new bytes[](2);
+        signatures[0] = _sign(firstSigner, digest);
+        signatures[1] = _sign(secondSigner, digest);
+    }
+
+    function _highSSignature(uint256 privateKey, bytes32 digest) internal returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        uint8 alternateV = v == 27 ? 28 : 27;
+        return abi.encodePacked(r, bytes32(SECP256K1_ORDER - uint256(s)), alternateV);
+    }
+
+    function _quorumBatch() internal returns (QuorumBatch memory batch) {
+        vm.roll(block.number + 1);
+        uint64 tempoBlockNumber = uint64(block.number - 1);
+        batch = QuorumBatch({
+            tempoBlockNumber: tempoBlockNumber,
+            recentTempoBlockNumber: 0,
+            blockTransition: BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("certified-tip")
+            }),
+            depositQueueTransition: DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalQueueHash: bytes32(0),
+            verifierConfig: "",
+            nextZoneHeight: 10
+        });
+    }
+
+    function _assertQuorumPairSettles(
+        address caller,
+        uint256 firstSigner,
+        uint256 secondSigner
+    )
+        internal
+    {
+        QuorumBatch memory batch = _quorumBatch();
+        SettlementAttestationInput memory attestation = _attestationFor(batch);
+        bytes[] memory signatures = _quorumSignatures(
+            _attestationDigestFor(portal, block.chainid, attestation), firstSigner, secondSigner
+        );
+        _submitQuorumBatch(portal, caller, batch, signatures);
+        assertEq(portal.blockHash(), batch.blockTransition.nextBlockHash);
+        assertEq(portal.zoneHeight(), batch.nextZoneHeight);
+        assertEq(portal.withdrawalBatchIndex(), 1);
+    }
+
+    function _attestationFor(QuorumBatch memory batch)
+        internal
+        view
+        returns (SettlementAttestationInput memory)
+    {
+        return SettlementAttestationInput({
+            zoneId: portal.zoneId(),
+            sequencerSetVersion: portal.sequencerSetVersion(),
+            zoneHeight: batch.nextZoneHeight,
+            withdrawalBatchIndex: portal.withdrawalBatchIndex() + 1,
+            verifier: portal.verifier(),
+            tempoBlockNumber: batch.tempoBlockNumber,
+            anchorBlockNumber: batch.tempoBlockNumber,
+            anchorBlockHash: getBlockHash(batch.tempoBlockNumber),
+            blockTransition: batch.blockTransition,
+            depositQueueTransition: batch.depositQueueTransition,
+            withdrawalQueueHash: batch.withdrawalQueueHash,
+            verifierConfig: batch.verifierConfig
+        });
+    }
+
+    function _submitQuorumBatch(
+        ZonePortal target,
+        address caller,
+        QuorumBatch memory batch,
+        bytes[] memory signatures
+    )
+        internal
+    {
+        vm.prank(caller);
+        target.submitBatch(
+            batch.tempoBlockNumber,
+            batch.recentTempoBlockNumber,
+            batch.blockTransition,
+            batch.depositQueueTransition,
+            batch.withdrawalQueueHash,
+            batch.verifierConfig,
+            "",
+            batch.nextZoneHeight,
+            signatures
+        );
+    }
+
+    function _snapshotSettlementState(ZonePortal target)
+        internal
+        view
+        returns (PortalSettlementState memory)
+    {
+        return PortalSettlementState({
+            blockHash: target.blockHash(),
+            zoneHeight: target.zoneHeight(),
+            withdrawalBatchIndex: target.withdrawalBatchIndex(),
+            withdrawalQueueHead: target.withdrawalQueueHead(),
+            withdrawalQueueTail: target.withdrawalQueueTail(),
+            lastProcessedDepositNumber: target.lastProcessedDepositNumber(),
+            lastSyncedTempoBlockNumber: target.lastSyncedTempoBlockNumber()
+        });
+    }
+
+    function _assertSettlementStateUnchanged(
+        ZonePortal target,
+        PortalSettlementState memory before
+    )
+        internal
+        view
+    {
+        assertEq(target.blockHash(), before.blockHash, "Portal block hash changed after rejection");
+        assertEq(
+            target.zoneHeight(), before.zoneHeight, "Portal zone height changed after rejection"
+        );
+        assertEq(
+            target.withdrawalBatchIndex(),
+            before.withdrawalBatchIndex,
+            "Withdrawal batch index changed after rejection"
+        );
+        assertEq(
+            target.withdrawalQueueHead(),
+            before.withdrawalQueueHead,
+            "Withdrawal queue head changed after rejection"
+        );
+        assertEq(
+            target.withdrawalQueueTail(),
+            before.withdrawalQueueTail,
+            "Withdrawal queue tail changed after rejection"
+        );
+        assertEq(
+            target.lastProcessedDepositNumber(),
+            before.lastProcessedDepositNumber,
+            "Processed deposit index changed after rejection"
+        );
+        assertEq(
+            target.lastSyncedTempoBlockNumber(),
+            before.lastSyncedTempoBlockNumber,
+            "Tempo sync index changed after rejection"
+        );
+    }
+
+    function _expectInvalidQuorumCertificate(
+        ZonePortal target,
+        address caller,
+        QuorumBatch memory batch,
+        bytes[] memory signatures
+    )
+        internal
+    {
+        PortalSettlementState memory before = _snapshotSettlementState(target);
+        vm.expectRevert(IZonePortal.InvalidQuorumCertificate.selector);
+        _submitQuorumBatch(target, caller, batch, signatures);
+        _assertSettlementStateUnchanged(target, before);
+    }
+
+    function _mutatedAttestation(
+        SettlementAttestationInput memory attestation,
+        uint256 mutation
+    )
+        internal
+        pure
+        returns (SettlementAttestationInput memory)
+    {
+        if (mutation == 0) {
+            attestation.zoneId += 1;
+        } else if (mutation == 1) {
+            attestation.sequencerSetVersion += 1;
+        } else if (mutation == 2) {
+            attestation.zoneHeight += 1;
+        } else if (mutation == 3) {
+            attestation.withdrawalBatchIndex += 1;
+        } else if (mutation == 4) {
+            attestation.verifier = address(0xBEEF);
+        } else if (mutation == 5) {
+            attestation.tempoBlockNumber += 1;
+        } else if (mutation == 6) {
+            attestation.anchorBlockNumber += 1;
+        } else if (mutation == 7) {
+            attestation.anchorBlockHash = keccak256("wrong-anchor-hash");
+        } else if (mutation == 8) {
+            attestation.blockTransition.nextBlockHash = keccak256("wrong-tip");
+        } else if (mutation == 9) {
+            attestation.depositQueueTransition.nextProcessedHash = keccak256("wrong-deposit-hash");
+        } else if (mutation == 10) {
+            attestation.withdrawalQueueHash = keccak256("wrong-withdrawal-hash");
+        } else if (mutation == 11) {
+            attestation.verifierConfig = hex"01";
+        }
+        return attestation;
     }
 
     function _withdrawal(
@@ -870,7 +1149,20 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
     }
 
-    function test_setLeader_revertsForNonSequencerCaller() public {
+    function test_setLeader_allowsAdminCaller() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epoch = portal.leaderEpoch();
+
+        vm.roll(block.number + 1);
+        vm.prank(admin);
+        portal.setLeader(signers[1], epoch);
+
+        assertEq(portal.leader(), signers[1]);
+        assertEq(portal.leaderEpoch(), epoch + 1);
+        assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
+    }
+
+    function test_setLeader_revertsForUnauthorizedCaller() public {
         address[] memory signers = _activateSequencerSet(2);
         uint64 epoch = portal.leaderEpoch();
 
@@ -980,47 +1272,17 @@ contract ZonePortalTest is BaseTest {
         portal.setSequencerSet(withoutLeader, 2);
     }
 
-    function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
+    function test_submitBatch_acceptsEachRegisteredQuorumPair() public {
         address[] memory signers = _activateSequencerSet(2);
-        bytes32 nextBlockHash = keccak256("certified-tip");
-        uint256 nextZoneHeight = 10;
-        vm.roll(block.number + 1);
-        uint64 tempoBlockNumber = uint64(block.number - 1);
-        BlockTransition memory blockTransition =
-            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: nextBlockHash });
-        DepositQueueTransition memory depositQueueTransition = DepositQueueTransition({
-            prevProcessedHash: bytes32(0),
-            nextProcessedHash: bytes32(0),
-            prevDepositNumber: 0,
-            nextDepositNumber: 0
-        });
-        bytes[] memory signatures = _quorumSignatures(
-            _attestationDigest(
-                nextZoneHeight,
-                tempoBlockNumber,
-                tempoBlockNumber,
-                getBlockHash(tempoBlockNumber),
-                blockTransition,
-                depositQueueTransition,
-                bytes32(0),
-                ""
-            )
-        );
-        vm.prank(signers[0]);
-        portal.submitBatch(
-            tempoBlockNumber,
-            0,
-            blockTransition,
-            depositQueueTransition,
-            bytes32(0),
-            "",
-            "",
-            nextZoneHeight,
-            signatures
-        );
+        uint256 snapshot = vm.snapshotState();
 
-        assertEq(portal.blockHash(), nextBlockHash);
-        assertEq(portal.zoneHeight(), nextZoneHeight);
+        _assertQuorumPairSettles(signers[0], SIGNER_A_KEY, SIGNER_B_KEY);
+        assertTrue(vm.revertToState(snapshot));
+
+        _assertQuorumPairSettles(signers[0], SIGNER_A_KEY, SIGNER_C_KEY);
+        assertTrue(vm.revertToState(snapshot));
+
+        _assertQuorumPairSettles(signers[0], SIGNER_B_KEY, SIGNER_C_KEY);
     }
 
     function test_submitBatch_rejectsCertificateForDifferentWithdrawalRoot() public {
@@ -1063,6 +1325,76 @@ contract ZonePortalTest is BaseTest {
             10,
             signatures
         );
+    }
+
+    /// @notice Every condition below must fail at the certificate boundary, before a batch can
+    /// mutate the Portal's tip or either queue index. The field substitutions use a valid call and
+    /// alter exactly one EIP-712 attestation field, including fields not exposed in submitBatch
+    /// calldata such as zoneId, sequencerSetVersion, and verifier.
+    function test_submitBatch_rejectsQuorumCertificateMatrix() public {
+        address[] memory signers = _activateSequencerSet(2);
+        QuorumBatch memory batch = _quorumBatch();
+        SettlementAttestationInput memory attestation = _attestationFor(batch);
+        bytes32 digest = _attestationDigestFor(portal, block.chainid, attestation);
+        bytes[] memory validSignatures = _quorumSignatures(digest, SIGNER_A_KEY, SIGNER_B_KEY);
+
+        // A signature counts only once, must belong to a registered signer, and must use the
+        // canonical format enforced by TIP-1020.
+        bytes[] memory oneSignature = new bytes[](1);
+        oneSignature[0] = _sign(SIGNER_A_KEY, digest);
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, oneSignature);
+
+        bytes memory signerA = _sign(SIGNER_A_KEY, digest);
+        bytes[] memory duplicateSignatures = new bytes[](2);
+        duplicateSignatures[0] = signerA;
+        duplicateSignatures[1] = signerA;
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, duplicateSignatures);
+
+        bytes[] memory unregisteredSignatures = _quorumSignatures(digest, SIGNER_A_KEY, 4);
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, unregisteredSignatures);
+
+        bytes[] memory malformedSignatures = new bytes[](2);
+        malformedSignatures[0] = _sign(SIGNER_A_KEY, digest);
+        malformedSignatures[1] = hex"00";
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, malformedSignatures);
+
+        bytes[] memory highSSignatures = new bytes[](2);
+        highSSignatures[0] = _sign(SIGNER_A_KEY, digest);
+        highSSignatures[1] = _highSSignature(SIGNER_B_KEY, digest);
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, highSSignatures);
+
+        // All twelve settlement-bound attestation fields are individually non-substitutable.
+        for (uint256 mutation; mutation < 12; ++mutation) {
+            SettlementAttestationInput memory altered = _mutatedAttestation(attestation, mutation);
+            bytes[] memory alteredSignatures =
+                _quorumSignatures(_attestationDigestFor(portal, block.chainid, altered));
+            _expectInvalidQuorumCertificate(portal, signers[0], batch, alteredSignatures);
+        }
+
+        // EIP-712 additionally prevents a certificate from crossing L1 chains.
+        uint256 originalChainId = block.chainid;
+        vm.chainId(originalChainId + 1);
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, validSignatures);
+        vm.chainId(originalChainId);
+
+        // A matching Portal configuration cannot reuse a certificate intended for this Portal.
+        address[] memory initialSequencers = new address[](1);
+        initialSequencers[0] = sequencer;
+        ZonePortal otherPortal = _createZonePortal(
+            testZoneId, address(pathUSD), admin, initialSequencers, 1, "https://quorum.example"
+        );
+        _activateSequencerSet(otherPortal, signers, 2);
+        _expectInvalidQuorumCertificate(otherPortal, signers[0], batch, validSignatures);
+
+        // A certificate collected before a signer-set update cannot settle after it. Keep A and B
+        // registered so this is a version regression rather than merely an unregistered-signer one.
+        address[] memory rotatedSigners = new address[](3);
+        rotatedSigners[0] = signers[0];
+        rotatedSigners[1] = signers[1];
+        rotatedSigners[2] = vm.addr(4);
+        vm.prank(admin);
+        portal.setSequencerSet(rotatedSigners, 2);
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, validSignatures);
     }
 
     function test_adminCanPauseAndResumeDeposits() public {
