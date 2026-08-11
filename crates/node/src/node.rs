@@ -779,6 +779,7 @@ where
             provider.clone(),
         );
         let portal_address = self.portal_address;
+        let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -803,7 +804,7 @@ where
             .map(|config| ShadowProverConfig {
                 parent_chain_id: l1_chain_id,
                 zone_id: config.zone_id,
-                chain_spec: provider.chain_spec(),
+                chain_spec: evm_chain_spec,
                 debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
             });
 
