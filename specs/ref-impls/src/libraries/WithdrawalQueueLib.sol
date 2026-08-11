@@ -34,8 +34,7 @@ struct WithdrawalQueue {
 ///      - Exhausted slots before head are cleared to reclaim storage credits
 library WithdrawalQueueLib {
 
-    error NoWithdrawalsInQueue();
-    error InvalidWithdrawalHash();
+    error InvalidWithdrawalProof();
 
     /// @notice Add a batch's withdrawals to the queue
     /// @dev Called during submitBatch. The batch's withdrawal hash chain goes into
@@ -78,14 +77,10 @@ library WithdrawalQueueLib {
     {
         uint256 head = queue.head;
 
-        if (head == queue.tail) {
-            revert NoWithdrawalsInQueue();
-        }
-
         bytes32 currentSlot = queue.slots[head];
 
         if (keccak256(abi.encode(withdrawal, remainingQueue)) != currentSlot) {
-            revert InvalidWithdrawalHash();
+            revert InvalidWithdrawalProof();
         }
 
         queue.slots[head] = remainingQueue;

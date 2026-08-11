@@ -3156,7 +3156,7 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 100e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(WithdrawalQueueLib.NoWithdrawalsInQueue.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
     }
 
@@ -3197,7 +3197,7 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory wrongW =
             _withdrawal(address(pathUSD), alice, charlie, 500e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         portal.processWithdrawals(_singleWithdrawal(wrongW), bytes32(0));
     }
 
@@ -3704,7 +3704,7 @@ contract ZonePortalTest is BaseTest {
         );
 
         // Try to process w2 (slot 1) before w1 (slot 0) - should fail
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         portal.processWithdrawals(_singleWithdrawal(w2), bytes32(0));
 
         // Process w1 first

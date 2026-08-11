@@ -249,7 +249,7 @@ contract WithdrawalQueueLibTest is Test {
     function test_dequeue_revertsIfEmpty() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
 
-        vm.expectRevert(WithdrawalQueueLib.NoWithdrawalsInQueue.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w, bytes32(0));
     }
 
@@ -261,7 +261,7 @@ contract WithdrawalQueueLibTest is Test {
         harness.enqueue(h1);
 
         // Try to dequeue w2 (wrong withdrawal)
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w2, bytes32(0));
     }
 
@@ -275,7 +275,7 @@ contract WithdrawalQueueLibTest is Test {
         harness.enqueue(batchHash);
 
         // Try to dequeue with wrong remaining queue
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w1, keccak256("wrongHash"));
     }
 
@@ -283,7 +283,7 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
         harness.setRawState(0, 1, 0, bytes32(0));
 
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w, bytes32(0));
 
         assertEq(harness.head(), 0);
