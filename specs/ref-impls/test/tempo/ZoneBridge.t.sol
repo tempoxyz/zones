@@ -585,7 +585,7 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l2ZoneToken.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
 
         // Verify slot cleared and head advanced
-        assertEq(l1Portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(l1Portal.withdrawalQueueSlot(0), bytes32(0));
         assertEq(l1Portal.withdrawalQueueHead(), 1);
     }
 

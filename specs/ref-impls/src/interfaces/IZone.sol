@@ -736,7 +736,7 @@ interface IZonePortal {
 
     function withdrawalQueueTail() external view returns (uint256);
 
-    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32);
 
     /// @notice Configuration nonce for the active sequencer set and threshold.
     function sequencerSetVersion() external view returns (uint64);

@@ -146,7 +146,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Refunds parked after a deposit bounce-back transfer reverts on Tempo.
     mapping(address token => mapping(address owner => uint128 amount)) public refunds;
 
-    /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
+    /// @notice Withdrawal queue (zone→Tempo): unbounded FIFO
     WithdrawalQueue internal _withdrawalQueue;
 
     /// @notice Operator RPC endpoint for the zone
@@ -510,8 +510,8 @@ contract ZonePortal is IZonePortal {
         return _withdrawalQueue.tail;
     }
 
-    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32) {
-        return _withdrawalQueue.slots[physicalSlot];
+    function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32) {
+        return _withdrawalQueue.slots[queueIndex];
     }
 
     /*//////////////////////////////////////////////////////////////

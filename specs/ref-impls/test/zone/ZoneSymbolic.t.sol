@@ -4,7 +4,6 @@ pragma solidity ^0.8.13;
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import {
     EMPTY_SENTINEL,
-    WITHDRAWAL_QUEUE_CAPACITY,
     WithdrawalQueue,
     WithdrawalQueueLib
 } from "../../src/libraries/WithdrawalQueueLib.sol";
@@ -62,7 +61,7 @@ contract ZonePortalSymbolic is ZonePortalTest {
 
 }
 
-/// @notice Harness exposing the WithdrawalQueueLib ring-buffer over a storage queue so its
+/// @notice Harness exposing the WithdrawalQueueLib FIFO over a storage queue so its
 ///         index arithmetic can be explored symbolically.
 contract WithdrawalQueueHarness {
 
@@ -87,10 +86,6 @@ contract WithdrawalQueueHarness {
         return q.length();
     }
 
-    function isFull() external view returns (bool) {
-        return q.isFull();
-    }
-
     function hasWithdrawals() external view returns (bool) {
         return q.hasWithdrawals();
     }
@@ -99,14 +94,10 @@ contract WithdrawalQueueHarness {
         q.enqueue(h);
     }
 
-    function capacity() external pure returns (uint256) {
-        return WITHDRAWAL_QUEUE_CAPACITY;
-    }
-
 }
 
 /// @title WithdrawalQueueLib symbolic properties
-/// @notice Symbolic checks for the withdrawal ring-buffer's pure index arithmetic
+/// @notice Symbolic checks for the withdrawal FIFO's pure index arithmetic
 ///         (head/tail). The dequeue hash-chain path is intentionally excluded because it relies
 ///         on keccak injectivity, which the symbolic engine does not model.
 contract WithdrawalQueueSymbolic is Test {
@@ -117,30 +108,17 @@ contract WithdrawalQueueSymbolic is Test {
         qh = new WithdrawalQueueHarness();
     }
 
-    /// @notice For any valid queue state (head <= tail, length <= capacity),
-    ///         isFull() <=> length() == capacity.
-    function check_isFullIffLengthEqualsCapacity(uint256 _head, uint256 _tail) external {
-        vm.assume(_tail >= _head);
-        vm.assume(_tail - _head <= qh.capacity());
-
-        qh.setHeadTail(_head, _tail);
-
-        assertEq(qh.isFull(), qh.length() == qh.capacity());
-    }
-
     /// @notice For any valid queue state, hasWithdrawals() <=> length() != 0.
     function check_hasWithdrawalsIffNonEmpty(uint256 _head, uint256 _tail) external {
         vm.assume(_tail >= _head);
-        vm.assume(_tail - _head <= qh.capacity());
 
         qh.setHeadTail(_head, _tail);
 
         assertEq(qh.hasWithdrawals(), qh.length() != 0);
     }
 
-    /// @notice A valid non-empty enqueue on a non-full queue advances tail by exactly one and
-    ///         never pushes length past capacity.
-    function check_enqueueAdvancesTailAndRespectsCapacity(
+    /// @notice A valid non-empty enqueue advances tail and length by exactly one.
+    function check_enqueueAdvancesTailAndLength(
         uint256 _head,
         uint256 _tail,
         bytes32 h
@@ -150,7 +128,6 @@ contract WithdrawalQueueSymbolic is Test {
         vm.assume(h != bytes32(0));
         vm.assume(h != EMPTY_SENTINEL);
         vm.assume(_tail >= _head);
-        vm.assume(_tail - _head < qh.capacity()); // not full
         vm.assume(_tail < type(uint256).max); // tail + 1 cannot overflow
 
         qh.setHeadTail(_head, _tail);
@@ -160,7 +137,6 @@ contract WithdrawalQueueSymbolic is Test {
 
         assertEq(qh.tail(), _tail + 1);
         assertEq(qh.length(), lenBefore + 1);
-        assertLe(qh.length(), qh.capacity());
     }
 
     /// @notice Enqueuing the zero hash (a batch with no withdrawals) is a no-op: head and tail
@@ -172,19 +148,6 @@ contract WithdrawalQueueSymbolic is Test {
 
         assertEq(qh.head(), _head);
         assertEq(qh.tail(), _tail);
-    }
-
-    /// @notice A valid non-empty enqueue on a full queue always reverts, for any full state.
-    function check_enqueueRevertsWhenFull(uint256 _head, uint256 _tail, bytes32 h) external {
-        vm.assume(h != bytes32(0));
-        vm.assume(h != EMPTY_SENTINEL);
-        vm.assume(_tail >= _head);
-        vm.assume(_tail - _head == qh.capacity()); // full
-
-        qh.setHeadTail(_head, _tail);
-
-        vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
-        qh.enqueue(h);
     }
 
 }

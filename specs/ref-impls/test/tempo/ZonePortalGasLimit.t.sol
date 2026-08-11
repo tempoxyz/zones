@@ -135,7 +135,7 @@ contract ZonePortalGasLimitTest is Test {
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
         assertTrue(portal.currentDepositQueueHash() != bytes32(0));
     }
 
@@ -181,7 +181,7 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(token.balanceOf(admin), bouncebackFee);
         assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
     }
 
     function test_processWithdrawal_depositBounceBack_feeTransferFailureRefundsFullAmount() public {
@@ -200,7 +200,7 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(token.balanceOf(recipient), 1000e6);
         assertEq(token.balanceOf(address(portal)), 0);
         assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
     }
 
     function test_processWithdrawal_depositBounceBack_feeAndRefundFailureParksFullAmount() public {

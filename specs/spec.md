@@ -682,17 +682,19 @@ Batch cadence is deterministic. It closes a batch when there are pending withdra
 
 ### Withdrawal Queue
 
-The portal stores withdrawals in a fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100`. Each batch with a non-zero `withdrawalQueueHash` gets its own logical queue index. Empty batches advance `withdrawalBatchIndex` but do not consume a queue index.
+The portal stores withdrawals in an unbounded FIFO. Each batch with a non-zero `withdrawalQueueHash` gets its own logical queue index. Empty batches advance `withdrawalBatchIndex` but do not consume a queue index.
 
-The portal tracks `head` (oldest unprocessed batch) and `tail` (the logical index assigned to the next non-empty batch). Both are monotonically increasing counters that never wrap. The physical ring-buffer slot for a logical queue index is `index % 100`. `withdrawalQueueSlot(physicalSlot)` reads a physical slot, so clients resolving a pending logical index from an event must call `withdrawalQueueSlot(withdrawalQueueIndex % 100)`. Empty physical slots contain `EMPTY_SENTINEL` (`0xff...ff`) instead of `0x00` to avoid storage clearing and gas refund incentive issues.
+The portal tracks `head` (oldest unprocessed batch) and `tail` (the logical index assigned to the next non-empty batch). Both are monotonically increasing counters that never wrap. Each logical index is used directly as the key in the queue's storage mapping, and `withdrawalQueueSlot(queueIndex)` reads that key. Exhausted slots are deleted. Under TIP-1060, each deletion earns the portal a storage credit that can offset a later queue-slot creation; only growth beyond the queue's previous high-water storage footprint requires net-new storage.
 
-When `submitBatch` includes a non-zero `withdrawalQueueHash`, the current `tail` is assigned as its logical `withdrawalQueueIndex`, the hash is written to `slots[withdrawalQueueIndex % 100]`, and `tail` advances. `BatchSubmitted.withdrawalQueueIndex` emits that assigned logical index. For an empty batch, the event emits `NO_QUEUE_INDEX = type(uint256).max` and `tail` does not advance. The queue reverts with `WithdrawalQueueFull` if `tail - head >= 100`.
+When `submitBatch` includes a non-zero `withdrawalQueueHash`, the current `tail` is assigned as its logical `withdrawalQueueIndex`, the hash is written to `slots[withdrawalQueueIndex]`, and `tail` advances. `BatchSubmitted.withdrawalQueueIndex` emits that assigned logical index. For an empty batch, the event emits `NO_QUEUE_INDEX = type(uint256).max` and `tail` does not advance. Queue capacity cannot prevent a valid batch from acknowledging processed deposits.
 
 ### Withdrawal Processing
 
 The sequencer processes ordered withdrawals atomically on Tempo by calling `processWithdrawals(withdrawals, remainingQueue)` on the portal. `remainingQueue` is the queue suffix after the last supplied withdrawal, or `0x00` when the call exhausts the current slot. The portal derives each intermediate queue hash by folding the withdrawals backward from that suffix, then verifies and processes them in order.
 
-The portal dequeues before executing the withdrawal, then independently requires `withdrawal.token` to be enabled. Failed callbacks roll back in an external self-call and become bounce-backs, so the dequeue remains committed and cannot block the FIFO. If `remainingQueue` is zero (last item in the slot), processing sets the slot to `EMPTY_SENTINEL` and advances `head`; otherwise it updates the slot to `remainingQueue`.
+Before each call, the portal bounds the attempted withdrawal count by the deposit-queue capacity that remains before the next Tempo batch can process deposits. Specifically, with `unprocessed = depositCount - lastProcessedDepositNumber` and `remainingCapacity = MAX_UNPROCESSED_DEPOSITS - unprocessed`, the call must satisfy `withdrawals.length <= remainingCapacity`. This conservative check assumes every attempted withdrawal fails and creates a bounce-back, so all possible side effects fit within the outstanding-deposit limit. A finalized withdrawal batch may therefore be split across multiple ordered `processWithdrawals` calls, each carrying the appropriate `remainingQueue`; if `remainingCapacity` is zero, the operator must first run `advanceTempo()` to process queued deposits and reopen capacity.
+
+The portal dequeues before executing the withdrawal, then independently requires `withdrawal.token` to be enabled. Failed callbacks roll back in an external self-call and become bounce-backs, so the dequeue remains committed and cannot block the FIFO. If `remainingQueue` is zero (last item in the slot), processing deletes the slot and advances `head`; otherwise it updates the slot to `remainingQueue`.
 
 The sequencer first packs withdrawals into transactions using a configurable per-transaction gas budget, then submits them through a queue bounded by transaction count. Transactions use consecutive nonces on the dedicated withdrawal nonce key, preserving FIFO queue transitions even when later transactions are broadcast before earlier receipts arrive. If a submission reverts or cannot be confirmed, the sequencer stops admitting new transactions, drains those already submitted, then reconciles the on-chain queue and retries its unfinished suffix.
 
@@ -1398,7 +1400,7 @@ On success, the portal:
 2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
 3. Advances `withdrawalBatchIndex`.
 4. Updates `zoneHeight`.
-5. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to physical slot `tail % WITHDRAWAL_QUEUE_CAPACITY`, and advances `tail`.
+5. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to `slots[tail]`, and advances `tail`.
 6. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for an empty batch.
 
 ### Verifier Interface
@@ -1869,7 +1871,7 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32);
 }
 ```
 

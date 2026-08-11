@@ -12,18 +12,14 @@ bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 ///      indices are monotonically increasing counters that can never reach this value.
 uint256 constant NO_QUEUE_INDEX = type(uint256).max;
 
-/// @dev Fixed capacity for the withdrawal ring buffer (number of batch slots).
-uint256 constant WITHDRAWAL_QUEUE_CAPACITY = 100;
-
 /// @title WithdrawalQueue
-/// @notice Fixed-size ring buffer for zone→Tempo withdrawals
+/// @notice Unbounded FIFO for zone→Tempo withdrawals
 /// @dev Each batch with a non-zero withdrawal hash chain gets its own slot; empty
 ///      batches (withdrawalQueueHash == 0) advance the batch index but do not consume
 ///      a slot. Head points to the oldest unprocessed batch,
 ///      tail points to where the next batch will write. Slots contain hash chains
 ///      of withdrawals for that batch. Head and tail are raw uint256 values that
-///      never wrap; modular arithmetic (head % WITHDRAWAL_QUEUE_CAPACITY) is used
-///      only for slot indexing.
+///      never wrap. Each logical index is used directly as its storage key.
 struct WithdrawalQueue {
     uint256 head; // logical index of oldest unprocessed batch
     uint256 tail; // logical index where next batch will write
@@ -31,7 +27,7 @@ struct WithdrawalQueue {
 }
 
 /// @title WithdrawalQueueLib
-/// @notice Library for managing the withdrawal queue ring buffer
+/// @notice Library for managing the withdrawal FIFO
 /// @dev Withdrawals are inserted by proofs (one slot per batch) and dequeued
 ///      on-chain by the sequencer. The sequencer processes withdrawals from
 ///      the head slot, advancing head when the slot is exhausted.
@@ -39,17 +35,14 @@ struct WithdrawalQueue {
 ///      Invariants:
 ///      - Slots between head (inclusive) and tail (exclusive) contain withdrawal hash chains
 ///      - If head == tail, the queue is empty
-///      - Slots at head contain EMPTY_SENTINEL only after being fully processed
-///      - length() <= capacity at all times
+///      - Exhausted slots before head are cleared to reclaim storage credits
 library WithdrawalQueueLib {
 
     error NoWithdrawalsInQueue();
     error InvalidWithdrawalHash();
-    error WithdrawalQueueFull();
-
     /// @notice Add a batch's withdrawals to the queue
     /// @dev Called during submitBatch. The batch's withdrawal hash chain goes into
-    ///      the slot at tail % WITHDRAWAL_QUEUE_CAPACITY, then tail advances.
+    ///      the slot at tail, then tail advances.
     /// @param queue The withdrawal queue
     /// @param withdrawalQueueHash The hash chain of withdrawals for this batch (0 if none)
     /// @return assignedIndex The logical queue index the hash chain was stored under,
@@ -70,11 +63,7 @@ library WithdrawalQueueLib {
 
         uint256 tail = queue.tail;
 
-        if (tail - queue.head >= WITHDRAWAL_QUEUE_CAPACITY) {
-            revert WithdrawalQueueFull();
-        }
-
-        queue.slots[tail % WITHDRAWAL_QUEUE_CAPACITY] = withdrawalQueueHash;
+        queue.slots[tail] = withdrawalQueueHash;
 
         queue.tail = tail + 1;
         return tail;
@@ -82,8 +71,8 @@ library WithdrawalQueueLib {
 
     /// @notice Pop the next withdrawal from the queue
     /// @dev Verifies the withdrawal is at the head of the current slot and advances.
-    ///      When a slot is exhausted (remainingQueue would be empty), we set it to
-    ///      EMPTY_SENTINEL and advance head to the next slot.
+    ///      When a slot is exhausted (remainingQueue would be empty), we clear it
+    ///      to reclaim a TIP-1060 storage credit and advance head.
     /// @param queue The withdrawal queue
     /// @param withdrawal The withdrawal to pop (must be at head of current slot)
     /// @param remainingQueue The hash of the remaining queue after this withdrawal
@@ -100,8 +89,7 @@ library WithdrawalQueueLib {
             revert NoWithdrawalsInQueue();
         }
 
-        uint256 slotIndex = head % WITHDRAWAL_QUEUE_CAPACITY;
-        bytes32 currentSlot = queue.slots[slotIndex];
+        bytes32 currentSlot = queue.slots[head];
 
         if (currentSlot == EMPTY_SENTINEL || remainingQueue == EMPTY_SENTINEL) {
             revert InvalidWithdrawalHash();
@@ -114,10 +102,10 @@ library WithdrawalQueueLib {
         }
 
         if (remainingQueue == bytes32(0)) {
-            queue.slots[slotIndex] = EMPTY_SENTINEL;
+            delete queue.slots[head];
             queue.head = head + 1;
         } else {
-            queue.slots[slotIndex] = remainingQueue;
+            queue.slots[head] = remainingQueue;
         }
     }
 
@@ -133,13 +121,6 @@ library WithdrawalQueueLib {
     /// @return The number of batch slots with pending withdrawals
     function length(WithdrawalQueue storage queue) internal view returns (uint256) {
         return queue.tail - queue.head;
-    }
-
-    /// @notice Check if the queue is full
-    /// @param queue The withdrawal queue
-    /// @return True if length() == WITHDRAWAL_QUEUE_CAPACITY
-    function isFull(WithdrawalQueue storage queue) internal view returns (bool) {
-        return queue.tail - queue.head == WITHDRAWAL_QUEUE_CAPACITY;
     }
 
 }
