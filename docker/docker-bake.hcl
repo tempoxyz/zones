@@ -14,7 +14,7 @@ target "docker-metadata" {}
 
 # Base image with all dependencies pre-compiled
 target "chef" {
-  dockerfile = "Dockerfile.chef"
+  dockerfile = "docker/Dockerfile.chef"
   context = "."
   platforms = ["linux/amd64"]
   args = {
@@ -24,7 +24,7 @@ target "chef" {
 }
 
 target "_common" {
-  dockerfile = "Dockerfile"
+  dockerfile = "docker/Dockerfile"
   context = "."
   contexts = {
     chef = "target:chef"

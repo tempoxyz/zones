@@ -24,7 +24,7 @@ echo "::group::Reproducible build inputs"
 printf '  commit              = %s\n' "$COMMIT"
 printf '  version             = %s\n' "$VERSION"
 printf '  SOURCE_DATE_EPOCH   = %s\n' "$SOURCE_DATE_EPOCH"
-printf '  Dockerfile          = Dockerfile.reproducible\n'
+printf '  Dockerfile          = docker/Dockerfile.reproducible\n'
 printf '  out_dir             = %s\n' "$OUT_DIR"
 [[ -n "$DEBIAN_SNAPSHOT" ]] && printf '  DEBIAN_SNAPSHOT     = %s (override)\n' "$DEBIAN_SNAPSHOT"
 echo "::endgroup::"
@@ -43,7 +43,7 @@ fi
 docker build \
   --platform linux/amd64 \
   "${build_args[@]}" \
-  -f Dockerfile.reproducible \
+  -f docker/Dockerfile.reproducible \
   --target artifacts \
   --output "type=local,dest=$OUT_DIR" \
   .
