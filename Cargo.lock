@@ -11743,6 +11743,8 @@ dependencies = [
  "libc",
  "tokio",
  "tokio-vsock",
+ "tracing",
+ "tracing-subscriber",
  "vsock",
 ]
 

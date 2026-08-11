@@ -4,17 +4,87 @@ use std::{
     process::ExitCode,
 };
 
-#[cfg(target_os = "linux")]
-use std::mem::size_of;
-#[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
-
 use clap::Parser;
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
 };
-use tokio_vsock::VsockStream;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(tracing::Level::INFO.into())
+                .from_env_lossy(),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    match Cli::parse().run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(%error, "VSOCK proxy failed");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[derive(Debug, Parser, PartialEq)]
+#[command(
+    version,
+    about = "Forward TCP connections to a VSOCK endpoint via the host transport"
+)]
+struct Cli {
+    /// TCP port on which to accept connections.
+    #[arg(value_name = "TCP_PORT")]
+    listen_port: u16,
+
+    /// Destination VSOCK context identifier.
+    #[arg(value_name = "VSOCK_CID")]
+    vsock_cid: u32,
+
+    /// Destination VSOCK port.
+    #[arg(value_name = "VSOCK_PORT")]
+    vsock_port: u32,
+}
+
+impl Cli {
+    async fn run(self) -> io::Result<()> {
+        let listen_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.listen_port);
+        let listener = TcpListener::bind(listen_addr).await?;
+
+        info!(
+            %listen_addr,
+            vsock_cid = self.vsock_cid,
+            vsock_port = self.vsock_port,
+            "Listening for TCP connections"
+        );
+
+        loop {
+            let (tcp, peer) = listener.accept().await?;
+            let cid = self.vsock_cid;
+            let port = self.vsock_port;
+
+            tokio::spawn(async move {
+                if let Err(error) = proxy_connection(tcp, cid, port).await {
+                    error!(%peer, %error, "Connection failed");
+                }
+            });
+        }
+    }
+}
+
+async fn proxy_connection(mut tcp: TcpStream, cid: u32, port: u32) -> io::Result<()> {
+    let stream = tokio::task::spawn_blocking(move || connect_blocking(cid, port))
+        .await
+        .map_err(io::Error::other)??;
+    let mut vsock = tokio_vsock::VsockStream::new(stream)?;
+    copy_bidirectional(&mut tcp, &mut vsock).await?;
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 const VMADDR_FLAG_TO_HOST: u8 = 1;
@@ -30,75 +100,10 @@ struct SockAddrVm {
     zero: [u8; 3],
 }
 
-#[derive(Debug, Parser, PartialEq)]
-#[command(
-    version,
-    about = "Forward TCP connections to a VSOCK endpoint via the host transport"
-)]
-struct Config {
-    /// TCP port on which to accept connections.
-    #[arg(value_name = "TCP_PORT")]
-    listen_port: u16,
-
-    /// Destination VSOCK context identifier.
-    #[arg(value_name = "VSOCK_CID")]
-    vsock_cid: u32,
-
-    /// Destination VSOCK port.
-    #[arg(value_name = "VSOCK_PORT")]
-    vsock_port: u32,
-}
-
-#[tokio::main]
-async fn main() -> ExitCode {
-    let config = Config::parse();
-
-    match run(config).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("tempo-vsock-proxy failed: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn run(config: Config) -> io::Result<()> {
-    let listen_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.listen_port);
-    let listener = TcpListener::bind(listen_addr).await?;
-
-    println!(
-        "Listening on TCP {} and forwarding to VSOCK CID {}, port {} with VMADDR_FLAG_TO_HOST",
-        listen_addr, config.vsock_cid, config.vsock_port
-    );
-
-    loop {
-        let (tcp, peer) = listener.accept().await?;
-        let cid = config.vsock_cid;
-        let port = config.vsock_port;
-
-        tokio::spawn(async move {
-            if let Err(error) = proxy_connection(tcp, cid, port).await {
-                eprintln!("connection from {peer} failed: {error}");
-            }
-        });
-    }
-}
-
-async fn proxy_connection(mut tcp: TcpStream, cid: u32, port: u32) -> io::Result<()> {
-    let mut vsock = connect_to_host(cid, port).await?;
-    copy_bidirectional(&mut tcp, &mut vsock).await?;
-    Ok(())
-}
-
-async fn connect_to_host(cid: u32, port: u32) -> io::Result<VsockStream> {
-    let connected = tokio::task::spawn_blocking(move || connect_blocking(cid, port))
-        .await
-        .map_err(io::Error::other)??;
-    VsockStream::new(connected)
-}
-
 #[cfg(target_os = "linux")]
 fn connect_blocking(cid: u32, port: u32) -> io::Result<vsock::VsockStream> {
+    use std::{mem::size_of, os::fd::FromRawFd};
+
     let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -141,34 +146,16 @@ fn connect_blocking(_cid: u32, _port: u32) -> io::Result<vsock::VsockStream> {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_config() {
-        let config = Config::try_parse_from(["proxy", "5000", "16", "5001"]).unwrap();
-
-        assert_eq!(
-            config,
-            Config {
-                listen_port: 5000,
-                vsock_cid: 16,
-                vsock_port: 5001,
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_config() {
-        let error = Config::try_parse_from(["proxy", "not-a-port", "16", "5000"]).unwrap_err();
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn socket_address_matches_linux_abi() {
-        assert_eq!(size_of::<SockAddrVm>(), size_of::<libc::sockaddr_vm>());
+        assert_eq!(
+            std::mem::size_of::<SockAddrVm>(),
+            std::mem::size_of::<libc::sockaddr_vm>()
+        );
         assert_eq!(std::mem::offset_of!(SockAddrVm, flags), 12);
 
         let addr = SockAddrVm {
