@@ -10,9 +10,9 @@
 //!  3. Portal admin enables the token on the zone portal
 //!  4. Deposit tokens into the zone (plain deposit to the PRIVATE_KEY wallet)
 //!  5. Create a TIP-403 blacklist policy, blacklist a target wallet, assign it to the token
-//!  6. Encrypted deposit to the blacklisted target → zone bounces it back
+//!  6. Deposit to the blacklisted target → zone bounces it back
 //!  7. Remove target from the blacklist on L1
-//!  8. Encrypted deposit to the now-unblacklisted target → zone accepts it
+//!  8. Deposit to the now-unblacklisted target → zone accepts it
 //!  9. Target withdraws tokens from zone back to L1
 //!
 //! Each step prints what it's doing, why, and every tx hash / address for
@@ -75,7 +75,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
 };
 use tempo_zone_contracts::{
-    EncryptedDepositPayload, IZoneInbox, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal,
+    DepositPayload, IZoneInbox, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use zone_precompiles::ecies::encrypt_deposit;
 
@@ -96,17 +96,17 @@ pub(crate) struct DemoBlacklist {
     portal: Address,
 
     /// Private key (hex) of the token admin / depositor.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Portal admin private key (hex). If not set, reads adminKey from the
     /// explicit or auto-discovered zone.json, then falls back to SEQUENCER_KEY /
     /// sequencerKey for legacy zones.
-    #[arg(long, env = "ADMIN_KEY")]
+    #[arg(long, env = "ADMIN_KEY", hide_env_values = true)]
     admin_key: Option<String>,
 
     /// Sequencer private key (hex). Legacy fallback for zones where admin == sequencer.
-    #[arg(long, env = "SEQUENCER_KEY")]
+    #[arg(long, env = "SEQUENCER_KEY", hide_env_values = true)]
     sequencer_key: Option<String>,
 
     /// Path to zone directory containing zone.json. If omitted, scans
@@ -256,7 +256,7 @@ impl DemoBlacklist {
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
         // Mint 4× the deposit amount: 2× goes to the initial deposit (step 4),
-        // 1× for the bounced encrypted deposit (step 6), 1× for the successful one (step 8).
+        // 1× for the bounced deposit (step 6), 1× for the successful one (step 8).
         let mint_amount = self.amount * 4;
         let receipt = token
             .mint(admin, U256::from(mint_amount))
@@ -331,54 +331,34 @@ impl DemoBlacklist {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         let deposit_amount = self.amount * 2;
         println!("Step 4: Deposit {deposit_amount} DUSD into the zone (to admin)");
-        println!("  Plain deposit so admin has L2 funds for later encrypted deposits.");
+        println!("  Deposit so admin has L2 funds for later steps.");
         println!();
 
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
-        let receipt = {
-            let mut last_err = None;
-            let mut pending = None;
-            for attempt in 0..5u32 {
-                match portal
-                    .deposit(token_addr, admin, deposit_amount, B256::ZERO, admin)
-                    .send()
-                    .await
-                {
-                    Ok(p) => {
-                        pending = Some(p);
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("nonce") || msg.contains("underpriced") {
-                            println!(
-                                "  Retry {}/5 — transient nonce conflict, waiting...",
-                                attempt + 1
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            last_err = Some(e);
-                            continue;
-                        }
-                        return Err(e).wrap_err("deposit failed");
-                    }
-                }
-            }
-            pending
-                .ok_or_else(|| {
-                    last_err
-                        .map(|e| eyre!(e))
-                        .unwrap_or_else(|| eyre!("deposit failed after retries"))
-                })?
-                .get_receipt()
-                .await?
-        };
-        check(&receipt, "deposit")?;
+        send_deposit(
+            &portal,
+            self.portal,
+            token_addr,
+            admin,
+            admin,
+            admin,
+            deposit_amount,
+        )
+        .await?;
         println!("  Deposited {deposit_amount} DUSD");
-        println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
         println!("  Waiting for deposit to land on L2...");
-        let block = wait_for_deposit_processed(&l2, l2_block_before, admin, admin).await?;
-        println!("  Deposit processed on L2 (block {block})");
+        let bounced = wait_for_deposit_result(
+            &l2,
+            l2_block_before,
+            admin,
+            token_addr,
+            deposit_amount,
+            admin,
+        )
+        .await?;
+        eyre::ensure!(!bounced, "initial deposit unexpectedly bounced");
+        println!("  Deposit processed on L2");
 
         let l2_balance = get_l2_balance(&l2, token_addr, admin).await?;
         println!("  Admin L2 balance: {l2_balance}");
@@ -444,22 +424,30 @@ impl DemoBlacklist {
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
         println!();
 
-        // ── Step 6: Encrypted deposit to blacklisted address → bounce ────
+        // ── Step 6: Deposit to blacklisted address → bounce ─────────────
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!(
-            "Step 6: Encrypted deposit {} DUSD to blacklisted address {target}",
+            "Step 6: Deposit {} DUSD to blacklisted address {target}",
             self.amount
         );
         println!("  The zone should reject this deposit and bounce funds back to sender.");
         println!();
 
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
-        send_encrypted_deposit(&portal, self.portal, token_addr, target, admin, self.amount)
-            .await?;
+        send_deposit(
+            &portal,
+            self.portal,
+            token_addr,
+            target,
+            admin,
+            admin,
+            self.amount,
+        )
+        .await?;
 
-        println!("  Waiting for zone to process (expecting EncryptedDepositFailed)...");
+        println!("  Waiting for zone to process (expecting DepositFailed)...");
         let bounced =
-            wait_for_encrypted_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
+            wait_for_deposit_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
                 .await?;
         if bounced {
             println!("  BOUNCED! Deposit to blacklisted address was correctly rejected.");
@@ -480,12 +468,26 @@ impl DemoBlacklist {
 
         let gas_fund: u128 = 100_000;
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
-        let receipt = portal
-            .deposit(PATH_USD_ADDRESS, target, gas_fund, B256::ZERO, admin)
-            .send_sync()
-            .await?;
-        check(&receipt, "deposit pathUSD to target for gas")?;
-        let _ = wait_for_deposit_processed(&l2, l2_block_before, admin, target).await?;
+        send_deposit(
+            &portal,
+            self.portal,
+            PATH_USD_ADDRESS,
+            target,
+            admin,
+            admin,
+            gas_fund,
+        )
+        .await?;
+        let bounced = wait_for_deposit_result(
+            &l2,
+            l2_block_before,
+            admin,
+            PATH_USD_ADDRESS,
+            gas_fund,
+            target,
+        )
+        .await?;
+        eyre::ensure!(!bounced, "pathUSD gas deposit unexpectedly bounced");
         println!("  Deposited {gas_fund} pathUSD to target for L2 gas");
 
         // ── Step 7: Unblacklist the address ──────────────────────────────
@@ -514,22 +516,30 @@ impl DemoBlacklist {
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
         println!();
 
-        // ── Step 8: Encrypted deposit to unblacklisted address → success ─
+        // ── Step 8: Deposit to unblacklisted address → success ───────────
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!(
-            "Step 8: Encrypted deposit {} DUSD to unblacklisted address {target}",
+            "Step 8: Deposit {} DUSD to unblacklisted address {target}",
             self.amount
         );
         println!("  Now that the target is no longer blacklisted, this should succeed.");
         println!();
 
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
-        send_encrypted_deposit(&portal, self.portal, token_addr, target, admin, self.amount)
-            .await?;
+        send_deposit(
+            &portal,
+            self.portal,
+            token_addr,
+            target,
+            admin,
+            admin,
+            self.amount,
+        )
+        .await?;
 
-        println!("  Waiting for zone to process (expecting EncryptedDepositProcessed)...");
+        println!("  Waiting for zone to process (expecting DepositProcessed)...");
         let bounced =
-            wait_for_encrypted_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
+            wait_for_deposit_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
                 .await?;
         if bounced {
             println!("  WARNING: Deposit still bounced — policy may need more time to sync.");
@@ -670,17 +680,18 @@ fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Send an ECIES-encrypted deposit through the portal.
+/// Send a deposit through the portal.
 ///
 /// Fetches the sequencer's current encryption public key, encrypts the
 /// `(recipient, memo)` tuple so only the sequencer can decrypt it on-chain,
-/// and submits the encrypted deposit transaction on L1.
-async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
+/// and submits the deposit transaction on L1.
+async fn send_deposit<P: Provider<TempoNetwork>>(
     portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
     portal_addr: Address,
     token: Address,
     to: Address,
     tempo_refund_recipient: Address,
+    sender: Address,
     amount: u128,
 ) -> eyre::Result<()> {
     let (key, key_index) = portal
@@ -692,10 +703,18 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
         .normalized_y_parity()
         .ok_or_else(|| eyre!("unexpected yParity {:#x}", key.yParity))?;
 
-    let enc = encrypt_deposit(&key.x, y_parity, to, B256::ZERO, portal_addr, key_index)
-        .ok_or_else(|| eyre!("ECIES encryption failed"))?;
+    let enc = encrypt_deposit(
+        &key.x,
+        y_parity,
+        to,
+        B256::ZERO,
+        sender,
+        portal_addr,
+        key_index,
+    )
+    .ok_or_else(|| eyre!("ECIES encryption failed"))?;
 
-    let payload = EncryptedDepositPayload {
+    let payload = DepositPayload {
         ephemeralPubkeyX: enc.eph_pub_x,
         ephemeralPubkeyYParity: enc.eph_pub_y_parity,
         ciphertext: Bytes::from(enc.ciphertext),
@@ -704,13 +723,13 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     };
 
     let receipt = portal
-        .depositEncrypted(token, amount, key_index, payload, tempo_refund_recipient)
+        .deposit(token, amount, key_index, payload, tempo_refund_recipient)
         .send_sync()
         .await
-        .wrap_err("depositEncrypted send failed")?;
-    check(&receipt, "depositEncrypted")?;
+        .wrap_err("deposit send failed")?;
+    check(&receipt, "deposit")?;
     println!(
-        "  Encrypted deposit sent (block {})",
+        "  Deposit sent (block {})",
         receipt.block_number.unwrap_or(0),
     );
     println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
@@ -757,41 +776,11 @@ async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
     Err(eyre!("timeout waiting for TokenEnabled event on L2"))
 }
 
-/// Poll L2 for a `DepositProcessed` event matching the given sender and recipient.
-///
-/// Times out after 60 seconds (120 polls × 500ms).
-async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
-    l2: &P,
-    from_block: u64,
-    sender: Address,
-    to: Address,
-) -> eyre::Result<u64> {
-    let filter = Filter::new()
-        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(IZoneInbox::DepositProcessed::SIGNATURE_HASH)
-        .from_block(from_block);
-
-    for _ in 0..120 {
-        let logs = l2.get_logs(&filter).await.unwrap_or_default();
-        for log in &logs {
-            if let Ok(event) = IZoneInbox::DepositProcessed::decode_log(&log.inner)
-                && event.data.sender == sender
-                && event.data.to == to
-            {
-                let block = log.block_number.unwrap_or(0);
-                return Ok(block);
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    Err(eyre!("timeout waiting for DepositProcessed"))
-}
-
-/// Poll L2 for the encrypted deposit terminal event.
+/// Poll L2 for the deposit terminal event.
 ///
 /// Returns `true` if the deposit bounced (blacklisted), `false` if it was accepted.
 /// Times out after 60 seconds (120 polls × 500ms).
-async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
+async fn wait_for_deposit_result<P: Provider<TempoNetwork>>(
     l2: &P,
     from_block: u64,
     sender: Address,
@@ -801,16 +790,16 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
 ) -> eyre::Result<bool> {
     let processed_filter = Filter::new()
         .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(IZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
+        .event_signature(IZoneInbox::DepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
     let failed_filter = Filter::new()
         .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(IZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
+        .event_signature(IZoneInbox::DepositFailed::SIGNATURE_HASH)
         .from_block(from_block);
     for _ in 0..120 {
         let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
         for log in &logs {
-            if let Ok(event) = IZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
+            if let Ok(event) = IZoneInbox::DepositProcessed::decode_log(&log.inner)
                 && event.data.sender == sender
                 && event.data.to == to
                 && event.data.token == token
@@ -822,7 +811,7 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
 
         let logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
         for log in &logs {
-            if let Ok(event) = IZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
+            if let Ok(event) = IZoneInbox::DepositFailed::decode_log(&log.inner)
                 && event.data.sender == sender
                 && event.data.token == token
                 && event.data.amount == amount
@@ -833,7 +822,7 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    Err(eyre!("timeout waiting for encrypted deposit result"))
+    Err(eyre!("timeout waiting for deposit result"))
 }
 
 /// Poll L1 for a `WithdrawalProcessed` event on the portal matching the recipient.

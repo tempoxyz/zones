@@ -1,5 +1,5 @@
 [profile.default]
-hardfork = "tempo:T3"
+hardfork = "tempo:T8"
 solc_version = "0.8.35"
 
 # layout and file system
@@ -9,7 +9,6 @@ libs = ["lib"]
 extra_output = ["storageLayout"]
 fs_permissions = [{ access = "read-write", path = "./" }]
 remappings = [
-    "@openzeppelin/contracts/=test/fixtures/earn/openzeppelin/",
     "tempo-std/=lib/tempo-std/src/",
     "forge-std/=lib/forge-std/src/",
 ]

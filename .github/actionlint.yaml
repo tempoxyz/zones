@@ -1,6 +1,6 @@
 # actionlint configuration.
-# Register the Depot custom runner labels currently used in this repo's
-# workflows so actionlint does not report them as unknown `runs-on` labels.
+# Register the custom runner labels currently used in this repo's workflows so
+# actionlint does not report them as unknown `runs-on` labels.
 # See https://github.com/rhysd/actionlint/blob/main/docs/config.md
 self-hosted-runner:
   labels:
@@ -9,3 +9,4 @@ self-hosted-runner:
     - depot-ubuntu-latest-16
     - depot-ubuntu-latest-arm-16
     - depot-macos-15
+    - bare-metal-dual-schelk

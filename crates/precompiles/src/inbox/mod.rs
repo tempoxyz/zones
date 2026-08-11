@@ -19,26 +19,21 @@ mod tests;
 use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_sol_types::{SolCall, SolValue};
-#[cfg(test)]
-use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+use alloy_primitives::{Address, B256, U256};
+use alloy_sol_types::{SolCall, SolType, SolValue};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
-    tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
+    tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
     tip403_registry::TIP403Registry,
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
-    DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneInbox, IZoneOutbox,
-    QueuedDeposit, ZoneInboxError, ZoneInboxEvent,
+    DecryptionData, Deposit, DepositType, EnabledToken, IZoneInbox, IZoneOutbox, QueuedDeposit,
+    WithdrawalBounceBackDeposit, ZoneInboxError, ZoneInboxEvent,
 };
-use zone_primitives::constants::{
-    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, ZONE_INBOX_ADDRESS,
-    ZONE_OUTBOX_ADDRESS,
-};
+use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
@@ -112,16 +107,15 @@ impl ZoneInbox {
             current_hash = queued.hash_with_tail(current_hash)?;
 
             match queued {
-                DecodedQueuedDeposit::Regular(deposit) => {
-                    self.process_deposit(&mut outbox, current_hash, deposit)
+                DecodedQueuedDeposit::WithdrawalBounceBack(deposit) => {
+                    self.process_withdrawal_bounce_back(&mut outbox, deposit)
                 }
-                DecodedQueuedDeposit::Encrypted(deposit) => {
+                DecodedQueuedDeposit::Deposit(deposit) => {
                     let Some(decryption) = decryptions.next() else {
                         return Err(ZoneInboxError::missing_decryption_data().into());
                     };
-                    let key =
-                        read_encryption_key(l1, portal, tempo_block_number, deposit.keyIndex)?;
-                    self.process_deposit_encrypted(
+                    let key = read_encryption_key(l1, deposit.keyIndex)?;
+                    self.process_deposit(
                         &mut outbox,
                         portal,
                         current_hash,
@@ -147,11 +141,7 @@ impl ZoneInbox {
         // NOTE: A zero portal denotes the explicit no-L1 mode used by local development and offline
         // execution. There is no canonical queue to bind in that mode.
         if !portal.is_zero() {
-            let tempo_current_hash = l1.read_l1_storage(
-                portal,
-                PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
-                tempo_block_number,
-            )?;
+            let tempo_current_hash = l1.read_portal(|portal| &portal.current_deposit_queue_hash)?;
             if tempo_current_hash != current_hash {
                 return Err(ZoneInboxError::invalid_deposit_queue_hash().into());
             }
@@ -204,59 +194,30 @@ impl ZoneInbox {
     fn process_deposit(
         &mut self,
         outbox: &mut ZoneOutbox,
-        current_hash: B256,
-        deposit: Deposit,
-    ) -> ZoneResult<()> {
-        // The user-facing `ZonePortal.deposit` entry point rejects a zero refund recipient, but
-        // `ZonePortal._enqueueBounceBack` deliberately uses zero as the sentinel for an internal
-        // withdrawal bounce-back and encodes its fallback nonce in `deposit.to`.
-        if deposit.tempoRefundRecipient.is_zero() {
-            return self.process_withdrawal_bounce_back(outbox, deposit);
-        }
-
-        if self.try_mint(deposit.token, deposit.to, deposit.amount)? {
-            self.emit_event(deposit.processed_event(current_hash))?;
-        } else {
-            outbox.enqueue_deposit_bounce_back(
-                ZONE_INBOX_ADDRESS,
-                IZoneOutbox::enqueueDepositBounceBackCall {
-                    token: deposit.token,
-                    amount: deposit.amount,
-                    tempoRefundRecipient: deposit.tempoRefundRecipient,
-                },
-            )?;
-            self.emit_event(deposit.failed_event(current_hash))?;
-        }
-        Ok(())
-    }
-
-    fn process_deposit_encrypted(
-        &mut self,
-        outbox: &mut ZoneOutbox,
         portal: Address,
         current_hash: B256,
-        deposit: EncryptedDeposit,
+        deposit: Deposit,
         decryption: DecryptionData,
         key: (B256, u8),
     ) -> ZoneResult<()> {
         let Some((to, memo)) = recover_encrypted_payload(portal, &deposit, &decryption, key)?
         else {
-            return self.fail_encrypted_deposit(outbox, current_hash, deposit);
+            return self.fail_deposit(outbox, current_hash, deposit);
         };
 
         if self.try_mint(deposit.token, to, deposit.amount)? {
             self.emit_event(deposit.processed_event(current_hash, to, memo))?;
         } else {
-            self.fail_encrypted_deposit(outbox, current_hash, deposit)?;
+            self.fail_deposit(outbox, current_hash, deposit)?;
         }
         Ok(())
     }
 
-    fn fail_encrypted_deposit(
+    fn fail_deposit(
         &mut self,
         outbox: &mut ZoneOutbox,
         current_hash: B256,
-        deposit: EncryptedDeposit,
+        deposit: Deposit,
     ) -> ZoneResult<()> {
         outbox.enqueue_deposit_bounce_back(
             ZONE_INBOX_ADDRESS,
@@ -273,7 +234,7 @@ impl ZoneInbox {
     fn process_withdrawal_bounce_back(
         &mut self,
         outbox: &mut ZoneOutbox,
-        deposit: Deposit,
+        deposit: WithdrawalBounceBackDeposit,
     ) -> ZoneResult<()> {
         let fallback_nonce = u64::from_be_bytes(
             deposit.to.as_slice()[12..]
@@ -294,57 +255,96 @@ impl ZoneInbox {
     /// Mint with Solidity `try/catch` semantics: ordinary reverts are caught while fatal and
     /// out-of-gas failures abort the outer Inbox call.
     fn try_mint(&mut self, token: Address, to: Address, amount: u128) -> ZoneResult<bool> {
-        let checkpoint = self.storage.checkpoint();
-        let result = TIP20Token::from_address(token).and_then(|mut token| {
-            token.mint(
-                ZONE_INBOX_ADDRESS,
-                ITIP20::mintCall {
-                    to,
-                    amount: U256::from(amount),
-                },
-            )
-        });
-        match result {
-            Ok(()) => {
-                checkpoint.commit();
-                Ok(true)
+        let ensure_logic_err = |err: TempoPrecompileError| {
+            if err.is_system_error() {
+                Err(err)
+            } else {
+                Ok(false)
             }
-            Err(error @ (TempoPrecompileError::Fatal(_) | TempoPrecompileError::OutOfGas)) => {
-                Err(error.into())
-            }
-            Err(_) => Ok(false),
+        };
+
+        // TODO: Resolve virtual addresses through `AddressRegistry`precompile once it activates.
+        let can_receive = TIP403Registry::new()
+            .validate_receive_policy(token, ZONE_INBOX_ADDRESS, to)
+            .map(|reason| reason.is_none())
+            .or_else(ensure_logic_err)?;
+
+        if !can_receive {
+            return Ok(false);
         }
+
+        let checkpoint = self.storage.checkpoint();
+        let success = TIP20Token::from_address(token)
+            .and_then(|mut token| {
+                token.mint(
+                    ZONE_INBOX_ADDRESS,
+                    ITIP20::mintCall {
+                        to,
+                        amount: U256::from(amount),
+                    },
+                )
+            })
+            .map(|_| true)
+            .or_else(ensure_logic_err)?;
+
+        if success {
+            checkpoint.commit();
+        }
+
+        Ok(success)
     }
 
     fn claim_refund(&mut self, caller: Address, token: Address) -> ZoneResult<u128> {
         let amount = self.withdrawal_bounce_backs[token][caller].read()?;
+        if !self.try_mint(token, caller, amount)? {
+            return Err(TempoPrecompileError::from(TIP20Error::policy_forbids()).into());
+        }
+
         self.withdrawal_bounce_backs[token][caller].delete()?;
-        TIP20Token::from_address(token)?.mint(
-            ZONE_INBOX_ADDRESS,
-            ITIP20::mintCall {
-                to: caller,
-                amount: U256::from(amount),
-            },
-        )?;
         self.emit_event(ZoneInboxEvent::refund_claimed(caller, token, amount))?;
         Ok(amount)
+    }
+
+    fn view_refund<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        msg_sender: Address,
+        token: Address,
+        owner: Address,
+    ) -> ZoneResult<u128> {
+        if msg_sender != owner && !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
+            return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
+                IZoneInbox::Unauthorized {},
+            )));
+        }
+        Ok(self.withdrawal_bounce_backs[token][owner].read()?)
+    }
+
+    /// Returns the hash-chain head after the last processed L1 deposit.
+    pub fn processed_deposit_queue_hash(&self) -> tempo_precompiles::Result<B256> {
+        self.processed_deposit_queue_hash.read()
+    }
+
+    /// Returns the number of L1 deposits consumed by the Zone.
+    pub fn processed_deposit_number(&self) -> tempo_precompiles::Result<u64> {
+        self.processed_deposit_number.read()
     }
 }
 
 /// A queue entry whose nested ABI payload has been validated before execution begins.
 enum DecodedQueuedDeposit {
-    Regular(Deposit),
-    Encrypted(EncryptedDeposit),
+    WithdrawalBounceBack(WithdrawalBounceBackDeposit),
+    Deposit(Deposit),
 }
 
 impl DecodedQueuedDeposit {
     fn hash_with_tail(&self, tail: B256) -> tempo_precompiles::Result<B256> {
         let encoded = match self {
-            Self::Regular(deposit) => {
-                (DepositType::Regular, deposit.clone(), tail).abi_encode_params()
+            Self::WithdrawalBounceBack(deposit) => {
+                (DepositType::WithdrawalBounceBack, deposit.clone(), tail).abi_encode_params()
             }
-            Self::Encrypted(deposit) => {
-                (DepositType::Encrypted, deposit.clone(), tail).abi_encode_params()
+            Self::Deposit(deposit) => {
+                (DepositType::Deposit, deposit.clone(), tail).abi_encode_params()
             }
         };
         StorageCtx::default().keccak256(&encoded)
@@ -356,14 +356,24 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
 
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
         match queued.depositType {
-            DepositType::Regular => Deposit::abi_decode(&queued.depositData).map(Self::Regular),
-            DepositType::Encrypted => {
-                EncryptedDeposit::abi_decode(&queued.depositData).map(Self::Encrypted)
+            DepositType::WithdrawalBounceBack => {
+                decode_canonical(&queued.depositData).map(Self::WithdrawalBounceBack)
             }
+            DepositType::Deposit => decode_canonical(&queued.depositData).map(Self::Deposit),
             _ => return Err(ZonePrecompileError::MalformedCalldata),
         }
         .map_err(|_| ZonePrecompileError::MalformedCalldata)
     }
+}
+
+fn decode_canonical<T>(encoded: &[u8]) -> alloy_sol_types::Result<T>
+where
+    T: SolValue + From<<T::SolType as SolType>::RustType>,
+{
+    let value = T::abi_decode(encoded)?;
+    (value.abi_encode().as_slice() == encoded)
+        .then_some(value)
+        .ok_or(alloy_sol_types::Error::ReserMismatch)
 }
 
 fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
@@ -372,7 +382,7 @@ fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueued
 
 fn recover_encrypted_payload(
     portal: Address,
-    deposit: &EncryptedDeposit,
+    deposit: &Deposit,
     decryption: &DecryptionData,
     (key_x, key_y_parity): (B256, u8),
 ) -> ZoneResult<Option<(Address, B256)>> {
@@ -394,6 +404,7 @@ fn recover_encrypted_payload(
         &portal,
         &deposit.keyIndex,
         &deposit.encrypted.ephemeralPubkeyX,
+        &deposit.sender,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
@@ -416,27 +427,13 @@ fn recover_encrypted_payload(
 
 fn read_encryption_key<P: L1StorageReader>(
     l1: &L1State<P>,
-    portal: Address,
-    tempo_block_number: u64,
     key_index: U256,
 ) -> ZoneResult<(B256, u8)> {
-    let read_l1_portal_slot =
-        |slot: U256| l1.read_l1_storage(portal, slot.into(), tempo_block_number);
-
-    let base: U256 = keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).into();
-    let slot_x = key_index
-        .checked_mul(U256::from(2))
-        .and_then(|offset| base.checked_add(offset))
-        .ok_or_else(TempoPrecompileError::under_overflow)?;
-
-    let x = read_l1_portal_slot(slot_x)?;
+    let index = usize::try_from(key_index).map_err(|_| TempoPrecompileError::under_overflow())?;
+    let x = l1.read_portal(|portal| &portal.encryption_keys[index].x)?;
     if x.is_zero() {
         return Err(ZoneInboxError::invalid_shared_secret_proof().into());
     }
-    let meta = read_l1_portal_slot(
-        slot_x
-            .checked_add(U256::ONE)
-            .ok_or_else(TempoPrecompileError::under_overflow)?,
-    )?;
-    Ok((x, meta.as_slice()[31]))
+    let y_parity = l1.read_portal(|portal| &portal.encryption_keys[index].y_parity)?;
+    Ok((x, y_parity))
 }

@@ -42,7 +42,7 @@ ADDR=$(cast wallet address "$PRIVATE_KEY")
 # Fund the wallet on L1 (testnet faucet)
 cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 
-# Approve the portal and deposit tokens to the zone
+# Approve the portal and make a deposit to the zone
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
 just send-deposit 1000000
@@ -51,7 +51,7 @@ just send-deposit 1000000
 just check-balance "$ADDR"
 ```
 
-See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
+See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and redacted RPC usage.
 
 For a fully local development stack, use Foundry 1.8 or newer, or a nightly
 build from July 11, 2026 or later. Run Anvil in Tempo mode and point the dev
@@ -94,6 +94,15 @@ just zone-up my-zone false release
 
 All zone commands need an L1 RPC URL.
 
+The zone chain ID is domain-separated by that L1's chain ID. For parent chain ID
+`4217` (Tempo mainnet), it is `421700000 + zone_id`; for `42431` (Moderato), it is
+`1424310000 + zone_id`. Zone IDs outside each reserved production range are rejected
+rather than wrapped. For any other parent in `1..=1048574`, the chain ID is
+`(parent_chain_id << 32) | zone_id`. These generic IDs are intentionally high, cannot
+collide with the production ranges, and remain safe for JavaScript tooling and legacy
+EIP-155 `v` values. Every devnet must use a unique parent chain ID to prevent transaction
+replay between it and other devnets.
+
 **Moderato testnet:**
 ```bash
 export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
@@ -106,7 +115,7 @@ export L1_RPC_URL="wss://rpc.devnet.tempoxyz.dev"
 
 ### 2. Generate Admin and Sequencer Keys
 
-The admin controls portal governance such as token enablement and deposit pause/resume. The sequencer is the operator that builds zone blocks, processes deposits, and submits batch proofs back to L1. The same key may be used for both roles, but pass it explicitly as both `ADMIN_KEY` and `SEQUENCER_KEY` when that is intentional.
+The admin controls portal governance such as token enablement and deposit pause/resume. The sequencer is the operator that builds zone blocks, processes deposits, and submits batch proofs back to L1. The same key may be used for both roles, but load it into both `ADMIN_KEY` and `SEQUENCER_KEY` when that is intentional.
 
 ```bash
 cast wallet new
@@ -181,15 +190,15 @@ This creates `generated/my-zone/` containing:
 
 This initial token controls the first L1 TIP-20 the portal accepts and mirrors onto the zone. The zone's fee token in genesis remains `pathUSD`.
 
-You can also run the xtask directly for more control:
+You can also run the xtask directly for more control. Set `ZONE_FACTORY_OWNER_KEY` for that
+invocation instead of passing a key argument:
 
 ```bash
-cargo run -p tempo-xtask -- create-zone \
+ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone \
   --output generated/my-zone \
   --initial-token 0x20c0000000000000000000000000000000000001 \
   --admin "$ADMIN_ADDR" \
-  --sequencer "$SEQUENCER_ADDR" \
-  --private-key "$SEQUENCER_KEY"
+  --sequencer "$SEQUENCER_ADDR"
 ```
 
 `create-zone` requires the admin address explicitly. Keep the matching `ADMIN_KEY`
@@ -234,7 +243,12 @@ cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 
 #### Deposit from L1 to Zone
 
-Approve the portal to spend your tokens, then deposit:
+All user deposits are encrypted. Approve the portal to spend your tokens, then deposit:
+
+The portal's `deposit(...)` entrypoint accepts encrypted arguments and forwards to the same
+implementation as `depositEncrypted(...)`; first-party tooling uses `deposit`.
+
+> This deposit ABI is not compatible with earlier plaintext-deposit zones. Recreate an existing development zone after upgrading.
 
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
@@ -243,27 +257,33 @@ just send-deposit 1000000                       # deposit to your own address
 just send-deposit 1000000 <recipient-address>   # deposit to a specific address
 ```
 
-#### Encrypted Deposit (Private Recipient)
+#### Encryption Key Setup
 
 Encrypted deposits hide the recipient address and memo on-chain using ECIES encryption to the sequencer's public key. Only the sequencer can decrypt them during block building.
 
 ```bash
 # The sequencer must first register their encryption key (done automatically by deploy-zone)
 # For manual setup:
-cargo run -p tempo-xtask -- set-encryption-key \
+PRIVATE_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- set-encryption-key \
   --portal "$L1_PORTAL_ADDRESS" \
-  --private-key "$SEQUENCER_KEY"
+  --l1-rpc-url "$L1_RPC_URL"
 
-# Send an encrypted deposit
-just send-deposit-encrypted 1000000                       # to your own address
-just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+# Send a deposit
+just send-deposit 1000000                       # to your own address
+just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
+
+Before registering a replacement encryption key, add its private key to
+`--deposit-decryption-keys-file`, restart every node that may sequence, and confirm the nodes are
+healthy. Keep each previous key in the file while the Portal still accepts deposits for it during
+the rotation grace period. File order does not matter: finalized Portal registrations bind each
+configured key to its on-chain index. The active sequencer key is included automatically.
 
 Set `ZONE_RPC_URL` to poll the zone for processing confirmation:
 
 ```bash
 export ZONE_RPC_URL="http://localhost:8546"
-just send-deposit-encrypted 1000000
+just send-deposit 1000000
 ```
 
 #### Check balance on the zone
@@ -286,7 +306,7 @@ The sequencer includes the withdrawal in the next batch submission to L1 and pro
 
 #### Router Swap + Deposit Demo (Same Zone)
 
-This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone via an encrypted deposit. The routed callback payload includes a public `tempoRefundRecipient` for the downstream portal deposit; set `ROUTER_BOUNCEBACK_RECIPIENT` to a refund-specific burner or stealth address you control if you do not want a later refund to point at the encrypted zone recipient. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
+This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone. The routed callback payload includes a public `tempoRefundRecipient` for the downstream portal deposit; set `ROUTER_BOUNCEBACK_RECIPIENT` to a refund-specific burner or stealth address you control if you do not want a later refund to point at the encrypted zone recipient. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
 
 Prerequisites:
 - A running zone with an active sequencer
@@ -323,20 +343,20 @@ just demo-swap-and-deposit my-zone 100000000 0
 
 This is a same-zone demo only. The command creates its own temporary tokens and DEX liquidity automatically, so you do not need to pre-create assets or seed the order book yourself.
 
-#### Query the Private RPC
+#### Query the Redacted RPC
 
-The private RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own scoped state.
+The redacted RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own scoped state. The operator RPC (port 8545) is restricted to the zone operator and exposes full state plus administrative methods.
 
 Use the built-in helper if you only want a quick balance check:
 
 ```bash
-just check-balance-private my-zone
+just check-balance-redacted my-zone
 ```
 
 For direct RPC calls, `just zone-auth-token` generates a 10-minute token from `generated/<name>/zone.json`, and `cast rpc` forwards it with `X-Authorization-Token`.
 HTTP header names are case-insensitive, so `x-authorization-token` works too, but the examples here use the canonical casing from the spec.
 
-One-liner to verify the private endpoint and inspect the authenticated account:
+One-liner to verify the redacted endpoint and inspect the authenticated account:
 
 ```bash
 cast rpc zone_getAuthorizationTokenInfo \
@@ -445,7 +465,7 @@ Once the token is enabled, approve the portal and deposit as usual — just pass
 just max-approve-portal <token-address>
 
 # Deposit the custom token into the zone
-just send-deposit 1000000 "" <token-address>
+just send-deposit 1000000 "" 0x0000000000000000000000000000000000000000000000000000000000000000 <token-address>
 
 # Check balance on the zone (pass the token address)
 just check-balance "$ADDR" <token-address>
@@ -518,9 +538,9 @@ The demo walks through 9 steps, printing every transaction with an explorer link
 3. **Enable on zone** — portal admin calls `enableToken` on the portal (uses `ADMIN_KEY`, or auto-discovers the matching `generated/<name>/zone.json` and reads `adminKey` with `sequencerKey` as a legacy fallback)
 4. **Deposit** — plain deposit so the `PRIVATE_KEY` wallet has L2 funds
 5. **Blacklist** — creates a TIP-403 blacklist policy, adds a fresh target wallet, assigns the policy to the token
-6. **Encrypted deposit → bounce** — sends an encrypted deposit to the blacklisted target; zone rejects it and returns funds to sender
+6. **Deposit → bounce** — sends a deposit to the blacklisted target; zone rejects it and returns funds to sender
 7. **Unblacklist** — removes the target from the blacklist on L1
-8. **Encrypted deposit → success** — same encrypted deposit now goes through
+8. **Deposit → success** — the same deposit now goes through
 9. **Withdraw** — target withdraws tokens from zone back to L1
 
 Prerequisites: a running zone with the sequencer producing blocks, the `PRIVATE_KEY` wallet funded with pathUSD on L1, and portal admin authority available via `ADMIN_KEY` or a saved `adminKey` in the matching `generated/<name>/zone.json` (the demo deposits a small amount to the target for L2 gas fees).
@@ -538,7 +558,6 @@ graph TB
     subgraph L2["Zone L2 Node"]
         direction TB
         Tasks["Sequencer Tasks<br/>• L1 subscriber (deposit backfill + live)<br/>• Zone engine (L1-driven block building)<br/>• Zone monitor (batch submission to L1)<br/>• Withdrawal processor (L1 queue drain)"]
-        Predeploys["Predeploys<br/>0x1c00…0000 TempoState<br/>0x1c00…0001 ZoneInbox<br/>0x1c00…0002 ZoneOutbox<br/>0x1c00…0003 ZoneConfig<br/>0x1c00…0004 TempoStateReader<br/>0x20C0…0000 pathUSD"]
     end
 
     Portal -- "WSS subscription<br/>(deposits, headers)" --> Tasks
@@ -609,33 +628,33 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 |------|---------|-------------|
 | `--l1.rpc-url` | (required) | Certified Tempo follower WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
-| `--l1.genesis-block-number` | (from zone.json) | L1 block when the zone was created |
-| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `421700000 + (zone_id % 1002610000)` (mainnet) or `1424310000 + (zone_id % 723173648)` (testnet). |
+| `--zone.id` | 0 | Zone ID from ZoneFactory. At startup it must match `ZonePortal.zoneId()`; `0` does not bypass validation. |
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
-| `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled; conflicts with `--sequencer-key-file` |
-| `--sequencer-key-file` | (optional) | File or FIFO containing the sequencer private key; avoids exposing it in process arguments |
+| `--sequencer-key-file` | (required for sequencing) | Owner-readable file or FIFO containing the sequencer private key |
+| `--deposit-decryption-keys-file` | (optional) | File containing additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
-| `--zone.poll-interval-secs` | 1 | How often (seconds) the zone monitor polls for new L2 blocks |
+| `--zone.poll-interval-secs` | 1 | Fallback interval for reconciling the canonical Zone head when no native notification arrives |
 | `--withdrawal-poll-interval-secs` | 5 | How often (seconds) the withdrawal processor polls the L1 queue |
 | `--withdrawal-max-batch-gas` | 10000000 | Maximum planned gas for one `processWithdrawals` transaction (up to 20000000); an oversized FIFO head is still sent alone |
 | `--withdrawal-max-in-flight-batches` | 8 | Maximum ordered withdrawal transactions kept concurrently in flight |
 | `--http.port` | 8546 | HTTP JSON-RPC port |
-| `--private-rpc.port` | 8544 | Private RPC server port |
-| `--private-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
+| `--redacted-rpc.port` | 8544 | Redacted RPC server port |
+| `--redacted-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the redacted RPC accepts, in seconds. The effective limit is capped at 30 days. |
 
 ### Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `L1_RPC_URL` | Yes | Certified Tempo follower WebSocket RPC URL (`wss://...`) |
-| `SEQUENCER_KEY` | For sequencing | Sequencer private key |
-| `SEQUENCER_KEY_FILE` | For sequencing | File or FIFO containing the sequencer private key |
+| `SEQUENCER_KEY` | For short-lived tooling | Sequencer private key for `just create-zone` and xtasks; not accepted by the node |
+| `SEQUENCER_KEY_FILE` | For sequencing | Owner-readable file or FIFO containing the sequencer private key |
+| `DEPOSIT_DECRYPTION_KEYS_FILE` | During encryption-key rotation | Additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `ADMIN_KEY` | For portal governance | Portal admin private key for `enableToken` / deposit pause controls. `SEQUENCER_KEY` only works for legacy zones where admin == sequencer. |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
 | `ROUTER_BOUNCEBACK_RECIPIENT` | No | Optional controlled burner/stealth address for `demo-swap-and-deposit` routed deposit refunds |
-| `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
+| `REDACTED_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the redacted RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `WITHDRAWAL_MAX_BATCH_GAS` | No | Override the per-transaction withdrawal gas budget (maximum 20000000) |
 | `WITHDRAWAL_MAX_IN_FLIGHT_BATCHES` | No | Override the maximum number of ordered withdrawal transactions in flight |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
@@ -652,8 +671,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |
-| `just send-deposit [amount] [to] [token] [memo]` | Deposit tokens from L1 to zone (defaults to sender) |
-| `just send-deposit-encrypted [amount] [to] [memo] [token] [rpc]` | Encrypted deposit — hides recipient and memo on-chain |
+| `just send-deposit [amount] [to] [memo] [token] [rpc]` | Deposit tokens from L1 to the zone with an encrypted recipient and memo |
 | `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (admin only) |
 | `just pause-deposits <token>` | Pause deposits for an enabled token on the portal (admin only) |
 | `just resume-deposits <token>` | Resume deposits for a paused token on the portal (admin only) |
@@ -662,8 +680,8 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `just send-withdrawal [amount] [to] [token] [memo] [gas-limit] [fallback-recipient] [data] [reveal-to] [rpc]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just demo-swap-and-deposit <name> [amount] [tick] [rpc]` | Self-contained same-zone router demo: create tokens, seed DEX liquidity, swap on L1, deposit output back into the zone; set `ROUTER_BOUNCEBACK_RECIPIENT` for routed deposit refunds |
 | `just check-balance <addr> [token] [rpc]` | Check token balance on the zone |
-| `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
-| `just check-balance-private <name> [token] [rpc]` | Check balance via the private RPC (auto-generates auth token) |
+| `just zone-auth-token <name>` | Generate a signed redacted RPC auth token (10 min TTL) |
+| `just check-balance-redacted <name> [token] [rpc]` | Check balance via the redacted RPC (auto-generates auth token) |
 | `just zone-info <id-or-portal>` | Fetch zone metadata from ZoneFactory |
 | `just demo-blacklist [amount] [rpc] [zone-dir]` | End-to-end TIP-20 + TIP-403 blacklist lifecycle demo |
 | `just spam-deposits [total] [per-block] [amount] [encrypted] [token] [lead-time]` | Send many deposit transactions to measure portal throughput |

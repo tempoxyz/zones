@@ -1,10 +1,9 @@
-//! Contract creation validation and runtime enforcement.
+//! Contract creation runtime enforcement.
 
 use alloy_evm::Database;
 use alloy_primitives::Address;
 use revm::{
     bytecode::opcode::{CREATE, CREATE2},
-    context::Transaction,
     interpreter::{
         Instruction, InstructionContext, InstructionResult,
         instructions::contract::create as revm_create, interpreter::EthInterpreter,
@@ -12,7 +11,7 @@ use revm::{
     },
 };
 use tempo_evm::evm::TempoEvm;
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, evm::TempoContext};
+use tempo_revm::evm::TempoContext;
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type ZoneInstructionCtx<'a, DB> = InstructionContext<'a, TempoContext<DB>, EthInterpreter>;
@@ -48,32 +47,10 @@ fn create<const IS_CREATE2: bool, DB: Database>(
     revm_create::<IS_CREATE2, EthInterpreter, TempoContext<DB>>(context)
 }
 
-/// Reject transaction-level contract creation unless its deployer is explicitly allowed.
-pub fn validate_transaction(
-    tx: &TempoTxEnv,
-    allowlist: &[Address],
-) -> Result<(), TempoInvalidTransaction> {
-    if contract_creation_deployer(tx).is_some_and(|deployer| !allowlist.contains(&deployer)) {
-        return Err(TempoInvalidTransaction::CallsValidation(
-            "contract creation is not supported",
-        ));
-    }
-
-    Ok(())
-}
-
-fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
-    let creates = match tx.tempo_tx_env.as_ref() {
-        Some(aa) => aa.aa_calls.iter().any(|call| call.to.is_create()),
-        None => tx.kind().is_create(),
-    };
-    creates.then_some(tx.caller)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{L1OverlayDB, ZoneEvm};
+    use crate::{L1OverlayDB, ZoneEvm, zone_evm::validation::validate_transaction};
     use alloy_evm::{Evm, EvmEnv};
     use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use revm::{
@@ -86,9 +63,9 @@ mod tests {
         inspector::NoOpInspector,
         state::AccountInfo,
     };
-    use tempo_evm::{TempoBlockEnv, TempoHaltReason};
+    use tempo_evm::{TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm};
     use tempo_primitives::transaction::Call;
-    use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+    use tempo_revm::{TempoBatchCallEnv, TempoInvalidTransaction, TempoTxEnv};
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
     type TestDb = CacheDB<EmptyDB>;
@@ -180,6 +157,26 @@ mod tests {
         assert!(matches!(
             err,
             EVMError::Transaction(TempoInvalidTransaction::CallsValidation(..))
+        ));
+    }
+
+    #[test]
+    fn pool_validation_rejects_top_level_create_before_tempo_checks() {
+        let mut evm = evm_with_contract(Address::ZERO, &[]);
+        let (result, _) = evm.validate_pool_transaction(TempoTxEnv {
+            inner: TxEnv {
+                caller: Address::repeat_byte(0x01),
+                kind: TxKind::Create,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            Err(EVMError::Transaction(
+                TempoInvalidTransaction::CallsValidation("contract creation is not supported")
+            ))
         ));
     }
 

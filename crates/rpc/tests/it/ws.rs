@@ -11,12 +11,13 @@ use serde_json::{Value, json};
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
     KeyInfo, SignatureType as KeyInfoSignatureType,
 };
+use tokio::sync::Notify;
 use tokio_tungstenite::{connect_async, tungstenite};
 use zone_rpc::{
-    PrivateRpcConfig,
+    RedactedRpcConfig,
     auth::build_token_fields,
     handlers::ZoneRpcApi,
-    start_private_rpc,
+    start_redacted_rpc,
     subscription::{BoxWsSubscriptionFut, WsSubscriptionStream},
     types::{BoxEyreFut, BoxFut, JsonRpcError},
 };
@@ -38,6 +39,7 @@ struct MockZoneRpcApi {
     key_infos: Mutex<HashMap<(Address, Address), KeyInfo>>,
     key_lookup_error: Option<&'static str>,
     ws_subscriptions_enabled: bool,
+    blocking_rpc_started: Option<Arc<Notify>>,
 }
 
 impl MockZoneRpcApi {
@@ -57,7 +59,19 @@ impl MockZoneRpcApi {
             key_infos: Mutex::new(key_infos),
             key_lookup_error: None,
             ws_subscriptions_enabled: false,
+            blocking_rpc_started: None,
         }
+    }
+
+    fn with_key_and_blocking_request(
+        account: Address,
+        key_id: Address,
+        signature_type: KeyInfoSignatureType,
+    ) -> (Self, Arc<Notify>) {
+        let mut api = Self::with_key(account, key_id, signature_type);
+        let started = Arc::new(Notify::new());
+        api.blocking_rpc_started = Some(started.clone());
+        (api, started)
     }
 
     fn with_key_lookup_error(message: &'static str) -> Self {
@@ -65,6 +79,7 @@ impl MockZoneRpcApi {
             key_infos: Mutex::new(HashMap::new()),
             key_lookup_error: Some(message),
             ws_subscriptions_enabled: false,
+            blocking_rpc_started: None,
         }
     }
 
@@ -73,6 +88,7 @@ impl MockZoneRpcApi {
             key_infos: Mutex::new(HashMap::new()),
             key_lookup_error: None,
             ws_subscriptions_enabled: true,
+            blocking_rpc_started: None,
         }
     }
 
@@ -120,6 +136,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
     }
 
     stub!(net_version);
+    stub!(client_version);
     stub!(syncing);
     stub!(coinbase);
     stub!(gas_price);
@@ -134,7 +151,20 @@ impl ZoneRpcApi for MockZoneRpcApi {
     stub!(call, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: zone_rpc::auth::AuthContext);
     stub!(estimate_gas, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: zone_rpc::auth::AuthContext);
     stub!(send_raw_transaction, _a: alloy_primitives::Bytes, _c: zone_rpc::auth::AuthContext);
-    stub!(send_raw_transaction_sync, _a: alloy_primitives::Bytes, _c: zone_rpc::auth::AuthContext);
+    fn send_raw_transaction_sync(
+        &self,
+        _data: alloy_primitives::Bytes,
+        _auth: zone_rpc::auth::AuthContext,
+    ) -> BoxFut<'_> {
+        let started = self.blocking_rpc_started.clone();
+        Box::pin(async move {
+            if let Some(started) = started {
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Err(JsonRpcError::internal("not implemented"))
+        })
+    }
     stub!(fill_transaction, _a: tempo_alloy::rpc::TempoTransactionRequest, _c: zone_rpc::auth::AuthContext);
     stub!(get_logs, _a: alloy_rpc_types_eth::Filter, _c: zone_rpc::auth::AuthContext);
     stub!(new_filter, _a: alloy_rpc_types_eth::Filter, _c: zone_rpc::auth::AuthContext);
@@ -252,17 +282,15 @@ impl TestContext {
 
     async fn start_shared(api: Arc<MockZoneRpcApi>) -> Self {
         let signer = PrivateKeySigner::random();
-        let config = PrivateRpcConfig {
+        let config = RedactedRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
-            l1_rpc_url: "http://127.0.0.1:1".to_string(),
-            zone_rpc_url: "http://127.0.0.1:1".to_string(),
-            retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+            max_response_size: 160 * 1024 * 1024,
             zone_portal: Address::ZERO,
         };
-        let addr = start_private_rpc(config, api).await.unwrap();
+        let addr = start_redacted_rpc(config, api).await.unwrap();
         Self { addr, signer }
     }
 
@@ -807,6 +835,42 @@ async fn ws_closes_when_keychain_key_is_revoked() {
     let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
         .await
         .expect("authorized keychain ws connect failed");
+
+    api.revoke_key(root_account, key_id);
+
+    let _closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("timed out waiting for keychain-revocation close");
+}
+
+#[tokio::test]
+async fn ws_closes_when_keychain_key_is_revoked_during_request() {
+    let root_account = Address::repeat_byte(0x78);
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+    let (signature, key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x04)
+        .expect("keychain signing should succeed");
+    let (api, blocking_rpc_started) = MockZoneRpcApi::with_key_and_blocking_request(
+        root_account,
+        key_id,
+        KeyInfoSignatureType::P256,
+    );
+    let api = Arc::new(api);
+    let ctx = TestContext::start_shared(api.clone()).await;
+    let token = build_token_with_signature(signature, &fields);
+    let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect("authorized keychain ws connect failed");
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_sendRawTransactionSync", json!(["0x00"]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), blocking_rpc_started.notified())
+        .await
+        .expect("blocking RPC was not dispatched");
 
     api.revoke_key(root_account, key_id);
 

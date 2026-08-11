@@ -76,9 +76,21 @@ impl ZoneInfoCmd {
         let block_hash = portal.blockHash().call().await?;
         let deposit_queue = portal.currentDepositQueueHash().call().await?;
         let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
+        let set_version = portal.sequencerSetVersion().call().await?;
+        let leader = portal.leader().call().await?;
+        let leader_epoch = portal.leaderEpoch().call().await?;
+        let leader_activation = portal.leaderActivationTempoBlock().call().await?;
 
         println!("\nPortal State");
         println!("  Active Sequencers:     {sequencers:?}");
+        println!("  Sequencer Set Version: {set_version}");
+        if leader.is_zero() {
+            println!("  Leader:                (uninitialized)");
+        } else {
+            println!("  Leader:                {leader}");
+            println!("  Leader Epoch:          {leader_epoch}");
+            println!("  Leader Activation:     Tempo block {leader_activation}");
+        }
         println!("  Zone Gas Rate:         {gas_rate}");
         println!("  Withdrawal Batch:      {batch_index}");
         println!("  Block Hash:            {block_hash}");

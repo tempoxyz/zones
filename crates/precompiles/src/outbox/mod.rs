@@ -7,30 +7,39 @@ mod tests;
 use alloc::vec::Vec;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_sol_types::SolCall;
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{ContractStorage, Handler, Mapping, StorageKey},
+    storage::{ContractStorage, Handler, Mapping},
     tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
-    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal, ZonePortalError,
+    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal as IZonePortal,
+    ZonePortalError,
 };
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT,
-    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
-    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
-    TempoState, ZoneResult,
+    ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
     storage::{L1State, L1StorageReader},
 };
 
-const MAX_CALLBACK_DATA_SIZE: usize = 1024;
+/// Maximum callback payload accepted by the Zone Outbox.
+pub const MAX_CALLBACK_DATA_SIZE: usize = 1024;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
+
+/// Returns whether `calldata` is a canonical `finalizeWithdrawalBatch` call.
+pub fn is_finalize_withdrawal_batch_calldata(calldata: &[u8]) -> bool {
+    let Ok(call) = IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(calldata) else {
+        return false;
+    };
+    call.abi_encode() == calldata
+}
 
 #[contract(addr = ZONE_OUTBOX_ADDRESS)]
 pub struct ZoneOutbox {
@@ -53,25 +62,12 @@ impl ZoneOutbox {
         self.__initialize()
     }
 
-    fn read_portal_slot<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        slot: B256,
-    ) -> ZoneResult<U256> {
-        let anchor = TempoState::new().tempo_block_number.read()?;
-        Ok(l1.read_l1_storage(l1.portal(), slot, anchor)?.into())
-    }
-
     fn ensure_sequencer<P: L1StorageReader>(
         &self,
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        if caller == Address::ZERO {
-            return Ok(());
-        }
-        let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-        if self.read_portal_slot(l1, membership_slot.into())? == U256::ZERO {
+        if caller != Address::ZERO && !l1.read_portal(|portal| &portal.is_sequencer[caller])? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -84,38 +80,30 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let token_config = self.read_portal_slot(
-            l1,
-            token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()).into(),
-        )?;
-        if token_config & U256::from(u8::MAX) == U256::ZERO {
+        if !l1.read_portal(|portal| &portal.token_configs[token].enabled)? {
             return Err(ZonePortalError::token_not_enabled().into());
         }
 
-        let modes = self.read_portal_slot(l1, PORTAL_ENFORCEMENT_MODES_SLOT)?;
-        let access_enforced = modes & U256::from(u8::MAX) != U256::ZERO;
-        let gateway_enforced = (modes >> 8) & U256::from(u8::MAX) != U256::ZERO;
+        let access_enforced = l1.read_portal(|portal| &portal.is_access_enforced)?;
+        let gateway_enforced = l1.read_portal(|portal| &portal.is_gateway_enforced)?;
 
         if gas_limit == 0 {
             if !access_enforced && !gateway_enforced {
                 return Ok(());
             }
 
-            let role_slot = to.mapping_slot(PORTAL_ROLE_SLOT.into());
-            let role = self.read_portal_slot(l1, role_slot.into())?;
-            if gateway_enforced && role == U256::from(ZonePortal::Role::CallbackGateway as u8) {
+            let role = l1.read_portal(|portal| &portal.role[to])?;
+            if gateway_enforced && role == IZonePortal::Role::CallbackGateway as u8 {
                 return Err(ZonePortalError::invalid_callback_target().into());
             }
-            if access_enforced && role != U256::from(ZonePortal::Role::Account as u8) {
+            if access_enforced && role != IZonePortal::Role::Account as u8 {
                 return Err(ZonePortalError::account_not_allowed(to).into());
             }
-        } else if gateway_enforced {
-            let role_slot = to.mapping_slot(PORTAL_ROLE_SLOT.into());
-            if self.read_portal_slot(l1, role_slot.into())?
-                != U256::from(ZonePortal::Role::CallbackGateway as u8)
-            {
-                return Err(ZonePortalError::invalid_callback_target().into());
-            }
+        } else if gateway_enforced
+            && l1.read_portal(|portal| &portal.role[to])?
+                != IZonePortal::Role::CallbackGateway as u8
+        {
+            return Err(ZonePortalError::invalid_callback_target().into());
         }
 
         Ok(())
@@ -179,6 +167,9 @@ impl ZoneOutbox {
     ) -> ZoneResult<()> {
         if call.zoneFallbackRecipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
+        }
+        if call.amount == 0 {
+            return Err(ZoneOutboxError::zero_amount_withdrawal().into());
         }
         if call.data.len() > MAX_CALLBACK_DATA_SIZE {
             return Err(ZoneOutboxError::callback_data_too_large().into());
@@ -296,11 +287,13 @@ impl ZoneOutbox {
 
     fn finalize_withdrawal_batch<P: L1StorageReader>(
         &mut self,
-        l1: &L1State<P>,
+        _l1: &L1State<P>,
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        self.ensure_sequencer(l1, caller)?;
+        if caller != Address::ZERO {
+            return Err(ZoneOutboxError::only_sequencer().into());
+        }
         if call.blockNumber != self.storage.block_number() {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }
@@ -353,9 +346,7 @@ impl ZoneOutbox {
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
         self.ensure_sequencer(l1, caller)?;
-        let max_tempo_gas_rate = self
-            .read_portal_slot(l1, PORTAL_MAX_TEMPO_GAS_RATE_SLOT)?
-            .to::<u128>();
+        let max_tempo_gas_rate = l1.read_portal(|portal| &portal.max_tempo_gas_rate)?;
         if call._tempoGasRate > max_tempo_gas_rate {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
@@ -405,7 +396,8 @@ impl ZoneOutbox {
         Ok(pending)
     }
 
-    fn last_batch(&self) -> TempoResult<IZoneOutbox::LastBatch> {
+    /// Returns the last finalized withdrawal batch from Zone state.
+    pub fn last_batch(&self) -> TempoResult<IZoneOutbox::LastBatch> {
         Ok(IZoneOutbox::LastBatch {
             withdrawalQueueHash: self.withdrawal_queue_hash.read()?,
             withdrawalBatchIndex: self.withdrawal_batch_index.read()?,
@@ -490,7 +482,7 @@ impl PendingWithdrawal {
             .into());
         }
 
-        let sender_tag = Withdrawal::sender_tag(self.sender, self.tx_hash);
+        let sender_tag = Withdrawal::sender_tag(self.sender, self.tx_hash, self.fallback_nonce);
         Ok(Withdrawal {
             token: self.token,
             senderTag: sender_tag,

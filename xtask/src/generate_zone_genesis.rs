@@ -31,8 +31,10 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
+    receive_policy_guard::ReceivePolicyGuard,
     stablecoin_dex::StablecoinDEX,
     storage::{StorageActions, StorageCtx},
+    storage_credits::StorageCredits,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
@@ -46,7 +48,6 @@ use zone_precompiles::{
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
-const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -139,33 +140,21 @@ impl GenerateZoneGenesis {
         deploy_permit2(&mut evm)?;
 
         initialize_tip403_registry(&mut evm)?;
-        create_path_usd_token(&mut evm, self.admin)?;
+        create_path_usd_token(&mut evm)?;
         initialize_fee_manager(&mut evm, self.default_fee_token)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
         initialize_account_keychain(&mut evm)?;
+        initialize_receive_policy_guard(&mut evm)?;
+        initialize_storage_credits(&mut evm)?;
 
-        let mut nonce = 0u64;
+        let nonce = 0u64;
 
         initialize_tempo_state(&mut evm, &header_rlp)?;
         initialize_zone_outbox(&mut evm)?;
 
-        let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
-        let zone_config_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
-        deploy_contract(
-            &mut evm,
-            &zone_config_bytecode,
-            &zone_config_args,
-            ZONE_CONFIG_ADDRESS,
-            "ZoneConfig",
-            self.chain_id,
-            nonce,
-        )?;
-        nonce += 1;
-
         let zone_inbox_bytecode = load_artifact(&self.specs_out, "ZoneInbox")?;
-        let zone_inbox_args =
-            (ZONE_CONFIG_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
+        let zone_inbox_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_inbox_bytecode,
@@ -179,7 +168,6 @@ impl GenerateZoneGenesis {
         let db = evm.db_mut();
         for (name, addr) in [
             ("TempoState", TEMPO_STATE_ADDRESS),
-            ("ZoneConfig", ZONE_CONFIG_ADDRESS),
             ("ZoneInbox", ZONE_INBOX_ADDRESS),
             ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
         ] {
@@ -493,7 +481,8 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 /// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
-fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -> eyre::Result<()> {
+/// ZoneInbox is the fixed token admin; the configured zone admin receives no token roles.
+fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -508,11 +497,10 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
                 "pathUSD",
                 "USD",
                 Address::ZERO,
-                admin,
+                ZONE_INBOX_ADDRESS,
             )?;
 
             let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
-            token.grant_role_internal(admin, *ISSUER_ROLE)?;
             // Allow address(0) to mint (system transactions use sender=0)
             token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
             // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
@@ -522,7 +510,7 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
 
             // Set a large supply cap
             token.set_supply_cap(
-                admin,
+                ZONE_INBOX_ADDRESS,
                 ITIP20::setSupplyCapCall {
                     newSupplyCap: U256::from(u128::MAX),
                 },
@@ -601,5 +589,39 @@ fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Re
         || AccountKeychain::new().initialize(),
     )?;
     println!("Initialized AccountKeychain");
+    Ok(())
+}
+
+/// Initialize the ReceivePolicyGuard precompile account.
+fn initialize_receive_policy_guard(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || ReceivePolicyGuard::new().initialize(),
+    )?;
+    println!("Initialized ReceivePolicyGuard");
+    Ok(())
+}
+
+/// Initialize the StorageCredits precompile account.
+///
+/// TIP-1060 bookkeeping writes this account from the EVM handler, even when no transaction calls
+/// the precompile directly. Keeping the account non-empty prevents EIP-161 from dropping the
+/// sequential transition while the sparse-trie state hook still observes its storage updates.
+fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || StorageCredits::new().initialize(),
+    )?;
+    println!("Initialized StorageCredits");
     Ok(())
 }

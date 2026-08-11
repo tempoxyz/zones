@@ -7,11 +7,11 @@
 //!
 //! The module is split into:
 //! - [`subscriber`] — the [`L1Subscriber`] background task and its config.
-//! - [`deposit`] — deposit value types ([`Deposit`], [`EncryptedDeposit`],
+//! - [`deposit`] — deposit value types ([`WithdrawalBounceBackDeposit`], [`Deposit`],
 //!   [`L1Deposit`]).
 //! - [`event`] — portal event types extracted per L1 block.
 //! - [`block`] — per-block deposit grouping and prepared payload types.
-//! - [`queue`] — the deposit hash-chain queue consumed by the engine.
+//! - [`queue`] — the finalized L1 block queue consumed by the engine.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -67,14 +67,16 @@ pub(crate) mod rpc {
 }
 
 use crate::abi::{
-    EncryptedDeposit as AbiEncryptedDeposit, EncryptedDepositPayload as AbiEncryptedDepositPayload,
+    Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, EncryptedDepositMade, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
+        WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 
 mod block;
 mod deposit;
+mod encryption_keys;
 mod event;
 mod queue;
 mod subscriber;
@@ -83,16 +85,15 @@ mod subscriber;
 mod tests;
 
 pub use block::{L1BlockDeposits, PreparedL1Block};
-pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
-pub use event::{EnabledToken, L1PortalEvents};
+pub use deposit::{Deposit, L1Deposit, WithdrawalBounceBackDeposit};
+pub use encryption_keys::EncryptionKeyRing;
+pub use event::{EnabledToken, EncryptionKeyRotation, L1PortalEvents, LeaderTransition};
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
 pub use subscriber::{
-    L1BlockTracker, L1Subscriber, L1SubscriberConfig, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
+    L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS,
 };
-
-pub(crate) use event::EnqueueOutcome;
 
 #[cfg(test)]
 pub(crate) use queue::PendingDeposits;

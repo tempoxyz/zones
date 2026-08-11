@@ -83,15 +83,9 @@ export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 export PRIVATE_KEY=$(jq -r '.sequencerKey' generated/my-zone/zone.json)
 just max-approve-portal
 
-# deposit into the zone
-just send-deposit 1000000                       # deposit to your own address
-just send-deposit 1000000 <recipient-address>   # deposit to a specific address
-```
-
-```bash
-# send an encrypted deposit
-just send-deposit-encrypted 1000000                       # to your own address
-just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+# Deposits are encrypted; the command fetches the portal's active encryption key.
+just send-deposit 1000000                       # to your own address
+just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
 
 ### Withdrawing from Zone to Tempo
@@ -106,7 +100,7 @@ just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific addre
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
 
-### Querying the Private RPC
+### Querying the Redacted RPC
 
 Zone balances are private by default. Every RPC request must include a signed authorization token that proves you control the querying account.
 
@@ -119,11 +113,11 @@ export PRIVATE_KEY=<zone-wallet-private-key>
 export TOKEN=$(just zone-auth-token my-zone)
 
 # query your TIP-20 balance 
-just check-balance-private my-zone <token-address>
+just check-balance-redacted my-zone <token-address>
 ```
 
 
-See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references.
+See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, redacted RPC, router demos, TIP-403 policy flows, and command references.
 
 <br> 
 

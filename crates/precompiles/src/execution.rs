@@ -7,9 +7,10 @@
 //! # Call ordering
 //!
 //! 1. Direct-call-only rules reject delegate calls before storage access.
-//! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
-//! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
+//! 2. Reject calls that cannot cover the calldata input cost before admission rules decode it.
+//! 3. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
+//! 4. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
+//! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Admission-rule rejections include calldata input gas, while early delegate-call rejection is
 //! unmetered. Calls without a fixed charge retain normal provider metering, and successful
@@ -21,15 +22,17 @@ use core::cell::RefCell;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
-use revm::precompile::{
-    PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
-};
+use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
     dispatch::selector_from_calldata,
     error::TempoPrecompileError,
-    storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    input_cost,
+    storage::{
+        PrecompileStorageProvider, StorageCtx, actions::StorageActions,
+        evm::EvmPrecompileStorageProvider,
+    },
     storage_credits::NonCreditableSlots,
 };
 
@@ -68,10 +71,8 @@ pub(crate) enum CallCheck {
 
 /// State-read failures raised while applying pre-execution rules.
 pub(crate) enum CallRuleError {
-    /// Error from Zone-local precompile storage, preserving halt/fatal behavior.
+    /// Error from Zone-local or L1-mirrored precompile storage.
     Tempo(TempoPrecompileError),
-    /// Fatal external-state error that must abort EVM execution.
-    Fatal(PrecompileError),
 }
 
 /// Selector and caller dependent precompile call rules evaluated after storage setup.
@@ -111,6 +112,13 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
+        if input.gas < input_cost(data.len()) {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::OutOfGas,
+                input.reservoir,
+            ));
+        }
+
         let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
             return Ok(PrecompileOutput::halt(
@@ -130,6 +138,11 @@ pub(crate) fn create_precompile(
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
+        if fixed_gas.is_some() {
+            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
+            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
+            storage.set_tip1060_storage_credits(false);
+        }
 
         let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
             CallCheck::Continue => execute(data, caller),
@@ -141,10 +154,11 @@ pub(crate) fn create_precompile(
             CallCheck::Error(CallRuleError::Tempo(error)) => {
                 StorageCtx::default().error_result(error)
             }
-            CallCheck::Error(CallRuleError::Fatal(error)) => Err(error),
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
+            // Disable refunds to not leak any data about previous storage values.
+            output.gas_refunded = 0;
         }
         result
     })
@@ -175,6 +189,7 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+    use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
@@ -256,6 +271,49 @@ mod tests {
             Some((calldata.into(), Some([0xde, 0xad, 0xbe, 0xef]), caller))
         );
         assert_eq!(*recorded_execute.borrow(), Some((calldata.into(), caller)));
+    }
+
+    #[test]
+    fn fixed_gas_disables_storage_credits_and_discards_refunds() {
+        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        cfg.spec = TempoHardfork::T8;
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let storage_owner = Address::repeat_byte(0x33);
+        let credit_slot = U256::from_be_slice(storage_owner.as_slice());
+        let observed_credit_state = Rc::new(Cell::new(U256::MAX));
+        let execute_credit_state = observed_credit_state.clone();
+        let precompile = create_precompile(
+            "FixedGasAccountingTest",
+            &env,
+            RecordingRules(Rc::new(RefCell::new(None))),
+            move |_, _| {
+                let mut storage = StorageCtx::default();
+                storage
+                    .sstore(storage_owner, U256::ZERO, U256::ONE)
+                    .unwrap();
+                execute_credit_state
+                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
+
+                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
+                storage.refund_gas(4_800);
+                let mut output = storage.success_output(Bytes::new());
+                output.gas_refunded = storage.gas_refunded();
+                Ok(output)
+            },
+        );
+
+        let mut ctx = test_context();
+        let output = precompile
+            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
+            .unwrap();
+
+        assert_eq!(output.gas_used, FIXED_GAS);
+        assert_eq!(output.gas_refunded, 0);
+        assert_eq!(observed_credit_state.get(), U256::ZERO);
     }
 
     #[test]

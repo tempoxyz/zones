@@ -168,6 +168,67 @@ impl AttestationStore {
         (inserted, signature_count)
     }
 
+    /// Check that a follower signature belongs to an active leader proposal and is new.
+    pub fn precheck_follower_settlement(
+        &self,
+        height: u64,
+        digest: B256,
+        leader: Address,
+        follower: Address,
+    ) -> eyre::Result<()> {
+        let all = self
+            .settlements
+            .read()
+            .expect("attestation store lock poisoned");
+        let signatures = all
+            .get(&height)
+            .and_then(|by_digest| by_digest.get(&digest))
+            .filter(|signatures| signatures.contains_key(&leader))
+            .ok_or_else(|| eyre::eyre!("settlement response has no active leader proposal"))?;
+        eyre::ensure!(
+            !signatures.contains_key(&follower),
+            "settlement response signer is already stored"
+        );
+        Ok(())
+    }
+
+    /// Insert a new follower signature only while its leader proposal remains active.
+    pub fn insert_follower_settlement(
+        &self,
+        domain: AttestationDomain,
+        leader: Address,
+        follower: Address,
+        signed: SignedSettlementAttestation,
+    ) -> eyre::Result<usize> {
+        let height = signed
+            .attestation
+            .zoneHeight
+            .try_into()
+            .expect("validated settlement zone height must fit in u64");
+        let digest = domain.settlement_digest(&signed.attestation);
+
+        let signature_count = {
+            let mut all = self
+                .settlements
+                .write()
+                .expect("attestation store lock poisoned");
+            let signatures = all
+                .get_mut(&height)
+                .and_then(|by_digest| by_digest.get_mut(&digest))
+                .filter(|signatures| signatures.contains_key(&leader))
+                .ok_or_else(|| eyre::eyre!("settlement response has no active leader proposal"))?;
+            eyre::ensure!(
+                !signatures.contains_key(&follower),
+                "settlement response signer is already stored"
+            );
+            signatures.insert(follower, signed);
+            signatures.len()
+        };
+
+        self.settlement_changed.notify_one();
+        Ok(signature_count)
+    }
+
     /// Wait until any statement at `height` has at least `quorum` distinct signatures. If there aren't
     /// enough to meet quorum, the zone blocks will stall, this is intentional.
     pub async fn wait_for_settlement(&self, height: u64, quorum: usize) -> SettlementCertificate {

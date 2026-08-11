@@ -1,7 +1,7 @@
 //! `ZonePortal` — deployed on Tempo L1.
 
 pub use ZonePortal::{
-    BlockTransition, DepositQueueTransition, EncryptedDeposit, EncryptedDepositPayload, Withdrawal,
+    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, Withdrawal,
     ZonePortalErrors as ZonePortalError,
 };
 
@@ -9,6 +9,17 @@ use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 use zone_primitives::constants::EMPTY_SENTINEL;
+
+/// Maximum number of deposits that may remain unprocessed in the portal queue.
+pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+/// Maximum number of token enablements imported from one Tempo block.
+pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
+/// Maximum UTF-8 byte length of an enabled token name.
+pub const MAX_TOKEN_NAME_BYTES: usize = 64;
+/// Maximum UTF-8 byte length of an enabled token symbol.
+pub const MAX_TOKEN_SYMBOL_BYTES: usize = 31;
+/// Maximum UTF-8 byte length of an enabled token currency code.
+pub const MAX_TOKEN_CURRENCY_BYTES: usize = 31;
 
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -32,8 +43,8 @@ crate::sol! {
             bytes encryptedSender;
         }
 
-        /// Encrypted deposit payload (ECIES encrypted recipient and memo)
-        struct EncryptedDepositPayload {
+        /// Deposit payload (ECIES-encrypted recipient and memo).
+        struct DepositPayload {
             bytes32 ephemeralPubkeyX;
             uint8 ephemeralPubkeyYParity;
             bytes ciphertext;
@@ -41,14 +52,20 @@ crate::sol! {
             bytes16 tag;
         }
 
-        /// Encrypted deposit stored in the queue
-        struct EncryptedDeposit {
+        /// User deposit stored in the queue.
+        struct Deposit {
             address token;
             address sender;
             uint128 amount;
             address tempoRefundRecipient;
             uint256 keyIndex;
-            EncryptedDepositPayload encrypted;
+            DepositPayload encrypted;
+        }
+
+        struct EncryptionKeyEntry {
+            bytes32 x;
+            uint8 yParity;
+            uint64 activationBlock;
         }
 
         struct BlockTransition {
@@ -69,18 +86,6 @@ crate::sol! {
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed sender,
             address token,
-            address to,
-            uint128 netAmount,
-            uint128 fee,
-            bytes32 memo,
-            address tempoRefundRecipient,
-            uint64 depositNumber
-        );
-
-        event EncryptedDepositMade(
-            bytes32 indexed newCurrentDepositQueueHash,
-            address indexed sender,
-            address token,
             uint128 netAmount,
             uint128 fee,
             uint256 keyIndex,
@@ -96,6 +101,16 @@ crate::sol! {
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
+        event DepositsPaused(address indexed token);
+        event DepositsResumed(address indexed token);
+        event RpcUrlUpdated(string rpcUrl);
+
+        event SequencerEncryptionKeyUpdated(
+            bytes32 x,
+            uint8 yParity,
+            uint256 keyIndex,
+            uint64 activationBlock
+        );
 
         /// `withdrawalQueueIndex` is the logical withdrawal queue index the batch's hash
         /// chain was enqueued under, or `NO_QUEUE_INDEX` when the batch
@@ -159,6 +174,15 @@ crate::sol! {
         event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
         event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
+        /// Emitted when block-production leadership transitions to a new sequencer.
+        /// Zone nodes derive leadership exclusively from finalized observations of this event.
+        event LeaderUpdated(
+            address indexed previousLeader,
+            address indexed newLeader,
+            uint64 indexed epoch,
+            uint64 activationTempoBlock
+        );
+
         // -- Errors --
 
         error NotSequencer();
@@ -169,8 +193,13 @@ crate::sol! {
         error PolicyForbids();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
+        error DepositBlockCapacityExceeded(uint64 maximum);
         error InvalidCallbackTarget();
         error AccountNotAllowed(address account);
+        error InvalidLeader();
+        error ActiveLeaderRemoved();
+        error LeaderAlreadyUpdatedThisBlock();
+        error StaleLeadershipEpoch(uint64 expected, uint64 actual);
 
         // -- View functions --
 
@@ -193,7 +222,10 @@ crate::sol! {
         function isSequencer(address account) external view returns (bool);
         function sequencerCount() external view returns (uint256);
         function sequencerAt(uint256 index) external view returns (address);
-        function sequencerPubkey() external view returns (bytes32);
+        function leader() external view returns (address);
+        function leaderEpoch() external view returns (uint64);
+        function leaderActivationTempoBlock() external view returns (uint64);
+        function setLeader(address newLeader, uint64 expectedEpoch) external;
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
         function currentDepositQueueHash() external view returns (bytes32);
@@ -205,19 +237,10 @@ crate::sol! {
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
         function lastProcessedDepositNumber() external view returns (uint64);
+        function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
         // -- State-changing functions --
-
-        function deposit(
-            address token,
-            address to,
-            uint128 amount,
-            bytes32 memo,
-            address tempoRefundRecipient
-        )
-            external
-            returns (bytes32 newCurrentDepositQueueHash);
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
@@ -247,11 +270,19 @@ crate::sol! {
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
 
+        function deposit(
+            address token,
+            uint128 amount,
+            uint256 keyIndex,
+            DepositPayload calldata encrypted,
+            address tempoRefundRecipient
+        ) external returns (bytes32 newCurrentDepositQueueHash);
+
         function depositEncrypted(
             address token,
             uint128 amount,
             uint256 keyIndex,
-            EncryptedDepositPayload calldata encrypted,
+            DepositPayload calldata encrypted,
             address tempoRefundRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
@@ -277,6 +308,10 @@ crate::sol! {
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAt(uint256 index)
+            external view returns (EncryptionKeyEntry memory entry);
+        function isEncryptionKeyValid(uint256 keyIndex)
+            external view returns (bool valid, uint64 expiresAtBlock);
         function encryptionKeyAtBlock(uint64 tempoBlockNumber)
             external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
@@ -289,8 +324,8 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
 {
     /// Returns all token addresses currently enabled for bridging on this [`ZonePortal`].
     ///
-    /// Calls [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) followed by
-    /// [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) for each index concurrently.
+    /// Equivalent to [`enabled_tokens_at`](Self::enabled_tokens_at) pinned to the `latest`
+    /// block tag.
     pub async fn enabled_tokens(
         &self,
     ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
@@ -303,24 +338,97 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     /// Callers that pair the returned token list with other historical L1 reads
     /// should use this instead of [`enabled_tokens`](Self::enabled_tokens), so
     /// future `TokenEnabled` events are not mixed into older state snapshots.
+    ///
+    /// Issues two RPC requests regardless of registry size: an
+    /// [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) read, then one Multicall3
+    /// `aggregate` batching an [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) call per
+    /// index. The batch executes as a single EVM call, so all index reads observe the same
+    /// state snapshot; only the count read can race the batch when `block_id` is a moving tag
+    /// like `latest`. If any index read reverts, the whole call errors.
+    ///
+    /// Requires Multicall3 at the canonical
+    /// [`MULTICALL3_ADDRESS`](alloy_provider::MULTICALL3_ADDRESS) on the portal's chain; all
+    /// Tempo networks predeploy it at genesis.
     pub async fn enabled_tokens_at(
         &self,
         block_id: alloy_rpc_types_eth::BlockId,
     ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
-        let count = self.enabledTokenCount().block(block_id).call().await?;
-        let futs: alloc::vec::Vec<_> = (0..count.to::<u64>())
-            .map(|i| async move {
-                self.enabledTokenAt(alloy_primitives::U256::from(i))
-                    .block(block_id)
-                    .call()
-                    .await
-            })
-            .collect();
-        futures::future::try_join_all(futs).await
+        let count = self
+            .enabledTokenCount()
+            .block(block_id)
+            .call()
+            .await?
+            .to::<u64>();
+        if count == 0 {
+            return Ok(alloc::vec::Vec::new());
+        }
+        let mut multicall = self
+            .provider()
+            .multicall()
+            .dynamic::<ZonePortal::enabledTokenAtCall>()
+            .block(block_id);
+        for i in 0..count {
+            multicall = multicall.add_dynamic(self.enabledTokenAt(alloy_primitives::U256::from(i)));
+        }
+        multicall.aggregate().await.map_err(|err| match err {
+            alloy_provider::MulticallError::TransportError(err) => err.into(),
+            alloy_provider::MulticallError::DecodeError(err) => err.into(),
+            err => {
+                alloy_provider::transport::TransportErrorKind::custom_str(&err.to_string()).into()
+            }
+        })
     }
 
-    /// Fetches the active sequencer encryption key and its index.
+    /// Returns all sequencer addresses currently registered on this [`ZonePortal`].
     ///
+    /// Calls [`sequencerCount`](ZonePortal::sequencerCountCall) followed by a Multicall3
+    /// batch of [`sequencerAt`](ZonePortal::sequencerAtCall) reads.
+    pub async fn sequencers(
+        &self,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        self.sequencers_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+    }
+
+    /// Returns all sequencer addresses registered at `block_id`.
+    ///
+    /// The index reads go through Multicall3 so they execute in a single EVM call and observe
+    /// one state snapshot even when `block_id` is a moving tag like `latest`.
+    pub async fn sequencers_at(
+        &self,
+        block_id: alloy_rpc_types_eth::BlockId,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self
+            .sequencerCount()
+            .block(block_id)
+            .call()
+            .await?
+            .to::<u64>();
+        if count == 0 {
+            return Ok(alloc::vec::Vec::new());
+        }
+        let mut multicall = self
+            .provider()
+            .multicall()
+            .dynamic::<ZonePortal::sequencerAtCall>()
+            .block(block_id);
+        for i in 0..count {
+            multicall = multicall.add_dynamic(self.sequencerAt(alloy_primitives::U256::from(i)));
+        }
+        multicall.aggregate().await.map_err(|err| match err {
+            alloy_provider::MulticallError::TransportError(err) => err.into(),
+            alloy_provider::MulticallError::DecodeError(err) => err.into(),
+            err => {
+                alloy_provider::transport::TransportErrorKind::custom_str(&err.to_string()).into()
+            }
+        })
+    }
+
+    /// Fetches the active sequencer encryption key and its index from one L1 snapshot.
+    ///
+    /// Reads the current L1 block number, then pins an atomic
+    /// [`encryptionKeyAtBlock`](ZonePortal::encryptionKeyAtBlockCall) call to that block so a key
+    /// rotation cannot pair a key with an index from a different state snapshot.
     /// Returns `(key, key_index)` where `key` is the
     /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
     /// `key_index` is the zero-based index of the current key.
@@ -333,11 +441,80 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         ),
         alloy_contract::Error,
     > {
-        let key_call = self.sequencerEncryptionKey();
-        let count_call = self.encryptionKeyCount();
-        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
-        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
-        Ok((key, key_index))
+        let block_number = self.provider().get_block_number().await?;
+        let key = self
+            .encryptionKeyAtBlock(block_number)
+            .block(alloy_rpc_types_eth::BlockId::number(block_number))
+            .call()
+            .await?;
+        Ok((
+            ZonePortal::sequencerEncryptionKeyReturn {
+                x: key.x,
+                yParity: key.yParity,
+            },
+            key.keyIndex,
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "rpc"))]
+mod tests {
+    use super::*;
+    use alloy_primitives::U256;
+    use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
+    use alloy_sol_types::SolCall;
+    use alloy_transport::mock::Asserter;
+
+    #[tokio::test]
+    async fn encryption_key_reads_key_and_index_from_one_snapshot() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let block_number = 42_u64;
+        let expected = ZonePortal::encryptionKeyAtBlockReturn {
+            x: B256::repeat_byte(0x11),
+            yParity: 1,
+            keyIndex: U256::from(7),
+        };
+
+        asserter.push_success(&block_number);
+        asserter.push_success(&Bytes::from(
+            ZonePortal::encryptionKeyAtBlockCall::abi_encode_returns(&expected),
+        ));
+
+        let portal = ZonePortal::new(Address::ZERO, &provider);
+        let (key, key_index) = portal.encryption_key().await.unwrap();
+
+        assert_eq!(key.x, expected.x);
+        assert_eq!(key.yParity, expected.yParity);
+        assert_eq!(key_index, expected.keyIndex);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn enabled_tokens_at_batches_index_reads_through_multicall() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let tokens = [Address::repeat_byte(0xaa), Address::repeat_byte(0xbb)];
+
+        asserter.push_success(&Bytes::from(U256::from(tokens.len()).abi_encode()));
+        asserter.push_success(&Bytes::from(
+            IMulticall3::aggregateCall::abi_encode_returns(&IMulticall3::aggregateReturn {
+                blockNumber: U256::ZERO,
+                returnData: tokens
+                    .iter()
+                    .map(|token| token.abi_encode().into())
+                    .collect(),
+            }),
+        ));
+
+        let portal = ZonePortal::new(Address::ZERO, &provider);
+        let enabled = portal
+            .enabled_tokens_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+            .unwrap();
+
+        assert_eq!(enabled, tokens);
+        assert!(asserter.read_q().is_empty());
     }
 }
 
@@ -365,21 +542,26 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
+            Self::DepositBlockCapacityExceeded(_) => f.write_str("DepositBlockCapacityExceeded"),
             Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
             Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
+            Self::InvalidLeader(_) => f.write_str("InvalidLeader"),
+            Self::ActiveLeaderRemoved(_) => f.write_str("ActiveLeaderRemoved"),
+            Self::LeaderAlreadyUpdatedThisBlock(_) => f.write_str("LeaderAlreadyUpdatedThisBlock"),
+            Self::StaleLeadershipEpoch(_) => f.write_str("StaleLeadershipEpoch"),
         }
     }
 }
 
-impl EncryptedDeposit {
-    /// Build the event emitted after a successful encrypted deposit.
+impl Deposit {
+    /// Build the event emitted after a successfully processed deposit.
     pub fn processed_event(
         &self,
         deposit_hash: B256,
         recipient: Address,
         memo: B256,
     ) -> ZoneInboxEvent {
-        ZoneInboxEvent::encrypted_deposit_processed(
+        ZoneInboxEvent::deposit_processed(
             deposit_hash,
             self.sender,
             recipient,
@@ -389,9 +571,9 @@ impl EncryptedDeposit {
         )
     }
 
-    /// Build the event emitted after a failed encrypted deposit.
+    /// Build the event emitted after a failed deposit.
     pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::encrypted_deposit_failed(deposit_hash, self.sender, self.token, self.amount)
+        ZoneInboxEvent::deposit_failed(deposit_hash, self.sender, self.token, self.amount)
     }
 }
 
@@ -404,9 +586,23 @@ impl Withdrawal {
         plaintext
     }
 
-    /// Compute the authenticated sender tag `keccak256(sender || tx_hash)`.
-    pub fn sender_tag(sender: Address, tx_hash: B256) -> B256 {
-        keccak256(Self::authenticated_sender_plaintext(sender, tx_hash))
+    /// Compute the authenticated sender tag for one user withdrawal.
+    ///
+    /// The fallback nonce is public on L1 and unique per user withdrawal, so including it keeps
+    /// multiple withdrawals from the same private transaction unlinkable. Deposit bounce-backs
+    /// retain their canonical zero-sender tag.
+    pub fn sender_tag(sender: Address, tx_hash: B256, fallback_nonce: u64) -> B256 {
+        if sender.is_zero() && fallback_nonce == 0 {
+            return keccak256(Self::authenticated_sender_plaintext(
+                Address::ZERO,
+                B256::ZERO,
+            ));
+        }
+
+        let mut preimage = [0u8; 60];
+        preimage[..52].copy_from_slice(&Self::authenticated_sender_plaintext(sender, tx_hash));
+        preimage[52..].copy_from_slice(&fallback_nonce.to_be_bytes());
+        keccak256(preimage)
     }
 
     /// Reconstruct the public L1-facing withdrawal from a zone-side withdrawal request event.
@@ -415,15 +611,9 @@ impl Withdrawal {
         tx_hash: B256,
         encrypted_sender: Bytes,
     ) -> Self {
-        let sender_tag = if event.sender.is_zero() && event.fallbackNonce == 0 {
-            Self::sender_tag(Address::ZERO, B256::ZERO)
-        } else {
-            Self::sender_tag(event.sender, tx_hash)
-        };
-
         Self {
             token: event.token,
-            senderTag: sender_tag,
+            senderTag: Self::sender_tag(event.sender, tx_hash, event.fallbackNonce),
             to: event.to,
             amount: event.amount,
             memo: event.memo,

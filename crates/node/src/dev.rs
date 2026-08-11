@@ -37,7 +37,7 @@ pub struct ProvisionConfig {
     pub zone_gateways: Vec<Address>,
     /// Initial portal membership (required for closed mode, retained but unenforced in open mode).
     pub allowed_accounts: Vec<Address>,
-    /// Public zone RPC URL registered on the portal.
+    /// Operator zone RPC URL registered on the portal.
     pub rpc_url: String,
 }
 
@@ -46,7 +46,7 @@ pub struct ProvisionConfig {
 pub struct ProvisionedZone {
     /// Zone ID assigned by the factory.
     pub zone_id: u32,
-    /// Zone chain ID derived from the zone ID.
+    /// Zone chain ID derived from the parent and zone IDs.
     pub chain_id: u64,
     /// `ZoneFactory` address on L1.
     pub factory: Address,
@@ -140,7 +140,8 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
     let zone_id = zone_created.zoneId;
     let portal = zone_created.portal;
-    let chain_id = zone_chain_id(zone_id);
+    let parent_chain_id = provider.get_chain_id().await?;
+    let chain_id = zone_chain_id(parent_chain_id, zone_id)?;
 
     register_encryption_key(&provider, portal, &dev_key).await?;
 
@@ -270,7 +271,12 @@ mod command {
 
         /// Dev private key (hex): L1 fee payer, portal admin, and zone sequencer. Funded via
         /// `tempo_fundAddress` when the L1 supports it.
-        #[arg(long = "dev.key", env = "DEV_KEY", default_value = DEFAULT_DEV_KEY)]
+        #[arg(
+            long = "dev.key",
+            env = "DEV_KEY",
+            hide_env_values = true,
+            default_value = DEFAULT_DEV_KEY
+        )]
         dev_key: String,
 
         /// Initial TIP-20 token enabled on the portal. Defaults to pathUSD.
@@ -306,9 +312,13 @@ mod command {
         #[arg(long = "http.port", default_value_t = 9545)]
         http_port: u16,
 
-        /// Zone private RPC port.
-        #[arg(long = "private-rpc.port", default_value_t = 8544)]
-        private_rpc_port: u16,
+        /// Zone redacted RPC port.
+        #[arg(
+            long = "redacted-rpc.port",
+            alias = "private-rpc.port",
+            default_value_t = 8544
+        )]
+        redacted_rpc_port: u16,
 
         /// Extra arguments forwarded to `tempo-zone node`.
         #[arg(last = true)]
@@ -381,10 +391,12 @@ mod command {
                 "zoneFactory": format!("{}", provisioned.factory),
                 "rpcUrl": format!("http://{}:{}", self.http_addr, self.http_port),
             });
-            std::fs::write(
-                self.datadir.join("zone.json"),
-                serde_json::to_string_pretty(&zone_json)?,
+            super::write_owner_only(
+                &self.datadir.join("zone.json"),
+                serde_json::to_string_pretty(&zone_json)?.as_bytes(),
             )?;
+            let sequencer_key_path = self.datadir.join("sequencer.key");
+            super::write_owner_only(&sequencer_key_path, self.dev_key.as_bytes())?;
 
             println!("Zone provisioned!");
             println!("  Zone ID:      {}", provisioned.zone_id);
@@ -399,8 +411,8 @@ mod command {
             );
             println!("  WS RPC:       ws://{}:{ws_port}", self.http_addr);
             println!(
-                "  Private RPC:  http://{}:{}",
-                self.http_addr, self.private_rpc_port
+                "  Redacted RPC: http://{}:{}",
+                self.http_addr, self.redacted_rpc_port
             );
             println!("  Datadir:      {}", self.datadir.display());
 
@@ -413,8 +425,6 @@ mod command {
                 &self.l1_rpc_url,
                 "--l1.portal-address",
                 &provisioned.portal.to_string(),
-                "--l1.genesis-block-number",
-                &provisioned.anchor_block_number.to_string(),
                 "--zone.id",
                 &provisioned.zone_id.to_string(),
                 "--http",
@@ -433,15 +443,15 @@ mod command {
                 "all",
                 "--port",
                 &p2p_port.to_string(),
-                "--private-rpc.port",
-                &self.private_rpc_port.to_string(),
+                "--redacted-rpc.port",
+                &self.redacted_rpc_port.to_string(),
                 "--datadir",
                 &self.datadir.join("node").display().to_string(),
                 "--log.file.directory",
                 &self.datadir.join("logs").display().to_string(),
                 "--sequencer",
-                "--sequencer-key",
-                &self.dev_key,
+                "--sequencer-key-file",
+                &sequencer_key_path.display().to_string(),
             ]
             .map(str::to_owned)
             .to_vec();
@@ -491,7 +501,20 @@ mod command {
 
     #[cfg(test)]
     mod tests {
-        use super::ensure_ws_url;
+        use clap::Parser as _;
+
+        use super::{DevCommand, ensure_ws_url};
+
+        #[test]
+        fn private_rpc_port_alias_is_accepted() {
+            let redacted =
+                DevCommand::try_parse_from(["dev", "--redacted-rpc.port", "9544"]).unwrap();
+            let private =
+                DevCommand::try_parse_from(["dev", "--private-rpc.port", "9544"]).unwrap();
+
+            assert_eq!(redacted.redacted_rpc_port, 9544);
+            assert_eq!(private.redacted_rpc_port, 9544);
+        }
 
         #[test]
         fn ensure_ws_url_accepts_websocket_schemes() {
@@ -503,5 +526,29 @@ mod command {
         fn ensure_ws_url_rejects_non_websocket_schemes() {
             assert!(ensure_ws_url("http://localhost:8545").is_err());
         }
+    }
+}
+
+#[cfg(feature = "cli")]
+fn write_owner_only(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::{
+            fs::{OpenOptions, Permissions},
+            io::Write as _,
+            os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+        };
+
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).mode(0o600);
+        let mut file = options.open(path)?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(contents)
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
     }
 }

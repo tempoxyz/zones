@@ -11,11 +11,11 @@ use reth_tracing::tracing::info;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
-use zone_p2p::{P2pConfig, Role};
+use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_sequencer::{
@@ -114,13 +114,12 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
                     eyre::eyre!("--p2p.key is required with --sequencer.manifest")
                 })?;
-                let secp256k1_key_path = args.secp256k1_key.as_ref().ok_or_else(|| {
-                    eyre::eyre!("--secp256k1.key is required with --sequencer.manifest")
-                })?;
+                // Required for a quorum member and rejected for an `rpc_only` node, which never
+                // signs a settlement attestation; the manifest decides which this node is.
                 P2pConfig::load(
                     manifest_path,
                     ed25519_key_path,
-                    secp256k1_key_path,
+                    args.secp256k1_key.as_ref(),
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
                     args.zone_id,
@@ -128,34 +127,51 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 )
             })
             .transpose()?;
-        let manifest_role = p2p_config.as_ref().map(P2pConfig::role);
         if let Some(config) = p2p_config.as_ref() {
             info!(
                 target: "reth::cli",
-                role = %config.role(),
                 ed25519_public_key = %config.ed25519_public_key(),
-                secp256k1_address = %config.secp256k1_address(),
+                secp256k1_address = ?config.secp256k1_address(),
                 listen = %config.listen(),
                 "Validated multi-sequencer manifest and local identity"
             );
         }
 
         let manifest_mode = p2p_config.is_some();
+        validate_p2p_transaction_size_limit(
+            manifest_mode,
+            builder.config().txpool.max_tx_input_bytes,
+        )?;
         if manifest_mode {
             // Replicate only durable blocks. Persist every block immediately so followers can
             // acknowledge each block without waiting for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
-            builder.config_mut().engine.memory_block_buffer_target = 0;
+            builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
-        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_role);
-        let sequencer_signer = if should_sequence_blocks || manifest_mode {
-            Some(
-                load_sequencer_signer(args.sequencer_key, args.sequencer_key_file.as_deref())
-                    .await?,
-            )
+        // Every promotable node constructs all the sequencer resources: activation is gated at
+        // runtime by the leadership schedule, so a quorum follower must be able to become a
+        // leader without a restart. An rpc-only standby is not promotable at runtime — that
+        // needs a new individual key registered with `ZonePortal` and a manifest change — so it
+        // is deliberately left without the shared sequencer key, which is also the zone's ECIES
+        // private key for encrypted deposits and must not sit on an internet-facing host.
+        let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, p2p_config.as_ref());
+        if rpc_only && args.sequencer_key_file.is_some() {
+            return Err(eyre::eyre!(
+                "this node is `rpc_only` in the manifest, so --sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
+            ));
+        }
+        let sequencer_signer = if should_sequence_blocks {
+            Some(load_sequencer_signer(args.sequencer_key_file.as_deref()).await?)
         } else {
             None
         };
+        eyre::ensure!(
+            !args.enable_prover || should_sequence_blocks,
+            "--sequencer.enable-prover requires a promotable sequencer node"
+        );
+        let additional_decryption_keys =
+            load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
 
         builder.config_mut().network.discovery.disable_discovery = true;
         builder.config_mut().rpc.disable_auth_server = true;
@@ -165,42 +181,42 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         let mut node = ZoneNode::new(
             args.l1_rpc_url,
             args.portal_address,
-            args.l1_genesis_block_number,
             args.l1_fetch_concurrency,
             Duration::from_millis(args.l1_retry_connection_interval_ms),
         )
         .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
-        .with_private_rpc(ZonePrivateRpcConfig {
-            private_rpc_port: args.private_rpc_port,
+        .with_redacted_rpc(ZoneRedactedRpcConfig {
+            redacted_rpc_port: args.redacted_rpc_port,
             zone_id: args.zone_id,
             max_auth_token_validity: Duration::from_secs(
-                args.private_rpc_max_auth_token_validity_secs,
+                args.redacted_rpc_max_auth_token_validity_secs,
             ),
         });
+        if !additional_decryption_keys.is_empty() {
+            node = node.with_deposit_decryption_keys(additional_decryption_keys);
+        }
 
         if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
                 .expect("sequencer signer is parsed whenever sequencing is enabled");
+            // `None` on an rpc-only node: it holds no individual key, and it is never the
+            // scheduled leader, so it never submits an L1 settlement transaction.
             let l1_transaction_signer = p2p_config
                 .as_ref()
-                .filter(|config| config.role() == Role::Leader)
-                .map(P2pConfig::block_attestation_signer);
+                .and_then(P2pConfig::block_attestation_signer);
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,
                 zone_id: args.zone_id,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-                batch_interval_blocks: args.zone_batch_interval_blocks,
                 batch_anchor_config: BatchAnchorConfig::default(),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
                 withdrawal_batch_limits: WithdrawalBatchLimits {
                     max_batch_gas: args.withdrawal_max_batch_gas,
                     max_in_flight_batches: args.withdrawal_max_in_flight_batches,
                 },
+                enable_prover: args.enable_prover,
             });
-        }
-        if manifest_role == Some(Role::Follower) {
-            info!(target: "reth::cli", "Starting in follower mode");
         }
         if let Some(config) = p2p_config {
             node = node.with_p2p(config);
@@ -212,40 +228,57 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 }
 
 async fn load_sequencer_signer(
-    inline_key: Option<String>,
     key_file: Option<&std::path::Path>,
 ) -> eyre::Result<PrivateKeySigner> {
-    let (key, source) = match (inline_key, key_file) {
-        (Some(key), None) => (Zeroizing::new(key), "--sequencer-key".to_owned()),
-        (None, Some(path)) => {
-            let path = path.to_path_buf();
-            let source = format!("--sequencer-key-file {}", path.display());
-            let display_path = path.display().to_string();
-            let key = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
-                .await
-                .map_err(|err| {
-                    eyre::eyre!("sequencer key reader task failed for {display_path}: {err}")
-                })?
-                .map_err(|err| {
-                    eyre::eyre!("failed to read sequencer key from {display_path}: {err}")
-                })?;
-            (Zeroizing::new(key), source)
-        }
-        (Some(_), Some(_)) => {
-            return Err(eyre::eyre!(
-                "--sequencer-key and --sequencer-key-file are mutually exclusive"
-            ));
-        }
-        (None, None) => {
-            return Err(eyre::eyre!(
-                "one of --sequencer-key or --sequencer-key-file is required"
-            ));
-        }
-    };
+    let path = key_file.ok_or_else(|| {
+        eyre::eyre!("--sequencer-key-file is required when sequencing is enabled")
+    })?;
+    let path = path.to_path_buf();
+    let source = format!("--sequencer-key-file {}", path.display());
+    let display_path = path.display().to_string();
+    let key = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(|err| eyre::eyre!("sequencer key reader task failed for {display_path}: {err}"))?
+        .map_err(|err| eyre::eyre!("failed to read sequencer key from {display_path}: {err}"))?;
+    let key = Zeroizing::new(key);
 
     key.trim()
         .parse::<PrivateKeySigner>()
         .map_err(|_| eyre::eyre!("invalid sequencer key from {source}"))
+}
+
+async fn load_decryption_keys(
+    key_file: Option<&std::path::Path>,
+) -> eyre::Result<Vec<k256::SecretKey>> {
+    let Some(path) = key_file else {
+        return Ok(Vec::new());
+    };
+    let path = path.to_path_buf();
+    let display_path = path.display().to_string();
+    let contents = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(|err| eyre::eyre!("decryption key reader task failed for {display_path}: {err}"))?
+        .map_err(|err| eyre::eyre!("failed to read decryption keys from {display_path}: {err}"))?;
+    let contents = Zeroizing::new(contents);
+    let mut keys = Vec::new();
+    for (line_index, value) in contents.lines().enumerate() {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let signer = value.parse::<PrivateKeySigner>().map_err(|_| {
+            eyre::eyre!(
+                "invalid decryption key on line {} of {display_path}",
+                line_index + 1
+            )
+        })?;
+        keys.push(k256::SecretKey::from(signer.credential()));
+    }
+    eyre::ensure!(
+        !keys.is_empty(),
+        "decryption key file {display_path} contains no keys"
+    );
+    Ok(keys)
 }
 
 /// Tempo Zone CLI arguments.
@@ -267,25 +300,25 @@ pub struct ZoneArgs {
     )]
     pub block_interval_ms: u64,
 
-    /// Sequencer private key (hex, with or without 0x prefix).
-    #[arg(
-        long = "sequencer-key",
-        env = "SEQUENCER_KEY",
-        value_name = "HEX",
-        required_unless_present = "sequencer_key_file",
-        conflicts_with = "sequencer_key_file"
-    )]
-    pub sequencer_key: Option<String>,
-
-    /// Path to a file or FIFO containing the sequencer private key.
+    /// Path to a file or FIFO containing the shared sequencer private key.
+    ///
+    /// Required by every node that can produce blocks. Requiredness is checked after the
+    /// manifest is read rather than by `clap`, because an `rpc_only` node must not hold this
+    /// key: it is also the zone's ECIES private key for encrypted deposits.
     #[arg(
         long = "sequencer-key-file",
         env = "SEQUENCER_KEY_FILE",
-        value_name = "PATH",
-        required_unless_present = "sequencer_key",
-        conflicts_with = "sequencer_key"
+        value_name = "PATH"
     )]
     pub sequencer_key_file: Option<PathBuf>,
+
+    /// File containing additional deposit decryption keys, one hex key per line.
+    #[arg(
+        long = "deposit-decryption-keys-file",
+        env = "DEPOSIT_DECRYPTION_KEYS_FILE",
+        value_name = "PATH"
+    )]
+    pub deposit_decryption_keys_file: Option<PathBuf>,
 
     /// Path to the static multi-sequencer manifest. Its presence activates
     /// multi-sequencer mode and makes the manifest authoritative for role selection.
@@ -293,12 +326,12 @@ pub struct ZoneArgs {
         long = "sequencer.manifest",
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
-        requires_all = ["p2p_key", "secp256k1_key"],
+        requires = "p2p_key",
         conflicts_with = "enable_sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
 
-    /// Path to this node's hex-encoded Ed25519 P2P identity key.
+    /// Path to a file or FIFO containing this node's hex-encoded Ed25519 P2P identity key.
     #[arg(
         long = "p2p.key",
         env = "P2P_KEY",
@@ -307,7 +340,7 @@ pub struct ZoneArgs {
     )]
     pub p2p_key: Option<PathBuf>,
 
-    /// Path to this node's hex-encoded individual secp256k1 private key.
+    /// Path to a file or FIFO containing this node's hex-encoded individual secp256k1 private key.
     #[arg(
         long = "secp256k1.key",
         env = "SECP256K1_KEY",
@@ -336,6 +369,8 @@ pub struct ZoneArgs {
     pub p2p_bypass_ip_check: bool,
 
     /// (Optional) Checked against the role derived from the manifest.
+    ///
+    /// One of `leader`, `follower`, or `rpc-follower`.
     #[arg(
         long = "sequencer.role",
         env = "SEQUENCER_ROLE",
@@ -344,7 +379,8 @@ pub struct ZoneArgs {
     )]
     pub sequencer_role: Option<Role>,
 
-    /// How often (in seconds) the zone monitor polls for new L2 blocks.
+    /// How often (in seconds) the zone monitor reconciles with the canonical head if no
+    /// canonical-state notification triggers it first.
     #[arg(
         long = "zone.poll-interval-secs",
         env = "ZONE_POLL_INTERVAL_SECS",
@@ -354,9 +390,7 @@ pub struct ZoneArgs {
 
     /// Number of zone blocks between withdrawal batch boundaries.
     ///
-    /// Also used by the sequencer monitor to decide when enough chain progress has
-    /// occurred to look for empty finalized batches to submit to L1. Default 120 is
-    /// ~1 minute at Tempo's expected 500 ms block time.
+    /// Default 120 is ~1 minute at Tempo's expected 500 ms block time.
     #[arg(
         long = "zone.batch-interval-blocks",
         env = "ZONE_BATCH_INTERVAL_BLOCKS",
@@ -392,10 +426,6 @@ pub struct ZoneArgs {
     )]
     pub withdrawal_max_in_flight_batches: usize,
 
-    /// Genesis Tempo L1 block number override.
-    #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
-    pub l1_genesis_block_number: Option<u64>,
-
     /// Maximum number of concurrent L1 receipt fetches.
     #[arg(
         long = "l1.fetch-concurrency",
@@ -412,25 +442,26 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    /// Zone ID for the private RPC auth token validation.
+    /// Zone ID used for chain identity and redacted RPC authentication.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
     pub zone_id: u32,
 
-    /// Port for the private zone RPC server (0 for OS-assigned).
+    /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
-        long = "private-rpc.port",
-        env = "PRIVATE_RPC_PORT",
+        long = "redacted-rpc.port",
+        alias = "private-rpc.port",
+        env = "REDACTED_RPC_PORT",
         default_value_t = 8544
     )]
-    pub private_rpc_port: u16,
+    pub redacted_rpc_port: u16,
 
-    /// Maximum auth token validity window the private RPC accepts, in seconds.
+    /// Maximum auth token validity window the redacted RPC accepts, in seconds.
     #[arg(
-        long = "private-rpc.max-auth-token-validity-secs",
-        env = "PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS",
+        long = "redacted-rpc.max-auth-token-validity-secs",
+        env = "REDACTED_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS",
         default_value_t = DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS
     )]
-    pub private_rpc_max_auth_token_validity_secs: u64,
+    pub redacted_rpc_max_auth_token_validity_secs: u64,
 
     /// Enable the Zone node in sequencer mode. This advances block production and submits
     /// withdrawal batches.
@@ -440,6 +471,10 @@ pub struct ZoneArgs {
         conflicts_with = "sequencer_manifest"
     )]
     pub enable_sequencer: bool,
+
+    /// Validate finalized batch candidates with the SPF without changing settlement.
+    #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
+    pub enable_prover: bool,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -450,12 +485,25 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
     }
 }
 
-fn sequencer_enabled(cli_flag: bool, manifest_role: Option<Role>) -> bool {
-    match manifest_role {
-        Some(Role::Leader) => true,
-        Some(Role::Follower) => false,
-        None => cli_flag,
+/// Whether the sequencer add-on is configured at boot.
+///
+/// `rpc_only` nodes are excluded: they never produce blocks and cannot be promoted without a
+/// restart, so they must not be given the shared sequencer key.
+fn sequencer_enabled(cli_flag: bool, p2p_config: Option<&P2pConfig>) -> bool {
+    cli_flag || p2p_config.is_some_and(|config| !config.is_rpc_only())
+}
+
+fn validate_p2p_transaction_size_limit(
+    manifest_mode: bool,
+    max_tx_input_bytes: usize,
+) -> eyre::Result<()> {
+    if manifest_mode {
+        eyre::ensure!(
+            max_tx_input_bytes <= MAX_TRANSACTION_MESSAGE_SIZE,
+            "--txpool.max-tx-input-bytes ({max_tx_input_bytes}) exceeds the multi-sequencer P2P transaction limit ({MAX_TRANSACTION_MESSAGE_SIZE})"
+        );
     }
+    Ok(())
 }
 
 fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
@@ -485,10 +533,9 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url,
-        validate_portal_address,
+        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
+        validate_l1_rpc_url, validate_p2p_transaction_size_limit, validate_portal_address,
     };
-    use zone_p2p::Role;
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
@@ -518,7 +565,27 @@ mod tests {
     }
 
     #[test]
-    fn sequencer_key_file_is_accepted_and_conflicts_with_inline_key() {
+    fn manifest_mode_rejects_a_txpool_limit_above_the_p2p_wire_limit() {
+        assert!(
+            validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE,)
+                .is_ok()
+        );
+        let error =
+            validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE + 1)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the multi-sequencer P2P transaction limit")
+        );
+        assert!(
+            validate_p2p_transaction_size_limit(false, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE + 1,)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn sequencer_key_file_is_accepted_and_inline_key_option_is_rejected() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -537,16 +604,10 @@ mod tests {
             parsed.zone.sequencer_key_file.as_deref(),
             Some(std::path::Path::new("/run/secrets/sequencer-key"))
         );
-        assert!(parsed.zone.sequencer_key.is_none());
-
-        let error = ZoneArgsParser::try_parse_from(common.into_iter().chain([
-            "--sequencer-key",
-            "0x01",
-            "--sequencer-key-file",
-            "/run/secrets/sequencer-key",
-        ]))
-        .unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        let error =
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--sequencer-key", "0x01"]))
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -559,7 +620,7 @@ mod tests {
         )
         .unwrap();
 
-        let signer = load_sequencer_signer(None, Some(&path)).await.unwrap();
+        let signer = load_sequencer_signer(Some(&path)).await.unwrap();
         std::fs::remove_file(path).unwrap();
 
         assert_eq!(
@@ -567,6 +628,34 @@ mod tests {
             "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
                 .parse::<alloy_primitives::Address>()
                 .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loads_additional_decryption_keys_one_per_line() {
+        let path =
+            std::env::temp_dir().join(format!("tempo-zone-decryption-keys-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            concat!(
+                "0000000000000000000000000000000000000000000000000000000000000001\n",
+                "\n",
+                "0000000000000000000000000000000000000000000000000000000000000002\n"
+            ),
+        )
+        .unwrap();
+
+        let keys = load_decryption_keys(Some(&path)).await.unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys[0].to_bytes().as_slice(),
+            alloy_primitives::B256::with_last_byte(1).as_slice()
+        );
+        assert_eq!(
+            keys[1].to_bytes().as_slice(),
+            alloy_primitives::B256::with_last_byte(2).as_slice()
         );
     }
 
@@ -597,13 +686,11 @@ mod tests {
             .unwrap();
         });
 
-        let signer = tokio::time::timeout(
-            Duration::from_secs(2),
-            load_sequencer_signer(None, Some(&path)),
-        )
-        .await
-        .expect("FIFO read timed out")
-        .unwrap();
+        let signer =
+            tokio::time::timeout(Duration::from_secs(2), load_sequencer_signer(Some(&path)))
+                .await
+                .expect("FIFO read timed out")
+                .unwrap();
         writer.join().unwrap();
         std::fs::remove_file(path).unwrap();
 
@@ -616,15 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_requires_node_keys_and_conflicts_with_legacy_sequencer() {
+    fn manifest_mode_requires_the_p2p_key_and_conflicts_with_legacy_sequencer() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
         ];
 
         let missing_key = ZoneArgsParser::try_parse_from(
@@ -638,17 +723,17 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
 
-        let missing_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+        // `--secp256k1.key` is deliberately not a parse-time requirement: an `rpc_only` node
+        // holds no individual key. Whether one is expected is decided against the manifest in
+        // `ZoneManifest::validate_node`.
+        let without_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
             "node.key",
         ]))
-        .unwrap_err();
-        assert_eq!(
-            missing_secp256k1_key.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+        .unwrap();
+        assert_eq!(without_secp256k1_key.zone.secp256k1_key, None);
 
         let conflict = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",
@@ -671,13 +756,54 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
             "--sequencer",
         ])
         .unwrap();
         assert!(parsed.zone.enable_sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
+    }
+
+    #[test]
+    fn zone_poll_interval_keeps_one_second_default_and_accepts_override() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let default = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert_eq!(default.zone.zone_poll_interval_secs, 1);
+
+        let overridden = ZoneArgsParser::try_parse_from(
+            common.into_iter().chain(["--zone.poll-interval-secs", "3"]),
+        )
+        .unwrap();
+        assert_eq!(overridden.zone.zone_poll_interval_secs, 3);
+    }
+
+    #[test]
+    fn private_rpc_port_alias_is_accepted() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let redacted = ZoneArgsParser::try_parse_from(
+            common.into_iter().chain(["--redacted-rpc.port", "9544"]),
+        )
+        .unwrap();
+        let private = ZoneArgsParser::try_parse_from(
+            common.into_iter().chain(["--private-rpc.port", "9544"]),
+        )
+        .unwrap();
+
+        assert_eq!(redacted.zone.redacted_rpc_port, 9544);
+        assert_eq!(private.zone.redacted_rpc_port, 9544);
     }
 
     #[test]
@@ -689,8 +815,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
             "--withdrawal-max-batch-gas",
             &above_limit,
         ])
@@ -706,8 +830,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
         ];
 
         let without_manifest =
@@ -735,11 +857,35 @@ mod tests {
     }
 
     #[test]
-    fn manifest_role_is_authoritative_for_sequencer_startup() {
-        assert!(sequencer_enabled(false, Some(Role::Leader)));
-        assert!(!sequencer_enabled(true, Some(Role::Follower)));
+    fn sequencer_resources_follow_the_cli_flag_without_a_manifest() {
+        // Manifest mode is covered by `sequencer_enabled`'s other arm, which needs a real
+        // `P2pConfig`; see `manifest_mode_configures_sequencer_resources_except_on_standbys`
+        // in the integration tests.
         assert!(sequencer_enabled(true, None));
         assert!(!sequencer_enabled(false, None));
+    }
+
+    #[test]
+    fn sequencer_role_argument_accepts_the_rpc_follower_spelling() {
+        let parsed = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+            "--sequencer.role",
+            "rpc-follower",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zone.sequencer_role, Some(Role::RpcFollower));
+        // A standby holds neither key. Requiredness is checked against the manifest after it is
+        // read, so neither flag is a parse-time requirement.
+        assert_eq!(parsed.zone.secp256k1_key, None);
+        assert_eq!(parsed.zone.sequencer_key_file, None);
     }
 
     #[test]

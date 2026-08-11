@@ -24,12 +24,12 @@ pub(crate) struct SetEncryptionKey {
 
     /// Encryption private key (hex). Also signs the transaction unless
     /// `transaction_private_key` is provided.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Private key of the active sequencer that submits the L1 transaction.
     /// Defaults to `private_key` for single-sequencer zones.
-    #[arg(long, env = "TRANSACTION_PRIVATE_KEY")]
+    #[arg(long, env = "TRANSACTION_PRIVATE_KEY", hide_env_values = true)]
     transaction_private_key: Option<String>,
 }
 

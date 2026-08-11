@@ -4,11 +4,15 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{storage::StorageCtx, test_util::TIP20Setup};
+use tempo_precompiles::{
+    storage::{StorageCtx, StorageKey},
+    test_util::TIP20Setup,
+    zone_factory::ZonePortalStorage,
+};
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::{
-    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT,
-    TEMPO_STATE_ADDRESS,
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, TEMPO_STATE_ADDRESS,
 };
 
 use crate::{
@@ -206,7 +210,7 @@ impl Harness {
             .insert(PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT.into(), ANCHOR, modes);
     }
 
-    fn set_role(&self, account: Address, role: ZonePortal::Role) {
+    fn set_role(&self, account: Address, role: IZonePortal::Role) {
         let slot = keccak256((account, PORTAL_ROLE_SLOT).abi_encode());
         self.l1
             .insert(PORTAL, slot.into(), ANCHOR, U256::from(role as u8));
@@ -231,7 +235,7 @@ impl Harness {
 
     fn finalize(&mut self, count: usize) -> PrecompileResult {
         self.call(
-            SEQUENCER,
+            Address::ZERO,
             ZoneOutboxAbi::finalizeWithdrawalBatchCall {
                 count: U256::from(count),
                 blockNumber: 0,
@@ -291,25 +295,27 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
     harness.set_gas_rate(1)?;
     harness.request(1, BOB, B256::ZERO)?;
 
+    let portal = ZonePortalStorage::new(PORTAL);
+    assert_eq!(harness.l1.storage_requests().len(), 5);
     assert_eq!(
-        harness.l1.storage_requests(),
-        vec![
-            (
-                PORTAL,
-                keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
-                ANCHOR
-            ),
-            (PORTAL, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ANCHOR),
-            (
-                PORTAL,
-                harness
-                    .token
-                    .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
-                    .into(),
-                ANCHOR,
-            ),
-            (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
-        ]
+        harness
+            .l1
+            .request_count(ANCHOR, &portal.is_sequencer[SEQUENCER]),
+        1
+    );
+    assert_eq!(
+        harness.l1.request_count(ANCHOR, &portal.max_tempo_gas_rate),
+        1
+    );
+    assert_eq!(
+        harness
+            .l1
+            .request_count(ANCHOR, &portal.token_configs[harness.token].enabled),
+        1
+    );
+    assert_eq!(
+        harness.l1.request_count(ANCHOR, &portal.is_access_enforced),
+        2
     );
     Ok(())
 }
@@ -396,7 +402,7 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     );
     assert_eq!(closed_open.balance_of(ALICE)?, balance_before);
     assert!(closed_open.pending()?.is_empty());
-    closed_open.set_role(BOB, ZonePortal::Role::Account);
+    closed_open.set_role(BOB, IZonePortal::Role::Account);
     closed_open.request(1, BOB, B256::ZERO)?;
     closed_open.request_with_gas(1, FEE_PAYER, B256::ZERO, 1)?;
 
@@ -404,7 +410,7 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     // gateways require callback gas and callback targets must have the CallbackGateway role.
     let mut open_enforced = Harness::new()?;
     open_enforced.set_modes(false, true);
-    open_enforced.set_role(GATEWAY, ZonePortal::Role::CallbackGateway);
+    open_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway);
     open_enforced.request(1, BOB, B256::ZERO)?;
     let pending_before = open_enforced.pending()?.len();
     let balance_before = open_enforced.balance_of(ALICE)?;
@@ -423,8 +429,8 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     // Closed access, enforced gateway: plain and callback paths enforce their distinct roles.
     let mut closed_enforced = Harness::new()?;
     closed_enforced.set_modes(true, true);
-    closed_enforced.set_role(BOB, ZonePortal::Role::Account);
-    closed_enforced.set_role(GATEWAY, ZonePortal::Role::CallbackGateway);
+    closed_enforced.set_role(BOB, IZonePortal::Role::Account);
+    closed_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway);
     closed_enforced.request(1, BOB, B256::ZERO)?;
     closed_enforced.request_with_gas(1, GATEWAY, B256::ZERO, 1)?;
     let pending_before = closed_enforced.pending()?.len();
@@ -481,7 +487,7 @@ fn finalize_empty_queue_returns_zero() -> eyre::Result<()> {
 }
 
 #[test]
-fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre::Result<()> {
+fn finalize_withdrawals_match_queue_hash_and_have_unique_sender_tags() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness.request(100, ALICE, B256::repeat_byte(1))?;
     harness.request(200, BOB, B256::repeat_byte(2))?;
@@ -490,7 +496,11 @@ fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre
         .iter()
         .map(|pending| Withdrawal {
             token: pending.token,
-            senderTag: Withdrawal::sender_tag(pending.sender, pending.txHash),
+            senderTag: Withdrawal::sender_tag(
+                pending.sender,
+                pending.txHash,
+                pending.fallbackNonce,
+            ),
             to: pending.to,
             amount: pending.amount,
             memo: pending.memo,
@@ -506,12 +516,13 @@ fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre
         ZoneOutboxAbi::finalizeWithdrawalBatchCall::abi_decode_returns(&output.bytes)?,
         Withdrawal::queue_hash(&expected)
     );
+    assert_ne!(expected[0].senderTag, expected[1].senderTag);
     assert!(harness.pending()?.is_empty());
     Ok(())
 }
 
 #[test]
-fn finalize_rejects_wrong_count_and_non_sequencer() -> eyre::Result<()> {
+fn finalize_rejects_wrong_count_and_non_system_caller() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness.request(100, ALICE, B256::ZERO)?;
     assert_revert(
@@ -520,7 +531,7 @@ fn finalize_rejects_wrong_count_and_non_sequencer() -> eyre::Result<()> {
     );
 
     let result = harness.call(
-        ALICE,
+        SEQUENCER,
         ZoneOutboxAbi::finalizeWithdrawalBatchCall {
             count: U256::ONE,
             blockNumber: 0,
@@ -629,7 +640,7 @@ fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
 }
 
 #[test]
-fn fallback_recipient_and_zero_amount_semantics_match_reference() -> eyre::Result<()> {
+fn request_rejects_zero_fallback_recipient() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let token = harness.token;
     assert_revert(
@@ -645,8 +656,18 @@ fn fallback_recipient_and_zero_amount_semantics_match_reference() -> eyre::Resul
         }),
         ZoneOutboxError::invalid_fallback_recipient(),
     );
-    harness.request(0, BOB, B256::ZERO)?;
-    assert_eq!(harness.pending()?[0].amount, 0);
+    Ok(())
+}
+
+#[test]
+fn request_rejects_zero_amount_without_mutating_state() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    assert_revert(
+        harness.request(0, BOB, B256::ZERO),
+        ZoneOutboxError::zero_amount_withdrawal(),
+    );
+    assert!(harness.pending()?.is_empty());
+    assert_eq!(harness.last_fallback_nonce()?, 0);
     Ok(())
 }
 
@@ -703,7 +724,7 @@ fn encrypted_sender_count_and_length_are_validated() -> eyre::Result<()> {
     harness.request(1, BOB, B256::ZERO)?;
     assert_revert(
         harness.call(
-            SEQUENCER,
+            Address::ZERO,
             ZoneOutboxAbi::finalizeWithdrawalBatchCall {
                 count: U256::ONE,
                 blockNumber: 0,
@@ -715,7 +736,7 @@ fn encrypted_sender_count_and_length_are_validated() -> eyre::Result<()> {
     );
     assert_revert(
         harness.call(
-            SEQUENCER,
+            Address::ZERO,
             ZoneOutboxAbi::finalizeWithdrawalBatchCall {
                 count: U256::ONE,
                 blockNumber: 0,

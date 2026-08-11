@@ -1,20 +1,36 @@
 //! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
-//! and the native `TempoState` precompile.
+//! and the L1-backed `TempoState` precompile.
 
-use alloc::{rc::Rc, string::String};
-use core::{cell::Cell, fmt};
+use alloc::{
+    rc::Rc,
+    string::{String, ToString},
+};
+use core::{
+    cell::{Cell, RefCell},
+    fmt,
+};
 
-use alloy_primitives::{Address, B256, keccak256};
-use alloy_sol_types::SolValue;
-use revm::{context::result::AnyError, precompile::PrecompileError};
+use alloy_primitives::{Address, B256, U256, map::HashSet};
+use revm::{
+    context::result::AnyError,
+    interpreter::gas::{COLD_SLOAD_COST, WARM_STORAGE_READ_COST},
+    precompile::PrecompileError,
+};
+use tempo_precompiles::{
+    error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
+};
 use thiserror::Error;
 
-pub(crate) use tempo_precompiles::storage::*;
-use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
+use crate::tempo_state::TempoState;
 
-/// L1 storage access needed by the anchored Zone database and native precompiles.
+pub(crate) use tempo_precompiles::storage::*;
+
+/// Raw L1 storage access needed by the anchored Zone database and L1-backed precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
-    /// Read `account[slot]` at `block_number` on Tempo L1.
+    /// Reads `account[slot]` at `block_number` on Tempo L1 without gas accounting.
+    ///
+    /// **IMPORTANT:** Implementations are raw provider hooks. Callers are responsible for dealing
+    /// with the execution anchor and charging the appropriate execution gas costs.
     fn read_l1_storage(
         &self,
         account: Address,
@@ -27,12 +43,12 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 ///
 /// The **anchor** is the Tempo L1 block number against which every external storage read in the
 /// current transaction attempt must be resolved. It corresponds to the checkpoint maintained in
-/// Zone state by the native `TempoState` precompile. The anchor starts unset and is selected in one
-/// of two ways:
+/// Zone state by the L1-backed `TempoState` precompile. The anchor starts unset and is selected
+/// in one of two ways:
 ///
 /// - For an ordinary transaction, the first L1 read selects the `tempoBlockNumber` loaded from the
 ///   chosen Zone state.
-/// - During `advanceTempo`, the native `TempoState` precompile governs advancement: it first
+/// - During `advanceTempo`, the `TempoState` precompile governs advancement: it first
 ///   validates that the submitted header is the direct child of the stored checkpoint, then
 ///   advances the anchor to that child before any reads at the new checkpoint.
 ///
@@ -42,15 +58,21 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// noncommitting simulations.
 ///
 /// Clones share the selected anchor and provider handle so the Zone database adapter, `TempoState`,
-/// and other native precompiles enforce one view of L1 state. A new `L1State` must be created for
-/// each EVM execution context; it must not be shared across independent EVMs.
+/// and other L1-backed precompiles enforce one view of L1 state. A new `L1State` must be created
+/// for each EVM execution context; it must not be shared across independent EVMs.
 #[derive(Clone)]
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.
     anchor: Rc<Cell<Option<u64>>>,
+    /// `(account, slot)` keys successfully accessed during the current transaction attempt.
+    ///
+    /// Used for cold/warm gas accounting. Unlike REVM's journal, this access set is not rolled back
+    /// when a subcall reverts, preserving charges for potentially incurred L1 fetch work and
+    /// simplifying the accounting model.
+    access_set: Rc<RefCell<HashSet<(Address, B256)>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
-    /// Zone portal whose L1 state defines the active sequencer set.
+    /// ZonePortal read through the L1 provider by explicit storage operations.
     portal_address: Address,
 }
 
@@ -59,14 +81,16 @@ impl<P> L1State<P> {
     pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
             anchor: Rc::new(Cell::new(None)),
+            access_set: Rc::new(RefCell::new(HashSet::default())),
             provider,
             portal_address,
         }
     }
 
-    /// Clears the selected anchor after the current transaction attempt completes.
-    pub fn reset_anchor(&self) {
+    /// Clears bookkeeping after the current transaction attempt completes.
+    pub fn reset_transaction_state(&self) {
         self.anchor.set(None);
+        self.access_set.borrow_mut().clear();
     }
 
     /// Returns the anchor selected for the current transaction, if any.
@@ -74,8 +98,8 @@ impl<P> L1State<P> {
         self.anchor.get()
     }
 
-    /// Returns the ZonePortal configured for this execution-local L1 state.
-    pub(crate) const fn portal(&self) -> Address {
+    /// Returns the configured ZonePortal address.
+    pub const fn portal(&self) -> Address {
         self.portal_address
     }
 
@@ -107,8 +131,12 @@ impl<P> L1State<P> {
 }
 
 impl<P: L1StorageReader> L1State<P> {
-    /// Reads L1 storage after selecting or validating `block_number` as this transaction's anchor.
-    pub fn read_l1_storage(
+    /// Reads L1 storage through the provider without gas metering, after selecting or validating
+    /// `block_number` as this transaction's anchor.
+    ///
+    /// The EVM database overlay uses this path because revm already charges TIP-403 SLOADs.
+    /// Other L1-backed precompile reads use [`Self::read_l1`] for cold/warm accounting.
+    pub fn read_l1_storage_unmetered(
         &self,
         account: Address,
         slot: B256,
@@ -118,14 +146,47 @@ impl<P: L1StorageReader> L1State<P> {
         self.provider.read_l1_storage(account, slot, block_number)
     }
 
-    /// Return whether `account` belongs to the active sequencer set at `block_number`.
-    pub fn is_active_sequencer(
+    /// Reads L1 storage, with gas metering, after selecting or validating `block_number` as this
+    /// transaction's anchor.
+    fn read_l1_storage(
         &self,
         account: Address,
+        slot: B256,
         block_number: u64,
-    ) -> Result<bool, L1StateError> {
-        let slot = keccak256((account, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
-        Ok(self.read_l1_storage(self.portal_address, slot, block_number)? != B256::ZERO)
+    ) -> tempo_precompiles::Result<B256> {
+        let key = (account, slot);
+        let gas_cost = if self.access_set.borrow().contains(&key) {
+            WARM_STORAGE_READ_COST
+        } else {
+            COLD_SLOAD_COST
+        };
+        StorageCtx.deduct_gas(gas_cost)?;
+        let value = self
+            .read_l1_storage_unmetered(account, slot, block_number)
+            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))?;
+        self.access_set.borrow_mut().insert(key);
+        Ok(value)
+    }
+
+    /// Reads, with gas metering, and decodes a typed slot from an L1 account at the active anchor.
+    pub fn read_l1<T: Storable>(&self, slot: &Slot<T>) -> tempo_precompiles::Result<T> {
+        let storage = L1Storage {
+            l1: self,
+            account: slot.address(),
+        };
+        T::load(&storage, slot.slot(), slot.ctx())
+    }
+
+    /// Selects and reads a typed slot from the configured `ZonePortal` at the active anchor.
+    ///
+    /// The callback only exposes the portal for selecting a handler; the selected value is always
+    /// resolved through [`Self::read_l1`] rather than the local EVM journal.
+    pub fn read_portal<T: Storable>(
+        &self,
+        select_slot: impl for<'a> FnOnce(&'a ZonePortal) -> &'a Slot<T>,
+    ) -> tempo_precompiles::Result<T> {
+        let portal = ZonePortal::new(self.portal_address);
+        self.read_l1(select_slot(&portal))
     }
 }
 
@@ -133,6 +194,7 @@ impl<P> fmt::Debug for L1State<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("L1State")
             .field("anchor", &self.get_anchor())
+            .field("warm_l1_slots", &self.access_set.borrow().len())
             .field("portal_address", &self.portal_address)
             .finish_non_exhaustive()
     }
@@ -186,13 +248,115 @@ impl From<L1StateError> for PrecompileError {
     }
 }
 
+/// Read-only [`StorageOps`] adapter for one L1 account.
+///
+/// This lets typed L1-backed precompile storage handlers read, meter, and decode slots without
+/// inserting fetched values into the EVM journal. Reads use the transaction's selected anchor,
+/// falling back to the checkpoint stored in [`TempoState`] on the first read.
+struct L1Storage<'a, P> {
+    /// Execution-local provider and anchor coordination shared by all L1 reads.
+    l1: &'a L1State<P>,
+    /// L1 account whose storage slots are exposed through [`StorageOps`].
+    account: Address,
+}
+
+impl<P: L1StorageReader> StorageOps for L1Storage<'_, P> {
+    fn load(&self, slot: U256) -> tempo_precompiles::Result<U256> {
+        let anchor = match self.l1.get_anchor() {
+            Some(anchor) => anchor,
+            None => TempoState::new().tempo_block_number.read()?,
+        };
+        self.l1
+            .read_l1_storage(self.account, slot.into(), anchor)
+            .map(Into::into)
+    }
+
+    fn store(&mut self, _slot: U256, _value: U256) -> tempo_precompiles::Result<()> {
+        Err(TempoPrecompileError::Fatal(
+            "L1 storage is read-only".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MockL1Reader;
+    use crate::test_utils::{MockL1Reader, test_context, test_storage_provider};
 
     fn read(l1: &L1State<MockL1Reader>, anchor: u64) -> Result<B256, L1StateError> {
-        l1.read_l1_storage(Address::ZERO, B256::ZERO, anchor)
+        l1.read_l1_storage_unmetered(Address::ZERO, B256::ZERO, anchor)
+    }
+
+    #[test]
+    fn raw_l1_read_is_unmetered() -> eyre::Result<()> {
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        let gas_before = storage.gas_used();
+
+        StorageCtx::enter(&mut storage, || {
+            l1.read_l1_storage_unmetered(Address::ZERO, B256::ZERO, 10)
+        })?;
+
+        assert_eq!(storage.gas_used() - gas_before, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn metered_l1_reads_are_cold_once_per_account_slot() -> eyre::Result<()> {
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        let clone = l1.clone();
+        l1.advance_anchor(9, 10).unwrap();
+        let first = Slot::<B256>::new(U256::ZERO, Address::ZERO);
+        let second = Slot::<B256>::new(U256::ZERO, Address::repeat_byte(1));
+        let gas_before = storage.gas_used();
+
+        StorageCtx::enter(&mut storage, || {
+            l1.read_l1(&first)?;
+            clone.read_l1(&first)?;
+            l1.read_l1(&second)
+        })?;
+
+        assert_eq!(
+            storage.gas_used() - gas_before,
+            COLD_SLOAD_COST + WARM_STORAGE_READ_COST + COLD_SLOAD_COST
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn metered_l1_reads_charge_before_provider_fetch() -> eyre::Result<()> {
+        let mut ctx = test_context();
+
+        let cold_reader = MockL1Reader::default();
+        let cold_l1 = L1State::new(cold_reader.clone(), Address::ZERO);
+        let mut cold_storage = test_storage_provider(&mut ctx, COLD_SLOAD_COST - 1, false);
+        let cold_slot = Slot::<B256>::new(U256::ZERO, Address::ZERO);
+        assert!(matches!(
+            StorageCtx::enter(&mut cold_storage, || cold_l1.read_l1(&cold_slot)),
+            Err(TempoPrecompileError::OutOfGas)
+        ));
+        assert!(cold_reader.storage_requests().is_empty());
+        drop(cold_storage);
+
+        let warm_reader = MockL1Reader::default();
+        let warm_l1 = L1State::new(warm_reader.clone(), Address::ZERO);
+        warm_l1.advance_anchor(9, 10).unwrap();
+        let mut warm_storage = test_storage_provider(
+            &mut ctx,
+            COLD_SLOAD_COST + WARM_STORAGE_READ_COST - 1,
+            false,
+        );
+        let warm_slot = Slot::<B256>::new(U256::ZERO, Address::ZERO);
+        let result = StorageCtx::enter(&mut warm_storage, || {
+            warm_l1.read_l1(&warm_slot)?;
+            warm_l1.read_l1(&warm_slot)
+        });
+        assert!(matches!(result, Err(TempoPrecompileError::OutOfGas)));
+        assert_eq!(warm_reader.storage_requests().len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -236,25 +400,26 @@ mod tests {
     fn l1_state_reset_allows_a_new_anchor() {
         let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
-        l1.reset_anchor();
+        l1.reset_transaction_state();
         l1.advance_anchor(10, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
     }
 
     #[test]
-    fn sequencer_membership_uses_requested_anchor() {
-        let portal = Address::repeat_byte(0x11);
-        let current = Address::repeat_byte(0x22);
-        let next = Address::repeat_byte(0x33);
-        let reader = MockL1Reader::default();
-        reader.seed_active_sequencer(portal, 7, current);
-        reader.seed_active_sequencer(portal, 8, next);
-        let l1 = L1State::new(reader, portal);
+    fn tx_reset_makes_l1_slots_cold_again() -> eyre::Result<()> {
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        l1.advance_anchor(9, 10).unwrap();
+        let slot = Slot::<B256>::new(U256::ZERO, Address::ZERO);
+        let gas_before = storage.gas_used();
 
-        assert!(l1.is_active_sequencer(current, 7).unwrap());
-        assert!(!l1.is_active_sequencer(next, 7).unwrap());
-        l1.reset_anchor();
-        assert!(l1.is_active_sequencer(next, 8).unwrap());
-        assert!(!l1.is_active_sequencer(current, 8).unwrap());
+        StorageCtx::enter(&mut storage, || l1.read_l1(&slot))?;
+        l1.reset_transaction_state();
+        l1.advance_anchor(10, 11).unwrap();
+        StorageCtx::enter(&mut storage, || l1.read_l1(&slot))?;
+
+        assert_eq!(storage.gas_used() - gas_before, 2 * COLD_SLOAD_COST);
+        Ok(())
     }
 }

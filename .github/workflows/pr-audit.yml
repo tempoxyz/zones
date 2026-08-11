@@ -3,6 +3,11 @@ name: Pull request audit
 on:
   pull_request:
     types: [labeled]
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted]
+  merge_group:
   issue_comment:
     types: [created]
 
@@ -12,18 +17,31 @@ jobs:
   # Label-triggered audit -> read-only shared reusable
   audit:
     if: >-
-      github.event_name == 'pull_request' &&
+      github.repository == 'tempoxyz/zones' &&
       (
-        github.event.label.name == 'cyclops' ||
-        github.event.label.name == 'agentic-audit'
+        (
+        github.event_name == 'pull_request' &&
+        (
+          github.event.label.name == 'cyclops' ||
+          github.event.label.name == 'agentic-audit'
+        )
+        ) ||
+        (
+          github.event_name == 'pull_request_target' ||
+          github.event_name == 'pull_request_review' ||
+          github.event_name == 'merge_group'
+        )
       )
     permissions:
       contents: read
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@5829d6b46418710f752eb8b25218af9812b78428
+      pull-requests: read
+      statuses: write
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@7216a21c7e97d3f0c4d091ac5b894a407c600b91
     with:
       required-labels: |
         cyclops
         agentic-audit
+      require-completed-audit: true
     secrets:
       EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
       EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
@@ -32,6 +50,7 @@ jobs:
   # Comment-command audit -> caller-owned privileged job using the composite
   audit-comment:
     if: >-
+      github.repository == 'tempoxyz/zones' &&
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       (
@@ -45,7 +64,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: tempoxyz/gh-actions/actions/pr-audit-comment@5829d6b46418710f752eb8b25218af9812b78428
+      - uses: tempoxyz/gh-actions/actions/pr-audit-comment@7216a21c7e97d3f0c4d091ac5b894a407c600b91
         with:
           command-regex: '^(?:@decofe\s+)?(?:cyclops\s+audit|derek\s+audit)\b'
           permission-check-mode: association

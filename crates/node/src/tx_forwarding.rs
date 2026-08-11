@@ -1,4 +1,4 @@
-//! Follower-to-leader raw transaction forwarding and leader pool admission.
+//! Raw transaction propagation and replica pool admission.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -8,7 +8,7 @@ use std::{
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_primitives::B256;
 use reth_transaction_pool::{
-    NewTransactionEvent, PoolTransaction, TransactionPool, error::PoolErrorKind,
+    NewTransactionEvent, PoolTransaction, TransactionOrigin, TransactionPool, error::PoolErrorKind,
 };
 use tempo_transaction_pool::transaction::TempoPooledTransaction;
 use tokio::{
@@ -17,26 +17,6 @@ use tokio::{
 };
 use tracing::{debug, warn};
 use zone_p2p::{P2pCommand, P2pEvent};
-
-/// Split leader-side P2P events so block catch-up and transaction admission can run independently.
-pub(crate) async fn route_p2p_events(
-    mut events: mpsc::Receiver<P2pEvent>,
-    block_events: mpsc::Sender<P2pEvent>,
-    transaction_events: mpsc::Sender<P2pEvent>,
-) {
-    while let Some(event) = events.recv().await {
-        let destination = if matches!(event, P2pEvent::TransactionReceived { .. }) {
-            &transaction_events
-        } else {
-            &block_events
-        };
-        if destination.send(event).await.is_err() {
-            tracing::error!(target: "zone::p2p", "P2P event consumer closed");
-            return;
-        }
-    }
-    tracing::error!(target: "zone::p2p", "P2P event channel closed");
-}
 
 #[cfg(not(test))]
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
@@ -51,8 +31,8 @@ enum QueueOutcome {
     Closed,
 }
 
-/// Immediately queue new follower transactions, then periodically reconcile the pool
-/// to recover from intermittent connection issues / restarts.
+/// Immediately queue locally originated follower transactions for the quorum, then periodically
+/// reconcile local-origin pool entries to recover from intermittent connection issues / restarts.
 pub(crate) async fn forward_new_transactions<P>(
     pool: P,
     mut transactions: mpsc::Receiver<NewTransactionEvent<TempoPooledTransaction>>,
@@ -72,6 +52,11 @@ pub(crate) async fn forward_new_transactions<P>(
                     tracing::error!(target: "zone::p2p", "Follower transaction pool listener closed");
                     return;
                 };
+                // Transactions admitted from P2P use `External` origin. Retain them for a future
+                // promotion, but do not relay them and create quorum-wide re-flooding.
+                if !event.transaction.origin.is_local() {
+                    continue;
+                }
                 let transaction = &event.transaction.transaction;
                 let hash = *transaction.hash();
 
@@ -110,7 +95,7 @@ fn try_queue_transaction(
     }) {
         Ok(()) => {
             metrics::counter!("zone_node_transactions_queued_for_forwarding_total").increment(1);
-            debug!(target: "zone::p2p", ?hash, transaction_size_bytes = encoded_len, "Queued follower transaction for leader");
+            debug!(target: "zone::p2p", ?hash, transaction_size_bytes = encoded_len, "Queued local follower transaction for quorum peers");
             QueueOutcome::Queued
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -124,9 +109,9 @@ fn try_queue_transaction(
     }
 }
 
-/// Scan the current txpool to recover missed listener events and retry transactions whose retry
-/// interval has elapsed. Prune retry state for transactions no longer in the txpool, stop when
-/// the command channel applies backpressure, and return `false` if that channel has closed.
+/// Scan locally originated txpool entries to recover missed listener events and retry transactions
+/// whose retry interval has elapsed. Prune retry state for transactions no longer in that set,
+/// stop when the command channel applies backpressure, and return `false` if that channel closes.
 fn reconcile_txpool<P>(
     pool: &P,
     commands: &mpsc::Sender<P2pCommand>,
@@ -135,7 +120,7 @@ fn reconcile_txpool<P>(
 where
     P: TransactionPool<Transaction = TempoPooledTransaction>,
 {
-    let mut transactions = pool.pooled_transactions();
+    let mut transactions = pool.get_transactions_by_origin(TransactionOrigin::Local);
     let live_hashes: HashSet<_> = transactions.iter().map(|tx| *tx.hash()).collect();
     retry_at.retain(|hash, _| live_hashes.contains(hash));
 
@@ -169,8 +154,10 @@ where
     true
 }
 
-/// Recover forwarded bytes and admit valid transactions to the leader's pool as external traffic.
-/// Note that only leader node will run this, followers don't need to keep track of mempool.
+/// Recover forwarded bytes and admit valid transactions to this replica's pool as external traffic.
+///
+/// The P2P layer emits these events only on quorum members, so promotable followers retain pending
+/// transactions while RPC-only standbys never receive their bodies.
 pub(crate) async fn insert_forwarded_transactions<P>(pool: P, mut events: mpsc::Receiver<P2pEvent>)
 where
     P: TransactionPool<Transaction = TempoPooledTransaction>,
@@ -199,7 +186,7 @@ where
         match pool.add_external_transaction(transaction).await {
             Ok(outcome) => {
                 metrics::counter!("zone_node_forwarded_transaction_admissions_total").increment(1);
-                debug!(target: "zone::p2p", %peer, ?hash, ?outcome, "Admitted forwarded transaction to leader pool");
+                debug!(target: "zone::p2p", %peer, ?hash, ?outcome, "Admitted forwarded transaction to local pool");
             }
             Err(err) if matches!(err.kind, PoolErrorKind::AlreadyImported) => {
                 metrics::counter!("zone_node_forwarded_transaction_duplicates_total").increment(1);
@@ -207,11 +194,11 @@ where
             }
             Err(err) => {
                 metrics::counter!("zone_node_forwarded_transaction_rejections_total").increment(1);
-                warn!(target: "zone::p2p", %peer, ?hash, %err, "Leader pool rejected forwarded transaction");
+                warn!(target: "zone::p2p", %peer, ?hash, %err, "Local pool rejected forwarded transaction");
             }
         }
     }
-    tracing::error!(target: "zone::p2p", "Leader P2P event channel closed");
+    debug!(target: "zone::p2p", "Transaction P2P event channel closed");
 }
 
 #[cfg(test)]
@@ -342,7 +329,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propagate_only_listener_excludes_private_transactions() {
+    async fn externally_admitted_transaction_is_retained_without_reforwarding() {
+        let pool = test_pool();
+        let listener = pool.new_transactions_listener();
+        let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
+        let task = tokio::spawn(forward_new_transactions(pool.clone(), listener, commands));
+        let (transaction, _) = signed_transaction(0);
+        let transaction_hash = *transaction.hash();
+
+        pool.add_transaction(TransactionOrigin::External, transaction)
+            .await
+            .unwrap();
+
+        assert!(pool.contains(&transaction_hash));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), command_rx.recv())
+                .await
+                .is_err(),
+            "externally admitted transaction was re-forwarded"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn forwarder_excludes_private_transactions() {
         let pool = test_pool();
         let listener = pool.new_transactions_listener();
         let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
@@ -416,7 +426,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leader_consumer_survives_malformed_and_duplicate_transactions() {
+    async fn replica_consumer_survives_malformed_and_duplicate_transactions() {
         let pool = test_pool();
         let (events, event_rx) = tokio::sync::mpsc::channel(8);
         let task = tokio::spawn(insert_forwarded_transactions(pool.clone(), event_rx));
