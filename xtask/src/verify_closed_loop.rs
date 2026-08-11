@@ -81,6 +81,7 @@ impl VerifyClosedLoop {
             earn_share,
             supports_deposit,
             supports_redeem,
+            supports_unknown,
         ) = provider
             .multicall()
             .block(snapshot_block_id)
@@ -91,6 +92,7 @@ impl VerifyClosedLoop {
             .add(router.earnShare())
             .add(router.supportsFlow(0))
             .add(router.supportsFlow(1))
+            .add(router.supportsFlow(2))
             .aggregate()
             .await
             .wrap_err("failed reading Earn router configuration")?;
@@ -192,6 +194,10 @@ impl VerifyClosedLoop {
 
         checks.expect("Earn router supports deposit callbacks", supports_deposit);
         checks.expect("Earn router supports redeem callbacks", supports_redeem);
+        checks.expect(
+            "Earn router rejects unsupported callback flow 2",
+            !supports_unknown,
+        );
         checks.expect(
             "Earn router vault asset matches EarnVault",
             vault
