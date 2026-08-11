@@ -942,7 +942,6 @@ provision_up() {
         --zone-gas-rate 0 \
         --bounceback-gas 0
 
-    export SEQUENCER_KEY="$sequencer_key"
     # The pinned Reth revision predates the retained-branch pruning fix. Its
     # default sparse-trie pruning can make a multi-transaction Zone payload
     # disagree with the root obtained during final validation.
@@ -965,8 +964,9 @@ provision_up() {
         --log.file.directory "$log_dir/zone" \
         --ipcdisable \
         --engine.disable-sparse-trie-cache-pruning \
-        --sequencer
-    unset SEQUENCER_KEY sequencer_key owner_key admin_key
+        --sequencer \
+        --sequencer-key-file <(printf '%s\n' "$sequencer_key")
+    unset sequencer_key owner_key admin_key
 
     local zone_rpc="http://127.0.0.1:8546"
     local zone_redacted_rpc="http://127.0.0.1:8544"
