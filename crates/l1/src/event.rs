@@ -34,16 +34,12 @@ pub struct EncryptionKeyRotation {
 
 /// Derive the Ethereum address for a compressed secp256k1 encryption public key.
 pub fn encryption_key_address(x: B256, y_parity: u8) -> eyre::Result<Address> {
-    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-
     let mut compressed = [0; 33];
     compressed[0] = y_parity;
     compressed[1..].copy_from_slice(x.as_slice());
-    let public_key = k256::PublicKey::from_sec1_bytes(&compressed)
+    let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&compressed)
         .map_err(|err| eyre::eyre!("invalid compressed encryption public key: {err}"))?;
-    let uncompressed = public_key.to_encoded_point(false);
-    let hash = keccak256(&uncompressed.as_bytes()[1..]);
-    Ok(Address::from_slice(&hash.as_slice()[12..]))
+    Ok(alloy_signer::utils::public_key_to_address(&verifying_key))
 }
 
 /// A decoded `LeaderUpdated` portal event.
