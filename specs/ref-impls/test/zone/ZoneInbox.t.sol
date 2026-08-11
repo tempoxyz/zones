@@ -555,10 +555,12 @@ contract ZoneInboxTest is Test {
         );
 
         // Build encrypted deposit
-        (QueuedDeposit memory qd,) = _makeDeposit(alice, amount, 0);
+        (QueuedDeposit memory qd, Deposit memory ed) = _makeDeposit(alice, amount, 0);
 
         tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
+            mockPortal,
+            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+            keccak256(abi.encode(DepositType.Deposit, ed, bytes32(0)))
         );
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
