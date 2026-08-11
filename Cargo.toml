@@ -7,7 +7,7 @@ publish = false
 
 [workspace]
 members = [
-  "bin/tempo-zone-spf",
+  "bin/prover/utils",
   "bin/tempo-zone",
   "crates/chainspec",
   "crates/contracts",

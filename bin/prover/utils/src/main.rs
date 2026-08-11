@@ -47,14 +47,17 @@ type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 #[derive(Debug, Parser)]
-#[command(name = "tempo-zone-spf", about = "Tempo Zone SPF development tools")]
+#[command(
+    name = "tempo-zone-prover-utils",
+    about = "Tempo Zone prover development utilities"
+)]
 struct Cli {
     /// Tracing filter. Can also be set with RUST_LOG.
     #[arg(
         long,
         global = true,
         env = "RUST_LOG",
-        default_value = "tempo_zone_spf=info"
+        default_value = "tempo_zone_prover_utils=info"
     )]
     log_filter: String,
 
@@ -1221,7 +1224,7 @@ mod tests {
         let mut genesis = Genesis::default();
         genesis.config.chain_id = 31_318;
         let path = std::env::temp_dir().join(format!(
-            "tempo-zone-spf-genesis-{}.json",
+            "tempo-zone-prover-utils-genesis-{}.json",
             std::process::id()
         ));
         std::fs::write(&path, serde_json::to_vec(&genesis).unwrap()).unwrap();

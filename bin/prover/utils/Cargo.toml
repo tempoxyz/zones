@@ -1,6 +1,6 @@
 [package]
-name = "tempo-zone-spf"
-description = "SPF development and input-generation tools for Tempo Zones"
+name = "tempo-zone-prover-utils"
+description = "Prover development and input-generation utilities for Tempo Zones"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

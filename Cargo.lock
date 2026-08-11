@@ -11776,7 +11776,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempo-zone-spf"
+name = "tempo-zone-prover-utils"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
