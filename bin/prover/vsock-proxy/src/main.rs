@@ -1,6 +1,8 @@
-use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::process::ExitCode;
+use std::{
+    io,
+    net::{Ipv4Addr, SocketAddrV4},
+    process::ExitCode,
+};
 
 #[cfg(target_os = "linux")]
 use std::mem::size_of;
@@ -8,8 +10,10 @@ use std::mem::size_of;
 use std::os::fd::FromRawFd;
 
 use clap::Parser;
-use tokio::io::copy_bidirectional;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::copy_bidirectional,
+    net::{TcpListener, TcpStream},
+};
 use tokio_vsock::VsockStream;
 
 #[cfg(target_os = "linux")]
