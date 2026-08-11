@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
@@ -720,17 +720,12 @@ pub struct ZoneManifest {
     leader_ed25519_public_key: PublicKey,
     forced_recovery: Option<ForcedRecoveryConfig>,
     nodes: Vec<ManifestNode>,
-    historical_leaders: Vec<HistoricalLeaderIdentity>,
-}
-
-/// Identity retained only to resolve finalized leadership history.
-///
-/// Historical leaders are deliberately not manifest nodes: they have no network address, do not
-/// join the settlement quorum, and cannot be selected for forced recovery or a new leader update.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HistoricalLeaderIdentity {
-    ed25519_public_key: PublicKey,
-    secp256k1_address: EthereumAddress,
+    /// Identity-only address mappings retained to resolve finalized leadership history.
+    ///
+    /// Historical leaders are deliberately not manifest nodes: they have no network address, do
+    /// not join the settlement quorum, and cannot be selected for forced recovery or a new leader
+    /// update.
+    historical_leaders: BTreeMap<EthereumAddress, PublicKey>,
 }
 
 impl ZoneManifest {
@@ -810,7 +805,7 @@ impl ZoneManifest {
             });
         }
 
-        let mut historical_leaders = Vec::with_capacity(raw.historical_leaders.len());
+        let mut historical_leaders = BTreeMap::new();
         for (index, raw_leader) in raw.historical_leaders.into_iter().enumerate() {
             let ed25519_public_key = parse_ed25519_public_key(
                 &format!("historical_leaders.{index}.ed25519_public_key"),
@@ -834,10 +829,7 @@ impl ZoneManifest {
             if !secp256k1_addresses.insert(secp256k1_address) {
                 return Err(ManifestError::DuplicateSecp256k1Address(secp256k1_address));
             }
-            historical_leaders.push(HistoricalLeaderIdentity {
-                ed25519_public_key,
-                secp256k1_address,
-            });
+            historical_leaders.insert(secp256k1_address, ed25519_public_key);
         }
 
         if !ed25519_public_keys.contains(&leader_ed25519_public_key) {
@@ -1089,12 +1081,7 @@ impl ZoneManifest {
     ) -> Option<&PublicKey> {
         self.node_by_secp256k1_address(secp256k1_address)
             .map(ManifestNode::ed25519_public_key)
-            .or_else(|| {
-                self.historical_leaders
-                    .iter()
-                    .find(|leader| leader.secp256k1_address == secp256k1_address)
-                    .map(|leader| &leader.ed25519_public_key)
-            })
+            .or_else(|| self.historical_leaders.get(&secp256k1_address))
     }
 
     pub(crate) fn has_dns_addresses(&self) -> bool {

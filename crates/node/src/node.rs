@@ -625,20 +625,26 @@ where
             // Freeze the replay/live boundary before the subscriber starts. Historical identities
             // may authenticate transitions that were already finalized when this process began,
             // but must never authorize a leader selected later.
-            let historical_replay_through = l1_provider
-                .get_header_by_number(BlockNumberOrTag::Finalized)
-                .await
-                .map_err(|err| eyre::eyre!("failed reading finalized L1 replay boundary: {err}"))?
-                .map(|header| header.number())
-                .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
-            seed_leadership_schedule(
-                &l1_provider,
-                self.portal_address,
-                snapshot_anchor,
-                p2p.manifest(),
-                &schedule,
-            )
-            .await?;
+            let finalized_replay_boundary = async {
+                l1_provider
+                    .get_header_by_number(BlockNumberOrTag::Finalized)
+                    .await
+                    .map_err(|err| {
+                        eyre::eyre!("failed reading finalized L1 replay boundary: {err}")
+                    })?
+                    .map(|header| header.number())
+                    .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
+            };
+            let (historical_replay_through, ()) = tokio::try_join!(
+                finalized_replay_boundary,
+                seed_leadership_schedule(
+                    &l1_provider,
+                    self.portal_address,
+                    snapshot_anchor,
+                    p2p.manifest(),
+                    &schedule,
+                ),
+            )?;
             // Seed the applied anchor from the persisted checkpoint so it targets the leader
             // of the next anchor from the very start (and not after the first post-restart block)
             schedule.record_applied_anchor(snapshot_anchor);
