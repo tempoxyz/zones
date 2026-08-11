@@ -405,7 +405,7 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> 
 }
 
 /// Errors emitted by the stateless state transition function.
-#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The verifier-bound parent and Zone IDs cannot produce a valid chain ID.
     #[error(transparent)]
@@ -497,6 +497,13 @@ pub enum Error {
     /// The ZoneInbox system transaction failed while advancing Tempo.
     #[error("failed to execute advanceTempo in zone block {block_index}")]
     AdvanceTempoExecution { block_index: usize },
+    /// The ZoneInbox system transaction reverted while advancing Tempo.
+    #[error("advanceTempo reverted in zone block {block_index}: {reason}; data: {output}")]
+    AdvanceTempoRevert {
+        block_index: usize,
+        reason: String,
+        output: alloy_primitives::Bytes,
+    },
     /// The ZoneOutbox system transaction failed while finalizing withdrawals.
     #[error("failed to execute finalizeWithdrawalBatch in zone block {block_index}")]
     FinalizeWithdrawalBatchExecution { block_index: usize },

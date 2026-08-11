@@ -14,7 +14,7 @@ use alloy_evm::{
 };
 use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Decodable as _;
-use alloy_sol_types::SolCall as _;
+use alloy_sol_types::{ContractError, SolCall as _, SolInterface as _};
 use reth_chainspec::EthereumHardforks as _;
 use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
 use revm::{
@@ -27,7 +27,9 @@ use tempo_primitives::{
     TempoHeader, TempoReceipt, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
-use tempo_zone_contracts::{IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{
+    IZoneInbox, IZoneOutbox, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+};
 use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
 use zone_primitives::constants::zone_chain_id;
 
@@ -367,14 +369,38 @@ fn execute_recovered_transaction<'a, 'db, I>(
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
 {
-    let result = executor
-        .execute_transaction_without_commit(transaction)
-        .map_err(|error| map_block_execution_error(error, execution_error))?;
+    let result = match executor.execute_transaction_without_commit(transaction) {
+        Ok(result) => result,
+        Err(error) => return Err(map_block_execution_error(error, execution_error)),
+    };
     if require_success && !result.result().result.is_success() {
-        return Err(execution_error);
+        return Err(match (execution_error, &result.result().result) {
+            (
+                Error::AdvanceTempoExecution { block_index },
+                revm::context::result::ExecutionResult::Revert { output, .. },
+            ) => Error::AdvanceTempoRevert {
+                block_index,
+                reason: decode_advance_tempo_revert(output),
+                output: output.clone(),
+            },
+            (error, _) => error,
+        });
     }
     executor.commit_transaction(result);
     Ok(())
+}
+
+fn decode_advance_tempo_revert(output: &Bytes) -> String {
+    if output.is_empty() {
+        return "empty revert data".to_owned();
+    }
+    if let Ok(error) = ContractError::<IZoneInbox::IZoneInboxErrors>::abi_decode(output.as_ref()) {
+        return format!("{error:?}");
+    }
+    if let Ok(error) = ContractError::<TempoState::TempoStateErrors>::abi_decode(output.as_ref()) {
+        return format!("{error:?}");
+    }
+    "unknown revert".to_owned()
 }
 
 fn map_block_execution_error(
@@ -395,4 +421,40 @@ fn map_block_execution_error(
     }
 
     execution_error
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_sol_types::SolError as _;
+
+    use super::*;
+
+    #[test]
+    fn decodes_zone_inbox_advance_tempo_revert() {
+        let output = Bytes::from(IZoneInbox::InvalidDepositQueueHash {}.abi_encode());
+
+        assert!(decode_advance_tempo_revert(&output).contains("InvalidDepositQueueHash"));
+    }
+
+    #[test]
+    fn decodes_tempo_state_advance_tempo_revert() {
+        let output = Bytes::from(TempoState::InvalidParentHash {}.abi_encode());
+
+        assert!(decode_advance_tempo_revert(&output).contains("InvalidParentHash"));
+    }
+
+    #[test]
+    fn retains_unknown_advance_tempo_revert_data() {
+        let output = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
+        let error = Error::AdvanceTempoRevert {
+            block_index: 7,
+            reason: decode_advance_tempo_revert(&output),
+            output,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "advanceTempo reverted in zone block 7: unknown revert; data: 0xdeadbeef"
+        );
+    }
 }
