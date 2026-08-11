@@ -64,10 +64,6 @@ struct Cli {
     /// Maximum time to wait for a VSOCK connection, in seconds.
     #[arg(long, default_value = "10", value_name = "SECONDS")]
     connect_timeout_secs: NonZeroU64,
-
-    /// Maximum lifetime of a proxied connection, in seconds.
-    #[arg(long, default_value = "3600", value_name = "SECONDS")]
-    session_timeout_secs: NonZeroU64,
 }
 
 impl Cli {
@@ -76,7 +72,6 @@ impl Cli {
         let listener = TcpListener::bind(listen_addr).await?;
         let connections = Arc::new(Semaphore::new(self.max_connections.get()));
         let connect_timeout = Duration::from_secs(self.connect_timeout_secs.get());
-        let session_timeout = Duration::from_secs(self.session_timeout_secs.get());
 
         info!(
             %listen_addr,
@@ -84,7 +79,6 @@ impl Cli {
             vsock_port = self.vsock_port,
             max_connections = self.max_connections.get(),
             connect_timeout_secs = self.connect_timeout_secs.get(),
-            session_timeout_secs = self.session_timeout_secs.get(),
             "Listening for TCP connections"
         );
 
@@ -110,8 +104,7 @@ impl Cli {
             let port = self.vsock_port;
 
             tokio::spawn(async move {
-                if let Err(error) =
-                    proxy_connection(tcp, cid, port, permit, connect_timeout, session_timeout).await
+                if let Err(error) = proxy_connection(tcp, cid, port, permit, connect_timeout).await
                 {
                     error!(%peer, %error, "Connection failed");
                 }
@@ -126,7 +119,6 @@ async fn proxy_connection(
     port: u32,
     permit: OwnedSemaphorePermit,
     connect_timeout: Duration,
-    session_timeout: Duration,
 ) -> io::Result<()> {
     // A timed-out blocking task cannot be cancelled, so move the permit into it to keep the
     // connection counted until connect_blocking returns. On success, the returned permit remains
@@ -138,9 +130,7 @@ async fn proxy_connection(
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "VSOCK connection timed out"))??;
     let mut vsock = tokio_vsock::VsockStream::new(stream?)?;
-    timeout(session_timeout, copy_bidirectional(&mut tcp, &mut vsock))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy session timed out"))??;
+    copy_bidirectional(&mut tcp, &mut vsock).await?;
     Ok(())
 }
 
