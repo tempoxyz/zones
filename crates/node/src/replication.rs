@@ -810,6 +810,13 @@ pub(crate) async fn run_follower_block_sync<P>(
                                 .zoneHeight
                                 .try_into()
                                 .wrap_err("settlement height does not fit in u64")?;
+                            let persisted_head = provider
+                                .last_block_number()
+                                .wrap_err("failed reading persisted zone head")?;
+                            eyre::ensure!(
+                                height <= persisted_head,
+                                "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
+                            );
                             let expected = build_settlement_attestation(
                                 &provider,
                                 height,
