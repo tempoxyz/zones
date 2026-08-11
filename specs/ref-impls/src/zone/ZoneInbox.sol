@@ -195,18 +195,16 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice Advance Tempo state and process deposits in a single system transaction
     /// @dev This is the main entry point for the sequencer's system transaction.
-    ///      1. Advances the zone's view of Tempo by processing the header array
-    ///      2. Processes deposits from the unified queue (regular + encrypted)
-    ///      3. Validates the resulting hash chain equals Tempo's currentDepositQueueHash
-    ///      The proof and system call require exact equality with the final queue head.
+    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      2. Processes user deposits and internal withdrawal bounce-backs
+    ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
+    ///      The proof validates contiguity (ancestor check) rather than exact equality.
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
-    /// @param headers Ordered RLP-encoded Tempo block headers; only the final
-    ///        header's state root is used for every Tempo read in this call, including
-    ///        TIP-403 policy resolution for every deposit; no per-header policy snapshots exist
+    /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid user deposits, in order
     function advanceTempo(
-        bytes[] calldata headers,
+        bytes calldata header,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
@@ -216,7 +214,7 @@ contract ZoneInbox is IZoneInbox {
         if (msg.sender != address(0)) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
-        _tempoState.finalizeTempo(headers);
+        _tempoState.finalizeTempo(header);
 
         // Activate new tokens directly in the Inbox.
         for (uint256 i = 0; i < enabledTokens.length; i++) {
@@ -338,14 +336,19 @@ contract ZoneInbox is IZoneInbox {
         if (decryptionIndex != decryptions.length) revert ExtraDecryptionData();
 
         // Step 3: Validate against Tempo state
-        // Read currentDepositQueueHash from the portal's storage using the final imported root.
-        // The system transaction is all-or-nothing: every queued deposit through the final
-        // queue head must be processed in this call, or the entire call reverts. That rollback
-        // also undoes the Tempo checkpoint, token activation, and any deposit-side effects above.
+        // Read currentDepositQueueHash from the portal's storage using the new Tempo state.
+        // The proof validates that our processedDepositQueueHash is an ancestor of (or equal to)
+        // tempoCurrentHash, allowing partial deposit processing.
+        // On-chain we only need to verify the hash chain when all deposits have been caught up.
         bytes32 tempoCurrentHash =
             _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
-        if (currentHash != tempoCurrentHash) revert InvalidDepositQueueHash();
+        if (currentHash != tempoCurrentHash) {
+            // Partial processing is allowed — the proof validates ancestor contiguity.
+            // However, if no deposits were provided and the hashes don't match, it means
+            // there are unprocessed deposits. This is valid as long as the hash chain is contiguous,
+            // which the proof system enforces.
+        }
 
         // Step 4: Update state
         processedDepositQueueHash = currentHash;

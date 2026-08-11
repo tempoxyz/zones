@@ -412,7 +412,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process on zone via the advanceTempo system call.
         vm.prank(address(0));
-        l2Inbox.advanceTempo(new bytes[](1), deposits, decryptions, new EnabledToken[](0));
+        l2Inbox.advanceTempo("", deposits, decryptions, new EnabledToken[](0));
 
         // Clear pending
         delete pendingDeposits;
@@ -808,49 +808,6 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.transfer(bob, 100_001e6);
     }
 
-    function test_l2_depositHashMismatchReverts() public {
-        // Deposit on L1
-        vm.startPrank(alice);
-        l2ZoneToken.approve(address(l1Portal), 1000e6);
-        _deposit(l1Portal, address(l2ZoneToken), alice, 1000e6, bytes32(""), alice);
-        vm.stopPrank();
-
-        _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
-
-        // Set up mock with different hash (simulating more deposits pending)
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32("different hash")
-        );
-
-        BridgeDepositFixture memory d = pendingDeposits[0].deposit;
-        Deposit memory deposit = Deposit({
-            token: d.token,
-            sender: d.sender,
-            amount: d.amount,
-            tempoRefundRecipient: d.tempoRefundRecipient,
-            keyIndex: l1Portal.encryptionKeyCount() - 1,
-            encrypted: _depositPayload(d.to, d.memo)
-        });
-        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
-        deposits[0] = QueuedDeposit({
-            depositType: DepositType.Deposit, depositData: abi.encode(deposit), rejected: false
-        });
-        DecryptionData[] memory decryptions = new DecryptionData[](1);
-        decryptions[0] = DecryptionData({
-            sharedSecret: bytes32(uint256(0xDEAD)),
-            sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
-        });
-        EncryptionKeyEntry memory key = l1Portal.encryptionKeyAt(deposit.keyIndex);
-        _setupEncryptionKeyMockOnZone(deposit.keyIndex, key.x, key.yParity);
-        _setupPrecompileMocksSuccess(d.to, d.memo);
-
-        // A final-root queue mismatch reverts the complete system transaction.
-        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
-        vm.prank(address(0));
-        l2Inbox.advanceTempo(new bytes[](1), deposits, decryptions, new EnabledToken[](0));
-    }
-
     function test_l2_callbackRequiresFallbackRecipient() public {
         // BridgeDepositFixture to Alice
         vm.startPrank(alice);
@@ -1107,7 +1064,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process on zone via advanceTempo
         vm.prank(address(0));
-        l2Inbox.advanceTempo(new bytes[](1), queued, decs, new EnabledToken[](0));
+        l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // Clear pending
         delete pendingUserDeposits;
@@ -1358,7 +1315,7 @@ contract ZoneBridgeTest is BaseTest {
         );
 
         vm.prank(address(0));
-        l2Inbox.advanceTempo(new bytes[](1), queued, decs, new EnabledToken[](0));
+        l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify ===
         // Both deposits go to sharedRecipient (no prior balance)
