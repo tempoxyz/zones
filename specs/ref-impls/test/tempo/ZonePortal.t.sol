@@ -3307,7 +3307,7 @@ contract ZonePortalTest is BaseTest {
         // Test the simplified single-slot deposit design:
         // currentDepositQueueHash: head of chain (new deposits land here)
         // The zone tracks its own processedDepositQueueHash in EVM state.
-        // The proof reads currentDepositQueueHash from Tempo state to validate ancestry.
+        // The proof reads currentDepositQueueHash from Tempo state to validate equality.
 
         // Initial state: zero
         assertEq(portal.currentDepositQueueHash(), bytes32(0));

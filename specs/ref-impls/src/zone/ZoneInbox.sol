@@ -197,11 +197,10 @@ contract ZoneInbox is IZoneInbox {
     /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes user deposits and internal withdrawal bounce-backs
-    ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
-    ///      The proof validates contiguity (ancestor check) rather than exact equality.
+    ///      3. Requires the resulting hash chain to equal Tempo's currentDepositQueueHash
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param deposits All queued deposits through the current head, oldest first
     /// @param decryptions Decryption data for valid user deposits, in order
     function advanceTempo(
         bytes calldata header,
@@ -337,18 +336,13 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state.
-        // The proof validates that our processedDepositQueueHash is an ancestor of (or equal to)
-        // tempoCurrentHash, allowing partial deposit processing.
-        // On-chain we only need to verify the hash chain when all deposits have been caught up.
+        // The system transaction is all-or-nothing: every queued deposit through the current
+        // queue head must be processed in this call, or the entire call reverts. That rollback
+        // also undoes the Tempo checkpoint, token activation, and any deposit-side effects above.
         bytes32 tempoCurrentHash =
             _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
-        if (currentHash != tempoCurrentHash) {
-            // Partial processing is allowed — the proof validates ancestor contiguity.
-            // However, if no deposits were provided and the hashes don't match, it means
-            // there are unprocessed deposits. This is valid as long as the hash chain is contiguous,
-            // which the proof system enforces.
-        }
+        if (currentHash != tempoCurrentHash) revert InvalidDepositQueueHash();
 
         // Step 4: Update state
         processedDepositQueueHash = currentHash;

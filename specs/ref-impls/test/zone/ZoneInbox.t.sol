@@ -140,6 +140,37 @@ contract ZoneInboxTest is Test {
         assertEq(inbox.processedDepositQueueHash(), bytes32(0));
     }
 
+    function test_advanceTempo_revertsForQueueHashMismatchAndRollsBack() public {
+        address recipient = address(0x500);
+        uint128 amount = 1000e6;
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(recipient, bytes32("payment"));
+
+        (QueuedDeposit memory deposit,) = _makeDeposit(alice, amount, 0);
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = deposit;
+
+        DecryptionData[] memory decryptions = new DecryptionData[](1);
+        decryptions[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xdeadbeef)),
+            sharedSecretYParity: 0x02,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("different queue head")
+        );
+
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decryptions, new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+        assertEq(zoneToken.balanceOf(recipient), 0);
+        assertEq(tempoState.tempoBlockNumber(), GENESIS_TEMPO_BLOCK_NUMBER);
+        assertEq(tempoState.tempoBlockHash(), GENESIS_TEMPO_BLOCK_HASH);
+    }
+
     /*//////////////////////////////////////////////////////////////
                           EVENT EMISSION TESTS
     //////////////////////////////////////////////////////////////*/

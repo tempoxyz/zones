@@ -10,8 +10,8 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 use zone_primitives::constants::EMPTY_SENTINEL;
 
-/// Maximum number of deposits that may remain unprocessed in the portal queue.
-pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+/// Maximum number of deposits accepted by a portal in one Tempo block.
+pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
 /// Maximum number of token enablements imported from one Tempo block.
 pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
 /// Maximum UTF-8 byte length of an enabled token name.
