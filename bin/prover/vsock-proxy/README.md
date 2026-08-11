@@ -18,6 +18,16 @@ in enclave CID `16`:
 tempo-vsock-proxy 5000 16 5000
 ```
 
+The proxy limits resource usage with three optional settings:
+
+- `--max-connections` limits concurrent TCP/VSOCK sessions (default: `256`).
+- `--connect-timeout-secs` limits VSOCK connection setup (default: `10`).
+- `--session-timeout-secs` limits the lifetime of each session (default:
+  `3600`).
+
+Clients above the connection limit are rejected. Transient TCP accept failures
+are retried after a short delay.
+
 ## Why not `socat`?
 
 Nitro Enclave connections must use the guest-to-host VSOCK transport. When a

@@ -1,16 +1,23 @@
 use std::{
     io,
     net::{Ipv4Addr, SocketAddrV4},
+    num::{NonZeroU64, NonZeroUsize},
     process::ExitCode,
+    sync::Arc,
+    time::Duration,
 };
 
 use clap::Parser;
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::{sleep, timeout},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -49,27 +56,63 @@ struct Cli {
     /// Destination VSOCK port.
     #[arg(value_name = "VSOCK_PORT")]
     vsock_port: u32,
+
+    /// Maximum number of connections that may be active at once.
+    #[arg(long, default_value = "256")]
+    max_connections: NonZeroUsize,
+
+    /// Maximum time to wait for a VSOCK connection, in seconds.
+    #[arg(long, default_value = "10", value_name = "SECONDS")]
+    connect_timeout_secs: NonZeroU64,
+
+    /// Maximum lifetime of a proxied connection, in seconds.
+    #[arg(long, default_value = "3600", value_name = "SECONDS")]
+    session_timeout_secs: NonZeroU64,
 }
 
 impl Cli {
     async fn run(self) -> io::Result<()> {
         let listen_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.listen_port);
         let listener = TcpListener::bind(listen_addr).await?;
+        let connections = Arc::new(Semaphore::new(self.max_connections.get()));
+        let connect_timeout = Duration::from_secs(self.connect_timeout_secs.get());
+        let session_timeout = Duration::from_secs(self.session_timeout_secs.get());
 
         info!(
             %listen_addr,
             vsock_cid = self.vsock_cid,
             vsock_port = self.vsock_port,
+            max_connections = self.max_connections.get(),
+            connect_timeout_secs = self.connect_timeout_secs.get(),
+            session_timeout_secs = self.session_timeout_secs.get(),
             "Listening for TCP connections"
         );
 
         loop {
-            let (tcp, peer) = listener.accept().await?;
+            let (tcp, peer) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    error!(%error, "Failed to accept TCP connection; retrying");
+                    sleep(ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+            };
+
+            let permit = match Arc::clone(&connections).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    warn!(%peer, "Connection limit reached; rejecting client");
+                    continue;
+                }
+            };
+
             let cid = self.vsock_cid;
             let port = self.vsock_port;
 
             tokio::spawn(async move {
-                if let Err(error) = proxy_connection(tcp, cid, port).await {
+                if let Err(error) =
+                    proxy_connection(tcp, cid, port, permit, connect_timeout, session_timeout).await
+                {
                     error!(%peer, %error, "Connection failed");
                 }
             });
@@ -77,12 +120,27 @@ impl Cli {
     }
 }
 
-async fn proxy_connection(mut tcp: TcpStream, cid: u32, port: u32) -> io::Result<()> {
-    let stream = tokio::task::spawn_blocking(move || connect_blocking(cid, port))
+async fn proxy_connection(
+    mut tcp: TcpStream,
+    cid: u32,
+    port: u32,
+    permit: OwnedSemaphorePermit,
+    connect_timeout: Duration,
+    session_timeout: Duration,
+) -> io::Result<()> {
+    // A timed-out blocking task cannot be cancelled, so move the permit into it to keep the
+    // connection counted until connect_blocking returns. On success, the returned permit remains
+    // held for the lifetime of the proxy session.
+    let (stream, _permit) = timeout(
+        connect_timeout,
+        tokio::task::spawn_blocking(move || (connect_blocking(cid, port), permit)),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "VSOCK connection timed out"))??;
+    let mut vsock = tokio_vsock::VsockStream::new(stream?)?;
+    timeout(session_timeout, copy_bidirectional(&mut tcp, &mut vsock))
         .await
-        .map_err(io::Error::other)??;
-    let mut vsock = tokio_vsock::VsockStream::new(stream)?;
-    copy_bidirectional(&mut tcp, &mut vsock).await?;
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy session timed out"))??;
     Ok(())
 }
 
@@ -146,10 +204,40 @@ fn connect_blocking(_cid: u32, _port: u32) -> io::Result<vsock::VsockStream> {
 }
 
 #[cfg(test)]
-#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 
+    #[test]
+    fn parses_connection_limits() {
+        let cli = Cli::try_parse_from([
+            "proxy",
+            "5000",
+            "16",
+            "5001",
+            "--max-connections",
+            "64",
+            "--connect-timeout-secs",
+            "5",
+            "--session-timeout-secs",
+            "600",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.max_connections.get(), 64);
+        assert_eq!(cli.connect_timeout_secs.get(), 5);
+        assert_eq!(cli.session_timeout_secs.get(), 600);
+    }
+
+    #[test]
+    fn uses_sensible_connection_limit_defaults() {
+        let cli = Cli::try_parse_from(["proxy", "5000", "16", "5001"]).unwrap();
+
+        assert_eq!(cli.max_connections.get(), 256);
+        assert_eq!(cli.connect_timeout_secs.get(), 10);
+        assert_eq!(cli.session_timeout_secs.get(), 3600);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn socket_address_matches_linux_abi() {
         assert_eq!(
