@@ -24,7 +24,7 @@ target "chef" {
 }
 
 target "prover-chef" {
-  dockerfile = "Dockerfile.chef"
+  dockerfile = "docker/Dockerfile.chef"
   context = "."
   platforms = ["linux/amd64"]
   args = {
@@ -55,7 +55,7 @@ target "tempo-zone" {
 
 target "tempo-zone-prover" {
   inherits = ["docker-metadata"]
-  dockerfile = "Dockerfile.prover"
+  dockerfile = "docker/Dockerfile.prover"
   context = "."
   contexts = {
     chef = "target:prover-chef"

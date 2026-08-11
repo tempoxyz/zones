@@ -1,6 +1,6 @@
 # Tempo Zone SPF enclave service
 
-`tempo-zone-prover` runs the Zone stateless proof function inside an AWS Nitro Enclave. The
+`tempo-zone-prover-enclave` runs the Zone stateless proof function inside an AWS Nitro Enclave. The
 parent instance generates a complete `BatchWitness` and sends it to the enclave over `AF_VSOCK`;
 the enclave performs no RPC or filesystem access.
 

@@ -18,7 +18,7 @@ zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives.workspace = true
 zone-rpc.workspace = true
 zone-spf.workspace = true
-tempo-zone-prover.workspace = true
+tempo-zone-prover-enclave.workspace = true
 
 tempo-alloy.workspace = true
 tempo-chainspec.workspace = true

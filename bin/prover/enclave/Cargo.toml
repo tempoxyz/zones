@@ -1,5 +1,5 @@
 [package]
-name = "tempo-zone-prover"
+name = "tempo-zone-prover-enclave"
 description = "AWS Nitro Enclave service for the Tempo Zone SPF"
 version.workspace = true
 edition.workspace = true
@@ -18,10 +18,12 @@ zone-spf.workspace = true
 tempo-chainspec.workspace = true
 
 clap = { workspace = true, features = ["env"] }
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

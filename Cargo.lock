@@ -11811,7 +11811,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempo-zone-prover"
+name = "tempo-zone-prover-enclave"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
@@ -11819,6 +11819,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "clap",
+ "futures",
  "reth-trie-common",
  "serde",
  "serde_json",
@@ -11826,6 +11827,7 @@ dependencies = [
  "tempo-primitives",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tokio-vsock",
  "tracing",
  "tracing-subscriber",
@@ -11858,7 +11860,7 @@ dependencies = [
  "tempo-chainspec",
  "tempo-primitives",
  "tempo-zone-contracts",
- "tempo-zone-prover",
+ "tempo-zone-prover-enclave",
  "tokio",
  "tracing",
  "tracing-subscriber",

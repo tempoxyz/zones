@@ -4,7 +4,8 @@ use std::{collections::HashMap, io, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::{Framed, LengthDelimitedCodec, LengthDelimitedCodecError};
 use zone_chainspec::ZoneChainSpec;
 use zone_spf::{BatchOutput, BatchWitness, SpfConfig, prove_zone_batch};
 
@@ -56,16 +57,6 @@ pub enum ErrorCode {
     InternalError,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum FrameError {
-    #[error("request frame is truncated")]
-    Truncated,
-    #[error("request payload is {actual} bytes; maximum is {maximum} bytes")]
-    TooLarge { actual: usize, maximum: usize },
-    #[error("frame I/O failed: {0}")]
-    Io(String),
-}
-
 /// Tempo chain specifications trusted by this prover in addition to built-in networks.
 #[derive(Debug, Default)]
 pub struct TrustedChainSpecs {
@@ -109,38 +100,43 @@ pub enum TrustedChainSpecError {
     Duplicate(u64),
 }
 
-pub async fn read_frame(
-    reader: &mut (impl AsyncRead + Unpin),
-    maximum: usize,
-) -> Result<Vec<u8>, FrameError> {
-    let mut header = [0_u8; 4];
-    read_exact_or_truncated(reader, &mut header).await?;
-    let length = u32::from_be_bytes(header) as usize;
-    if length > maximum {
-        return Err(FrameError::TooLarge {
-            actual: length,
-            maximum,
-        });
-    }
-
-    let mut payload = vec![0_u8; length];
-    read_exact_or_truncated(reader, &mut payload).await?;
-    Ok(payload)
+/// Wraps an I/O stream in the prover's four-byte, big-endian length-delimited protocol.
+pub fn framed<T>(io: T, maximum: usize) -> Framed<T, LengthDelimitedCodec>
+where
+    T: AsyncRead + AsyncWrite,
+{
+    LengthDelimitedCodec::builder()
+        .max_frame_length(maximum)
+        .new_framed(io)
 }
 
-pub async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), payload: &[u8]) -> io::Result<()> {
-    let length = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "response frame exceeds 4 GiB"))?;
-    writer.write_all(&length.to_be_bytes()).await?;
-    writer.write_all(payload).await?;
-    writer.flush().await
+/// Converts a framing I/O error directly into a prover protocol response.
+pub fn framing_error_response(error: &io::Error, maximum: usize) -> VerifyResponse {
+    let (code, message) = if error
+        .get_ref()
+        .is_some_and(|source| source.is::<LengthDelimitedCodecError>())
+    {
+        (
+            ErrorCode::RequestTooLarge,
+            format!("request payload exceeds the maximum of {maximum} bytes"),
+        )
+    } else if error.kind() == io::ErrorKind::Other
+        && error.to_string() == "bytes remaining on stream"
+    {
+        (
+            ErrorCode::TruncatedFrame,
+            "request frame is truncated".into(),
+        )
+    } else {
+        (
+            ErrorCode::InternalError,
+            format!("frame I/O failed: {error}"),
+        )
+    };
+    error_response(None, code, message)
 }
 
-pub fn process_payload(payload: &[u8]) -> VerifyResponse {
-    process_payload_with_specs(payload, &TrustedChainSpecs::default())
-}
-
-pub fn process_payload_with_specs(payload: &[u8], specs: &TrustedChainSpecs) -> VerifyResponse {
+pub fn process_payload(payload: &[u8], specs: &TrustedChainSpecs) -> VerifyResponse {
     let request = match serde_json::from_slice::<VerifyRequest>(payload) {
         Ok(request) => request,
         Err(error) => {
@@ -170,7 +166,10 @@ pub fn process_payload_with_specs(payload: &[u8], specs: &TrustedChainSpecs) -> 
             format!("unsupported Tempo chain ID {}", request.tempo_chain_id),
         );
     };
-    let config = SpfConfig::new(Arc::new(ZoneChainSpec::from(tempo_spec)));
+    let config = SpfConfig::new(
+        Arc::new(ZoneChainSpec::from(tempo_spec)),
+        request.witness.public_inputs.portal,
+    );
 
     match prove_zone_batch(&config, request.witness) {
         Ok(output) => VerifyResponse::Ok {
@@ -184,15 +183,6 @@ pub fn process_payload_with_specs(payload: &[u8], specs: &TrustedChainSpecs) -> 
             error.to_string(),
         ),
     }
-}
-
-pub fn frame_error_response(error: &FrameError) -> VerifyResponse {
-    let code = match error {
-        FrameError::TooLarge { .. } => ErrorCode::RequestTooLarge,
-        FrameError::Truncated => ErrorCode::TruncatedFrame,
-        FrameError::Io(_) => ErrorCode::InternalError,
-    };
-    error_response(None, code, error.to_string())
 }
 
 pub fn serialize_response(response: &VerifyResponse) -> Vec<u8> {
@@ -209,17 +199,6 @@ fn error_response(request_id: Option<String>, code: ErrorCode, message: String) 
     }
 }
 
-async fn read_exact_or_truncated(
-    reader: &mut (impl AsyncRead + Unpin),
-    buffer: &mut [u8],
-) -> Result<(), FrameError> {
-    match reader.read_exact(buffer).await {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Err(FrameError::Truncated),
-        Err(error) => Err(FrameError::Io(error.to_string())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
@@ -232,37 +211,49 @@ mod tests {
 
     #[tokio::test]
     async fn frame_round_trip() {
-        let payload = br#"{"version":1}"#;
-        let mut encoded = Vec::new();
-        write_frame(&mut encoded, payload).await.unwrap();
+        use futures::{SinkExt as _, StreamExt as _};
 
-        assert_eq!(
-            read_frame(&mut encoded.as_slice(), 1024).await.unwrap(),
-            payload
-        );
+        let payload = br#"{"version":1}"#;
+        let (client, server) = tokio::io::duplex(1024);
+        let mut client = framed(client, 1024);
+        let mut server = framed(server, 1024);
+        client.send(payload.as_slice().into()).await.unwrap();
+
+        assert_eq!(server.next().await.unwrap().unwrap(), payload.as_slice());
     }
 
     #[tokio::test]
     async fn rejects_oversized_and_truncated_frames() {
-        let oversized = 10_u32.to_be_bytes();
-        assert_eq!(
-            read_frame(&mut oversized.as_slice(), 4).await,
-            Err(FrameError::TooLarge {
-                actual: 10,
-                maximum: 4,
-            })
-        );
+        use futures::StreamExt as _;
+        use tokio::io::AsyncWriteExt as _;
 
-        let truncated = [0, 0, 0, 2, 1];
-        assert_eq!(
-            read_frame(&mut truncated.as_slice(), 4).await,
-            Err(FrameError::Truncated)
-        );
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        writer.write_all(&10_u32.to_be_bytes()).await.unwrap();
+        let error = framed(reader, 4).next().await.unwrap().unwrap_err();
+        assert!(matches!(
+            framing_error_response(&error, 4),
+            VerifyResponse::Error {
+                code: ErrorCode::RequestTooLarge,
+                ..
+            }
+        ));
+
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        writer.write_all(&[0, 0, 0, 2, 1]).await.unwrap();
+        writer.shutdown().await.unwrap();
+        let error = framed(reader, 4).next().await.unwrap().unwrap_err();
+        assert!(matches!(
+            framing_error_response(&error, 4),
+            VerifyResponse::Error {
+                code: ErrorCode::TruncatedFrame,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn malformed_json_has_a_stable_error() {
-        let response = process_payload(b"not json");
+        let response = process_payload(b"not json", &TrustedChainSpecs::default());
         assert!(matches!(
             response,
             VerifyResponse::Error {
@@ -296,7 +287,10 @@ mod tests {
             tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
-        let response = process_payload(&serde_json::to_vec(&request).unwrap());
+        let response = process_payload(
+            &serde_json::to_vec(&request).unwrap(),
+            &TrustedChainSpecs::default(),
+        );
 
         assert!(matches!(
             response,
@@ -316,7 +310,10 @@ mod tests {
             tempo_chain_id: 99,
             witness: empty_witness(),
         };
-        let response = process_payload(&serde_json::to_vec(&request).unwrap());
+        let response = process_payload(
+            &serde_json::to_vec(&request).unwrap(),
+            &TrustedChainSpecs::default(),
+        );
 
         assert!(matches!(
             response,
@@ -336,7 +333,10 @@ mod tests {
             tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
-        let response = process_payload(&serde_json::to_vec(&request).unwrap());
+        let response = process_payload(
+            &serde_json::to_vec(&request).unwrap(),
+            &TrustedChainSpecs::default(),
+        );
 
         assert!(matches!(
             response,
@@ -364,7 +364,7 @@ mod tests {
             witness: empty_witness(),
         };
 
-        let response = process_payload_with_specs(&serde_json::to_vec(&request).unwrap(), &specs);
+        let response = process_payload(&serde_json::to_vec(&request).unwrap(), &specs);
 
         assert!(matches!(
             response,
@@ -396,6 +396,7 @@ mod tests {
         };
         BatchWitness {
             public_inputs: PublicInputs {
+                parent_chain_id: 42_431,
                 zone_id: 1,
                 portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,

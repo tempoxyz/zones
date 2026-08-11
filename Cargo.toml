@@ -9,7 +9,7 @@ publish = false
 members = [
   "bin/prover/utils",
   "bin/prover/vsock-proxy",
-  "bin/tempo-zone-prover",
+  "bin/prover/enclave",
   "bin/tempo-zone",
   "crates/chainspec",
   "crates/contracts",
@@ -121,7 +121,7 @@ tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "de7
 
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
-tempo-zone-prover = { path = "bin/tempo-zone-prover" }
+tempo-zone-prover-enclave = { path = "bin/prover/enclave" }
 zone-chainspec = { path = "crates/chainspec" }
 zone-evm = { path = "crates/evm" }
 zone-l1 = { path = "crates/l1" }
@@ -220,6 +220,7 @@ futures = "0.3.31"
 indicatif = "0.18"
 itertools = "0.14.0"
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
+libc = "0.2.186"
 metrics = "0.24.3"
 k256 = { version = "0.13.4", features = ["arithmetic", "ecdh"] }
 parking_lot = "0.12.4"
@@ -240,7 +241,6 @@ thiserror = "2"
 tokio = { version = "1.45.1", features = ["full"] }
 tokio-vsock = "0.7.2"
 tokio-util = "0.7.18"
-tokio-vsock = "0.7.2"
 toml = "0.9.12"
 vsock = "0.5.4"
 axum = "0.8"

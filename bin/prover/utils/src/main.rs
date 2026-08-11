@@ -16,7 +16,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{SinkExt, StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -24,9 +24,8 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tempo_zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, VerifyRequest, VerifyResponse, read_frame,
-    write_frame,
+use tempo_zone_prover_enclave::{
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, VerifyRequest, VerifyResponse, framed,
 };
 use tokio::net::TcpStream;
 use tracing::{debug, info};
@@ -413,14 +412,19 @@ async fn send_to_prover(
     expected_output: &BatchOutput,
 ) -> Result<usize> {
     let payload = serde_json::to_vec(request).context("serialize prover request")?;
-    let mut stream = TcpStream::connect(target)
+    let request_bytes = payload.len();
+    let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
-    write_frame(&mut stream, &payload)
+    let mut stream = framed(stream, DEFAULT_MAX_REQUEST_BYTES);
+    stream
+        .send(payload.into())
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
-    let response_payload = read_frame(&mut stream, DEFAULT_MAX_REQUEST_BYTES)
+    let response_payload = stream
+        .next()
         .await
+        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?
         .map_err(|error| eyre!(error))
         .wrap_err_with(|| format!("read response from target prover at {target}"))?;
     let response = serde_json::from_slice::<VerifyResponse>(&response_payload)
@@ -470,7 +474,7 @@ async fn send_to_prover(
         }
     }
 
-    Ok(payload.len())
+    Ok(request_bytes)
 }
 
 async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
@@ -1369,10 +1373,9 @@ mod tests {
         let response_output = expected_output.clone();
 
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let payload = read_frame(&mut stream, DEFAULT_MAX_REQUEST_BYTES)
-                .await
-                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = framed(stream, DEFAULT_MAX_REQUEST_BYTES);
+            let payload = stream.next().await.unwrap().unwrap();
             let received = serde_json::from_slice::<VerifyRequest>(&payload).unwrap();
             assert_eq!(received.request_id, "tcp-test");
 
@@ -1381,7 +1384,8 @@ mod tests {
                 request_id: received.request_id,
                 output: response_output,
             };
-            write_frame(&mut stream, &serde_json::to_vec(&response).unwrap())
+            stream
+                .send(serde_json::to_vec(&response).unwrap().into())
                 .await
                 .unwrap();
         });
@@ -1396,6 +1400,7 @@ mod tests {
     fn empty_witness() -> BatchWitness {
         BatchWitness {
             public_inputs: PublicInputs {
+                parent_chain_id: 42_431,
                 zone_id: 1,
                 portal: Address::ZERO,
                 tempo_block_number: 0,
