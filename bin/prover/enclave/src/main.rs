@@ -7,6 +7,8 @@ use tempo_zone_prover_enclave::{DEFAULT_MAX_REQUEST_BYTES, DEFAULT_VSOCK_PORT, T
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
+const EMBEDDED_TEMPO_GENESIS: &str = "/etc/tempo/genesis/genesis.json";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -78,8 +80,14 @@ impl Cli {
 
     fn load_trusted_chain_specs(&self) -> io::Result<TrustedChainSpecs> {
         let mut specs = TrustedChainSpecs::default();
-        for path in &self.tempo_genesis {
-            let raw = std::fs::read(path)?;
+        let mut paths = self.tempo_genesis.clone();
+        let embedded = PathBuf::from(EMBEDDED_TEMPO_GENESIS);
+        if embedded.is_file() && !paths.contains(&embedded) {
+            paths.push(embedded);
+        }
+
+        for path in paths {
+            let raw = std::fs::read(&path)?;
             let genesis = serde_json::from_slice::<Genesis>(&raw).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,

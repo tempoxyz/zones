@@ -55,7 +55,7 @@ target "tempo-zone" {
 
 target "tempo-zone-prover" {
   inherits = ["docker-metadata"]
-  dockerfile = "docker/Dockerfile.prover"
+  dockerfile = "docker/Dockerfile.prover-enclave"
   context = "."
   contexts = {
     chef = "target:prover-chef"
