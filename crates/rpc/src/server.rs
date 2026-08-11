@@ -100,7 +100,7 @@ fn serialize_response(response: JsonRpcResponse) -> String {
     serde_json::to_string(&response).expect("JsonRpcResponse serialization is infallible")
 }
 
-fn append_batch_response(
+pub(crate) fn append_batch_response(
     batch: &mut String,
     response: JsonRpcResponse,
     max_response_size: usize,
