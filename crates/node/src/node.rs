@@ -19,6 +19,8 @@ use crate::{
     },
 };
 use alloy_chains::Chain;
+use alloy_consensus::BlockHeader as _;
+use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
@@ -620,6 +622,15 @@ where
         if let Some(p2p) = self.p2p_config.as_ref() {
             let schedule = p2p.leadership();
             let snapshot_anchor = tempo_block_number;
+            // Freeze the replay/live boundary before the subscriber starts. Historical identities
+            // may authenticate transitions that were already finalized when this process began,
+            // but must never authorize a leader selected later.
+            let historical_replay_through = l1_provider
+                .get_header_by_number(BlockNumberOrTag::Finalized)
+                .await
+                .map_err(|err| eyre::eyre!("failed reading finalized L1 replay boundary: {err}"))?
+                .map(|header| header.number())
+                .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
             seed_leadership_schedule(
                 &l1_provider,
                 self.portal_address,
@@ -640,6 +651,7 @@ where
             self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
                 schedule,
                 manifest: p2p.manifest().clone(),
+                historical_replay_through,
             }));
         }
 
@@ -909,20 +921,34 @@ where
 struct ScheduleLeadershipSink {
     schedule: LeadershipSchedule,
     manifest: Arc<ZoneManifest>,
+    /// Finalized L1 height captured before subscriber startup. Historical identities are valid
+    /// only while replaying transitions at or below this boundary.
+    historical_replay_through: u64,
 }
 
 impl LeadershipSink for ScheduleLeadershipSink {
     fn apply_leader_transition(&self, transition: &LeaderTransition) -> eyre::Result<()> {
-        let leader = self
-            .manifest
-            .leader_ed25519_by_secp256k1_address(transition.new_leader)
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "finalized portal leader {} (epoch {}) does not map to any active or historical manifest identity",
-                    transition.new_leader,
-                    transition.epoch,
-                )
-            })?;
+        let replaying_history = transition.activation_tempo_block <= self.historical_replay_through;
+        let leader = if replaying_history {
+            self.manifest
+                .leader_ed25519_by_secp256k1_address(transition.new_leader)
+        } else {
+            self.manifest
+                .node_by_secp256k1_address(transition.new_leader)
+                .map(|node| node.ed25519_public_key())
+        }
+        .ok_or_else(|| {
+            let allowed = if replaying_history {
+                "active or historical"
+            } else {
+                "active"
+            };
+            eyre::eyre!(
+                "finalized portal leader {} (epoch {}) does not map to any {allowed} manifest identity",
+                transition.new_leader,
+                transition.epoch,
+            )
+        })?;
         self.schedule.publish(LeadershipState::new(
             transition.epoch,
             leader.clone(),
@@ -1832,6 +1858,7 @@ mod tests {
         let sink = ScheduleLeadershipSink {
             schedule: schedule.clone(),
             manifest: Arc::new(manifest),
+            historical_replay_through: 100,
         };
 
         sink.apply_leader_transition(&LeaderTransition {
@@ -1847,21 +1874,35 @@ mod tests {
         .unwrap();
 
         assert_eq!(schedule.leader_for(100).unwrap().leader, peer(9));
+
+        sink.apply_leader_transition(&LeaderTransition {
+            previous_leader: "0x0000000000000000000000000000000000000009"
+                .parse()
+                .unwrap(),
+            new_leader: "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            epoch: 3,
+            activation_tempo_block: 200,
+        })
+        .unwrap();
+        assert_eq!(schedule.leader_for(200).unwrap().leader, peer(2));
+
         assert!(
             sink.apply_leader_transition(&LeaderTransition {
-                previous_leader: "0x0000000000000000000000000000000000000009"
+                previous_leader: "0x0000000000000000000000000000000000000002"
                     .parse()
                     .unwrap(),
-                new_leader: "0x0000000000000000000000000000000000000008"
+                new_leader: "0x0000000000000000000000000000000000000009"
                     .parse()
                     .unwrap(),
-                epoch: 3,
-                activation_tempo_block: 200,
+                epoch: 4,
+                activation_tempo_block: 300,
             })
             .is_err(),
-            "an unknown finalized leader must remain fail closed"
+            "a historical-only identity must not become a live leader"
         );
-        assert_eq!(schedule.latest_observed_epoch(), Some(2));
+        assert_eq!(schedule.latest_observed_epoch(), Some(3));
     }
 
     #[test]

@@ -816,6 +816,12 @@ impl ZoneManifest {
                 &format!("historical_leaders.{index}.ed25519_public_key"),
                 &raw_leader.ed25519_public_key,
             )?;
+            if let Some(node) = nodes
+                .iter()
+                .find(|node| node.rpc_only && node.ed25519_public_key == ed25519_public_key)
+            {
+                return Err(ManifestError::RpcOnlyHistoricalLeader(node.name.clone()));
+            }
             let secp256k1_address = raw_leader
                 .secp256k1_address
                 .parse::<EthereumAddress>()
@@ -1183,6 +1189,9 @@ pub enum ManifestError {
 
     #[error("forced recovery leader `{0}` cannot be `rpc_only`")]
     RpcOnlyForcedRecoveryLeader(String),
+
+    #[error("historical leader identity cannot alias `rpc_only` manifest node `{0}`")]
+    RpcOnlyHistoricalLeader(String),
 
     #[error("invalid forced recovery block hash `{hash}`: {reason}")]
     InvalidRecoveryBlockHash { hash: String, reason: String },
@@ -1783,6 +1792,25 @@ mod tests {
             ZoneManifest::parse(&duplicates_history),
             Err(ManifestError::DuplicateSecp256k1Address(address))
                 if address == secp256k1_address(9).parse::<Address>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rejects_historical_leader_aliasing_rpc_only_node() {
+        let base = manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", false),
+                (2, "follower-a", "127.0.0.1:9201", false),
+                (3, "follower-b", "127.0.0.1:9202", false),
+                (4, "operator-rpc", "127.0.0.1:9203", true),
+            ],
+        );
+        let aliased = with_historical_leader(&base, 9, 4);
+
+        assert!(matches!(
+            ZoneManifest::parse(&aliased),
+            Err(ManifestError::RpcOnlyHistoricalLeader(node)) if node == "operator-rpc"
         ));
     }
 

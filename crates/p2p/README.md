@@ -148,7 +148,8 @@ The manifest loader validates that:
 - the leader is not `rpc_only`;
 - `secp256k1_address` is present on every quorum node and absent on every `rpc_only` node;
 - node names, Ed25519 public keys, and secp256k1 addresses are unique;
-- historical leader addresses do not duplicate another historical or active node address;
+- historical leader addresses do not duplicate another historical or active node address, and
+  their Ed25519 identities do not alias an `rpc_only` node;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
 - the manifest's `zone_id` matches `--zone.id`; and
