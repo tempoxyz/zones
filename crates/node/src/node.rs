@@ -57,7 +57,6 @@ use reth_transaction_pool::{
 };
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
 use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
@@ -75,7 +74,7 @@ use tempo_transaction_pool::{
 };
 use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
 use tracing::{debug, info, warn};
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, tempo_chain_spec_for_parent};
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
@@ -96,22 +95,6 @@ use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
     ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
 };
-
-/// Returns a known Tempo chain spec for an L1 chain ID.
-///
-/// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
-/// Additional dev-schedule L1 chain IDs can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
-/// environment variable as a comma-separated list.
-pub(crate) fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
-    chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
-        1337 | 31337 => Some(DEV.clone()),
-        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
-            .ok()?
-            .split(',')
-            .any(|id| id.trim().parse() == Ok(chain_id))
-            .then(|| DEV.clone()),
-    })
-}
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
     let expected = zone_chain_id(parent_chain_id, zone_id)?;
@@ -1608,7 +1591,7 @@ where
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
         let l1_chain_id = decode_l1_chain_id(ctx.chain_spec().chain().id())?;
-        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
+        let tempo_chain_spec = tempo_chain_spec_for_parent(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
         let chain_spec = Arc::new(
             ctx.chain_spec()
@@ -1638,15 +1621,15 @@ where
         .await?;
 
         let l1_chain_id = l1_provider.chain_id().await?;
-        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
+        tempo_chain_spec_for_parent(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
-        // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
-        let evm_config = ZoneEvmConfig::new(
-            ctx.chain_spec(),
-            tempo_chain_spec,
-            l1_provider,
-            portal_address,
+        let genesis_parent_chain_id =
+            decode_l1_chain_id(ctx.chain_spec().genesis().config.chain_id)?;
+        eyre::ensure!(
+            l1_chain_id == genesis_parent_chain_id,
+            "parent chain ID mismatch: genesis requires {genesis_parent_chain_id}, but L1 RPC reports {l1_chain_id}"
         );
+        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, portal_address);
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)
@@ -1835,17 +1818,35 @@ mod tests {
 
     #[test]
     fn resolves_public_and_local_tempo_l1_specs() {
-        assert_eq!(tempo_chain_spec_for_l1(4217).unwrap().chain().id(), 4217);
-        assert_eq!(tempo_chain_spec_for_l1(42431).unwrap().chain().id(), 42431);
-        assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
-        assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
-        assert!(tempo_chain_spec_for_l1(999_999).is_none());
+        assert_eq!(
+            tempo_chain_spec_for_parent(4217).unwrap().chain().id(),
+            4217
+        );
+        assert_eq!(
+            tempo_chain_spec_for_parent(42431).unwrap().chain().id(),
+            42431
+        );
+        assert_eq!(
+            tempo_chain_spec_for_parent(1337).unwrap().chain().id(),
+            1337
+        );
+        assert_eq!(
+            tempo_chain_spec_for_parent(31337).unwrap().chain().id(),
+            1337
+        );
+        assert!(tempo_chain_spec_for_parent(999_999).is_none());
 
         // SAFETY: test-only env mutation; no other test reads this variable.
         unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
-        assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
-        assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
-        assert!(tempo_chain_spec_for_l1(999_999).is_none());
+        assert_eq!(
+            tempo_chain_spec_for_parent(31318).unwrap().chain().id(),
+            1337
+        );
+        assert_eq!(
+            tempo_chain_spec_for_parent(31319).unwrap().chain().id(),
+            1337
+        );
+        assert!(tempo_chain_spec_for_parent(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
     }
 

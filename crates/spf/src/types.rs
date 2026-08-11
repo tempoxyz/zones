@@ -44,7 +44,7 @@ impl SpfConfig {
 
     /// Crates a [`ZoneEvmConfig`] for the given L1 storage reader.
     pub fn evm_config<L1: L1StorageReader>(&self, l1_provider: L1) -> ZoneEvmConfig<L1> {
-        ZoneEvmConfig::from_composed_chain_spec(self.chain_spec.clone(), l1_provider, self.portal)
+        ZoneEvmConfig::new(self.chain_spec.clone(), l1_provider, self.portal)
     }
 }
 

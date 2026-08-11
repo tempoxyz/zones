@@ -417,7 +417,7 @@ fn funded_zone_genesis() -> Genesis {
 
 fn spf_config(genesis: &Genesis) -> SpfConfig {
     let chain_spec =
-        ZoneChainSpec::from_genesis(genesis.clone()).with_tempo_hardforks_from(DEV.as_ref());
+        ZoneChainSpec::from_genesis(genesis.clone()).expect("valid zone genesis chain ID");
     SpfConfig::new(Arc::new(chain_spec), Address::ZERO)
 }
 

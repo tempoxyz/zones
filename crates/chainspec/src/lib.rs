@@ -14,9 +14,12 @@ use reth_chainspec::{
 use reth_network_peers::NodeRecord;
 use std::{fmt::Display, sync::Arc};
 use tempo_chainspec::{
-    TempoChainSpec, TempoConsensusSpec, hardfork::TempoHardfork, spec::TempoHardforks,
+    TempoChainSpec, TempoConsensusSpec,
+    hardfork::TempoHardfork,
+    spec::{DEV, TempoHardforks, chainspec_from_chain_id},
 };
 use tempo_primitives::TempoHeader;
+use zone_primitives::constants::{ZoneChainIdError, decode_l1_chain_id};
 
 /// Chain specification for a Tempo Zone.
 ///
@@ -28,10 +31,19 @@ pub struct ZoneChainSpec {
 
 impl ZoneChainSpec {
     /// Converts a genesis configuration into a Zone chain specification.
-    pub fn from_genesis(genesis: Genesis) -> Self {
+    pub fn from_genesis(genesis: Genesis) -> Result<Self, ZoneChainSpecError> {
         Self {
             inner: Arc::new(TempoChainSpec::from_genesis(genesis)),
         }
+        .with_parent_tempo_hardforks()
+    }
+
+    /// Replaces the embedded Tempo hardfork schedule with the parent chain's schedule.
+    pub fn with_parent_tempo_hardforks(self) -> Result<Self, ZoneChainSpecError> {
+        let parent_chain_id = decode_l1_chain_id(self.chain().id())?;
+        let parent = tempo_chain_spec_for_parent(parent_chain_id)
+            .ok_or(ZoneChainSpecError::UnsupportedParent(parent_chain_id))?;
+        Ok(self.with_tempo_hardforks_from(parent.as_ref()))
     }
 
     /// Applies Tempo hardfork activations from the parent chain.
@@ -186,8 +198,44 @@ impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
     const SUPPORTED_CHAINS: &'static [&'static str] = tempo_chainspec::spec::SUPPORTED_CHAINS;
 
     fn parse(s: &str) -> eyre::Result<std::sync::Arc<Self::ChainSpec>> {
-        tempo_chainspec::spec::chain_value_parser(s).map(|spec| Arc::new(ZoneChainSpec::from(spec)))
+        let spec = tempo_chainspec::spec::chain_value_parser(s)?;
+        let zone_spec = ZoneChainSpec::from(spec);
+        match decode_l1_chain_id(zone_spec.chain().id()) {
+            Ok(_) => Ok(Arc::new(zone_spec.with_parent_tempo_hardforks()?)),
+            Err(_) if tempo_chain_spec_for_parent(zone_spec.chain().id()).is_some() => {
+                // Named standalone Tempo specs (for example `dev`) already carry their
+                // canonical schedule and remain useful to offline CLI subcommands.
+                Ok(Arc::new(zone_spec))
+            }
+            Err(err) => Err(err.into()),
+        }
     }
+}
+
+/// Failure to resolve the canonical chain specification for a zone.
+#[derive(Debug, thiserror::Error)]
+pub enum ZoneChainSpecError {
+    /// The zone chain ID is not a valid encoding of its parent and zone IDs.
+    #[error(transparent)]
+    InvalidChainId(#[from] ZoneChainIdError),
+    /// The parent Tempo hardfork schedule is unknown.
+    #[error("unsupported parent Tempo chain ID {0}")]
+    UnsupportedParent(u64),
+}
+
+/// Returns the Tempo chain specification whose hardfork schedule a parent uses.
+///
+/// Tempo Anvil uses chain ID 31337 and the Tempo DEV schedule. Additional
+/// dev-schedule chain IDs can be listed in `ZONE_L1_DEV_CHAIN_IDS`.
+pub fn tempo_chain_spec_for_parent(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
+    chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
+        1_337 | 31_337 => Some(DEV.clone()),
+        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
+            .ok()?
+            .split(',')
+            .any(|id| id.trim().parse() == Ok(chain_id))
+            .then(|| DEV.clone()),
+    })
 }
 
 #[cfg(test)]
@@ -195,7 +243,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
-    use tempo_chainspec::spec::DEV;
+    use tempo_chainspec::spec::{DEV, MODERATO};
+    use zone_primitives::constants::zone_chain_id;
 
     #[test]
     fn delegates_tempo_chain_behavior() {
@@ -208,6 +257,23 @@ mod tests {
             assert_eq!(
                 zone.tempo_fork_activation(hardfork),
                 DEV.tempo_fork_activation(hardfork)
+            );
+        }
+    }
+
+    #[test]
+    fn genesis_uses_parent_tempo_hardforks_everywhere() {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 7).unwrap();
+        let raw = TempoChainSpec::from_genesis(genesis.clone());
+        let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
+
+        assert_eq!(zone.chain().id(), raw.chain().id());
+        assert_eq!(zone.genesis_hash(), raw.genesis_hash());
+        for &hardfork in TempoHardfork::VARIANTS {
+            assert_eq!(
+                zone.tempo_fork_activation(hardfork),
+                MODERATO.tempo_fork_activation(hardfork)
             );
         }
     }

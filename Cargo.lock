@@ -13702,6 +13702,8 @@ dependencies = [
  "reth-network-peers",
  "tempo-chainspec",
  "tempo-primitives",
+ "thiserror 2.0.18",
+ "zone-primitives",
 ]
 
 [[package]]

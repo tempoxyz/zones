@@ -14,6 +14,7 @@ workspace = true
 # tempo
 tempo-chainspec.workspace = true
 tempo-primitives.workspace = true
+zone-primitives.workspace = true
 
 # reth
 reth-chainspec.workspace = true
@@ -28,6 +29,7 @@ alloy-primitives.workspace = true
 
 # misc
 eyre = { workspace = true, optional = true }
+thiserror = { version = "2", default-features = false }
 
 [features]
 default = []
