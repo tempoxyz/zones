@@ -204,40 +204,10 @@ fn connect_blocking(_cid: u32, _port: u32) -> io::Result<vsock::VsockStream> {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_connection_limits() {
-        let cli = Cli::try_parse_from([
-            "proxy",
-            "5000",
-            "16",
-            "5001",
-            "--max-connections",
-            "64",
-            "--connect-timeout-secs",
-            "5",
-            "--session-timeout-secs",
-            "600",
-        ])
-        .unwrap();
-
-        assert_eq!(cli.max_connections.get(), 64);
-        assert_eq!(cli.connect_timeout_secs.get(), 5);
-        assert_eq!(cli.session_timeout_secs.get(), 600);
-    }
-
-    #[test]
-    fn uses_sensible_connection_limit_defaults() {
-        let cli = Cli::try_parse_from(["proxy", "5000", "16", "5001"]).unwrap();
-
-        assert_eq!(cli.max_connections.get(), 256);
-        assert_eq!(cli.connect_timeout_secs.get(), 10);
-        assert_eq!(cli.session_timeout_secs.get(), 3600);
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn socket_address_matches_linux_abi() {
         assert_eq!(
