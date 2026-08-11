@@ -526,7 +526,7 @@ impl BatchSubmitter {
                 .aggregate()
                 .await?;
             return Ok(Self::build_submission_metadata(
-                PortalSubmissionState {
+                RawPortalSubmissionMetadata {
                     withdrawal_batch_index,
                     sequencer_set_version,
                     sequencer_threshold,
@@ -565,7 +565,7 @@ impl BatchSubmitter {
         };
         let _ = self.stable_portal_metadata.set(stable);
         Ok(Self::build_submission_metadata(
-            PortalSubmissionState {
+            RawPortalSubmissionMetadata {
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -577,16 +577,16 @@ impl BatchSubmitter {
     }
 
     fn build_submission_metadata(
-        state: PortalSubmissionState,
+        raw: RawPortalSubmissionMetadata,
         stable: StablePortalMetadata,
     ) -> PortalSubmissionMetadata {
         PortalSubmissionMetadata {
-            withdrawal_batch_index: state.withdrawal_batch_index,
+            withdrawal_batch_index: raw.withdrawal_batch_index,
             stable,
-            sequencer_set_version: state.sequencer_set_version,
-            sequencer_threshold: state.sequencer_threshold,
-            signer_is_sequencer: state.signer_is_sequencer,
-            verifier: state.verifier,
+            sequencer_set_version: raw.sequencer_set_version,
+            sequencer_threshold: raw.sequencer_threshold,
+            signer_is_sequencer: raw.signer_is_sequencer,
+            verifier: raw.verifier,
         }
     }
 
@@ -950,7 +950,7 @@ impl BatchSubmitter {
         let page_tail = tail.min(head.saturating_add(WITHDRAWAL_RECOVERY_PAGE_SIZE));
 
         if head >= tail {
-            info!(head, tail = tail, "No pending withdrawals to restore");
+            info!(head, tail, "No pending withdrawals to restore");
             return Ok(BTreeMap::new());
         }
 
@@ -1164,7 +1164,7 @@ struct StablePortalMetadata {
     chain_id: u64,
 }
 
-struct PortalSubmissionState {
+struct RawPortalSubmissionMetadata {
     withdrawal_batch_index: u64,
     sequencer_set_version: u64,
     sequencer_threshold: u8,
