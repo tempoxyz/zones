@@ -235,7 +235,7 @@ fn maximum_metadata_token(index: u16) -> EnabledToken {
     token[18..].copy_from_slice(&index.to_be_bytes());
     EnabledToken {
         token: Address::from(token),
-        name: "n".repeat(64),
+        name: "n".repeat(31),
         symbol: "s".repeat(31),
         currency: "c".repeat(31),
     }

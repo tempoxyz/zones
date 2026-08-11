@@ -340,7 +340,7 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Metadata copied into the zone is bounded by encoded byte length: 64 bytes for `name` and 31 bytes each for `symbol` and `currency`. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Token Enablement Commitment
 
@@ -1747,9 +1747,7 @@ interface IZonePortal {
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);
     error TokenEnablementBlockCapacityExceeded(uint64 maximum);
-    error TokenNameTooLong(uint256 actual, uint256 maximum);
-    error TokenSymbolTooLong(uint256 actual, uint256 maximum);
-    error TokenCurrencyTooLong(uint256 actual, uint256 maximum);
+    error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -1763,9 +1761,7 @@ interface IZonePortal {
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
     function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
     function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
-    function MAX_TOKEN_NAME_BYTES() external view returns (uint256);
-    function MAX_TOKEN_SYMBOL_BYTES() external view returns (uint256);
-    function MAX_TOKEN_CURRENCY_BYTES() external view returns (uint256);
+    function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
     function MAX_GAS_FEE_RATE() external view returns (uint128);
 
@@ -1982,7 +1978,7 @@ interface IZoneInbox {
 }
 ```
 
-`EnabledToken` carries the token address and exact metadata bytes committed by `ZonePortal.tokenEnablementHash` for direct activation of zone-side TIP-20 precompiles by `ZoneInbox`. The array passed to `advanceTempo` is untrusted until the Inbox verifies that applying the canonical hash transition from `processedTokenEnablementHash` reaches the portal commitment at the imported Tempo state. `ZonePortal` admits at most 8 such activations per Tempo block and rejects metadata whose encoded byte length exceeds 64 bytes for `name` or 31 bytes for `symbol` or `currency`.
+`EnabledToken` carries the token address and exact metadata bytes committed by `ZonePortal.tokenEnablementHash` for direct activation of zone-side TIP-20 precompiles by `ZoneInbox`. The array passed to `advanceTempo` is untrusted until the Inbox verifies that applying the canonical hash transition from `processedTokenEnablementHash` reaches the portal commitment at the imported Tempo state. `ZonePortal` admits at most 8 such activations per Tempo block and rejects any `name`, `symbol`, or `currency` whose encoded byte length exceeds 31 bytes.
 
 ### IZoneOutbox
 

@@ -14,12 +14,8 @@ use zone_primitives::constants::EMPTY_SENTINEL;
 pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
 /// Maximum number of token enablements imported from one Tempo block.
 pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
-/// Maximum UTF-8 byte length of an enabled token name.
-pub const MAX_TOKEN_NAME_BYTES: usize = 64;
-/// Maximum UTF-8 byte length of an enabled token symbol.
-pub const MAX_TOKEN_SYMBOL_BYTES: usize = 31;
-/// Maximum UTF-8 byte length of an enabled token currency code.
-pub const MAX_TOKEN_CURRENCY_BYTES: usize = 31;
+/// Maximum UTF-8 byte length of each enabled token metadata string.
+pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]

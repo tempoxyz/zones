@@ -63,15 +63,12 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Maximum tokens that may be enabled for this portal in one Tempo block.
     /// @dev Under T9, processing 230 worst-case deposits plus 8 token enablements with maximum
-    ///      metadata uses 218,815,278 gas, below the buffered 225,000,000 gas ceiling.
+    ///      metadata uses 214,832,282 gas, below the buffered 225,000,000 gas ceiling.
     uint64 public constant MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK = 8;
 
-    /// @notice Maximum token metadata sizes copied into the zone, measured in bytes.
-    /// @dev Symbol and currency stay within Solidity's one-slot short-string representation.
-    ///      A maximum-size name has a bounded three-slot representation.
-    uint256 public constant MAX_TOKEN_NAME_BYTES = 64;
-    uint256 public constant MAX_TOKEN_SYMBOL_BYTES = 31;
-    uint256 public constant MAX_TOKEN_CURRENCY_BYTES = 31;
+    /// @notice Maximum byte length of each token metadata string copied into the zone.
+    /// @dev Keeps name, symbol, and currency in Solidity's one-slot short-string representation.
+    uint256 public constant MAX_TOKEN_METADATA_BYTES = 31;
 
     /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
     ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
@@ -581,17 +578,12 @@ contract ZonePortal is IZonePortal {
         string memory name = ITIP20(_token).name();
         string memory symbol = ITIP20(_token).symbol();
         string memory currency = ITIP20(_token).currency();
-        uint256 nameLength = bytes(name).length;
-        uint256 symbolLength = bytes(symbol).length;
-        uint256 currencyLength = bytes(currency).length;
-        if (nameLength > MAX_TOKEN_NAME_BYTES) {
-            revert TokenNameTooLong(nameLength, MAX_TOKEN_NAME_BYTES);
-        }
-        if (symbolLength > MAX_TOKEN_SYMBOL_BYTES) {
-            revert TokenSymbolTooLong(symbolLength, MAX_TOKEN_SYMBOL_BYTES);
-        }
-        if (currencyLength > MAX_TOKEN_CURRENCY_BYTES) {
-            revert TokenCurrencyTooLong(currencyLength, MAX_TOKEN_CURRENCY_BYTES);
+        if (
+            bytes(name).length > MAX_TOKEN_METADATA_BYTES
+                || bytes(symbol).length > MAX_TOKEN_METADATA_BYTES
+                || bytes(currency).length > MAX_TOKEN_METADATA_BYTES
+        ) {
+            revert TokenMetadataTooLong();
         }
 
         address[] memory tokens = new address[](1);

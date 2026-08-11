@@ -1493,10 +1493,11 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_acceptsMaximumMetadataLengths() public {
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
-            _stringOfLength(portal.MAX_TOKEN_NAME_BYTES()),
-            _stringOfLength(portal.MAX_TOKEN_SYMBOL_BYTES()),
-            _stringOfLength(portal.MAX_TOKEN_CURRENCY_BYTES()),
+            _stringOfLength(maximum),
+            _stringOfLength(maximum),
+            _stringOfLength(maximum),
             bytes32("max metadata")
         );
 
@@ -1507,45 +1508,39 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_rejectsOversizedName() public {
-        uint256 maximum = portal.MAX_TOKEN_NAME_BYTES();
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             _stringOfLength(maximum + 1), "T", "USD", bytes32("long name")
         );
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.TokenNameTooLong.selector, maximum + 1, maximum)
-        );
+        vm.expectRevert(IZonePortal.TokenMetadataTooLong.selector);
         portal.enableToken(token);
 
         assertFalse(portal.isTokenEnabled(token));
     }
 
     function test_enableToken_rejectsOversizedSymbol() public {
-        uint256 maximum = portal.MAX_TOKEN_SYMBOL_BYTES();
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             "Token", _stringOfLength(maximum + 1), "USD", bytes32("long symbol")
         );
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.TokenSymbolTooLong.selector, maximum + 1, maximum)
-        );
+        vm.expectRevert(IZonePortal.TokenMetadataTooLong.selector);
         portal.enableToken(token);
 
         assertFalse(portal.isTokenEnabled(token));
     }
 
     function test_enableToken_rejectsOversizedCurrency() public {
-        uint256 maximum = portal.MAX_TOKEN_CURRENCY_BYTES();
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             "Token", "T", _stringOfLength(maximum + 1), bytes32("long currency")
         );
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.TokenCurrencyTooLong.selector, maximum + 1, maximum)
-        );
+        vm.expectRevert(IZonePortal.TokenMetadataTooLong.selector);
         portal.enableToken(token);
 
         assertFalse(portal.isTokenEnabled(token));
