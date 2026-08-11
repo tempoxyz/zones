@@ -1020,7 +1020,7 @@ async fn tempo_anchor(
 ) -> Result<(u64, B256, Vec<Bytes>, &'static str)> {
     let checkpoint_number = checkpoint.number();
     let tip = tempo.get_block_number().await?;
-    if checkpoint_number >= tip {
+    if checkpoint_number > tip {
         bail!("Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}");
     }
     let gap = tip - checkpoint_number;
