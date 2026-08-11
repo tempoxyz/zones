@@ -37,6 +37,11 @@ alloy::sol! {
     interface PortalTokenView {
         function areDepositsActive(address token) external view returns (bool);
     }
+
+    #[sol(rpc)]
+    interface GnosisSafeView {
+        function getThreshold() external view returns (uint256);
+    }
 }
 
 #[derive(Debug, clap::Parser)]
@@ -112,6 +117,18 @@ impl VerifyClosedLoop {
 
         let deployment_block =
             find_zone_deployment_block(&provider, zone_id, zone.portal, snapshot_block).await?;
+        let portal = ZonePortal::new(zone.portal, &provider);
+        let portal_admin = portal
+            .admin()
+            .block(snapshot_block_id)
+            .call()
+            .await
+            .wrap_err("failed reading ZonePortal admin")?;
+        let portal_admin_code = provider
+            .get_code_at(portal_admin)
+            .block_id(snapshot_block_id)
+            .await
+            .wrap_err("failed reading ZonePortal admin bytecode")?;
 
         println!("Closed-loop deployment");
         println!("  Snapshot block: {snapshot_block}");
@@ -125,7 +142,28 @@ impl VerifyClosedLoop {
         println!("  EarnShare:    {earn_share}");
         println!();
 
-        let portal = ZonePortal::new(zone.portal, &provider);
+        println!("MANUAL REVIEW: ZonePortal admin");
+        println!("  {portal_admin}");
+        if portal_admin_code.is_empty() {
+            println!("  WARNING: ZonePortal admin is an EOA");
+        } else {
+            match GnosisSafeView::new(portal_admin, &provider)
+                .getThreshold()
+                .block(snapshot_block_id)
+                .call()
+                .await
+            {
+                Ok(threshold) if threshold <= U256::from(1) => println!(
+                    "  WARNING: admin contract reports a low Safe-compatible threshold \
+                     ({threshold}; expected greater than 1)"
+                ),
+                Ok(threshold) => println!("  Reported Safe-compatible threshold: {threshold}"),
+                Err(_) => println!("  Safe-compatible threshold could not be read"),
+            }
+            println!("  Confirm the admin contract, owners, and threshold manually.");
+        }
+        println!();
+
         let portal_tokens = PortalTokenView::new(zone.portal, &provider);
         let vault = EarnVaultView::new(earn_vault, &provider);
         let mut checks = Checks::default();
@@ -392,7 +430,7 @@ impl Checks {
             self.failures.join("\n- ")
         );
         println!("\nAutomated closed-loop configuration checks passed");
-        println!("Manual Account-role confirmation is still required");
+        println!("Manual Account-role and ZonePortal admin confirmation is still required");
         Ok(())
     }
 }
