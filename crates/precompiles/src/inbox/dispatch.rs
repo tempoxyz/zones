@@ -36,6 +36,9 @@ impl ZoneInbox {
                     processedDepositNumber(call) => {
                         view(call, |_| self.processed_deposit_number.read())
                     },
+                    processedTokenEnablementHash(call) => {
+                        view(call, |_| self.processed_token_enablement_hash.read())
+                    },
                     tempoPortal(call) => view(call, |_| Ok(l1.portal())),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     refunds(call) => typed::view(call, |call| {

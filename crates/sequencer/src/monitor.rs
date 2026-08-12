@@ -21,7 +21,7 @@
 //! number that IS within the EIP-2935 window, and the proof must include a
 //! block header chain linking that anchor back to `tempoBlockNumber`.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
@@ -30,7 +30,7 @@ use eyre::{Result, WrapErr};
 use futures::StreamExt;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use alloy_sol_types::{ContractError, SolInterface as _};
 
@@ -40,8 +40,9 @@ use crate::{
     prover::ShadowProver,
     resolve_portal_zone_anchor,
     settlement::{
-        BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog, ZoneBlockSnapshot,
-        fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
+        BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog, WithdrawalPage,
+        ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
+        read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -119,7 +120,7 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     /// batch submission so it can process newly enqueued withdrawal slots.
     withdrawal_notify: Arc<Notify>,
     /// Notifier from the withdrawal processor when the current portal head slot
-    /// is missing from the in-memory store and a full portal resync is needed.
+    /// is missing or stale and its bounded recovery page must be refilled.
     repair_notify: Arc<Notify>,
     /// Last **Zone L2** block number that was successfully submitted to L1.
     last_submitted_zone_block: u64,
@@ -141,7 +142,7 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
 struct PortalResyncSnapshot {
     portal_anchor: crate::settlement::PortalZoneAnchor,
     previous_snapshot: ZoneBlockSnapshot,
-    pending_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>>,
+    pending_withdrawals: WithdrawalPage,
 }
 
 impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
@@ -275,6 +276,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     info!("Zone monitor observed shutdown");
                     return Ok(());
                 }
+                _ = self.repair_notify.notified() => {
+                    self.refill_withdrawal_cache().await;
+                }
                 _ = fallback.tick() => {}
                 notification = canonical.next() => {
                     let Some(notification) = notification else {
@@ -285,9 +289,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                             "canonical zone chain reorged while the sequencer was active"
                         ));
                     }
-                }
-                _ = self.repair_notify.notified() => {
-                    self.repair_missing_withdrawal_slot().await;
                 }
             }
         }
@@ -321,19 +322,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
     /// Rebuild the in-memory withdrawal store from authoritative chain state.
     ///
-    /// The L1 portal only stores queue hashes, so the monitor reconstructs the
-    /// pending withdrawal payloads from L1 + zone-L2 events and replaces the
-    /// local store with that result. Used during startup and after a portal
-    /// resync when local withdrawal data may be stale or missing.
+    /// The L1 portal only stores queue hashes, so the monitor reconstructs one head page from
+    /// L1 + zone-L2 events. Existing valid tail payloads are retained within the cache bound.
     async fn restore_pending_withdrawals_from_chain(&self) -> Result<()> {
         let pending = self.fetch_pending_withdrawals_from_chain().await?;
         self.replace_pending_withdrawals(pending);
         Ok(())
     }
 
-    async fn fetch_pending_withdrawals_from_chain(
-        &self,
-    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+    async fn fetch_pending_withdrawals_from_chain(&self) -> Result<WithdrawalPage> {
         match self
             .batch_submitter
             .fetch_pending_withdrawals(&self.provider, self.config.outbox_address)
@@ -349,50 +346,43 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    fn replace_pending_withdrawals(&self, pending: BTreeMap<u64, Vec<abi::Withdrawal>>) {
-        let restored_withdrawals = pending.values().map(Vec::len).sum::<usize>();
-        let reconciled_first_slot = pending.keys().next().copied();
-        let reconciled_last_slot = pending.keys().next_back().copied();
+    fn replace_pending_withdrawals(&self, pending: WithdrawalPage) {
+        let restored_withdrawals = pending.batches.values().map(Vec::len).sum::<usize>();
+        let page_head = pending.head;
+        let tail = pending.tail;
 
         let mut store = self.withdrawal_store.lock();
-        let (previous_slots, previous_first_slot, previous_last_slot) = store.summary();
-        store.replace_batches(pending);
+        let previous_slots = store.batch_count();
+        let evicted_tail_slots = store.replace_page(pending);
         let reconciled_slots = store.batch_count();
         drop(store);
 
         if reconciled_slots > 0 {
             info!(
+                page_head,
+                tail,
                 previous_slots,
-                previous_first_slot,
-                previous_last_slot,
                 reconciled_slots,
-                reconciled_first_slot,
-                reconciled_last_slot,
                 restored_withdrawals,
+                evicted_tail_slots,
                 "Restored pending withdrawals from chain"
             );
             self.withdrawal_notify.notify_one();
         } else if previous_slots > 0 {
             info!(
+                page_head,
+                tail,
                 previous_slots,
-                previous_first_slot,
-                previous_last_slot,
-                "Cleared stale withdrawal batches after restoring pending withdrawals from chain"
+                "Cleared stale withdrawal cache after observing an empty portal queue"
             );
         }
     }
 
-    /// Repair monitor state after the withdrawal processor reports a missing head slot.
-    ///
-    /// This intentionally goes through a full portal resync rather than only
-    /// rebuilding the withdrawal store. An ambiguous `submitBatch` outcome can
-    /// leave both the portal anchor and the in-memory withdrawal data stale, so
-    /// the monitor first reloads the portal-confirmed anchor and then rebuilds
-    /// pending withdrawals from chain state.
-    async fn repair_missing_withdrawal_slot(&mut self) {
-        warn!("Withdrawal processor reported a missing portal head slot");
-        if let Err(error) = self.resync_from_portal().await {
-            error!(%error, "Failed to resync after missing portal head slot");
+    /// Refill the bounded withdrawal cache after the processor reports a missing head slot.
+    async fn refill_withdrawal_cache(&self) {
+        self.metrics.withdrawal_store_refill_total.increment(1);
+        if let Err(error) = self.restore_pending_withdrawals_from_chain().await {
+            error!(%error, "Failed to refill the portal withdrawal head page");
         }
     }
 
@@ -606,11 +596,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         if !withdrawals.is_empty() {
                             let count = withdrawals.len();
                             let mut store = self.withdrawal_store.lock();
-                            store.add_batch(portal_index, withdrawals);
-                            info!(
-                                portal_index,
-                                count, "Stored withdrawals for portal queue index"
-                            );
+                            if !store.add_batch(portal_index, withdrawals) {
+                                debug!(
+                                    portal_index,
+                                    count,
+                                    "Withdrawal cache full; dropped reconstructible far-tail payload"
+                                );
+                            }
                         }
                     } else {
                         if !batch_data.withdrawal_queue_hash.is_zero() || !withdrawals.is_empty() {
@@ -1060,21 +1052,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repair_missing_withdrawal_slot_resyncs_portal_and_rebuilds_withdrawal_store() {
+    async fn refill_withdrawal_cache_does_not_resync_the_portal_anchor() {
         let l1 = Asserter::new();
         let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
-        let confirmed_zone_block = 42;
-        let confirmed_deposit_hash = B256::repeat_byte(0x33);
-        let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
+        let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
 
-        l1.push_success(&abi_encode_b256(portal_hash));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
-        l1.push_success(&abi_encode_b256(portal_hash));
 
-        let mut monitor = test_monitor(l1.clone(), zone);
+        let monitor = test_monitor(l1.clone(), zone);
+        let old_hash = monitor.prev_zone_block_hash;
+        let old_last_submitted = monitor.last_submitted_zone_block;
+        let old_deposit_hash = monitor.prev_processed_deposit_hash;
         monitor.withdrawal_store.lock().add_withdrawal(
             3,
             abi::Withdrawal {
@@ -1090,13 +1081,14 @@ mod tests {
             },
         );
 
-        monitor.repair_missing_withdrawal_slot().await;
+        monitor.refill_withdrawal_cache().await;
 
         let store = monitor.withdrawal_store.lock();
         assert_eq!(store.batch_count(), 0);
-        assert_eq!(monitor.prev_zone_block_hash, portal_hash);
-        assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
-        assert_eq!(monitor.prev_processed_deposit_hash, confirmed_deposit_hash);
+        assert_eq!(monitor.prev_zone_block_hash, old_hash);
+        assert_eq!(monitor.last_submitted_zone_block, old_last_submitted);
+        assert_eq!(monitor.prev_processed_deposit_hash, old_deposit_hash);
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]

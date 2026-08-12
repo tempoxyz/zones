@@ -49,8 +49,6 @@ impl revm::database_interface::DBErrorMarker for WitnessDatabaseError {}
 #[derive(Debug)]
 pub struct WitnessDatabase {
     state: StatelessSparseTrie,
-    pre_state_root: B256,
-    node_pool: Vec<Bytes>,
     accounts: AddressMap<Option<AccountInfo>>,
     storage: AddressMap<U256Map<U256>>,
     code_by_hash: B256Map<Bytecode>,
@@ -85,25 +83,39 @@ impl WitnessDatabase {
 
         Ok(Self {
             state,
-            pre_state_root: state_root,
-            node_pool,
             accounts: AddressMap::default(),
             storage: AddressMap::default(),
             code_by_hash,
         })
     }
 
-    /// Calculate the post-state root from the initial witness and cumulative
-    /// in-memory execution changes.
+    /// Apply one block's execution changes to the current Zone state trie and
+    /// return the resulting post-state root.
     pub(crate) fn state_root(
-        &self,
-        bundle_state: &BundleState,
+        &mut self,
+        bundle_state: BundleState,
     ) -> Result<B256, StatelessSparseTrieError> {
-        let mut trie = StatelessSparseTrie::new(self.pre_state_root, &self.node_pool)?;
+        // Advance the trie from the previous block's root using this block's changes.
         let state = reth_trie_common::HashedPostState::from_bundle_state::<
             reth_trie_common::KeccakKeyHasher,
         >(bundle_state.state());
-        trie.calculate_state_root(state)
+        let state_root = self.state.calculate_state_root(state)?;
+
+        // Keep database read caches coherent with the newly advanced trie.
+        for (address, account) in bundle_state.state() {
+            self.accounts.insert(*address, account.info.clone());
+
+            if account.status.is_storage_known() {
+                self.storage.remove(address);
+            }
+
+            let storage_entry = self.storage.entry(*address).or_default();
+            for (slot, value) in account.storage.iter() {
+                storage_entry.insert(*slot, value.present_value);
+            }
+        }
+
+        Ok(state_root)
     }
 }
 

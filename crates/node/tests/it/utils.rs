@@ -5,7 +5,7 @@ use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder, bindings::IMulticall3};
 use alloy_rlp::Encodable;
-use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, TransactionRequest};
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, TransactionRequest};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use commonware_codec::Encode as _;
@@ -75,6 +75,7 @@ use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 use zone_primitives::constants::{
     PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
+    ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
     zone_chain_id as derive_zone_chain_id,
 };
 
@@ -2775,9 +2776,49 @@ impl L1TestNode {
     }
 }
 
-/// Build a zone test genesis anchored to a real L1 block.
+/// Patch a controlled post-creation test snapshot with the portal's token commitment.
 ///
-/// Delegates to [`zone_node::genesis::l1_anchored_genesis`] with the latest L1 header.
+/// This is intentionally test-only. It is sound for the shared integration fixture because the
+/// fixture has exactly its genesis token and no queued deposits. Tests that exercise portal
+/// creation replay pass a pre-portal block explicitly and leave the commitment empty.
+async fn patch_clean_portal_snapshot<P: Provider<TempoNetwork>>(
+    provider: &P,
+    genesis: &mut Genesis,
+    portal_address: Address,
+    block_number: u64,
+) -> eyre::Result<()> {
+    let block_id = BlockId::number(block_number);
+    let portal = ZonePortal::new(portal_address, provider);
+    eyre::ensure!(
+        portal.enabledTokenCount().block(block_id).call().await? == U256::from(1)
+            && portal
+                .currentDepositQueueHash()
+                .block(block_id)
+                .call()
+                .await?
+                .is_zero(),
+        "test snapshot at L1 block {block_number} is not a clean initial-token snapshot"
+    );
+    let token_enablement_hash = portal.tokenEnablementHash().block(block_id).call().await?;
+    eyre::ensure!(
+        !token_enablement_hash.is_zero(),
+        "test snapshot at L1 block {block_number} has no initial-token commitment"
+    );
+
+    genesis
+        .alloc
+        .get_mut(&ZONE_INBOX_ADDRESS)
+        .ok_or_else(|| eyre::eyre!("ZoneInbox not found in test genesis alloc"))?
+        .storage
+        .get_or_insert_with(Default::default)
+        .insert(
+            ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
+            token_enablement_hash,
+        );
+    Ok(())
+}
+
+/// Build a zone test genesis anchored to a real L1 block.
 ///
 /// Returns `(genesis, genesis_block_number)`.
 async fn build_l1_anchored_genesis(
@@ -2800,7 +2841,18 @@ async fn build_l1_anchored_genesis(
             .call()
             .await?
     };
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
+    let (mut genesis, genesis_block_number) =
+        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+    if !portal_address.is_zero() {
+        patch_clean_portal_snapshot(
+            &l1_provider,
+            &mut genesis,
+            portal_address,
+            l1_header.inner.number,
+        )
+        .await?;
+    }
+    Ok((genesis, genesis_block_number))
 }
 
 /// Build a zone test genesis anchored to a specific L1 block number.
@@ -2825,7 +2877,19 @@ async fn build_l1_anchored_genesis_at_block(
             .call()
             .await?
     };
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
+    let (mut genesis, genesis_block_number) =
+        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+    if !portal_address.is_zero()
+        && !l1_provider
+            .get_code_at(portal_address)
+            .block_id(BlockId::number(block_number))
+            .await?
+            .is_empty()
+    {
+        patch_clean_portal_snapshot(&l1_provider, &mut genesis, portal_address, block_number)
+            .await?;
+    }
+    Ok((genesis, genesis_block_number))
 }
 
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.

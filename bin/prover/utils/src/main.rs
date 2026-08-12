@@ -16,7 +16,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{SinkExt, StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -24,6 +24,10 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
+use tempo_zone_prover_enclave::{
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, VerifyRequest, VerifyResponse, framed,
+};
+use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
@@ -112,6 +116,10 @@ struct GenerateInputArgs {
     /// Write the complete JSON witness to this path.
     #[arg(long, short)]
     output: Option<PathBuf>,
+
+    /// Send the generated witness to a Tempo Zone prover TCP socket.
+    #[arg(long, value_name = "HOST:PORT")]
+    target: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -196,6 +204,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         zone_block_count = ?args.zone_block_count,
         wait_timeout_seconds = ?args.wait_timeout,
         writes_output = args.output.is_some(),
+        target = ?args.target,
         "generating SPF input"
     );
     if args.zone_block_count == Some(0) {
@@ -352,9 +361,21 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     }
     timings.record("SPF validation", started, ());
 
+    let request_id = format!(
+        "zone-{}-{from_block}-{to_block}-{}",
+        discovery.zone_id, output.block_transition.nextBlockHash
+    );
+    let request = VerifyRequest {
+        version: PROTOCOL_VERSION,
+        request_id,
+        tempo_chain_id: discovery.tempo_chain_id,
+        witness,
+    };
+
     let started = start_phase("output");
     let output_bytes = if let Some(path) = &args.output {
-        let json = serde_json::to_vec_pretty(&witness).context("serialize batch witness")?;
+        let json =
+            serde_json::to_vec_pretty(&request.witness).context("serialize batch witness")?;
         std::fs::write(path, &json)
             .wrap_err_with(|| format!("write SPF input to {}", path.display()))?;
         Some(json.len())
@@ -363,17 +384,97 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     };
     timings.record("output", started, ());
 
+    let target_bytes = if let Some(target) = &args.target {
+        let started = start_phase("target prover");
+        let bytes = send_to_prover(target, &request, &output).await?;
+        timings.record("target prover", started, ());
+        Some(bytes)
+    } else {
+        None
+    };
+
     print_summary(
         &discovery,
-        &witness,
+        &request.witness,
         &extracted,
         &output,
         anchor_mode,
-        args.output.as_ref(),
-        output_bytes,
+        args.output.as_ref().zip(output_bytes),
+        args.target.as_deref().zip(target_bytes),
     );
     timings.print(total_started.elapsed());
     Ok(())
+}
+
+async fn send_to_prover(
+    target: &str,
+    request: &VerifyRequest,
+    expected_output: &BatchOutput,
+) -> Result<usize> {
+    let payload = serde_json::to_vec(request).context("serialize prover request")?;
+    let request_bytes = payload.len();
+    let stream = TcpStream::connect(target)
+        .await
+        .wrap_err_with(|| format!("connect to target prover at {target}"))?;
+    let mut stream = framed(stream, DEFAULT_MAX_REQUEST_BYTES);
+    stream
+        .send(payload.into())
+        .await
+        .wrap_err_with(|| format!("send request to target prover at {target}"))?;
+    let response_payload = stream
+        .next()
+        .await
+        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?
+        .map_err(|error| eyre!(error))
+        .wrap_err_with(|| format!("read response from target prover at {target}"))?;
+    let response = serde_json::from_slice::<VerifyResponse>(&response_payload)
+        .wrap_err_with(|| format!("decode response from target prover at {target}"))?;
+
+    match response {
+        VerifyResponse::Ok {
+            version,
+            request_id,
+            output,
+        } => {
+            if version != PROTOCOL_VERSION {
+                bail!(
+                    "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+                );
+            }
+            if request_id != request.request_id {
+                bail!(
+                    "target prover response request ID {request_id:?} does not match {:?}",
+                    request.request_id
+                );
+            }
+            if output != *expected_output {
+                bail!("target prover output does not match local SPF output");
+            }
+        }
+        VerifyResponse::Error {
+            version,
+            request_id,
+            code,
+            message,
+        } => {
+            if version != PROTOCOL_VERSION {
+                bail!(
+                    "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+                );
+            }
+            if let Some(response_id) = request_id
+                && response_id != request.request_id
+            {
+                bail!(
+                    "target prover error request ID {response_id:?} does not match {:?}",
+                    request.request_id
+                );
+            }
+            bail!("target prover rejected request ({code:?}): {message}");
+        }
+    }
+
+    Ok(request_bytes)
 }
 
 async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
@@ -1020,7 +1121,7 @@ async fn tempo_anchor(
 ) -> Result<(u64, B256, Vec<Bytes>, &'static str)> {
     let checkpoint_number = checkpoint.number();
     let tip = tempo.get_block_number().await?;
-    if checkpoint_number >= tip {
+    if checkpoint_number > tip {
         bail!("Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}");
     }
     let gap = tip - checkpoint_number;
@@ -1111,8 +1212,8 @@ fn print_summary(
     extracted: &[ExtractedBlock],
     output: &BatchOutput,
     anchor_mode: &str,
-    output_path: Option<&PathBuf>,
-    output_bytes: Option<usize>,
+    written_output: Option<(&PathBuf, usize)>,
+    verified_target: Option<(&str, usize)>,
 ) {
     let first = witness.zone_blocks.first().expect("non-empty batch");
     let last = witness.zone_blocks.last().expect("non-empty batch");
@@ -1177,12 +1278,18 @@ fn print_summary(
         "  Next block hash:       {}",
         output.block_transition.nextBlockHash
     );
-    match (output_path, output_bytes) {
-        (Some(path), Some(bytes)) => println!(
+    match written_output {
+        Some((path, bytes)) => println!(
             "  Output:                {} ({bytes} bytes)",
             path.display()
         ),
         _ => println!("  Output:                not written (pass --output <PATH>)"),
+    }
+    match verified_target {
+        Some((target, bytes)) => {
+            println!("  Target prover:         {target} ({bytes} request bytes, verified)")
+        }
+        _ => println!("  Target prover:         not sent (pass --target <HOST:PORT>)"),
     }
 }
 

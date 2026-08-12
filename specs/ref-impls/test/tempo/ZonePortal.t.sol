@@ -27,6 +27,7 @@ import {
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     Role,
     Withdrawal,
     WithdrawalBounceBackDeposit,
@@ -37,12 +38,7 @@ import {
 } from "../../src/interfaces/IZone.sol";
 import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
-import {
-    EMPTY_SENTINEL,
-    NO_QUEUE_INDEX,
-    WithdrawalQueueLib
-} from "../../src/libraries/WithdrawalQueueLib.sol";
-import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLib.sol";
+import { NO_QUEUE_INDEX, WithdrawalQueueLib } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -322,6 +318,10 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
         assertEq(ZonePortal(proxyA).verifier(), verifierA);
         assertEq(ZonePortal(proxyA).blockHash(), bytes32(0));
+        assertEq(
+            ZonePortal(proxyA).tokenEnablementHash(),
+            keccak256(abi.encode(bytes32(0), initialToken, "Initial Token", "INITIAL", "USD"))
+        );
         _assertTip1091Storage(proxyA, ZonePortal(proxyA).sequencerAt(0));
 
         assertEq(ZonePortal(proxyB).zoneId(), 2);
@@ -498,6 +498,8 @@ contract ZonePortalProxyStorageTest is Test {
 
 /// @notice Tests for ZonePortal - simulating L1/zone interface
 contract ZonePortalTest is BaseTest {
+
+    uint256 internal constant TEST_QUEUE_LENGTH = 101;
 
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -1149,7 +1151,20 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
     }
 
-    function test_setLeader_revertsForNonSequencerCaller() public {
+    function test_setLeader_allowsAdminCaller() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epoch = portal.leaderEpoch();
+
+        vm.roll(block.number + 1);
+        vm.prank(admin);
+        portal.setLeader(signers[1], epoch);
+
+        assertEq(portal.leader(), signers[1]);
+        assertEq(portal.leaderEpoch(), epoch + 1);
+        assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
+    }
+
+    function test_setLeader_revertsForUnauthorizedCaller() public {
         address[] memory signers = _activateSequencerSet(2);
         uint64 epoch = portal.leaderEpoch();
 
@@ -1475,10 +1490,11 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_acceptsMaximumMetadataLengths() public {
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
-            _stringOfLength(portal.MAX_TOKEN_NAME_BYTES()),
-            _stringOfLength(portal.MAX_TOKEN_SYMBOL_BYTES()),
-            _stringOfLength(portal.MAX_TOKEN_CURRENCY_BYTES()),
+            _stringOfLength(maximum),
+            _stringOfLength(maximum),
+            _stringOfLength(maximum),
             bytes32("max metadata")
         );
 
@@ -1489,45 +1505,39 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_rejectsOversizedName() public {
-        uint256 maximum = portal.MAX_TOKEN_NAME_BYTES();
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             _stringOfLength(maximum + 1), "T", "USD", bytes32("long name")
         );
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.TokenNameTooLong.selector, maximum + 1, maximum)
-        );
+        vm.expectRevert(IZonePortal.TokenMetadataTooLong.selector);
         portal.enableToken(token);
 
         assertFalse(portal.isTokenEnabled(token));
     }
 
     function test_enableToken_rejectsOversizedSymbol() public {
-        uint256 maximum = portal.MAX_TOKEN_SYMBOL_BYTES();
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             "Token", _stringOfLength(maximum + 1), "USD", bytes32("long symbol")
         );
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.TokenSymbolTooLong.selector, maximum + 1, maximum)
-        );
+        vm.expectRevert(IZonePortal.TokenMetadataTooLong.selector);
         portal.enableToken(token);
 
         assertFalse(portal.isTokenEnabled(token));
     }
 
     function test_enableToken_rejectsOversizedCurrency() public {
-        uint256 maximum = portal.MAX_TOKEN_CURRENCY_BYTES();
+        uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             "Token", "T", _stringOfLength(maximum + 1), bytes32("long currency")
         );
 
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.TokenCurrencyTooLong.selector, maximum + 1, maximum)
-        );
+        vm.expectRevert(IZonePortal.TokenMetadataTooLong.selector);
         portal.enableToken(token);
 
         assertFalse(portal.isTokenEnabled(token));
@@ -1954,8 +1964,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
     }
 
-    function test_deposit_enforcesUnprocessedQueueCapAcrossDepositTypes() public {
-        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
+    function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
+        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
         uint64 maximumPublicDeposits = maximum - 20;
         assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
@@ -1975,7 +1985,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         _deposit(portal, address(pathUSD), bob, amount, bytes32("over cap"), bob);
@@ -1985,70 +1995,14 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(alice), aliceBalanceAtCapacity);
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
 
-        // Advancing the L1 block does not reduce the unprocessed queue.
         vm.roll(block.number + 1);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
-            )
-        );
-        _deposit(portal, address(pathUSD), bob, amount, bytes32("same batch"), bob);
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("next block"), bob);
         vm.stopPrank();
-
-        // A stale batch that processes no deposits does not reopen capacity.
-        vm.prank(sequencer);
-        _submitBatch(
-            portal,
-            uint64(block.number - 1),
-            0,
-            BlockTransition({
-                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("batch")
-            }),
-            DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: bytes32(0),
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
-            bytes32(0),
-            "",
-            ""
-        );
-        vm.prank(alice);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
-            )
-        );
-        _deposit(portal, address(pathUSD), bob, amount, bytes32("stale batch"), bob);
-
-        // Processing the queued deposits reopens exactly that much capacity.
-        vm.roll(block.number + 1);
-        vm.prank(sequencer);
-        _submitBatch(
-            portal,
-            uint64(block.number - 1),
-            0,
-            BlockTransition({
-                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("processing batch")
-            }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0),
-                nextProcessedHash: queueHashAtCapacity,
-                prevDepositNumber: 0,
-                nextDepositNumber: maximumPublicDeposits
-            }),
-            bytes32(0),
-            "",
-            ""
-        );
-        vm.prank(alice);
-        _deposit(portal, address(pathUSD), bob, amount, bytes32("after processing"), bob);
 
         assertEq(portal.depositCount(), maximumPublicDeposits + 1);
     }
 
-    function test_withdrawalBounceBack_usesReservedQueueCapacityWithoutBlockingQueue() public {
+    function test_withdrawalBounceBack_usesReservedBatchCapacityWithoutBlockingQueue() public {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
         _deposit(portal, address(pathUSD), alice, 1000e6, bytes32("escrow"), alice);
@@ -2067,7 +2021,7 @@ contract ZonePortalTest is BaseTest {
         );
         uint256 reserve = 20;
         Withdrawal[] memory withdrawals = new Withdrawal[](reserve);
-        bytes32 withdrawalHash = EMPTY_SENTINEL;
+        bytes32 withdrawalHash = bytes32(0);
         for (uint256 i = reserve; i > 0; --i) {
             withdrawals[i - 1] = withdrawal;
             withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
@@ -2092,7 +2046,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
+        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
         uint64 maximumPublicDeposits = maximum - uint64(reserve);
         vm.startPrank(alice);
         pathUSD.approve(address(portal), maximum);
@@ -2108,67 +2062,15 @@ contract ZonePortalTest is BaseTest {
         assertTrue(queueHashAtCapacity != queueHashAtPublicCapacity);
         assertEq(portal.depositCount(), maximum + 1);
         assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         vm.prank(alice);
         _deposit(portal, address(pathUSD), bob, 1, bytes32("reserved"), bob);
-    }
-
-    function test_processWithdrawals_rejectsBatchAboveRemainingDepositCapacity() public {
-        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
-        uint64 publicDepositLimit = maximum - 20;
-        _setEncKeyWithPoP(ENC_KEY_1);
-
-        vm.startPrank(alice);
-        pathUSD.approve(address(portal), publicDepositLimit);
-        for (uint256 i; i < publicDepositLimit; ++i) {
-            _deposit(portal, address(pathUSD), bob, 1, bytes32(i), bob);
-        }
-        vm.stopPrank();
-
-        Withdrawal memory withdrawal =
-            _withdrawal(address(pathUSD), alice, bob, 1, bytes32("capacity"), 0, alice, "");
-        uint256 attempted = 21;
-        Withdrawal[] memory withdrawals = new Withdrawal[](attempted);
-        bytes32 withdrawalHash = EMPTY_SENTINEL;
-        for (uint256 i = attempted; i > 0; --i) {
-            withdrawals[i - 1] = withdrawal;
-            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
-        }
-
-        vm.roll(block.number + 1);
-        _submitBatch(
-            portal,
-            uint64(block.number - 1),
-            0,
-            BlockTransition({
-                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("capacity batch")
-            }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0),
-                nextProcessedHash: bytes32(0),
-                prevDepositNumber: 0,
-                nextDepositNumber: 0
-            }),
-            withdrawalHash,
-            "",
-            ""
-        );
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.WithdrawalBatchCapacityExceeded.selector, attempted, uint64(20)
-            )
-        );
-        portal.processWithdrawals(withdrawals, bytes32(0));
-
-        assertEq(portal.withdrawalQueueHead(), 0);
-        assertEq(portal.withdrawalQueueSlot(0), withdrawalHash);
     }
 
     function test_deposit_hashChainStructure() public {
@@ -2373,7 +2275,7 @@ contract ZonePortalTest is BaseTest {
         // Batch with withdrawals: assigned the current logical tail (index 0).
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 withdrawalHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 withdrawalHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.expectEmit(true, true, false, true);
         emit IZonePortal.BatchSubmitted(2, 0, bytes32(0), keccak256("state2"), withdrawalHash, 0);
@@ -2397,22 +2299,22 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalQueueTail(), 1);
     }
 
-    function test_submitBatch_emitsLogicalWithdrawalQueueIndexAfterWrap() public {
+    function test_submitBatch_emitsMonotonicLogicalWithdrawalQueueIndex() public {
         Withdrawal memory firstWithdrawal =
             _withdrawal(address(pathUSD), alice, bob, 0, bytes32(0), 0, alice, "");
-        bytes32 firstHash = keccak256(abi.encode(firstWithdrawal, EMPTY_SENTINEL));
+        bytes32 firstHash = keccak256(abi.encode(firstWithdrawal, bytes32(0)));
         bytes32 previousState = portal.blockHash();
 
         vm.roll(block.number + 1);
 
-        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
-            bytes32 nextState = keccak256(abi.encode("state", i));
+        for (uint256 i = 0; i < TEST_QUEUE_LENGTH; i++) {
+            bytes32 batchState = keccak256(abi.encode("state", i));
             bytes32 withdrawalHash = i == 0 ? firstHash : keccak256(abi.encode("batch", i));
             _submitBatch(
                 portal,
                 uint64(block.number - 1),
                 0,
-                BlockTransition({ prevBlockHash: previousState, nextBlockHash: nextState }),
+                BlockTransition({ prevBlockHash: previousState, nextBlockHash: batchState }),
                 DepositQueueTransition({
                     prevProcessedHash: bytes32(0),
                     nextProcessedHash: bytes32(0),
@@ -2423,41 +2325,37 @@ contract ZonePortalTest is BaseTest {
                 "",
                 ""
             );
-            previousState = nextState;
+            previousState = batchState;
         }
 
         portal.processWithdrawals(_singleWithdrawal(firstWithdrawal), bytes32(0));
 
-        bytes32 wrappedState = keccak256("wrapped-state");
-        bytes32 wrappedHash = keccak256("wrapped-batch");
+        bytes32 nextState = keccak256("next-state");
+        bytes32 nextHash = keccak256("next-batch");
         vm.expectEmit(true, true, false, true);
         emit IZonePortal.BatchSubmitted(
-            uint64(WITHDRAWAL_QUEUE_CAPACITY + 1),
-            WITHDRAWAL_QUEUE_CAPACITY,
-            bytes32(0),
-            wrappedState,
-            wrappedHash,
-            0
+            uint64(TEST_QUEUE_LENGTH + 1), TEST_QUEUE_LENGTH, bytes32(0), nextState, nextHash, 0
         );
         _submitBatch(
             portal,
             uint64(block.number - 1),
             0,
-            BlockTransition({ prevBlockHash: previousState, nextBlockHash: wrappedState }),
+            BlockTransition({ prevBlockHash: previousState, nextBlockHash: nextState }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0),
                 nextProcessedHash: bytes32(0),
                 prevDepositNumber: 0,
                 nextDepositNumber: 0
             }),
-            wrappedHash,
+            nextHash,
             "",
             ""
         );
 
         assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueTail(), WITHDRAWAL_QUEUE_CAPACITY + 1);
-        assertEq(portal.withdrawalQueueSlot(0), wrappedHash);
+        assertEq(portal.withdrawalQueueTail(), TEST_QUEUE_LENGTH + 1);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
+        assertEq(portal.withdrawalQueueSlot(TEST_QUEUE_LENGTH), nextHash);
     }
 
     function test_submitBatch_revertsOnPrevBlockHashMismatch() public {
@@ -2555,8 +2453,8 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
 
-        // Build withdrawal hash (oldest = outermost, innermost = EMPTY_SENTINEL)
-        bytes32 withdrawalHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        // Build withdrawal hash (oldest = outermost, zero-terminated)
+        bytes32 withdrawalHash = keccak256(abi.encode(w, bytes32(0)));
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -2591,8 +2489,8 @@ contract ZonePortalTest is BaseTest {
 
         // Bob should have received funds
         assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + 500e6);
-        // Slot should be cleared (back to EMPTY_SENTINEL), head advanced to 1
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        // Slot should be deleted and head advanced to 1.
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
         assertEq(portal.withdrawalQueueHead(), 1);
     }
 
@@ -2610,8 +2508,8 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory w2 =
             _withdrawal(address(pathUSD), alice, charlie, 400e6, bytes32(0), 0, alice, "");
 
-        // Build queue: w1 is oldest (outermost), w2 is newest (innermost wraps EMPTY_SENTINEL)
-        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        // Build queue: w1 is oldest (outermost), w2 is newest (innermost terminates at zero)
+        bytes32 innerHash = keccak256(abi.encode(w2, bytes32(0)));
         bytes32 batchQueueHash = keccak256(abi.encode(w1, innerHash));
 
         // Advance a block so the history precompile can return a hash
@@ -2653,7 +2551,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(charlie), charlieBalanceBefore + 400e6);
 
         // Slot 0 cleared, head advanced
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
         assertEq(portal.withdrawalQueueHead(), 1);
     }
 
@@ -2671,7 +2569,7 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory w3 =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
 
-        bytes32 remainingQueue = keccak256(abi.encode(w3, EMPTY_SENTINEL));
+        bytes32 remainingQueue = keccak256(abi.encode(w3, bytes32(0)));
         bytes32 innerHash = keccak256(abi.encode(w2, remainingQueue));
         bytes32 batchQueueHash = keccak256(abi.encode(w1, innerHash));
 
@@ -2708,7 +2606,7 @@ contract ZonePortalTest is BaseTest {
 
         portal.processWithdrawals(_singleWithdrawal(w3), bytes32(0));
         assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + 800e6);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
         assertEq(portal.withdrawalQueueHead(), 1);
     }
 
@@ -2731,7 +2629,7 @@ contract ZonePortalTest is BaseTest {
         // Batch 1: withdrawal to bob
         Withdrawal memory w1 =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 w1Hash = keccak256(abi.encode(w1, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -2755,7 +2653,7 @@ contract ZonePortalTest is BaseTest {
         // Batch 2: withdrawal to charlie
         Withdrawal memory w2 =
             _withdrawal(address(pathUSD), alice, charlie, 600e6, bytes32(0), 0, alice, "");
-        bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 w2Hash = keccak256(abi.encode(w2, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -2860,7 +2758,7 @@ contract ZonePortalTest is BaseTest {
             alice,
             "callback_data"
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -2999,7 +2897,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function _enqueueWithdrawal(Withdrawal memory withdrawal) internal {
-        bytes32 withdrawalHash = keccak256(abi.encode(withdrawal, EMPTY_SENTINEL));
+        bytes32 withdrawalHash = keccak256(abi.encode(withdrawal, bytes32(0)));
         vm.roll(block.number + 1);
 
         _submitBatch(
@@ -3218,7 +3116,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -3258,7 +3156,7 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 100e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(WithdrawalQueueLib.NoWithdrawalsInQueue.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
     }
 
@@ -3272,7 +3170,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -3299,7 +3197,7 @@ contract ZonePortalTest is BaseTest {
         Withdrawal memory wrongW =
             _withdrawal(address(pathUSD), alice, charlie, 500e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         portal.processWithdrawals(_singleWithdrawal(wrongW), bytes32(0));
     }
 
@@ -3312,7 +3210,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -3364,7 +3262,7 @@ contract ZonePortalTest is BaseTest {
             abi.encode(nested, bytes32(0))
         );
 
-        bytes32 remainingQueue = keccak256(abi.encode(nested, EMPTY_SENTINEL));
+        bytes32 remainingQueue = keccak256(abi.encode(nested, bytes32(0)));
         bytes32 withdrawalQueue = keccak256(abi.encode(outer, remainingQueue));
 
         vm.roll(block.number + 1);
@@ -3415,7 +3313,7 @@ contract ZonePortalTest is BaseTest {
         // Test the simplified single-slot deposit design:
         // currentDepositQueueHash: head of chain (new deposits land here)
         // The zone tracks its own processedDepositQueueHash in EVM state.
-        // The proof reads currentDepositQueueHash from Tempo state to validate ancestry.
+        // The proof reads currentDepositQueueHash from Tempo state to validate equality.
 
         // Initial state: zero
         assertEq(portal.currentDepositQueueHash(), bytes32(0));
@@ -3765,7 +3663,7 @@ contract ZonePortalTest is BaseTest {
         // Create two batches with different withdrawals
         Withdrawal memory w1 =
             _withdrawal(address(pathUSD), alice, bob, 100e6, bytes32("w1"), 0, alice, "");
-        bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 w1Hash = keccak256(abi.encode(w1, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -3786,7 +3684,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w2 =
             _withdrawal(address(pathUSD), alice, charlie, 200e6, bytes32("w2"), 0, alice, "");
-        bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 w2Hash = keccak256(abi.encode(w2, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -3806,7 +3704,7 @@ contract ZonePortalTest is BaseTest {
         );
 
         // Try to process w2 (slot 1) before w1 (slot 0) - should fail
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         portal.processWithdrawals(_singleWithdrawal(w2), bytes32(0));
 
         // Process w1 first
@@ -3840,7 +3738,7 @@ contract ZonePortalTest is BaseTest {
             alice,
             ""
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -3889,7 +3787,7 @@ contract ZonePortalTest is BaseTest {
             alice,
             ""
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -3920,7 +3818,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(gasConsumingReceiver)), 0);
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
         assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
     }
 
     /// A reverting callback must not outspend its declared `gasLimit` plus fixed overhead.
@@ -3948,7 +3846,7 @@ contract ZonePortalTest is BaseTest {
         // A second, well-behaved withdrawal that must still be delivered.
         withdrawals[1] = _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
 
-        bytes32 tailHash = keccak256(abi.encode(withdrawals[1], EMPTY_SENTINEL));
+        bytes32 tailHash = keccak256(abi.encode(withdrawals[1], bytes32(0)));
         bytes32 headHash = keccak256(abi.encode(withdrawals[0], tailHash));
 
         vm.roll(block.number + 1);
@@ -3979,9 +3877,7 @@ contract ZonePortalTest is BaseTest {
 
         assertTrue(success, "batch must not revert");
         assertEq(portal.withdrawalQueueHead(), 1, "the queue slot must be consumed");
-        assertEq(
-            portal.withdrawalQueueSlot(0), EMPTY_SENTINEL, "both items must have been dequeued"
-        );
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0), "both items must have been dequeued");
         assertEq(pathUSD.balanceOf(address(bomb)), 0, "bomb must not keep the tokens");
         assertEq(
             pathUSD.balanceOf(bob) - bobBefore, 500e6, "honest withdrawal must still be delivered"
@@ -4003,7 +3899,7 @@ contract ZonePortalTest is BaseTest {
         // Create withdrawal with gasLimit = 0
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -4099,7 +3995,7 @@ contract ZonePortalTest is BaseTest {
             alice,
             "test"
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -4149,7 +4045,7 @@ contract ZonePortalTest is BaseTest {
             bob,
             ""
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -4266,7 +4162,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -4308,7 +4204,7 @@ contract ZonePortalTest is BaseTest {
             alice,
             ""
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -5086,6 +4982,15 @@ contract ZonePortalTest is BaseTest {
             portal.leaderActivationTempoBlock(),
             "slot 24: leaderActivationTempoBlock mismatch"
         );
+
+        // --- Slot 26: token enablement commitment ---
+        bytes32 tokenEnablementHashSlot =
+            vm.load(address(portal), PORTAL_TOKEN_ENABLEMENT_HASH_SLOT);
+        assertEq(
+            tokenEnablementHashSlot,
+            portal.tokenEnablementHash(),
+            "slot 26: tokenEnablementHash mismatch"
+        );
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
@@ -5331,7 +5236,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 250e6, bytes32(0), 0, address(0), "");
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -5410,13 +5315,10 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + amount);
     }
 
-    /// @notice Submitting a batch reverts once the withdrawal queue is full.
-    function test_withdrawalQueue_revertsWhenFull() public {
+    /// @notice A withdrawal backlog cannot prevent a batch from being submitted.
+    function test_withdrawalQueue_acceptsBacklogBeyondFormerCapacity() public {
         vm.roll(genesisTempoBlockNumber + 1);
-        uint256 i;
-        while (
-            portal.withdrawalQueueTail() - portal.withdrawalQueueHead() < WITHDRAWAL_QUEUE_CAPACITY
-        ) {
+        for (uint256 i = 0; i < TEST_QUEUE_LENGTH; i++) {
             _submitBatch(
                 portal,
                 genesisTempoBlockNumber,
@@ -5434,16 +5336,11 @@ contract ZonePortalTest is BaseTest {
                 "",
                 ""
             );
-            i++;
-            assertLe(i, WITHDRAWAL_QUEUE_CAPACITY);
         }
-        assertEq(
-            portal.withdrawalQueueTail() - portal.withdrawalQueueHead(), WITHDRAWAL_QUEUE_CAPACITY
-        );
+        assertEq(portal.withdrawalQueueTail() - portal.withdrawalQueueHead(), TEST_QUEUE_LENGTH);
 
         bytes32 prevBlockHash = portal.blockHash();
         bytes32 depositQueueHash = portal.currentDepositQueueHash();
-        vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
         _submitBatch(
             portal,
             genesisTempoBlockNumber,
@@ -5459,6 +5356,8 @@ contract ZonePortalTest is BaseTest {
             "",
             ""
         );
+        assertEq(portal.withdrawalQueueTail() - portal.withdrawalQueueHead(), TEST_QUEUE_LENGTH + 1);
+        assertEq(portal.withdrawalQueueSlot(TEST_QUEUE_LENGTH), keccak256("overflow"));
     }
 
     /// @notice Deposit fee equals fixed deposit gas multiplied by zone gas rate.

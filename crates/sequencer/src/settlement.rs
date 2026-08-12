@@ -27,10 +27,7 @@ use std::{collections::BTreeMap, fmt, sync::OnceLock};
 
 use crate::{
     ZoneSequencerProvider,
-    abi::{
-        self, BlockTransition, DepositQueueTransition, EMPTY_SENTINEL, IZoneInbox, IZoneOutbox,
-        ZonePortal,
-    },
+    abi::{self, BlockTransition, DepositQueueTransition, IZoneInbox, IZoneOutbox, ZonePortal},
     attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
@@ -73,8 +70,9 @@ const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 /// signatures still fit comfortably within this limit.
 const SUBMIT_BATCH_GAS_LIMIT: u64 = 2_000_000;
 
-/// Maximum number of pending withdrawal queue slots in the portal ring buffer.
-pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
+/// Maximum number of pending withdrawal slots reconstructed in one recovery page.
+/// Bounds L1 topic filters and temporary withdrawal data without limiting the on-chain FIFO.
+pub(crate) const WITHDRAWAL_RECOVERY_PAGE_SIZE: u64 = 100;
 
 /// Maximum block span for one bounded log query.
 ///
@@ -507,14 +505,11 @@ impl BatchSubmitter {
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
     ///
-    /// The portal and chain identifiers are immutable, so the first call includes and caches
-    /// them. Sequencer membership, verifier configuration, and queue state are deliberately
-    /// refreshed on every submission.
+    /// The portal and chain identifiers are immutable, so the first call includes and caches them.
+    /// Sequencer membership and verifier configuration are deliberately refreshed on every submission.
     async fn read_submission_metadata(&self, signer: Address) -> Result<PortalSubmissionMetadata> {
         if let Some(stable) = self.stable_portal_metadata.get().copied() {
             let (
-                queue_head,
-                queue_tail,
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -523,8 +518,6 @@ impl BatchSubmitter {
             ) = self
                 .l1_provider
                 .multicall()
-                .add(self.portal.withdrawalQueueHead())
-                .add(self.portal.withdrawalQueueTail())
                 .add(self.portal.withdrawalBatchIndex())
                 .add(self.portal.sequencerSetVersion())
                 .add(self.portal.sequencerThreshold())
@@ -532,10 +525,8 @@ impl BatchSubmitter {
                 .add(self.portal.verifier())
                 .aggregate()
                 .await?;
-            return Self::build_submission_metadata(
+            return Ok(Self::build_submission_metadata(
                 RawPortalSubmissionMetadata {
-                    queue_head,
-                    queue_tail,
                     withdrawal_batch_index,
                     sequencer_set_version,
                     sequencer_threshold,
@@ -543,12 +534,10 @@ impl BatchSubmitter {
                     verifier,
                 },
                 stable,
-            );
+            ));
         }
 
         let (
-            queue_head,
-            queue_tail,
             withdrawal_batch_index,
             sequencer_set_version,
             sequencer_threshold,
@@ -559,8 +548,6 @@ impl BatchSubmitter {
         ) = self
             .l1_provider
             .multicall()
-            .add(self.portal.withdrawalQueueHead())
-            .add(self.portal.withdrawalQueueTail())
             .add(self.portal.withdrawalBatchIndex())
             .add(self.portal.sequencerSetVersion())
             .add(self.portal.sequencerThreshold())
@@ -577,10 +564,8 @@ impl BatchSubmitter {
                 .map_err(|_| eyre::eyre!("Tempo L1 chain ID overflow"))?,
         };
         let _ = self.stable_portal_metadata.set(stable);
-        Self::build_submission_metadata(
+        Ok(Self::build_submission_metadata(
             RawPortalSubmissionMetadata {
-                queue_head,
-                queue_tail,
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -588,29 +573,21 @@ impl BatchSubmitter {
                 verifier,
             },
             stable,
-        )
+        ))
     }
 
     fn build_submission_metadata(
         raw: RawPortalSubmissionMetadata,
         stable: StablePortalMetadata,
-    ) -> Result<PortalSubmissionMetadata> {
-        Ok(PortalSubmissionMetadata {
-            queue_head: raw
-                .queue_head
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue head overflow"))?,
-            queue_tail: raw
-                .queue_tail
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue tail overflow"))?,
+    ) -> PortalSubmissionMetadata {
+        PortalSubmissionMetadata {
             withdrawal_batch_index: raw.withdrawal_batch_index,
             stable,
             sequencer_set_version: raw.sequencer_set_version,
             sequencer_threshold: raw.sequencer_threshold,
             signer_is_sequencer: raw.signer_is_sequencer,
             verifier: raw.verifier,
-        })
+        }
     }
 
     fn validate_submission_metadata(
@@ -637,13 +614,6 @@ impl BatchSubmitter {
                 metadata.sequencer_threshold == 1,
                 "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {}",
                 metadata.sequencer_threshold
-            );
-        }
-        if !batch.withdrawal_queue_hash.is_zero() {
-            let pending = metadata.queue_tail.saturating_sub(metadata.queue_head);
-            eyre::ensure!(
-                pending < WITHDRAWAL_QUEUE_CAPACITY,
-                "withdrawal queue full ({pending} pending slots, capacity {WITHDRAWAL_QUEUE_CAPACITY})"
             );
         }
         Ok(())
@@ -950,15 +920,15 @@ impl BatchSubmitter {
         ))
     }
 
-    /// Re-populate the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
-    /// after a sequencer restart.
+    /// Re-populate one page of the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
+    /// after a sequencer restart or page refill.
     ///
     /// The L1 portal stores only hash chains, not the actual [`Withdrawal`](abi::Withdrawal)
     /// structs. This method reconstructs them by:
     ///
     /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
-    ///    to determine which slots are still pending.
-    /// 2. Querying the `BatchSubmitted` event for each pending slot (plus the
+    ///    to determine which bounded page starts at the current head.
+    /// 2. Querying the `BatchSubmitted` event for each slot in that page (plus the
     ///    predecessor for zone block range boundaries) via the indexed
     ///    `withdrawalQueueIndex` topic.
     /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
@@ -968,32 +938,29 @@ impl BatchSubmitter {
     ///    detection.
     /// 6. Verifying the hash chain and trimming already-processed withdrawals.
     ///
-    /// Returns a map of portal_slot → verified withdrawals ready to be stored.
+    /// Returns one bounded page of verified withdrawals starting at the portal head.
     #[instrument(skip_all, fields(portal = %self.portal_address))]
     pub async fn fetch_pending_withdrawals<P: ZoneSequencerProvider>(
         &self,
         zone_provider: &P,
         outbox_address: Address,
-    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
-        // Step 1: read pending slot range from the L1 portal.
+    ) -> Result<WithdrawalPage> {
+        // Step 1: read pending slot range from the L1 portal and bound this recovery page.
         let (head, tail) = self.read_portal_withdrawal_queue_bounds().await?;
+        let page_tail = tail.min(head.saturating_add(WITHDRAWAL_RECOVERY_PAGE_SIZE));
 
         if head >= tail {
-            info!(head, tail, "No pending withdrawals to restore");
-            return Ok(BTreeMap::new());
+            return Ok(WithdrawalPage {
+                head,
+                tail: head,
+                batches: BTreeMap::new(),
+            });
         }
 
-        info!(
-            head,
-            tail,
-            pending = tail - head,
-            "Restoring pending withdrawals"
-        );
-
-        // Step 2: query BatchSubmitted events for pending slots [head, tail)
+        // Step 2: query BatchSubmitted events for this page [head, page_tail)
         // plus the predecessor (head-1) by their indexed withdrawalQueueIndex.
         let events = self
-            .find_batch_events_by_index(head.saturating_sub(1), tail)
+            .find_batch_events_by_index(head.saturating_sub(1), page_tail)
             .await?;
 
         // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
@@ -1013,7 +980,7 @@ impl BatchSubmitter {
 
         // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
         let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
-        for portal_slot in head..tail {
+        for portal_slot in head..page_tail {
             if !events.contains_key(&portal_slot) {
                 continue;
             }
@@ -1037,16 +1004,16 @@ impl BatchSubmitter {
         // Step 5: read the head slot's current on-chain hash (for partial processing detection).
         let head_slot_hash = self
             .portal
-            .withdrawalQueueSlot(U256::from(head % WITHDRAWAL_QUEUE_CAPACITY))
+            .withdrawalQueueSlot(U256::from(head))
             .call()
             .await?;
 
         // Guard: verify the queue didn't change during the multi-RPC replay.
         let (head2, tail2) = self.read_portal_withdrawal_queue_bounds().await?;
 
-        if head2 != head || tail2 != tail {
+        if head2 != head || tail2 < page_tail {
             eyre::bail!(
-                "withdrawal queue changed during restore ({}..{} -> {}..{}), retry on next startup",
+                "withdrawal queue changed during page restore ({}..{} -> {}..{}), retry from the current head",
                 head,
                 tail,
                 head2,
@@ -1055,7 +1022,13 @@ impl BatchSubmitter {
         }
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
-        resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash)
+        resolve_pending_slots(head, page_tail, &events, &slot_withdrawals, head_slot_hash).map(
+            |batches| WithdrawalPage {
+                head,
+                tail: tail2,
+                batches,
+            },
+        )
     }
 
     /// Fetch `BatchSubmitted` events for logical queue indices `[first_index, tail)`
@@ -1114,6 +1087,17 @@ impl BatchSubmitter {
 
         Ok(found)
     }
+}
+
+/// Verified bounded window of the portal withdrawal queue reconstructed from chain history.
+#[derive(Debug)]
+pub struct WithdrawalPage {
+    /// Portal head observed before reconstructing the page.
+    pub head: u64,
+    /// Portal tail observed after reconstruction was validated.
+    pub tail: u64,
+    /// Verified payloads keyed by logical portal queue index.
+    pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
 /// Data required to submit a single batch to the ZonePortal on L1.
@@ -1192,8 +1176,6 @@ struct StablePortalMetadata {
 }
 
 struct RawPortalSubmissionMetadata {
-    queue_head: U256,
-    queue_tail: U256,
     withdrawal_batch_index: u64,
     sequencer_set_version: u64,
     sequencer_threshold: u8,
@@ -1203,8 +1185,6 @@ struct RawPortalSubmissionMetadata {
 
 #[derive(Debug, Clone, Copy)]
 struct PortalSubmissionMetadata {
-    queue_head: u64,
-    queue_tail: u64,
     withdrawal_batch_index: u64,
     stable: StablePortalMetadata,
     sequencer_set_version: u64,
@@ -1397,6 +1377,10 @@ fn resolve_pending_slots(
     slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
     head_slot_hash: B256,
 ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+    if head < tail && head_slot_hash.is_zero() {
+        eyre::bail!("pending withdrawal head slot {head} is zero for queue range {head}..{tail}");
+    }
+
     let mut result: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
 
     for portal_slot in head..tail {
@@ -1445,7 +1429,7 @@ pub(crate) fn find_processed_offset(
         return Some(withdrawals.len());
     }
 
-    let mut hash = EMPTY_SENTINEL;
+    let mut hash = B256::ZERO;
     for (offset, withdrawal) in withdrawals.iter().enumerate().rev() {
         hash = withdrawal.hash_with_tail(hash);
         if hash == current_slot_hash {
@@ -2185,8 +2169,6 @@ mod tests {
         let submitter = BatchSubmitter::new(portal_address, provider);
 
         asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(U256::from(3)),
-            abi_word(U256::from(5)),
             abi_word(7_u64),
             abi_word(11_u64),
             abi_word(U256::from(1)),
@@ -2196,8 +2178,6 @@ mod tests {
             abi_word(U256::from(42431)),
         ]));
         let first = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(first.queue_head, 3);
-        assert_eq!(first.queue_tail, 5);
         assert_eq!(first.withdrawal_batch_index, 7);
         assert_eq!(first.sequencer_set_version, 11);
         assert!(first.signer_is_sequencer);
@@ -2207,8 +2187,6 @@ mod tests {
 
         let next_verifier = Address::repeat_byte(0x55);
         asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(U256::from(4)),
-            abi_word(U256::from(6)),
             abi_word(8_u64),
             abi_word(12_u64),
             abi_word(U256::from(1)),
@@ -2216,8 +2194,6 @@ mod tests {
             abi_word(next_verifier),
         ]));
         let second = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(second.queue_head, 4);
-        assert_eq!(second.queue_tail, 6);
         assert_eq!(second.withdrawal_batch_index, 8);
         assert_eq!(second.sequencer_set_version, 12);
         assert!(!second.signer_is_sequencer);
@@ -2246,8 +2222,6 @@ mod tests {
             withdrawal_batch_index: 1,
         };
         let metadata = PortalSubmissionMetadata {
-            queue_head: 0,
-            queue_tail: 0,
             withdrawal_batch_index: 0,
             stable: StablePortalMetadata {
                 zone_id: 1,
@@ -2340,7 +2314,7 @@ mod tests {
     #[test]
     fn finds_processed_offset_for_empty_queue() {
         assert_eq!(find_processed_offset(&[], B256::ZERO), Some(0));
-        assert_eq!(find_processed_offset(&[], EMPTY_SENTINEL), None);
+        assert_eq!(find_processed_offset(&[], B256::random()), None);
     }
 
     #[test]
@@ -2408,7 +2382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_batch_events_by_logical_index_across_ring_wrap() {
+    async fn finds_batch_events_by_logical_index_beyond_legacy_capacity() {
         use alloy_provider::ProviderBuilder;
         use alloy_transport::mock::Asserter;
 
@@ -2503,7 +2477,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_single_slot_fully_processed() {
+    fn resolve_single_pending_slot_rejects_zero_hash() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
@@ -2513,10 +2487,9 @@ mod tests {
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, withdrawals);
 
-        // B256::ZERO = queue_hash(&[]), all consumed. find_processed_offset returns
-        // Some(1) (offset == len), so remaining is empty and slot is not stored.
-        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap();
-        assert!(result.is_empty());
+        let error =
+            resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap_err();
+        assert!(error.to_string().contains("head slot 5 is zero"));
     }
 
     #[test]

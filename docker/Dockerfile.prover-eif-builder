@@ -1,0 +1,12 @@
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:6d8e068b91f351df5bf6acd4bd261316e42747ad4bae76689ff6f4939e2180a2
+
+ARG NITRO_CLI_VERSION=1.4.5-0.amzn2023
+
+RUN dnf install -y \
+        "aws-nitro-enclaves-cli-${NITRO_CLI_VERSION}" \
+        "aws-nitro-enclaves-cli-devel-${NITRO_CLI_VERSION}" \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+ENTRYPOINT ["nitro-cli"]
+

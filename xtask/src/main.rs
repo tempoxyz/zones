@@ -6,7 +6,8 @@ use crate::{
     deploy_neobank_fixtures::DeployNeobankFixtures, deploy_router::DeployRouter, deposit::Deposit,
     generate_p2p_key::GenerateP2pKey, generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory,
-    set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
+    set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits,
+    verify_closed_loop::VerifyClosedLoop, zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
@@ -25,6 +26,7 @@ mod generate_zone_genesis;
 mod install_reference_zone_factory;
 mod set_encryption_key;
 mod spam_deposits;
+mod verify_closed_loop;
 mod zone_info;
 mod zone_utils;
 
@@ -63,6 +65,9 @@ async fn main() -> eyre::Result<()> {
             .wrap_err("failed to install reference ZoneFactory"),
         Action::SetEncryptionKey(args) => args.run().await.wrap_err("failed to set encryption key"),
         Action::SpamDeposits(args) => args.run().await.wrap_err("failed to spam deposits"),
+        Action::VerifyClosedLoop(args) => {
+            args.run().await.wrap_err("closed-loop verification failed")
+        }
         Action::ZoneInfo(args) => args.run().await.wrap_err("failed to fetch zone info"),
     }
 }
@@ -93,5 +98,6 @@ enum Action {
     InstallReferenceZoneFactory(InstallReferenceZoneFactory),
     SetEncryptionKey(SetEncryptionKey),
     SpamDeposits(SpamDeposits),
+    VerifyClosedLoop(VerifyClosedLoop),
     ZoneInfo(ZoneInfoCmd),
 }

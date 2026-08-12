@@ -25,11 +25,7 @@ import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "../libraries/EncryptedDeposit.sol";
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
-import {
-    EMPTY_SENTINEL,
-    WithdrawalQueue,
-    WithdrawalQueueLib
-} from "../libraries/WithdrawalQueueLib.sol";
+import { WithdrawalQueue, WithdrawalQueueLib } from "../libraries/WithdrawalQueueLib.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
@@ -55,23 +51,20 @@ contract ZonePortal is IZonePortal {
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
-    /// @notice Maximum deposits that may remain unprocessed in this portal's queue.
+    /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
     ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
     ///      below the buffered 200,000,000 gas ceiling.
-    uint64 public constant MAX_UNPROCESSED_DEPOSITS = 230;
+    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 230;
 
     /// @notice Maximum tokens that may be enabled for this portal in one Tempo block.
     /// @dev Under T9, processing 230 worst-case deposits plus 8 token enablements with maximum
-    ///      metadata uses 218,815,278 gas, below the buffered 225,000,000 gas ceiling.
+    ///      metadata uses 214,832,282 gas, below the buffered 225,000,000 gas ceiling.
     uint64 public constant MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK = 8;
 
-    /// @notice Maximum token metadata sizes copied into the zone, measured in bytes.
-    /// @dev Symbol and currency stay within Solidity's one-slot short-string representation.
-    ///      A maximum-size name has a bounded three-slot representation.
-    uint256 public constant MAX_TOKEN_NAME_BYTES = 64;
-    uint256 public constant MAX_TOKEN_SYMBOL_BYTES = 31;
-    uint256 public constant MAX_TOKEN_CURRENCY_BYTES = 31;
+    /// @notice Maximum byte length of each token metadata string copied into the zone.
+    /// @dev Keeps name, symbol, and currency in Solidity's one-slot short-string representation.
+    uint256 public constant MAX_TOKEN_METADATA_BYTES = 31;
 
     /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
     ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
@@ -149,7 +142,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Refunds parked after a deposit bounce-back transfer reverts on Tempo.
     mapping(address token => mapping(address owner => uint128 amount)) public refunds;
 
-    /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
+    /// @notice Withdrawal queue (zone→Tempo): unbounded FIFO
     WithdrawalQueue internal _withdrawalQueue;
 
     /// @notice Operator RPC endpoint for the zone
@@ -209,6 +202,10 @@ contract ZonePortal is IZonePortal {
     /// @dev Per-Tempo-block token-enablement admission counter. Appended for upgrade safety.
     uint64 internal _tokenEnableCountBlock;
     uint64 internal _tokensEnabledInCurrentBlock;
+
+    /// @notice Append-only commitment to every enabled token and its metadata.
+    /// @dev Stored at slot 26 so the existing portal layout remains unchanged.
+    bytes32 public tokenEnablementHash;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -273,6 +270,11 @@ contract ZonePortal is IZonePortal {
 
     modifier onlySequencer() {
         if (!isSequencer[msg.sender]) revert NotSequencer();
+        _;
+    }
+
+    modifier onlySequencerOrAdmin() {
+        if (msg.sender != admin && !isSequencer[msg.sender]) revert NotSequencer();
         _;
     }
 
@@ -368,7 +370,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
-    function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencer {
+    function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencerOrAdmin {
         if (!isSequencer[newLeader]) revert InvalidLeader();
         // Idempotent fanout: every node relays the same target, only the first call transitions.
         if (newLeader == leader) return;
@@ -504,8 +506,8 @@ contract ZonePortal is IZonePortal {
         return _withdrawalQueue.tail;
     }
 
-    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32) {
-        return _withdrawalQueue.slots[physicalSlot];
+    function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32) {
+        return _withdrawalQueue.slots[queueIndex];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -572,17 +574,12 @@ contract ZonePortal is IZonePortal {
         string memory name = ITIP20(_token).name();
         string memory symbol = ITIP20(_token).symbol();
         string memory currency = ITIP20(_token).currency();
-        uint256 nameLength = bytes(name).length;
-        uint256 symbolLength = bytes(symbol).length;
-        uint256 currencyLength = bytes(currency).length;
-        if (nameLength > MAX_TOKEN_NAME_BYTES) {
-            revert TokenNameTooLong(nameLength, MAX_TOKEN_NAME_BYTES);
-        }
-        if (symbolLength > MAX_TOKEN_SYMBOL_BYTES) {
-            revert TokenSymbolTooLong(symbolLength, MAX_TOKEN_SYMBOL_BYTES);
-        }
-        if (currencyLength > MAX_TOKEN_CURRENCY_BYTES) {
-            revert TokenCurrencyTooLong(currencyLength, MAX_TOKEN_CURRENCY_BYTES);
+        if (
+            bytes(name).length > MAX_TOKEN_METADATA_BYTES
+                || bytes(symbol).length > MAX_TOKEN_METADATA_BYTES
+                || bytes(currency).length > MAX_TOKEN_METADATA_BYTES
+        ) {
+            revert TokenMetadataTooLong();
         }
 
         address[] memory tokens = new address[](1);
@@ -597,6 +594,8 @@ contract ZonePortal is IZonePortal {
             revert TokenTransferPolicyNotSet();
         }
 
+        tokenEnablementHash =
+            keccak256(abi.encode(tokenEnablementHash, _token, name, symbol, currency));
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
         _enabledTokens.push(_token);
 
@@ -824,9 +823,16 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
-        uint64 unprocessedDeposits = depositCount - lastProcessedDepositNumber;
-        if (unprocessedDeposits >= maximum) {
-            revert DepositQueueCapacityExceeded(maximum);
+        uint64 currentBlock = uint64(block.number);
+        if (_depositCountBlock != currentBlock) {
+            _depositCountBlock = currentBlock;
+            _depositsInCurrentBlock = 0;
+        }
+        if (_depositsInCurrentBlock >= maximum) {
+            revert DepositBlockCapacityExceeded(maximum);
+        }
+        unchecked {
+            ++_depositsInCurrentBlock;
         }
 
         currentDepositQueueHash = newCurrentDepositQueueHash;
@@ -937,7 +943,7 @@ contract ZonePortal is IZonePortal {
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
         uint64 thisDeposit = _recordDeposit(
-            newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_BOUNCEBACK_RESERVE
+            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
         );
 
         emit DepositMade(
@@ -973,19 +979,12 @@ contract ZonePortal is IZonePortal {
         onlySequencer
         nonReentrantWithdrawal
     {
-        uint64 unprocessedDeposits = depositCount - lastProcessedDepositNumber;
-        uint64 remainingCapacity = MAX_UNPROCESSED_DEPOSITS - unprocessedDeposits;
-        if (withdrawals.length > remainingCapacity) {
-            revert WithdrawalBatchCapacityExceeded(withdrawals.length, remainingCapacity);
-        }
-
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
         bytes32 nextQueue = remainingQueue;
 
         for (uint256 i = withdrawals.length; i > 0; --i) {
             remainingQueues[i - 1] = nextQueue;
-            bytes32 encodedQueue = nextQueue == bytes32(0) ? EMPTY_SENTINEL : nextQueue;
-            nextQueue = keccak256(abi.encode(withdrawals[i - 1], encodedQueue));
+            nextQueue = keccak256(abi.encode(withdrawals[i - 1], nextQueue));
         }
 
         for (uint256 i; i < withdrawals.length; ++i) {
@@ -1165,7 +1164,8 @@ contract ZonePortal is IZonePortal {
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS);
+        uint64 thisDeposit =
+            _recordDeposit(newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK);
 
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit

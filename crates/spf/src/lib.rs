@@ -169,7 +169,8 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             }
         };
 
-        let state_root = zone_state.database.state_root(&zone_state.bundle_state)?;
+        let bundle_state = zone_state.take_bundle();
+        let state_root = zone_state.database.state_root(bundle_state)?;
         let gas_limit = executed_block.evm_env.block_env.inner.gas_limit;
         let execution_context =
             execution::evm::next_block_execution_context(config.chain_spec(), block, gas_limit);
@@ -877,7 +878,7 @@ mod tests {
             alloy_rlp::encode(expected_account),
         ))));
         assert_eq!(
-            state.database.state_root(&state.bundle_state).unwrap(),
+            state.database.state_root(state.bundle_state).unwrap(),
             expected_root
         );
     }

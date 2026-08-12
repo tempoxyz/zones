@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
@@ -720,6 +720,12 @@ pub struct ZoneManifest {
     leader_ed25519_public_key: PublicKey,
     forced_recovery: Option<ForcedRecoveryConfig>,
     nodes: Vec<ManifestNode>,
+    /// Identity-only address mappings retained to resolve finalized leadership history.
+    ///
+    /// Historical leaders are deliberately not manifest nodes: they have no network address, do
+    /// not join the settlement quorum, and cannot be selected for forced recovery or a new leader
+    /// update.
+    historical_leaders: BTreeMap<EthereumAddress, PublicKey>,
 }
 
 impl ZoneManifest {
@@ -799,6 +805,33 @@ impl ZoneManifest {
             });
         }
 
+        let mut historical_leaders = BTreeMap::new();
+        for (index, raw_leader) in raw.historical_leaders.into_iter().enumerate() {
+            let ed25519_public_key = parse_ed25519_public_key(
+                &format!("historical_leaders.{index}.ed25519_public_key"),
+                &raw_leader.ed25519_public_key,
+            )?;
+            if let Some(node) = nodes
+                .iter()
+                .find(|node| node.rpc_only && node.ed25519_public_key == ed25519_public_key)
+            {
+                return Err(ManifestError::RpcOnlyHistoricalLeader(node.name.clone()));
+            }
+            let secp256k1_address = raw_leader
+                .secp256k1_address
+                .parse::<EthereumAddress>()
+                .map_err(
+                    |source| ManifestError::InvalidHistoricalLeaderSecp256k1Address {
+                        address: raw_leader.secp256k1_address,
+                        reason: source.to_string(),
+                    },
+                )?;
+            if !secp256k1_addresses.insert(secp256k1_address) {
+                return Err(ManifestError::DuplicateSecp256k1Address(secp256k1_address));
+            }
+            historical_leaders.insert(secp256k1_address, ed25519_public_key);
+        }
+
         if !ed25519_public_keys.contains(&leader_ed25519_public_key) {
             return Err(ManifestError::LeaderEd25519PublicKeyNotFound(
                 leader_ed25519_public_key.to_string(),
@@ -844,6 +877,7 @@ impl ZoneManifest {
             leader_ed25519_public_key,
             forced_recovery,
             nodes,
+            historical_leaders,
         })
     }
 
@@ -1036,6 +1070,20 @@ impl ZoneManifest {
             .find(|node| node.secp256k1_address() == Some(secp256k1_address))
     }
 
+    /// Resolves a finalized Portal leader address to its Ed25519 block-author identity.
+    ///
+    /// Unlike [`Self::node_by_secp256k1_address`], this also consults identity-only historical
+    /// entries. Callers deciding current quorum membership, networking, routing, recovery, or a
+    /// new leader target must continue to use the active-node lookup.
+    pub fn leader_ed25519_by_secp256k1_address(
+        &self,
+        secp256k1_address: EthereumAddress,
+    ) -> Option<&PublicKey> {
+        self.node_by_secp256k1_address(secp256k1_address)
+            .map(ManifestNode::ed25519_public_key)
+            .or_else(|| self.historical_leaders.get(&secp256k1_address))
+    }
+
     pub(crate) fn has_dns_addresses(&self) -> bool {
         self.nodes.iter().any(|node| node.address.is_dns())
     }
@@ -1050,6 +1098,8 @@ struct RawManifest {
     leader_ed25519_public_key: String,
     #[serde(default)]
     forced_recovery: Option<RawForcedRecovery>,
+    #[serde(default)]
+    historical_leaders: Vec<RawHistoricalLeaderIdentity>,
     nodes: Vec<RawManifestNode>,
 }
 
@@ -1064,6 +1114,13 @@ struct RawForcedRecovery {
     leader: String,
     /// Exact canonical zone block hash shared by every restarting node.
     recovery_block_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHistoricalLeaderIdentity {
+    ed25519_public_key: String,
+    secp256k1_address: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1120,6 +1177,9 @@ pub enum ManifestError {
     #[error("forced recovery leader `{0}` cannot be `rpc_only`")]
     RpcOnlyForcedRecoveryLeader(String),
 
+    #[error("historical leader identity cannot alias `rpc_only` manifest node `{0}`")]
+    RpcOnlyHistoricalLeader(String),
+
     #[error("invalid forced recovery block hash `{hash}`: {reason}")]
     InvalidRecoveryBlockHash { hash: String, reason: String },
 
@@ -1152,6 +1212,9 @@ pub enum ManifestError {
         address: String,
         reason: String,
     },
+
+    #[error("invalid historical leader secp256k1 address `{address}`: {reason}")]
+    InvalidHistoricalLeaderSecp256k1Address { address: String, reason: String },
 
     #[error("invalid address `{address}` for node `{node}`: {reason}")]
     InvalidAddress {
@@ -1193,7 +1256,7 @@ pub enum ManifestError {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::B256;
+    use alloy_primitives::{Address, B256};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
@@ -1573,6 +1636,14 @@ mod tests {
         )
     }
 
+    fn with_historical_leader(manifest: &str, secp256k1_seed: u64, ed25519_seed: u64) -> String {
+        format!(
+            "{manifest}\n[[historical_leaders]]\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\n",
+            ed25519_public_key(ed25519_seed),
+            secp256k1_address(secp256k1_seed),
+        )
+    }
+
     /// Builds a manifest where the fourth tuple element marks a node `rpc_only`. An `rpc_only`
     /// node declares no `secp256k1_address`, exactly as the loader requires.
     fn manifest_with_rpc_only(leader: u64, nodes: &[(u64, &str, &str, bool)]) -> String {
@@ -1652,6 +1723,85 @@ mod tests {
     }
 
     #[test]
+    fn resolves_historical_leader_without_adding_an_active_node() {
+        let base = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "127.0.0.1:9201"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        );
+        let baseline_digest = ZoneManifest::parse(&base).unwrap().membership_digest();
+        let manifest = ZoneManifest::parse(&with_historical_leader(&base, 9, 8)).unwrap();
+        let historical_address = secp256k1_address(9).parse().unwrap();
+
+        assert_eq!(manifest.nodes().len(), 3);
+        assert_eq!(manifest.quorum_nodes().count(), 3);
+        assert_eq!(manifest.membership_digest(), baseline_digest);
+        assert!(
+            manifest
+                .node_by_secp256k1_address(historical_address)
+                .is_none(),
+            "historical identity must not become an active quorum or network node"
+        );
+        assert_eq!(
+            manifest.leader_ed25519_by_secp256k1_address(historical_address),
+            Some(&public_key(8))
+        );
+        assert_eq!(
+            manifest.leader_ed25519_by_secp256k1_address(secp256k1_address(2).parse().unwrap()),
+            Some(&public_key(2)),
+            "the leadership resolver must still resolve active nodes"
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_historical_leader_addresses() {
+        let base = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "127.0.0.1:9201"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        );
+
+        let duplicates_active = with_historical_leader(&base, 1, 8);
+        assert!(matches!(
+            ZoneManifest::parse(&duplicates_active),
+            Err(ManifestError::DuplicateSecp256k1Address(address))
+                if address == secp256k1_address(1).parse::<Address>().unwrap()
+        ));
+
+        let duplicates_history = with_historical_leader(&with_historical_leader(&base, 9, 8), 9, 7);
+        assert!(matches!(
+            ZoneManifest::parse(&duplicates_history),
+            Err(ManifestError::DuplicateSecp256k1Address(address))
+                if address == secp256k1_address(9).parse::<Address>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn rejects_historical_leader_aliasing_rpc_only_node() {
+        let base = manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", false),
+                (2, "follower-a", "127.0.0.1:9201", false),
+                (3, "follower-b", "127.0.0.1:9202", false),
+                (4, "operator-rpc", "127.0.0.1:9203", true),
+            ],
+        );
+        let aliased = with_historical_leader(&base, 9, 4);
+
+        assert!(matches!(
+            ZoneManifest::parse(&aliased),
+            Err(ManifestError::RpcOnlyHistoricalLeader(node)) if node == "operator-rpc"
+        ));
+    }
+
+    #[test]
     fn accepts_factory_installed_sequencer_set_version_zero() {
         let input = format!(
             "sequencer_set_version = 0\n{}",
@@ -1728,6 +1878,7 @@ mod tests {
         let manifest: super::RawManifest = toml::from_str(example).unwrap();
         assert_eq!(manifest.zone_id, 7);
         assert_eq!(manifest.nodes.len(), 4);
+        assert_eq!(manifest.historical_leaders.len(), 1);
         assert_eq!(
             manifest.nodes.iter().filter(|node| !node.rpc_only).count(),
             MIN_QUORUM_NODES
