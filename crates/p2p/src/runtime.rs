@@ -966,14 +966,16 @@ mod tests {
         seed_base: u64,
         standby: usize,
     ) -> String {
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
             let rpc_only = index == standby;
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
             ));
             if !rpc_only {
@@ -1017,14 +1019,16 @@ mod tests {
             ed25519_identity(2),
             ed25519_identity(3),
         ];
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, identity) in identities.iter().enumerate() {
             let secp256k1_identity = secp256k1_identity(index as u64 + 1);
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"node-{index}.zone.local:9200\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"node-{index}.zone.local:9200\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity.address(),
             ));
@@ -1112,14 +1116,16 @@ mod tests {
             ed25519_identity(2),
             ed25519_identity(3),
         ];
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
             let secp256k1_identity = secp256k1_identity(index as u64 + 1);
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity.address(),
             ));
@@ -1370,14 +1376,16 @@ mod tests {
             ed25519_identity(22),
             ed25519_identity(23),
         ];
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
             let secp256k1_identity = secp256k1_identity(index as u64 + 21);
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity.address(),
             ));
@@ -1761,13 +1769,15 @@ mod tests {
             available_address(),
         ];
         let identities = [51_u64, 52, 53].map(ed25519_identity);
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity(index as u64 + 51).address(),
             ));
@@ -1846,14 +1856,16 @@ mod tests {
             ed25519_identity(12),
             ed25519_identity(13),
         ];
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
             let secp256k1_identity = secp256k1_identity(index as u64 + 11);
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity.address(),
             ));
@@ -1948,14 +1960,16 @@ mod tests {
             ed25519_identity(62),
             ed25519_identity(63),
         ];
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
             let secp256k1_identity = secp256k1_identity(index as u64 + 61);
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity.address(),
             ));
@@ -2115,14 +2129,16 @@ mod tests {
             ed25519_identity(72),
             ed25519_identity(73),
         ];
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
-        );
+        let mut input = "zone_id = 9\n".to_owned();
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
             let secp256k1_identity = secp256k1_identity(index as u64 + 71);
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{index}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
                 secp256k1_identity.address(),
             ));

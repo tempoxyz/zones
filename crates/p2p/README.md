@@ -43,9 +43,9 @@ operation — provision an individual secp256k1 key, register it with `ZonePorta
 from the manifest, and restart.
 
 Roles are dynamic: a node promotes or demotes at finalized leadership activation
-boundaries, driven by the node's role controller. The manifest's
-`leader_ed25519_public_key` is only a legacy bootstrap used until the portal reports a
-nonzero leader; the (optional) `--sequencer.role` CLI argument is only an assertion checked
+boundaries, driven by the node's role controller. The Ed25519 public key of the manifest node
+named `leader` is the bootstrap leader until the portal reports a nonzero leader; the
+(optional) `--sequencer.role` CLI argument is only an assertion checked
 against that bootstrap — `leader`, `follower`, or `rpc-follower`. There is no automatic election:
 leadership changes only through an operator-triggered `setLeader` transaction finalized on L1.
  
@@ -79,8 +79,6 @@ the configuration shape:
 ```toml
 zone_id = 7
 sequencer_set_version = 0
-leader_ed25519_public_key = "0xleader..."
-
 [[nodes]]
 name = "leader"
 ed25519_public_key = "0xleader..."

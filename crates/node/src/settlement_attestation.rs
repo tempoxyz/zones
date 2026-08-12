@@ -607,14 +607,16 @@ mod tests {
 
     fn test_manifest() -> ZoneManifest {
         let public_keys = [1_u64, 2, 3].map(|seed| PrivateKey::from_seed(seed).public_key());
-        let mut input = format!(
-            "zone_id = 7\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(public_keys[0].as_ref())
-        );
+        let mut input = "zone_id = 7\nsequencer_set_version = 0\n".to_owned();
         for (index, public_key) in public_keys.iter().enumerate() {
             let number = index + 1;
+            let name = if index == 0 {
+                "leader".to_owned()
+            } else {
+                format!("node-{number}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{number}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x{number:040x}\"\naddress = \"127.0.0.1:{}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x{number:040x}\"\naddress = \"127.0.0.1:{}\"\n",
                 const_hex::encode_prefixed(public_key.as_ref()),
                 9200 + index,
             ));

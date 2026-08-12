@@ -727,8 +727,6 @@ impl ZoneManifest {
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
         let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Toml)?;
 
-        let leader_ed25519_public_key =
-            parse_ed25519_public_key("leader_ed25519_public_key", &raw.leader_ed25519_public_key)?;
         let mut names = BTreeSet::new();
         let mut ed25519_public_keys = BTreeSet::new();
         let mut secp256k1_addresses = BTreeSet::new();
@@ -787,7 +785,7 @@ impl ZoneManifest {
                         address: raw_node.address.clone(),
                         reason,
                     })?;
-            if raw_node.rpc_only && ed25519_public_key == leader_ed25519_public_key {
+            if raw_node.rpc_only && raw_node.name == "leader" {
                 return Err(ManifestError::RpcOnlyLeader(raw_node.name));
             }
             nodes.push(ManifestNode {
@@ -799,11 +797,11 @@ impl ZoneManifest {
             });
         }
 
-        if !ed25519_public_keys.contains(&leader_ed25519_public_key) {
-            return Err(ManifestError::LeaderEd25519PublicKeyNotFound(
-                leader_ed25519_public_key.to_string(),
-            ));
-        }
+        let leader_ed25519_public_key = nodes
+            .iter()
+            .find(|node| node.name == "leader")
+            .map(|node| node.ed25519_public_key.clone())
+            .ok_or(ManifestError::LeaderNodeNotFound)?;
 
         // RPC-only members are not registered with `ZonePortal`, so they cannot make up for a
         // quorum that is too small to settle.
@@ -1047,7 +1045,6 @@ struct RawManifest {
     zone_id: u32,
     #[serde(default = "default_sequencer_set_version")]
     sequencer_set_version: u64,
-    leader_ed25519_public_key: String,
     #[serde(default)]
     forced_recovery: Option<RawForcedRecovery>,
     nodes: Vec<RawManifestNode>,
@@ -1160,8 +1157,8 @@ pub enum ManifestError {
         reason: String,
     },
 
-    #[error("manifest leader Ed25519 public key `{0}` does not match any node")]
-    LeaderEd25519PublicKeyNotFound(String),
+    #[error("sequencer manifest must contain a node named `leader`")]
+    LeaderNodeNotFound,
 
     #[error("zone ID mismatch: manifest has {manifest}, but --zone.id is {cli}")]
     ZoneIdMismatch { manifest: u32, cli: u32 },
@@ -1576,10 +1573,12 @@ mod tests {
     /// Builds a manifest where the fourth tuple element marks a node `rpc_only`. An `rpc_only`
     /// node declares no `secp256k1_address`, exactly as the loader requires.
     fn manifest_with_rpc_only(leader: u64, nodes: &[(u64, &str, &str, bool)]) -> String {
-        let mut value = format!(
-            "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
-            ed25519_public_key(leader)
+        assert!(
+            nodes
+                .iter()
+                .any(|(key, name, _, _)| *key == leader && *name == "leader")
         );
+        let mut value = "zone_id = 7\n".to_owned();
         for (key, name, address, rpc_only) in nodes {
             value.push_str(&format!(
                 "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
@@ -1649,6 +1648,42 @@ mod tests {
                 .unwrap(),
             Role::Follower
         );
+    }
+
+    #[test]
+    fn derives_bootstrap_leader_from_named_node() {
+        let input = manifest(
+            1,
+            &[
+                (2, "follower-a", "127.0.0.1:9201"),
+                (1, "leader", "127.0.0.1:9200"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        );
+        let manifest = ZoneManifest::parse(&input).unwrap();
+
+        assert_eq!(
+            manifest.leader_ed25519_public_key(),
+            &PrivateKey::from_seed(1).public_key()
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_without_named_leader() {
+        let input = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-b", "127.0.0.1:9201"),
+                (3, "follower-c", "127.0.0.1:9202"),
+            ],
+        )
+        .replace("name = \"leader\"", "name = \"follower-a\"");
+
+        assert!(matches!(
+            ZoneManifest::parse(&input),
+            Err(ManifestError::LeaderNodeNotFound)
+        ));
     }
 
     #[test]

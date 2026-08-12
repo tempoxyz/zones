@@ -207,13 +207,15 @@ mod tests {
     }
 
     fn manifest_with_rpc_follower() -> ZoneManifest {
-        let mut manifest = format!(
-            "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
-            ed25519_public_key(1)
-        );
+        let mut manifest = "zone_id = 7\n".to_owned();
         for seed in 1..=3 {
+            let name = if seed == 1 {
+                "leader".to_owned()
+            } else {
+                format!("seq-{seed}")
+            };
             manifest.push_str(&format!(
-                "\n[[nodes]]\nname = \"seq-{seed}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x{seed:040x}\"\naddress = \"127.0.0.1:{}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x{seed:040x}\"\naddress = \"127.0.0.1:{}\"\n",
                 ed25519_public_key(seed),
                 9200 + seed,
             ));

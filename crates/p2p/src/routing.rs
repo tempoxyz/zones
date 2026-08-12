@@ -185,13 +185,15 @@ mod tests {
     }
 
     fn manifest() -> ZoneManifest {
-        let mut input = format!(
-            "zone_id = 7\nleader_ed25519_public_key = \"0x{}\"\n",
-            hex(key(1))
-        );
+        let mut input = "zone_id = 7\n".to_owned();
         for (seed, rpc_only) in [(1, false), (2, false), (3, false), (4, true)] {
+            let name = if seed == 1 {
+                "leader".to_owned()
+            } else {
+                format!("node-{seed}")
+            };
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{seed}\"\ned25519_public_key = \"0x{}\"\naddress = \"127.0.0.1:{}\"\nrpc_only = {rpc_only}\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"0x{}\"\naddress = \"127.0.0.1:{}\"\nrpc_only = {rpc_only}\n",
                 hex(key(seed)),
                 9000 + seed,
             ));

@@ -3768,18 +3768,20 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
     ));
     std::fs::create_dir_all(&config_dir)?;
     let manifest_path = config_dir.join("manifest.toml");
-    let mut manifest = format!(
-        "zone_id = {zone_id}\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
-        const_hex::encode_prefixed(public_keys[0].as_ref())
-    );
+    let mut manifest = format!("zone_id = {zone_id}\nsequencer_set_version = 0\n");
     for (index, ((public_key, signer), address)) in public_keys
         .iter()
         .zip(&attestation_signers)
         .zip(addresses)
         .enumerate()
     {
+        let name = if index == 0 {
+            "leader".to_owned()
+        } else {
+            format!("node-{index}")
+        };
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
             const_hex::encode_prefixed(public_key.as_ref()),
             signer.address(),
         ));
@@ -3877,18 +3879,20 @@ pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2
     ));
     std::fs::create_dir_all(&config_dir)?;
     let manifest_path = config_dir.join("manifest.toml");
-    let mut manifest = format!(
-        "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
-        const_hex::encode_prefixed(public_keys[0].as_ref())
-    );
+    let mut manifest = "zone_id = 0\n".to_owned();
     for (index, ((public_key, secp256k1_signer), address)) in public_keys
         .iter()
         .zip(&secp256k1_signers)
         .zip(addresses)
         .enumerate()
     {
+        let name = if index == 0 {
+            "leader".to_owned()
+        } else {
+            format!("node-{index}")
+        };
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
             const_hex::encode_prefixed(public_key.as_ref()),
             secp256k1_signer.address(),
         ));
@@ -3977,18 +3981,20 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
     std::fs::create_dir_all(&config_dir)?;
     let manifest_path = config_dir.join("manifest.toml");
     let key_path = config_dir.join("leader.key");
-    let mut manifest = format!(
-        "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
-        const_hex::encode_prefixed(public_keys[0].as_ref())
-    );
+    let mut manifest = "zone_id = 0\n".to_owned();
     for (index, ((public_key, secp256k1_signer), address)) in public_keys
         .iter()
         .zip(&secp256k1_signers)
         .zip(addresses)
         .enumerate()
     {
+        let name = if index == 0 {
+            "leader".to_owned()
+        } else {
+            format!("node-{index}")
+        };
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
             const_hex::encode_prefixed(public_key.as_ref()),
             secp256k1_signer.address(),
         ));
