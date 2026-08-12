@@ -11,7 +11,6 @@ import {
     MAX_WITHDRAWAL_CALLBACK_GAS,
     PORTAL_ACCESS_MODE_SLOT,
     PORTAL_GATEWAY_MODE_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
@@ -559,7 +558,7 @@ contract ZoneOutbox is IZoneOutbox {
     }
 
     function _isSequencer(address account) internal view returns (bool) {
-        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT)))) != 0;
+        return _hasPortalRole(account, Role.Sequencer);
     }
 
     function _isEnabledToken(address token) internal view returns (bool) {
@@ -578,13 +577,16 @@ contract ZoneOutbox is IZoneOutbox {
 
     function _isAllowedAccount(address account) internal view returns (bool) {
         if (uint8(uint256(_readPortal(PORTAL_ACCESS_MODE_SLOT))) == 0) return true;
-        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_ROLE_SLOT))))
-            == uint256(Role.Account);
+        return _hasPortalRole(account, Role.Account);
     }
 
     function _isZoneGateway(address gateway) internal view returns (bool) {
-        return uint256(_readPortal(keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT))))
-            == uint256(Role.CallbackGateway);
+        return _hasPortalRole(gateway, Role.CallbackGateway);
+    }
+
+    function _hasPortalRole(address account, Role role) internal view returns (bool) {
+        return uint8(uint256(_readPortal(keccak256(abi.encode(account, PORTAL_ROLE_SLOT)))))
+            == uint8(role);
     }
 
 }

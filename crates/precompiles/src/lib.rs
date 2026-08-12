@@ -86,6 +86,11 @@ use tempo_precompiles::{
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
     tip403_registry::TIP403Registry,
 };
+use tempo_zone_contracts::ZonePortal as IZonePortal;
+
+pub(crate) fn has_portal_role(actual: u8, expected: IZonePortal::Role) -> bool {
+    actual == u8::from(expected)
+}
 
 /// Creates the zone-native fee manager precompile.
 pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {

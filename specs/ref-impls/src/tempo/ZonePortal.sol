@@ -168,7 +168,9 @@ contract ZonePortal is IZonePortal {
     uint8 public sequencerThreshold;
     uint256 public zoneHeight;
     address[] internal _sequencers;
-    mapping(address => bool) public isSequencer;
+    /// @dev Reserved slot 19, available for future use.
+    uint256 private _reservedSlot19;
+    /// @dev Mutually exclusive Portal roles. Sequencer membership is derived from this mapping.
     mapping(address => Role) public role;
 
     /// @dev Solidity packs both enforcement booleans into slot 21.
@@ -269,12 +271,12 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier onlySequencer() {
-        if (!isSequencer[msg.sender]) revert NotSequencer();
+        if (role[msg.sender] != Role.Sequencer) revert NotSequencer();
         _;
     }
 
     modifier onlySequencerOrAdmin() {
-        if (msg.sender != admin && !isSequencer[msg.sender]) revert NotSequencer();
+        if (msg.sender != admin && role[msg.sender] != Role.Sequencer) revert NotSequencer();
         _;
     }
 
@@ -321,6 +323,11 @@ contract ZonePortal is IZonePortal {
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
+            if (signer == admin) revert AdminSequencerConflict(signer);
+            Role existing = role[signer];
+            if (existing != Role.None && existing != Role.Sequencer) {
+                revert RoleConflict(signer, existing, Role.Sequencer);
+            }
 
             for (uint256 j = 0; j < i; ++j) {
                 if (newSequencers[j] == signer) revert InvalidSequencerSet();
@@ -330,7 +337,7 @@ contract ZonePortal is IZonePortal {
         bool membersUnchanged = length == _sequencers.length;
         if (membersUnchanged) {
             for (uint256 i = 0; i < length; ++i) {
-                if (!isSequencer[newSequencers[i]]) {
+                if (role[newSequencers[i]] != Role.Sequencer) {
                     membersUnchanged = false;
                     break;
                 }
@@ -341,17 +348,19 @@ contract ZonePortal is IZonePortal {
         }
 
         for (uint256 i = 0; i < _sequencers.length; ++i) {
-            isSequencer[_sequencers[i]] = false;
+            role[_sequencers[i]] = Role.None;
         }
         delete _sequencers;
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             _sequencers.push(signer);
-            isSequencer[signer] = true;
+            role[signer] = Role.Sequencer;
         }
         // Rotating out the active leader would strand block production: transfer leadership
         // first (add the replacement, setLeader, then remove the old member).
-        if (leader != address(0) && !isSequencer[leader]) revert ActiveLeaderRemoved();
+        if (leader != address(0) && role[leader] != Role.Sequencer) {
+            revert ActiveLeaderRemoved();
+        }
 
         sequencerThreshold = newThreshold;
         uint64 nonce = sequencerSetVersion;
@@ -370,8 +379,13 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
+    function isSequencer(address account) public view returns (bool) {
+        return role[account] == Role.Sequencer;
+    }
+
+    /// @inheritdoc IZonePortal
     function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencerOrAdmin {
-        if (!isSequencer[newLeader]) revert InvalidLeader();
+        if (role[newLeader] != Role.Sequencer) revert InvalidLeader();
         // Idempotent fanout: every node relays the same target, only the first call transitions.
         if (newLeader == leader) return;
         // Compare-and-set: a delayed duplicate carrying a pre-handoff epoch cannot roll
@@ -434,6 +448,9 @@ contract ZonePortal is IZonePortal {
     ///      Passing address(0) cancels a pending transfer.
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
     function transferAdmin(address newAdmin) external onlyAdmin {
+        if (role[newAdmin] == Role.Sequencer) {
+            revert AdminSequencerConflict(newAdmin);
+        }
         pendingAdmin = newAdmin;
         emit AdminTransferStarted(admin, newAdmin);
     }
@@ -444,6 +461,9 @@ contract ZonePortal is IZonePortal {
     ///      The Admin key can only be rotated, never renounced.
     function acceptAdmin() external {
         if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotPendingAdmin();
+        if (role[pendingAdmin] == Role.Sequencer) {
+            revert AdminSequencerConflict(pendingAdmin);
+        }
         address previousAdmin = admin;
         admin = pendingAdmin;
         pendingAdmin = address(0);
@@ -472,26 +492,22 @@ contract ZonePortal is IZonePortal {
         return !_isGatewayEnforced;
     }
 
-    /// @notice Add or remove an account from closed-loop portal flows.
-    function setAllowedAccount(address account, bool allowed) external onlyAdmin {
-        _setRole(account, allowed ? Role.Account : Role.None);
-    }
-
-    /// @notice Add or remove a callback gateway.
-    function setGateway(address account, bool allowed) external onlyAdmin {
-        _setRole(account, allowed ? Role.CallbackGateway : Role.None);
-    }
-
-    /// @notice Assign an account's role across portal flows without changing enforcement modes.
+    /// @notice Assign an account's mutually exclusive Portal role.
+    /// @dev Sequencer membership is managed atomically through setSequencerSet.
     function setRole(address account, Role next) external onlyAdmin {
+        if (role[account] == Role.Sequencer || next == Role.Sequencer) {
+            revert InvalidSequencerSet();
+        }
         _setRole(account, next);
     }
 
     function _setRole(address account, Role next) internal {
-        if (next == Role.Account && account == messenger) revert InvalidAllowedAccount();
-        Role prev = role[account];
+        if (next == Role.Account && account == messenger) {
+            revert InvalidAllowedAccount();
+        }
+        Role previous = role[account];
         role[account] = next;
-        emit RoleUpdated(account, prev, next);
+        emit RoleUpdated(account, previous, next);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1349,7 +1365,7 @@ contract ZonePortal is IZonePortal {
             } catch {
                 return false;
             }
-            if (signer == address(0) || !isSequencer[signer]) return false;
+            if (signer == address(0) || role[signer] != Role.Sequencer) return false;
             for (uint256 j = 0; j < i; ++j) {
                 if (recovered[j] == signer) return false;
             }

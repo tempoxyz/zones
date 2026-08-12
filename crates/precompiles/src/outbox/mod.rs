@@ -26,6 +26,7 @@ use zone_primitives::constants::{
 use crate::{
     ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
+    has_portal_role,
     storage::{L1State, L1StorageReader},
 };
 
@@ -67,7 +68,12 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        if caller != Address::ZERO && !l1.read_portal(|portal| &portal.is_sequencer[caller])? {
+        if caller != Address::ZERO
+            && !has_portal_role(
+                l1.read_portal(|portal| &portal.role[caller])?,
+                IZonePortal::Role::Sequencer,
+            )
+        {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -93,15 +99,17 @@ impl ZoneOutbox {
             }
 
             let role = l1.read_portal(|portal| &portal.role[to])?;
-            if gateway_enforced && role == IZonePortal::Role::CallbackGateway as u8 {
+            if gateway_enforced && has_portal_role(role, IZonePortal::Role::CallbackGateway) {
                 return Err(ZonePortalError::invalid_callback_target().into());
             }
-            if access_enforced && role != IZonePortal::Role::Account as u8 {
+            if access_enforced && !has_portal_role(role, IZonePortal::Role::Account) {
                 return Err(ZonePortalError::account_not_allowed(to).into());
             }
         } else if gateway_enforced
-            && l1.read_portal(|portal| &portal.role[to])?
-                != IZonePortal::Role::CallbackGateway as u8
+            && !has_portal_role(
+                l1.read_portal(|portal| &portal.role[to])?,
+                IZonePortal::Role::CallbackGateway,
+            )
         {
             return Err(ZonePortalError::invalid_callback_target().into());
         }

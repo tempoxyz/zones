@@ -67,14 +67,10 @@ pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 /// ZonePortal storage slot 26: append-only token-enablement commitment.
 pub const PORTAL_TOKEN_ENABLEMENT_HASH_SLOT: B256 = B256::with_last_byte(26);
 
-/// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
-pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
-
-/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
-/// `role` (mapping(address => Role)).
+/// ZonePortal storage slot 20: `role` (mapping(address => Role)).
 pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 
-/// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
+/// ZonePortal slot following the reserved slot 20: packed account and gateway enforcement booleans.
 pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
 
 /// ZonePortal storage slot 22: `maxTempoGasRate` (uint128).

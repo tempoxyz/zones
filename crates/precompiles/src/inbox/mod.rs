@@ -330,7 +330,12 @@ impl ZoneInbox {
         token: Address,
         owner: Address,
     ) -> ZoneResult<u128> {
-        if msg_sender != owner && !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
+        if msg_sender != owner
+            && !crate::has_portal_role(
+                l1.read_portal(|portal| &portal.role[msg_sender])?,
+                tempo_zone_contracts::ZonePortal::Role::Sequencer,
+            )
+        {
             return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
                 IZoneInbox::Unauthorized {},
             )));

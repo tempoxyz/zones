@@ -22,6 +22,7 @@ crate::sol! {
         // -- Shared types --
         enum Role {
             None,
+            Sequencer,
             Account,
             CallbackGateway
         }
@@ -183,6 +184,8 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
+        error AdminSequencerConflict(address account);
+        error RoleConflict(address account, Role existingRole, Role requestedRole);
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
@@ -208,8 +211,6 @@ crate::sol! {
         function setGatewayMode(bool enforced) external;
         function role(address account) external view returns (Role);
         function setRole(address account, Role role) external;
-        function setAllowedAccount(address account, bool allowed) external;
-        function setGateway(address account, bool allowed) external;
         function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
@@ -557,6 +558,8 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
+            Self::AdminSequencerConflict(_) => f.write_str("AdminSequencerConflict"),
+            Self::RoleConflict(_) => f.write_str("RoleConflict"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
