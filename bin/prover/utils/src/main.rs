@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
 use futures::{StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
-use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
+use tempo_chainspec::TempoChainSpec;
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
@@ -27,7 +27,7 @@ use tempo_zone_contracts::{
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, tempo_chain_spec_for_parent};
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
 use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
 use zone_prover::{
@@ -81,7 +81,10 @@ struct GenerateInputArgs {
     #[arg(long)]
     tempo_rpc_url: String,
 
-    /// Tempo genesis JSON path or HTTP(S) URL. Required for unknown Tempo chain IDs.
+    /// Optional Tempo genesis JSON path or HTTP(S) URL.
+    ///
+    /// Its chain ID must resolve to a known parent schedule or be listed in
+    /// `ZONE_L1_DEV_CHAIN_IDS`.
     #[arg(long, value_name = "PATH_OR_URL")]
     tempo_genesis: Option<String>,
 
@@ -221,6 +224,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
     let spf_config = spf_config(
         discovery.tempo_chain_id,
+        zone_chain_id,
         args.tempo_genesis.as_deref(),
         discovery.portal,
     )
@@ -1170,6 +1174,7 @@ async fn tempo_anchor(
 
 async fn spf_config(
     tempo_chain_id: u64,
+    zone_chain_id: u64,
     genesis_source: Option<&str>,
     portal: Address,
 ) -> Result<SpfConfig> {
@@ -1186,13 +1191,13 @@ async fn spf_config(
             }
             Arc::new(TempoChainSpec::from_genesis(genesis))
         }
-        None => chainspec_from_chain_id(tempo_chain_id).ok_or_else(|| {
-            eyre!("unsupported Tempo chain ID {tempo_chain_id}; pass --tempo-genesis <PATH_OR_URL>")
-        })?,
+        None => tempo_chain_spec_for_parent(tempo_chain_id)
+            .ok_or_else(|| eyre!("unsupported Tempo chain ID {tempo_chain_id}"))?,
     };
 
-    let zone_chain_spec =
-        ZoneChainSpec::from(tempo_spec.clone()).with_tempo_hardforks_from(tempo_spec.as_ref());
+    let mut zone_genesis = tempo_spec.inner.genesis.clone();
+    zone_genesis.config.chain_id = zone_chain_id;
+    let zone_chain_spec = ZoneChainSpec::from_genesis(zone_genesis)?;
     Ok(SpfConfig::new(Arc::new(zone_chain_spec), portal))
 }
 
@@ -1336,31 +1341,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loads_a_custom_tempo_genesis_from_a_local_path() {
+    async fn loads_a_tempo_genesis_from_a_local_path() {
         let mut genesis = Genesis::default();
-        genesis.config.chain_id = 31_318;
+        genesis.config.chain_id = 42_431;
         let path = std::env::temp_dir().join(format!(
             "tempo-zone-prover-utils-genesis-{}.json",
             std::process::id()
         ));
         std::fs::write(&path, serde_json::to_vec(&genesis).unwrap()).unwrap();
 
-        let config = spf_config(31_318, path.to_str(), Address::ZERO)
+        let zone_chain_id = zone_chain_id(42_431, 1).unwrap();
+        let config = spf_config(42_431, zone_chain_id, path.to_str(), Address::ZERO)
             .await
             .unwrap();
-        let mismatch = spf_config(31_319, path.to_str(), Address::ZERO)
+        let mismatch = spf_config(42_432, zone_chain_id, path.to_str(), Address::ZERO)
             .await
             .unwrap_err();
 
         std::fs::remove_file(path).unwrap();
         assert_eq!(
-            config.chain_spec().inner.inner.genesis().config.chain_id,
-            31_318
+            config.chain_spec().inner.inner.genesis.config.chain_id,
+            zone_chain_id
         );
         assert!(
             mismatch
                 .to_string()
-                .contains("does not match RPC chain ID 31319")
+                .contains("does not match RPC chain ID 42432")
+        );
+    }
+
+    #[tokio::test]
+    async fn builds_a_known_parent_from_zone_genesis() {
+        let zone_chain_id = zone_chain_id(42_431, 1).unwrap();
+
+        let config = spf_config(42_431, zone_chain_id, None, Address::ZERO)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            config.chain_spec().inner.inner.genesis.config.chain_id,
+            zone_chain_id
         );
     }
 }

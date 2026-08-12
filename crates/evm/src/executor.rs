@@ -282,6 +282,7 @@ mod tests {
     use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256, keccak256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::{SolCall, SolEvent};
+    use reth_chainspec::EthChainSpec as _;
     use reth_primitives_traits::Recovered;
     use revm::database::{CacheDB, EmptyDB};
     use tempo_chainspec::spec::DEV;
@@ -304,7 +305,7 @@ mod tests {
     use tempo_zone_contracts::{ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox};
     use zone_chainspec::ZoneChainSpec;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-    use zone_primitives::constants::TEMPO_STATE_ADDRESS;
+    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, zone_chain_id};
 
     use crate::ZoneEvmFactory;
 
@@ -702,7 +703,9 @@ mod tests {
             .unwrap();
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(db, EvmEnv::default());
-        let chain_spec = ZoneChainSpec::from(DEV.clone());
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
+        let chain_spec = ZoneChainSpec::from_genesis(zone_genesis).unwrap();
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,

@@ -208,7 +208,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn spf_rejects_uncomposed_spec_for_migrated_policy_transaction() -> eyre::Result<()> {
+async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Result<()> {
     let mut genesis = funded_zone_genesis();
     // Model a TIP-1092 migration: T9 reads the parent Tempo registry binding, while older forks
     // fall back to this legacy TIP-20 slot. Removing it makes the wrong fork choice observable.
@@ -242,20 +242,6 @@ async fn spf_rejects_uncomposed_spec_for_migrated_policy_transaction() -> eyre::
 
     let config = spf_config(&genesis);
     let witness = built.batch_witness(&config, zone_state_witness, tempo_state_nodes);
-
-    let uncomposed_config = SpfConfig::new(
-        Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?),
-        Address::ZERO,
-    );
-    let uncomposed = prove_zone_batch(&uncomposed_config, witness.clone());
-    assert_eq!(
-        uncomposed,
-        Err(zone_spf::Error::TransactionExecution {
-            block_index: 0,
-            transaction_index: 0,
-        }),
-        "pre-T9 replay must fail the successful migrated-policy transaction"
-    );
 
     let output = prove_zone_batch(&config, witness)?;
 
@@ -416,8 +402,10 @@ fn funded_zone_genesis() -> Genesis {
 }
 
 fn spf_config(genesis: &Genesis) -> SpfConfig {
-    let chain_spec =
-        ZoneChainSpec::from_genesis(genesis.clone()).expect("valid zone genesis chain ID");
+    let mut genesis = genesis.clone();
+    genesis.config.chain_id = zone_primitives::constants::zone_chain_id(1_337, ZONE_ID)
+        .expect("valid zone genesis chain ID");
+    let chain_spec = ZoneChainSpec::from_genesis(genesis).expect("valid zone genesis chain ID");
     SpfConfig::new(Arc::new(chain_spec), Address::ZERO)
 }
 

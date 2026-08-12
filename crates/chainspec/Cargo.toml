@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 # tempo
-tempo-chainspec.workspace = true
+tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-primitives.workspace = true
 zone-primitives.workspace = true
 
@@ -31,6 +31,9 @@ alloy-primitives.workspace = true
 eyre = { workspace = true, optional = true }
 thiserror = { version = "2", default-features = false }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [features]
 default = []
-cli = ["dep:eyre", "dep:reth-cli", "tempo-chainspec/cli"]
+cli = ["dep:eyre", "dep:reth-cli"]

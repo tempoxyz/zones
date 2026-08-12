@@ -588,6 +588,7 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+    use reth_chainspec::EthChainSpec as _;
     use reth_evm::ConfigureEvm;
     use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
     use revm::{
@@ -604,7 +605,10 @@ mod tests {
 
     fn test_config() -> SpfConfig {
         let tempo_chain_spec = tempo_chainspec::spec::MODERATO.clone();
-        let zone_chain_spec = Arc::new(zone_chainspec::ZoneChainSpec::from(tempo_chain_spec));
+        let mut genesis = tempo_chain_spec.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain().id(), 1).unwrap();
+        let zone_chain_spec =
+            Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
         SpfConfig::new(zone_chain_spec, Address::repeat_byte(0x11))
     }
 

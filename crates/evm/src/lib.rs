@@ -573,7 +573,7 @@ mod tests {
     };
     use tempo_zone_contracts::IZoneInbox;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, zone_chain_id};
 
     #[test]
     fn l1_storage_recorder_deduplicates_successful_reads_without_block_numbers() {
@@ -698,8 +698,9 @@ mod tests {
 
     #[test]
     fn tempo_evm_selects_parent_fork_from_zone_block_timestamp() {
-        let zone = ZoneChainSpec::from(DEV.clone());
-        let composed = Arc::new(zone.with_tempo_hardforks_from(MODERATO.as_ref()));
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 1).unwrap();
+        let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
             .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
