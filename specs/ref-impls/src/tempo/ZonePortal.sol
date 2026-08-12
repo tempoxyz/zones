@@ -84,6 +84,9 @@ contract ZonePortal is IZonePortal {
     /// @dev Matches the creation and replacement bound fixed by TIP-1091.
     uint256 public constant MAX_SEQUENCERS = 8;
 
+    /// @notice Duration of every emergency pause.
+    uint64 public constant PAUSE_DURATION = 30 days;
+
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
@@ -132,7 +135,7 @@ contract ZonePortal is IZonePortal {
     EncryptionKeyEntry[] internal _encryptionKeys;
 
     /// @notice Per-token configuration (stored at slot 6)
-    /// @dev TokenConfig.enabled is permanent (write-once true); depositsActive can be toggled.
+    /// @dev TokenConfig.enabled is permanent; depositsActive is retained for storage compatibility.
     mapping(address => TokenConfig) internal _tokenConfigs;
 
     /// @notice Append-only list of enabled tokens (stored at slot 7)
@@ -205,9 +208,10 @@ contract ZonePortal is IZonePortal {
     uint64 internal _tokenEnableCountBlock;
     uint64 internal _tokensEnabledInCurrentBlock;
 
-    /// @notice Whether new deposits and L1 withdrawal processing are paused.
-    /// @dev Appended for upgrade-safe storage layout.
-    bool public paused;
+    /// @notice Timestamp at which the current emergency pause expires.
+    /// @dev Packed with pauseDisabled in slot 25 for upgrade-safe storage layout.
+    uint64 public pauseExpiry;
+    bool public pauseDisabled;
 
     /// @notice Append-only commitment to every enabled token and its metadata.
     /// @dev Stored at slot 26 so the existing portal layout remains unchanged.
@@ -296,15 +300,8 @@ contract ZonePortal is IZonePortal {
         _;
     }
 
-    modifier onlyPauseAuthority() {
-        if (msg.sender != admin && !isSequencer[msg.sender] && role[msg.sender] != Role.Pause) {
-            revert NotPauseAuthority();
-        }
-        _;
-    }
-
     modifier whenNotPaused() {
-        if (paused) revert PortalIsPaused();
+        if (paused()) revert PortalIsPaused();
         _;
     }
 
@@ -572,7 +569,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Check if deposits are currently active for a token
     function areDepositsActive(address _token) external view returns (bool) {
         TokenConfig storage cfg = _tokenConfigs[_token];
-        return !paused && cfg.enabled && cfg.depositsActive;
+        return !paused() && cfg.enabled;
     }
 
     /// @notice Get the token configuration for a specific token
@@ -590,16 +587,25 @@ contract ZonePortal is IZonePortal {
         return _enabledTokens[index];
     }
 
-    /// @notice Pause new deposits and L1 withdrawal processing.
-    function pause() external onlyPauseAuthority {
-        paused = true;
+    function paused() public view returns (bool) {
+        return block.timestamp < pauseExpiry;
+    }
+
+    /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
+    function pause() external {
+        if (paused()) revert PortalIsPaused();
+        if (pauseDisabled) revert PauseDisabled();
+        if (msg.sender != admin && !isSequencer[msg.sender] && role[msg.sender] != Role.Pause) {
+            revert NotPauseAuthority();
+        }
+        pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
         emit PortalPaused(msg.sender);
     }
 
-    /// @notice Resume new deposits and L1 withdrawal processing. Only callable by admin.
-    function resume() external onlyAdmin {
-        paused = false;
-        emit PortalResumed(msg.sender);
+    /// @notice Permanently disable the pause capability and clear any active pause.
+    function disablePause() external onlyAdmin {
+        pauseDisabled = true;
+        pauseExpiry = 0;
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
@@ -610,21 +616,6 @@ contract ZonePortal is IZonePortal {
             revert TokenNotEnabled();
         }
         _enableTokenInternal(_token);
-    }
-
-    /// @notice Pause deposits for a token. Only callable by admin.
-    /// @dev Does not affect withdrawal processing (non-custodial guarantee).
-    function pauseDeposits(address _token) external onlyAdmin {
-        if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
-        _tokenConfigs[_token].depositsActive = false;
-        emit DepositsPaused(_token);
-    }
-
-    /// @notice Resume deposits for a token. Only callable by admin.
-    function resumeDeposits(address _token) external onlyAdmin {
-        if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
-        _tokenConfigs[_token].depositsActive = true;
-        emit DepositsResumed(_token);
     }
 
     /// @notice Internal function to enable a token (used by initializer and enableToken)
@@ -845,10 +836,9 @@ contract ZonePortal is IZonePortal {
     }
 
     function _validateDepositsActive(address _token) internal view {
-        if (paused) revert PortalIsPaused();
+        if (paused()) revert PortalIsPaused();
         TokenConfig storage cfg = _tokenConfigs[_token];
         if (!cfg.enabled) revert TokenNotEnabled();
-        if (!cfg.depositsActive) revert DepositsNotActive();
     }
 
     function _requireAllowed(address account) internal view {
@@ -1261,6 +1251,7 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
+        whenNotPaused
     {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();

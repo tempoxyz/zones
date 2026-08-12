@@ -1482,21 +1482,12 @@ contract ZonePortalTest is BaseTest {
         _expectInvalidQuorumCertificate(portal, signers[0], batch, validSignatures);
     }
 
-    function test_adminCanPauseAndResumeDeposits() public {
-        vm.prank(admin);
-        portal.pauseDeposits(address(pathUSD));
-        assertFalse(portal.areDepositsActive(address(pathUSD)));
-
-        vm.prank(admin);
-        portal.resumeDeposits(address(pathUSD));
-        assertTrue(portal.areDepositsActive(address(pathUSD)));
-    }
-
-    function test_pause_blocksDepositsAndWithdrawalProcessing() public {
+    function test_pause_blocksBatchSubmissionsDepositsAndWithdrawalProcessing() public {
         vm.prank(sequencer);
         portal.pause();
 
         assertTrue(portal.paused());
+        assertEq(portal.pauseExpiry(), block.timestamp + 30 days);
         assertFalse(portal.areDepositsActive(address(pathUSD)));
 
         vm.prank(alice);
@@ -1507,8 +1498,26 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(IZonePortal.PortalIsPaused.selector);
         portal.processWithdrawals(new Withdrawal[](0), bytes32(0));
 
-        vm.prank(admin);
-        portal.resume();
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        portal.submitBatch(
+            0,
+            0,
+            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: bytes32(0) }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            "",
+            0,
+            new bytes[](0)
+        );
+
+        vm.warp(block.timestamp + 30 days);
         assertFalse(portal.paused());
         assertTrue(portal.areDepositsActive(address(pathUSD)));
     }
@@ -1522,29 +1531,49 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.paused());
     }
 
+    function test_pause_expiresAfterThirtyDays() public {
+        vm.prank(sequencer);
+        portal.pause();
+
+        vm.warp(block.timestamp + 30 days);
+        assertFalse(portal.paused());
+    }
+
+    function test_pause_cannotExtendActivePause() public {
+        vm.prank(sequencer);
+        portal.pause();
+        uint64 originalExpiry = portal.pauseExpiry();
+
+        vm.warp(block.timestamp + 15 days);
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        portal.pause();
+
+        assertEq(portal.pauseExpiry(), originalExpiry);
+    }
+
+    function test_disablePause_permanentlyDisablesAndClearsPause() public {
+        vm.prank(sequencer);
+        portal.pause();
+
+        vm.prank(admin);
+        portal.disablePause();
+        assertTrue(portal.pauseDisabled());
+        assertFalse(portal.paused());
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.PauseDisabled.selector);
+        portal.pause();
+    }
+
     function test_pause_revertsWithoutAuthority() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotPauseAuthority.selector);
         portal.pause();
     }
 
-    function test_resume_revertsIfNotAdmin() public {
-        vm.prank(sequencer);
-        portal.pause();
-
-        vm.prank(sequencer);
-        vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.resume();
-    }
-
     function test_tokenGovernance_revertsIfNotAdmin() public {
         vm.startPrank(sequencer);
-        vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.pauseDeposits(address(pathUSD));
-
-        vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.resumeDeposits(address(pathUSD));
-
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.enableToken(address(pathUSD));
 
@@ -1772,15 +1801,14 @@ contract ZonePortalTest is BaseTest {
         vm.prank(alice);
         portal.acceptAdmin();
 
-        // New admin can exercise governance powers.
+        // New admin can exercise governance powers and the old admin cannot unpause the portal.
         vm.prank(alice);
-        portal.pauseDeposits(address(pathUSD));
-        assertFalse(portal.areDepositsActive(address(pathUSD)));
+        portal.pause();
+        assertTrue(portal.paused());
 
-        // Old admin can no longer exercise them.
         vm.prank(admin);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.resumeDeposits(address(pathUSD));
+        portal.disablePause();
     }
 
     function test_transferAdmin_revertsIfNotAdmin() public {

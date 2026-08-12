@@ -488,11 +488,10 @@ interface IZoneFactory {
 }
 
 /// @notice Per-token configuration in the portal's token registry
-/// @dev enabled is permanent (write-once true); depositsActive can be toggled by admin.
-///      Once enabled, withdrawals can never be disabled (non-custodial guarantee).
+/// @dev depositsActive is retained for storage compatibility and is always true for enabled tokens.
 struct TokenConfig {
     bool enabled; // true once admin enables this token (permanent, irreversible)
-    bool depositsActive; // admin can pause/unpause deposits; does not affect withdrawals
+    bool depositsActive; // deprecated; retained for storage compatibility
 }
 
 /// @title IZonePortal
@@ -579,17 +578,8 @@ interface IZonePortal {
     /// @notice Emitted when admin enables a new TIP-20 token for bridging
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
-    /// @notice Emitted when admin pauses deposits for a token
-    event DepositsPaused(address indexed token);
-
-    /// @notice Emitted when admin resumes deposits for a token
-    event DepositsResumed(address indexed token);
-
-    /// @notice Emitted when portal deposits and withdrawal processing are paused.
+    /// @notice Emitted when batch submissions, deposits, and withdrawal processing are paused.
     event PortalPaused(address indexed account);
-
-    /// @notice Emitted when the portal is resumed by the admin.
-    event PortalResumed(address indexed account);
 
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
@@ -616,6 +606,7 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotPauseAuthority();
+    error PauseDisabled();
     error PortalIsPaused();
     error NotFactory();
     error NotSelf();
@@ -640,7 +631,6 @@ interface IZonePortal {
     error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
-    error DepositsNotActive();
     error TokenAlreadyEnabled();
     error TokenTransferPolicyNotSet();
     error InvalidBouncebackRecipient();
@@ -802,25 +792,22 @@ interface IZonePortal {
     /// @notice Append-only commitment to enabled token addresses and metadata
     function tokenEnablementHash() external view returns (bytes32);
 
-    /// @notice Whether new deposits and L1 withdrawal processing are paused.
+    /// @notice Whether batch submissions, new deposits, and L1 withdrawal processing are paused.
     function paused() external view returns (bool);
 
-    /// @notice Pause new deposits and L1 withdrawal processing.
+    function pauseExpiry() external view returns (uint64);
+
+    function pauseDisabled() external view returns (bool);
+
+    /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
     function pause() external;
 
-    /// @notice Resume new deposits and L1 withdrawal processing. Only callable by admin.
-    function resume() external;
+    /// @notice Permanently disable the pause capability. Only callable by admin.
+    function disablePause() external;
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
     function enableToken(address token) external;
-
-    /// @notice Pause deposits for a token. Only callable by admin.
-    /// @dev Does not affect withdrawal processing (non-custodial guarantee).
-    function pauseDeposits(address token) external;
-
-    /// @notice Resume deposits for a token. Only callable by admin.
-    function resumeDeposits(address token) external;
 
     /// @notice The zone's operator RPC endpoint
     /// @return The stored RPC URL, or empty string if unset

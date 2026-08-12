@@ -1669,237 +1669,6 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Same-zone routed withdrawal where the downstream encrypted deposit fails.
-///
-/// Deposits for BetaUSD are paused on the target portal so the router callback
-/// reverts and the original AlphaUSD withdrawal bounces back to the sender.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_swap_and_deposit_into_same_zone_bounces_back_when_target_deposits_paused()
--> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let mut fixture = setup_same_zone_swap_fixture().await?;
-    let expected_beta = fixture
-        .l1
-        .quote_dex_swap_exact_amount_in(fixture.alpha, fixture.beta, fixture.swap_amount)
-        .await?;
-
-    fixture
-        .l1
-        .pause_deposits_on_portal(fixture.portal_address, fixture.beta)
-        .await?;
-
-    let _sequencer = spawn_sequencer(
-        &fixture.l1,
-        &fixture.zone,
-        fixture.portal_address,
-        fixture.l1.dev_signer(),
-    )
-    .await;
-
-    let args = WithdrawalArgs::swap_and_deposit_via_router(
-        &fixture.l1,
-        RouterDepositArgs {
-            amount: fixture.swap_amount,
-            router: fixture.router,
-            token_out: fixture.beta,
-            target_portal: fixture.portal_address,
-            recipient: fixture.account.address(),
-            tempo_refund_recipient: fixture.account.address(),
-            memo: B256::ZERO,
-            min_amount_out: expected_beta,
-        },
-    )
-    .await?;
-    fixture
-        .account
-        .withdraw_token_with(fixture.alpha, args)
-        .await?;
-
-    let alpha_after_request = fixture
-        .zone
-        .balance_of(fixture.alpha, fixture.account.address())
-        .await?;
-    assert_eq!(
-        alpha_after_request,
-        U256::ZERO,
-        "AlphaUSD should leave the zone before the bounce-back is processed"
-    );
-
-    let timeout = Duration::from_secs(60);
-    fixture
-        .zone
-        .wait_for_balance(
-            fixture.alpha,
-            fixture.account.address(),
-            U256::from(fixture.swap_amount),
-            timeout,
-        )
-        .await?;
-
-    let alpha_after = fixture
-        .zone
-        .balance_of(fixture.alpha, fixture.account.address())
-        .await?;
-    assert_eq!(
-        alpha_after,
-        U256::from(fixture.swap_amount),
-        "AlphaUSD should bounce back after the router's encrypted deposit reverts"
-    );
-
-    let beta_after = fixture
-        .zone
-        .balance_of(fixture.beta, fixture.account.address())
-        .await?;
-    assert_eq!(
-        beta_after,
-        U256::ZERO,
-        "BetaUSD should not be minted when the routed encrypted deposit fails"
-    );
-
-    fixture
-        .l1
-        .assert_withdrawal_processed_with_status(
-            fixture.portal_address,
-            fixture.router,
-            fixture.alpha,
-            fixture.swap_amount,
-            false,
-        )
-        .await?;
-
-    Ok(())
-}
-
-/// Same-zone routed withdrawal where the downstream encrypted deposit fails.
-///
-/// This pins the callback behavior for `deposit`: even with a valid
-/// encrypted payload and key index, a target-portal deposit failure must revert
-/// the callback and bounce the original token back to the sender.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_payload()
--> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let mut fixture = setup_same_zone_swap_fixture().await?;
-    let expected_beta = fixture
-        .l1
-        .quote_dex_swap_exact_amount_in(fixture.alpha, fixture.beta, fixture.swap_amount)
-        .await?;
-
-    fixture
-        .l1
-        .pause_deposits_on_portal(fixture.portal_address, fixture.beta)
-        .await?;
-
-    let (key_index, encrypted) = fixture
-        .l1
-        .encrypt_deposit_for_portal(
-            fixture.portal_address,
-            fixture.router,
-            fixture.account.address(),
-            B256::ZERO,
-        )
-        .await?;
-
-    let _sequencer = spawn_sequencer(
-        &fixture.l1,
-        &fixture.zone,
-        fixture.portal_address,
-        fixture.l1.dev_signer(),
-    )
-    .await;
-
-    let args = WithdrawalArgs::swap_and_deposit_via_router_callback(RouterCallbackArgs {
-        amount: fixture.swap_amount,
-        router: fixture.router,
-        token_out: fixture.beta,
-        target_portal: fixture.portal_address,
-        key_index,
-        encrypted,
-        tempo_refund_recipient: fixture.account.address(),
-        min_amount_out: expected_beta,
-    });
-    fixture
-        .account
-        .withdraw_token_with(fixture.alpha, args)
-        .await?;
-
-    let alpha_after_request = fixture
-        .zone
-        .balance_of(fixture.alpha, fixture.account.address())
-        .await?;
-    assert_eq!(
-        alpha_after_request,
-        U256::ZERO,
-        "AlphaUSD should leave the zone before the router callback bounces back"
-    );
-
-    let timeout = Duration::from_secs(60);
-    fixture
-        .zone
-        .wait_for_balance(
-            fixture.alpha,
-            fixture.account.address(),
-            U256::from(fixture.swap_amount),
-            timeout,
-        )
-        .await?;
-
-    let alpha_after = fixture
-        .zone
-        .balance_of(fixture.alpha, fixture.account.address())
-        .await?;
-    assert_eq!(
-        alpha_after,
-        U256::from(fixture.swap_amount),
-        "AlphaUSD should bounce back when the routed encrypted deposit fails"
-    );
-
-    let beta_after = fixture
-        .zone
-        .balance_of(fixture.beta, fixture.account.address())
-        .await?;
-    assert_eq!(
-        beta_after,
-        U256::ZERO,
-        "BetaUSD should not be minted when the routed encrypted deposit fails"
-    );
-
-    fixture
-        .l1
-        .assert_withdrawal_processed_with_status(
-            fixture.portal_address,
-            fixture.router,
-            fixture.alpha,
-            fixture.swap_amount,
-            false,
-        )
-        .await?;
-
-    Ok(())
-}
-
-/// Multi-asset deposit + withdrawal test:
-///
-///  1. Start L1 dev node.
-///  2. Create a second TIP-20 token ("ZoneUSD") on L1.
-///  3. Create a zone with pathUSD through the native ZoneFactory.
-///  4. Enable ZoneUSD on the portal.
-///  5. Start zone node connected to L1 (ZoneUSD is auto-initialized via TokenEnabled event).
-///  6. Deposit pathUSD and ZoneUSD into the zone.
-///  7. Spawn sequencer, withdraw both tokens back to L1.
-///  8. Verify withdrawals processed and L2 balances decreased.
-///
-/// ```text
-///  L1 (pathUSD + ZoneUSD)          Zone L2
-///    |--- deposit pathUSD -------->|  ✓ pathUSD minted
-///    |--- deposit ZoneUSD -------->|  ✓ ZoneUSD minted
-///    |<-- withdraw pathUSD --------|  ✓ pathUSD burned
-///    |<-- withdraw ZoneUSD --------|  ✓ ZoneUSD burned
-/// ```
-///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -2103,6 +1872,103 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
         withdrawal_timeout,
     )
     .await?;
+
+    Ok(())
+}
+
+/// A portal-wide pause rejects deposits and keeps finalized withdrawals queued on L1 until the
+/// admin unpauses the portal.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    let recipient_signer = l1.signer_at(2);
+    let recipient = recipient_signer.address();
+    let mut depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
+    let initial_deposit = 1_000_000u128;
+    let resumed_deposit = 250_000u128;
+    l1.fund_user(depositor.address(), initial_deposit + resumed_deposit)
+        .await?;
+    depositor
+        .deposit_with_memo(initial_deposit, recipient, B256::ZERO, L1_TIMEOUT, &zone)
+        .await?;
+
+    let admin_provider = l1.admin_provider();
+    let portal = ZonePortal::new(portal_address, &admin_provider);
+    let pause_receipt = portal.pause().send().await?.get_receipt().await?;
+    eyre::ensure!(pause_receipt.status(), "global pause transaction failed");
+    eyre::ensure!(portal.paused().call().await?, "portal should be paused");
+
+    let _ = depositor
+        .simulate_deposit(resumed_deposit, depositor.address(), depositor.address())
+        .await
+        .expect_err("deposit simulation should revert while the portal is paused");
+
+    let sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+    let initial_withdrawal_batch = portal.withdrawalBatchIndex().call().await?;
+    let zone_outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let initial_zone_withdrawal_batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
+    let withdrawal_start_block = l1.provider().get_block_number().await?;
+    let withdrawal_amount = 500_000u128;
+    let mut recipient_account =
+        ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
+    recipient_account.withdraw(withdrawal_amount).await?;
+
+    poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(250),
+        "withdrawal to be finalized into a zone batch",
+        || {
+            let zone_outbox = &zone_outbox;
+            async move {
+                let batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
+                Ok((batch > initial_zone_withdrawal_batch).then_some(()))
+            }
+        },
+    )
+    .await?;
+    eyre::ensure!(
+        !sequencer.withdrawal_handle.is_finished(),
+        "withdrawal processor exited while the portal was paused"
+    );
+    assert_eq!(
+        portal.withdrawalBatchIndex().call().await?,
+        initial_withdrawal_batch,
+        "withdrawal batch must not be submitted while the portal is paused"
+    );
+
+    let processed_while_paused = portal
+        .WithdrawalProcessed_filter()
+        .from_block(withdrawal_start_block)
+        .query()
+        .await?;
+    assert!(
+        processed_while_paused.is_empty(),
+        "withdrawal must remain queued while the portal is paused"
+    );
+
+    let unpause_receipt = portal.disablePause().send().await?.get_receipt().await?;
+    eyre::ensure!(
+        unpause_receipt.status(),
+        "global unpause transaction failed"
+    );
+    eyre::ensure!(!portal.paused().call().await?, "portal should be unpaused");
+
+    l1.wait_for_withdrawal_on_l1(
+        portal_address,
+        recipient,
+        withdrawal_amount,
+        Duration::from_secs(60),
+    )
+    .await?;
+    depositor
+        .deposit(resumed_deposit, L1_TIMEOUT, &zone)
+        .await?;
 
     Ok(())
 }

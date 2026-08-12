@@ -1,21 +1,13 @@
 //! xtask is a Swiss army knife of tools that help with running and testing tempo.
 use crate::{
-    benchmark_results::BenchmarkResults,
-    configure_benchmark_fees::ConfigureBenchmarkFees,
-    create_zone::CreateZone,
-    demo_blacklist::DemoBlacklist,
-    demo_swap_and_deposit::DemoSwapAndDeposit,
-    deploy_neobank_fixtures::DeployNeobankFixtures,
-    deploy_router::DeployRouter,
-    deposit::Deposit,
-    generate_p2p_key::GenerateP2pKey,
+    benchmark_results::BenchmarkResults, configure_benchmark_fees::ConfigureBenchmarkFees,
+    create_zone::CreateZone, demo_blacklist::DemoBlacklist,
+    demo_swap_and_deposit::DemoSwapAndDeposit, deploy_neobank_fixtures::DeployNeobankFixtures,
+    deploy_router::DeployRouter, deposit::Deposit, generate_p2p_key::GenerateP2pKey,
     generate_zone_genesis::GenerateZoneGenesis,
-    install_reference_zone_factory::InstallReferenceZoneFactory,
-    portal_pause::{PausePortal, ResumePortal},
-    set_encryption_key::SetEncryptionKey,
-    spam_deposits::SpamDeposits,
-    verify_closed_loop::VerifyClosedLoop,
-    zone_info::ZoneInfoCmd,
+    install_reference_zone_factory::InstallReferenceZoneFactory, portal_pause::PausePortal,
+    set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits,
+    verify_closed_loop::VerifyClosedLoop, zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
@@ -71,7 +63,6 @@ async fn main() -> eyre::Result<()> {
             .run()
             .wrap_err("failed to install reference ZoneFactory"),
         Action::PausePortal(args) => args.run().await.wrap_err("failed to pause portal"),
-        Action::ResumePortal(args) => args.run().await.wrap_err("failed to resume portal"),
         Action::SetEncryptionKey(args) => args.run().await.wrap_err("failed to set encryption key"),
         Action::SpamDeposits(args) => args.run().await.wrap_err("failed to spam deposits"),
         Action::VerifyClosedLoop(args) => {
@@ -105,7 +96,6 @@ enum Action {
     GenerateZoneGenesis(GenerateZoneGenesis),
     InstallReferenceZoneFactory(InstallReferenceZoneFactory),
     PausePortal(PausePortal),
-    ResumePortal(ResumePortal),
     SetEncryptionKey(SetEncryptionKey),
     SpamDeposits(SpamDeposits),
     VerifyClosedLoop(VerifyClosedLoop),

@@ -98,10 +98,7 @@ crate::sol! {
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
-        event DepositsPaused(address indexed token);
-        event DepositsResumed(address indexed token);
         event PortalPaused(address indexed account);
-        event PortalResumed(address indexed account);
         event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(
@@ -188,6 +185,7 @@ crate::sol! {
         error NotSequencer();
         error NotAdmin();
         error NotPauseAuthority();
+        error PauseDisabled();
         error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
@@ -241,12 +239,14 @@ crate::sol! {
         function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function paused() external view returns (bool);
+        function pauseExpiry() external view returns (uint64);
+        function pauseDisabled() external view returns (bool);
 
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
         function pause() external;
-        function resume() external;
+        function disablePause() external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -261,8 +261,6 @@ crate::sol! {
         ) external;
 
         function enableToken(address token) external;
-        function pauseDeposits(address token) external;
-        function resumeDeposits(address token) external;
 
         function setZoneGasRate(uint128 newZoneGasRate) external;
         function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
@@ -566,6 +564,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
             Self::NotPauseAuthority(_) => f.write_str("NotPauseAuthority"),
+            Self::PauseDisabled(_) => f.write_str("PauseDisabled"),
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),

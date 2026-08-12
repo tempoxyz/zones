@@ -184,13 +184,6 @@ alloy_sol_types::sol! {
         function place(address token, uint128 amount, bool isBid, int16 tick) external returns (uint128 orderId);
         function quoteSwapExactAmountIn(address tokenIn, address tokenOut, uint128 amountIn) external view returns (uint128 amountOut);
     }
-
-    #[sol(rpc)]
-    contract TestZonePortalAdmin {
-        function pauseDeposits(address token) external;
-        function resumeDeposits(address token) external;
-        function areDepositsActive(address token) external view returns (bool);
-    }
 }
 
 /// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
@@ -2357,28 +2350,6 @@ impl L1TestNode {
             "L1 ZonePortal account role for {account} did not equal {expected_role:?}"
         );
         Ok(provider.get_block_number().await?)
-    }
-
-    /// Pause deposits for a token on the ZonePortal.
-    pub(crate) async fn pause_deposits_on_portal(
-        &self,
-        portal_address: Address,
-        token: Address,
-    ) -> eyre::Result<()> {
-        let provider = self.admin_provider();
-        let portal = TestZonePortalAdmin::new(portal_address, &provider);
-        let receipt = portal
-            .pauseDeposits(token)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "pauseDeposits failed");
-        eyre::ensure!(
-            !portal.areDepositsActive(token).call().await?,
-            "deposits should be paused for {token}"
-        );
-        Ok(())
     }
 
     /// Set the sequencer encryption key on the ZonePortal.

@@ -123,7 +123,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## System Overview
 
-Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. Each zone also has a separate **admin** role that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. Each zone also has a separate **admin** role that holds governance powers (enabling tokens, configuring portal pause/unpause); see [Access Control](#access-control). **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
@@ -175,7 +175,7 @@ Each zone has an **admin** authority and a set of **sequencers** registered on t
 
 **Admin.**
 
-- Holds governance powers over the zone (token enablement, deposit pause/resume, and account and gateway membership).
+- Holds governance powers over the zone (token enablement, portal pause/unpause, and account and gateway membership).
 - Expected to be a cold key, multisig, or governance contract.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
 - Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
@@ -200,12 +200,13 @@ The following table lists every privileged action and the role authorized to inv
 | Action | Contract | Authorized caller |
 |---|---|---|
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pause()` | [`ZonePortal`](#izoneportal) | **admin, sequencer, or pause role** |
 | `resume()` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAllowedAccount(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `disablePause()` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setPauseGuardian(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAccessMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGatewayMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -225,7 +226,7 @@ The following table lists every privileged action and the role authorized to inv
 
 Rationale notes:
 
-- **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
+- **Token enablement and permanent pause disablement are admin-only** because they govern what the zone is and which emergency controls remain available.
 - **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
 - **Encryption public-key management is admin- or sequencer-authorized**. Both paths require a proof of possession from the corresponding encryption private key, so neither role can register a public key it cannot decrypt with.
 - **Zone-side system calls** to `ZoneOutbox` use `msg.sender == address(0)`. Withdrawal finalization is system-only; sequencers may call the gas-rate and withdrawal-limit setters directly.
@@ -341,13 +342,12 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 The admin manages which TIP-20 tokens are available on the zone (see [Access Control](#access-control)):
 
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
-- `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
-- `pause()`: Pause all new deposits and L1 withdrawal processing. Callable by the admin, an
-  active sequencer, or an account assigned the pause role.
-- `resume()`: Resume portal-wide deposit and withdrawal processing. Callable only by the admin.
-- `resumeDeposits(token)`: Resume deposits for a previously paused token.
+- `pause()`: Pause batch submissions, all new deposits, and L1 withdrawal processing for the
+  public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
+  extended while active.
+- `disablePause()`: Permanently disable pausing and clear any active pause. This is admin-only.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with a permanent `enabled` flag, along with an append-only `enabledTokens` list. The legacy `depositsActive` field remains true and is retained only for storage compatibility. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Token Enablement Commitment
 
@@ -1614,7 +1614,7 @@ struct DepositQueueTransition {
 
 struct TokenConfig {
     bool enabled;
-    bool depositsActive;
+    bool depositsActive; // deprecated; retained for storage compatibility
 }
 
 address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
@@ -1741,10 +1741,7 @@ interface IZonePortal {
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
-    event DepositsPaused(address indexed token);
-    event DepositsResumed(address indexed token);
     event PortalPaused(address indexed account);
-    event PortalResumed(address indexed account);
     event RoleUpdated(address indexed account, Role prev, Role next);
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
@@ -1769,7 +1766,6 @@ interface IZonePortal {
     error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
-    error DepositsNotActive();
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
@@ -1786,11 +1782,11 @@ interface IZonePortal {
 
     // Token management
     function enableToken(address token) external;
-    function pauseDeposits(address token) external;
-    function resumeDeposits(address token) external;
     function paused() external view returns (bool);
+    function pauseExpiry() external view returns (uint64);
+    function pauseDisabled() external view returns (bool);
     function pause() external;
-    function resume() external;
+    function disablePause() external;
     function isTokenEnabled(address token) external view returns (bool);
     function areDepositsActive(address token) external view returns (bool);
     function tokenConfig(address token) external view returns (TokenConfig memory);

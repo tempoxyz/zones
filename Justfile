@@ -410,64 +410,10 @@ enable-token token:
         sleep 0.5
     done
 
-# Shared implementation for admin-only portal calls that take a single token
-# argument (pauseDeposits / resumeDeposits). Resolves the token alias, signs with
-# ADMIN_KEY (SEQUENCER_KEY fallback only when it is the on-chain admin).
-[private]
-_portal-admin-token-call action token:
-    #!/bin/bash
-    set -euo pipefail
-    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
-    PK="${ADMIN_KEY:-${SEQUENCER_KEY:-}}"
-    if [[ -z "$PK" ]]; then
-        echo "Set ADMIN_KEY env var (or SEQUENCER_KEY for legacy zones where admin == sequencer)" >&2
-        exit 1
-    fi
-    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
-    # {{action}} is onlyAdmin: reject the sequencer fallback unless it is the admin.
-    SIGNER_ADDR=$(cast wallet address "$PK" | tr '[:upper:]' '[:lower:]')
-    ONCHAIN_ADMIN=$(cast call "$PORTAL" "admin()(address)" --rpc-url "$HTTP_RPC" | tr '[:upper:]' '[:lower:]')
-    if [[ "$SIGNER_ADDR" != "$ONCHAIN_ADMIN" ]]; then
-        echo "Signer $SIGNER_ADDR is not the portal admin $ONCHAIN_ADMIN. Set ADMIN_KEY for this zone (SEQUENCER_KEY only works when admin == sequencer)." >&2
-        exit 1
-    fi
-    TOKEN="{{token}}"
-    TOKEN_LOWER=$(echo "$TOKEN" | tr '[:upper:]' '[:lower:]')
-    case "$TOKEN_LOWER" in
-        pathusd|path-usd|path_usd)
-            TOKEN="0x20C0000000000000000000000000000000000000" ;;
-        alphausd|alpha-usd|alpha_usd)
-            TOKEN="0x20c0000000000000000000000000000000000001" ;;
-        betausd|beta-usd|beta_usd)
-            TOKEN="0x20c0000000000000000000000000000000000002" ;;
-    esac
-    echo "Calling {{action}}($TOKEN) on portal $PORTAL..."
-    TX_OUTPUT=$(cast send "$PORTAL" "{{action}}(address)" "$TOKEN" \
-        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
-    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    echo "L1 tx: $TX_HASH"
-    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
-
 [group('zone')]
-[doc('Pauses deposits for an enabled TIP-20 on the ZonePortal (withdrawals unaffected). Token can be an address or alias. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars.')]
-pause-deposits token:
-    just _portal-admin-token-call pauseDeposits {{token}}
-
-[group('zone')]
-[doc('Resumes deposits for a previously paused TIP-20 on the ZonePortal. Token can be an address or alias. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars.')]
-resume-deposits token:
-    just _portal-admin-token-call resumeDeposits {{token}}
-
-[group('zone')]
-[doc('Pauses all new deposits and L1 withdrawal processing. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY for an admin, sequencer, or pause-role account.')]
-pause-portal:
-    cargo run -p tempo-xtask -- pause-portal
-
-[group('zone')]
-[doc('Resumes all new deposits and L1 withdrawal processing. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and the admin PRIVATE_KEY.')]
-resume-portal:
-    cargo run -p tempo-xtask -- resume-portal
+[doc('Sets whether batch submissions, all new deposits, and L1 withdrawal processing are paused. Pass false to unpause (admin only). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY.')]
+pause-portal paused="true":
+    cargo run -p tempo-xtask -- pause-portal {{paused}}
 
 [group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]

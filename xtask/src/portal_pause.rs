@@ -1,4 +1,4 @@
-//! Pauses or resumes ZonePortal deposits and L1 withdrawal processing.
+//! Pauses ZonePortal batch submissions, deposits, and L1 withdrawal processing for 30 days.
 
 use alloy::{
     network::{EthereumWallet, ReceiptResponse as _},
@@ -31,25 +31,13 @@ pub(crate) struct PausePortal {
     args: PortalPauseArgs,
 }
 
-#[derive(Debug, clap::Parser)]
-pub(crate) struct ResumePortal {
-    #[command(flatten)]
-    args: PortalPauseArgs,
-}
-
 impl PausePortal {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        set_paused(self.args, true).await
+        pause(self.args).await
     }
 }
 
-impl ResumePortal {
-    pub(crate) async fn run(self) -> eyre::Result<()> {
-        set_paused(self.args, false).await
-    }
-}
-
-async fn set_paused(args: PortalPauseArgs, pause: bool) -> eyre::Result<()> {
+async fn pause(args: PortalPauseArgs) -> eyre::Result<()> {
     let key = args
         .private_key
         .strip_prefix("0x")
@@ -62,34 +50,22 @@ async fn set_paused(args: PortalPauseArgs, pause: bool) -> eyre::Result<()> {
         .wrap_err("failed connecting to Tempo L1 RPC")?;
     let portal = ZonePortal::new(args.portal, &provider);
 
-    let pending = if pause {
-        portal
-            .pause()
-            .send()
-            .await
-            .wrap_err("failed sending ZonePortal.pause")?
-    } else {
-        portal
-            .resume()
-            .send()
-            .await
-            .wrap_err("failed sending ZonePortal.resume")?
-    };
+    let pending = portal
+        .pause()
+        .send()
+        .await
+        .wrap_err("failed sending ZonePortal.pause")?;
     let receipt = pending
         .get_receipt()
         .await
         .wrap_err("failed waiting for portal pause transaction receipt")?;
     ensure!(receipt.status(), "portal pause transaction reverted");
     ensure!(
-        portal.paused().call().await? == pause,
+        portal.paused().call().await?,
         "portal pause state did not update"
     );
 
-    println!(
-        "Portal {} {}",
-        args.portal,
-        if pause { "paused" } else { "resumed" }
-    );
+    println!("Portal {} paused for 30 days", args.portal);
     println!("Transaction: {}", receipt.transaction_hash());
     Ok(())
 }
