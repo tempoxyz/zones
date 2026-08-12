@@ -622,6 +622,22 @@ where
         );
     }
 
+    let encryption_key = encryption_key
+        .filter(|key| key.x != B256::ZERO)
+        .map(|key| {
+            let y_parity = key.normalized_y_parity().ok_or_else(|| {
+                eyre!(
+                    "Portal returned invalid encryption-key yParity {:#x}; expected 0/1 or 0x02/0x03",
+                    key.yParity
+                )
+            })?;
+            Ok::<_, eyre::Report>(EncryptionKey {
+                x: key.x,
+                y_parity,
+            })
+        })
+        .transpose()?;
+
     Ok(PortalSnapshot {
         finalized_block_number: block_number,
         finalized_block_hash: finalized.hash,
@@ -641,12 +657,7 @@ where
         withdrawal_batch_index,
         current_deposit_queue_hash,
         enabled_tokens,
-        encryption_key: encryption_key.and_then(|key| {
-            (key.x != B256::ZERO).then_some(EncryptionKey {
-                x: key.x,
-                y_parity: key.yParity,
-            })
-        }),
+        encryption_key,
     })
 }
 
@@ -1720,9 +1731,13 @@ fn parse_encryption_key(value: &str) -> Result<ExpectedEncryptionKey, String> {
             .parse::<u8>()
             .map_err(|_| "invalid parity".to_owned())?
     };
-    if !matches!(y_parity, 0..=3) {
-        return Err("parity must be 0, 1, 2, or 3".to_owned());
-    }
+    let y_parity = match y_parity {
+        0 | 1 => 0x02 + y_parity,
+        0x02 | 0x03 => y_parity,
+        _ => {
+            return Err("parity must be 0, 1, 2, or 3".to_owned());
+        }
+    };
     Ok(ExpectedEncryptionKey { x, y_parity })
 }
 
