@@ -740,6 +740,7 @@ where
                     local_secp256k1_address,
                     local_ed25519_public_key.clone(),
                     relayer,
+                    self.l1_config.encryption_keys.clone().unwrap_or_default(),
                 ))
                 .expect("the sequencer RPC context is installed exactly once");
             p2p_runtime = Some((
