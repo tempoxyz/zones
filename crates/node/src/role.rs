@@ -657,7 +657,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
         let mut promotion_reasons = if can_lead {
             Vec::new()
         } else {
-            vec!["node lacks sequencer resources or quorum membership".to_owned()]
+            vec!["rpc-only nodes cannot get promoted".to_owned()]
         };
         if let DesiredRole::Leader { epoch, next_anchor } = desired
             && !current
