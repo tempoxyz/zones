@@ -203,9 +203,8 @@ contract ZonePortalInitializationForwarder {
     )
         external
     {
-        address[] memory accounts = new address[](2);
+        address[] memory accounts = new address[](1);
         accounts[0] = portalAdmin;
-        accounts[1] = sequencer;
         address[] memory gateways = new address[](1);
         gateways[0] = portalMessenger;
         address[] memory sequencers = new address[](1);
@@ -477,8 +476,13 @@ contract ZonePortalProxyStorageTest is Test {
             initialSequencer,
             "slot 18: sequencer mismatch"
         );
-        bytes32 membershipSlot = keccak256(abi.encode(initialSequencer, uint256(19)));
-        assertEq(uint256(vm.load(target, membershipSlot)), 1, "slot 19: membership mismatch");
+        assertEq(uint256(vm.load(target, bytes32(uint256(19)))), 0, "slot 19: reserved");
+        bytes32 membershipSlot = keccak256(abi.encode(initialSequencer, PORTAL_ROLE_SLOT));
+        assertEq(
+            uint256(vm.load(target, membershipSlot)),
+            uint8(Role.Sequencer),
+            "slot 20: membership mismatch"
+        );
 
         bytes32 slot23 = vm.load(target, bytes32(uint256(23)));
         assertEq(address(uint160(uint256(slot23))), initialSequencer, "slot 23: leader mismatch");

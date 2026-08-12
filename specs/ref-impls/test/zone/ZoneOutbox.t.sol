@@ -66,7 +66,6 @@ contract ZoneOutboxTest is Test {
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
         tempoState.setMockMaxTempoGasRate(mockPortal, TEST_MAX_TEMPO_GAS_RATE);
-        tempoState.setMockAccountAllowed(mockPortal, sequencer, true);
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);

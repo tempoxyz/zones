@@ -534,8 +534,8 @@ fn zone_portal_storage_slot_constants_match_solidity() {
     );
     assert_eq!(
         PORTAL_ROLE_SLOT,
-        B256::from(U256::from(19)),
-        "role is slot 19"
+        B256::from(U256::from(20)),
+        "role is slot 20"
     );
     assert_eq!(
         PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
