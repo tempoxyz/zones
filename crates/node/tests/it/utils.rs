@@ -2002,11 +2002,8 @@ impl L1TestNode {
     ///
     /// [`admin_address`]: Self::admin_address
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
-        let config = ZoneCreationConfig::closed(vec![
-            self.admin_address(),
-            self.dev_address(),
-            self.user_signer().address(),
-        ]);
+        let config =
+            ZoneCreationConfig::closed(vec![self.admin_address(), self.user_signer().address()]);
         let portal = self
             .create_zone_with_admin_sequencer_and_config(
                 factory_address,
