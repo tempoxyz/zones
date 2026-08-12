@@ -221,7 +221,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .parse::<PrivateKeySigner>()
         .context("parse private Zone RPC key")?;
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = spf_config(args.chain, zone_chain_id, discovery.portal)?;
+    let spf_config = SpfConfig::new(args.chain, discovery.portal);
     let private_zone_provider = connect_private_zone(
         &args.zone_private_rpc_url,
         signer,
@@ -1165,20 +1165,6 @@ async fn tempo_anchor(
     ))
 }
 
-fn spf_config(
-    chain_spec: Arc<ZoneChainSpec>,
-    zone_chain_id: u64,
-    portal: Address,
-) -> Result<SpfConfig> {
-    let configured_chain_id = chain_spec.inner.inner.genesis.config.chain_id;
-    if configured_chain_id != zone_chain_id {
-        bail!(
-            "Zone chain specification has chain ID {configured_chain_id}, but the Zone RPC reports {zone_chain_id}"
-        );
-    }
-    Ok(SpfConfig::new(chain_spec, portal))
-}
-
 fn print_summary(
     discovery: &Discovery,
     witness: &BatchWitness,
@@ -1314,14 +1300,12 @@ mod tests {
             path.to_str().unwrap(),
         )
         .unwrap();
-        let config = spf_config(chain_spec.clone(), zone_chain_id, Address::ZERO).unwrap();
-        let mismatch = spf_config(chain_spec, zone_chain_id + 1, Address::ZERO).unwrap_err();
+        let config = SpfConfig::new(chain_spec, Address::ZERO);
 
         std::fs::remove_file(path).unwrap();
         assert_eq!(
             config.chain_spec().inner.inner.genesis.config.chain_id,
             zone_chain_id
         );
-        assert!(mismatch.to_string().contains("but the Zone RPC reports"));
     }
 }
