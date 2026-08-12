@@ -271,12 +271,12 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier onlySequencer() {
-        if (role[msg.sender] != Role.Sequencer) revert NotSequencer();
+        if (!isSequencer(msg.sender)) revert NotSequencer();
         _;
     }
 
     modifier onlySequencerOrAdmin() {
-        if (msg.sender != admin && role[msg.sender] != Role.Sequencer) revert NotSequencer();
+        if (msg.sender != admin && !isSequencer(msg.sender)) revert NotSequencer();
         _;
     }
 
@@ -337,7 +337,7 @@ contract ZonePortal is IZonePortal {
         bool membersUnchanged = length == _sequencers.length;
         if (membersUnchanged) {
             for (uint256 i = 0; i < length; ++i) {
-                if (role[newSequencers[i]] != Role.Sequencer) {
+                if (!isSequencer(newSequencers[i])) {
                     membersUnchanged = false;
                     break;
                 }
@@ -358,7 +358,7 @@ contract ZonePortal is IZonePortal {
         }
         // Rotating out the active leader would strand block production: transfer leadership
         // first (add the replacement, setLeader, then remove the old member).
-        if (leader != address(0) && role[leader] != Role.Sequencer) {
+        if (leader != address(0) && !isSequencer(leader)) {
             revert ActiveLeaderRemoved();
         }
 
@@ -385,7 +385,7 @@ contract ZonePortal is IZonePortal {
 
     /// @inheritdoc IZonePortal
     function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencerOrAdmin {
-        if (role[newLeader] != Role.Sequencer) revert InvalidLeader();
+        if (!isSequencer(newLeader)) revert InvalidLeader();
         // Idempotent fanout: every node relays the same target, only the first call transitions.
         if (newLeader == leader) return;
         // Compare-and-set: a delayed duplicate carrying a pre-handoff epoch cannot roll
@@ -448,7 +448,7 @@ contract ZonePortal is IZonePortal {
     ///      Passing address(0) cancels a pending transfer.
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
     function transferAdmin(address newAdmin) external onlyAdmin {
-        if (role[newAdmin] == Role.Sequencer) {
+        if (isSequencer(newAdmin)) {
             revert AdminSequencerConflict(newAdmin);
         }
         pendingAdmin = newAdmin;
@@ -461,7 +461,7 @@ contract ZonePortal is IZonePortal {
     ///      The Admin key can only be rotated, never renounced.
     function acceptAdmin() external {
         if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotPendingAdmin();
-        if (role[pendingAdmin] == Role.Sequencer) {
+        if (isSequencer(pendingAdmin)) {
             revert AdminSequencerConflict(pendingAdmin);
         }
         address previousAdmin = admin;
@@ -1369,7 +1369,7 @@ contract ZonePortal is IZonePortal {
             } catch {
                 return false;
             }
-            if (signer == address(0) || role[signer] != Role.Sequencer) return false;
+            if (signer == address(0) || !isSequencer(signer)) return false;
             for (uint256 j = 0; j < i; ++j) {
                 if (recovered[j] == signer) return false;
             }
