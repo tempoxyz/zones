@@ -75,6 +75,7 @@ use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 use zone_primitives::constants::{
     PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
+    ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
     zone_chain_id as derive_zone_chain_id,
 };
 
@@ -2775,41 +2776,49 @@ impl L1TestNode {
     }
 }
 
-/// Resolve a Zone genesis anchor at or before `candidate_block`.
+/// Patch a controlled post-creation test snapshot with the portal's token commitment.
 ///
-/// If the portal already exists at the candidate block, returns the one preceding its deployment.
-async fn resolve_genesis_anchor<P: Provider<TempoNetwork>>(
+/// This is intentionally test-only. It is sound for the shared integration fixture because the
+/// fixture has exactly its genesis token and no queued deposits. Tests that exercise portal
+/// creation replay pass a pre-portal block explicitly and leave the commitment empty.
+async fn patch_clean_portal_snapshot<P: Provider<TempoNetwork>>(
     provider: &P,
+    genesis: &mut Genesis,
     portal_address: Address,
-    candidate_block: u64,
-) -> eyre::Result<u64> {
-    let is_deployed_at = |block| async move {
-        provider
-            .get_code_at(portal_address)
-            .block_id(BlockId::number(block))
-            .await
-            .map(|code| !code.is_empty())
-    };
+    block_number: u64,
+) -> eyre::Result<()> {
+    let block_id = BlockId::number(block_number);
+    let portal = ZonePortal::new(portal_address, provider);
+    eyre::ensure!(
+        portal.enabledTokenCount().block(block_id).call().await? == U256::from(1)
+            && portal
+                .currentDepositQueueHash()
+                .block(block_id)
+                .call()
+                .await?
+                .is_zero(),
+        "test snapshot at L1 block {block_number} is not a clean initial-token snapshot"
+    );
+    let token_enablement_hash = portal.tokenEnablementHash().block(block_id).call().await?;
+    eyre::ensure!(
+        !token_enablement_hash.is_zero(),
+        "test snapshot at L1 block {block_number} has no initial-token commitment"
+    );
 
-    if portal_address.is_zero() || !is_deployed_at(candidate_block).await? {
-        return Ok(candidate_block);
-    }
-
-    let (mut low, mut high) = (0, candidate_block);
-    while low < high {
-        let mid = low + (high - low) / 2;
-        if is_deployed_at(mid).await? {
-            high = mid;
-        } else {
-            low = mid + 1;
-        }
-    }
-
-    low.checked_sub(1)
-        .ok_or_else(|| eyre::eyre!("portal {portal_address} was deployed at genesis"))
+    genesis
+        .alloc
+        .get_mut(&ZONE_INBOX_ADDRESS)
+        .ok_or_else(|| eyre::eyre!("ZoneInbox not found in test genesis alloc"))?
+        .storage
+        .get_or_insert_with(Default::default)
+        .insert(
+            ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
+            token_enablement_hash,
+        );
+    Ok(())
 }
 
-/// Build a zone test genesis anchored immediately before portal deployment.
+/// Build a zone test genesis anchored to a real L1 block.
 ///
 /// Returns `(genesis, genesis_block_number)`.
 async fn build_l1_anchored_genesis(
@@ -2819,28 +2828,34 @@ async fn build_l1_anchored_genesis(
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
 
-    let latest_block = l1_provider.get_block_number().await?;
-    let anchor_block = resolve_genesis_anchor(&l1_provider, portal_address, latest_block).await?;
     let block = l1_provider
-        .get_block_by_number(anchor_block.into())
+        .get_block_by_number(BlockNumberOrTag::Latest)
         .await?
-        .ok_or_else(|| eyre::eyre!("L1 anchor block {anchor_block} not found"))?;
+        .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
     let default_fee_token = if portal_address.is_zero() {
         PATH_USD_ADDRESS
     } else {
         ZonePortal::new(portal_address, &l1_provider)
             .enabledTokenAt(U256::ZERO)
-            .block(BlockId::number(latest_block))
             .call()
             .await?
     };
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
+    let (mut genesis, genesis_block_number) =
+        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+    if !portal_address.is_zero() {
+        patch_clean_portal_snapshot(
+            &l1_provider,
+            &mut genesis,
+            portal_address,
+            l1_header.inner.number,
+        )
+        .await?;
+    }
+    Ok((genesis, genesis_block_number))
 }
 
-/// Build a zone test genesis no later than a requested L1 block.
-///
-/// If the requested block already contains the portal, use the canonical pre-deployment anchor.
+/// Build a zone test genesis anchored to a specific L1 block number.
 async fn build_l1_anchored_genesis_at_block(
     l1_http_url: &url::Url,
     portal_address: Address,
@@ -2849,23 +2864,32 @@ async fn build_l1_anchored_genesis_at_block(
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
 
-    let anchor_block = resolve_genesis_anchor(&l1_provider, portal_address, block_number).await?;
     let block = l1_provider
-        .get_block_by_number(anchor_block.into())
+        .get_block_by_number(block_number.into())
         .await?
-        .ok_or_else(|| eyre::eyre!("L1 anchor block {anchor_block} not found"))?;
+        .ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
     let default_fee_token = if portal_address.is_zero() {
         PATH_USD_ADDRESS
     } else {
-        let latest_block = l1_provider.get_block_number().await?;
         ZonePortal::new(portal_address, &l1_provider)
             .enabledTokenAt(U256::ZERO)
-            .block(BlockId::number(latest_block))
             .call()
             .await?
     };
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
+    let (mut genesis, genesis_block_number) =
+        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+    if !portal_address.is_zero()
+        && !l1_provider
+            .get_code_at(portal_address)
+            .block_id(BlockId::number(block_number))
+            .await?
+            .is_empty()
+    {
+        patch_clean_portal_snapshot(&l1_provider, &mut genesis, portal_address, block_number)
+            .await?;
+    }
+    Ok((genesis, genesis_block_number))
 }
 
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.

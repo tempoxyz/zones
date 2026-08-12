@@ -28,9 +28,6 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
 
 /// Builds a zone genesis anchored to a real L1 block.
 ///
-/// `l1_header` must predate deployment of `portal_address`, so the Zone replays the portal-creation
-/// block and derives all protocol state from its events.
-///
 /// Applies three patches to the [template](genesis_template):
 ///
 /// 1. **TempoState storage**: `tempoBlockHash` and `tempoBlockNumber` must reflect the
