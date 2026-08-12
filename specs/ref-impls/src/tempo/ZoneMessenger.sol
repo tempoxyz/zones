@@ -51,7 +51,7 @@ contract ZoneMessenger is IZoneMessenger {
 
         if (
             !IZonePortal(msg.sender).isGatewayOpen()
-                && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
+                && !IZonePortal(msg.sender).hasRole(target, Role.CallbackGateway)
         ) {
             revert InvalidCallbackTarget();
         }

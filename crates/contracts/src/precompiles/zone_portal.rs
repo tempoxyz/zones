@@ -209,7 +209,7 @@ crate::sol! {
         function setAccessMode(bool enforced) external;
         function isGatewayOpen() external view returns (bool);
         function setGatewayMode(bool enforced) external;
-        function role(address account) external view returns (Role);
+        function hasRole(address account, Role role) external view returns (bool);
         function setRole(address account, Role role) external;
         function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);

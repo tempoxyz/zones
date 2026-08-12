@@ -171,7 +171,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Reserved slot 19, available for future use.
     uint256 private _reservedSlot19;
     /// @dev Mutually exclusive Portal roles. Sequencer membership is derived from this mapping.
-    mapping(address => Role) public role;
+    mapping(address => Role) internal role;
 
     /// @dev Solidity packs both enforcement booleans into slot 21.
     bool internal _isAccessEnforced;
@@ -510,6 +510,10 @@ contract ZonePortal is IZonePortal {
         emit RoleUpdated(account, previous, next);
     }
 
+    function hasRole(address account, Role expected) public view returns (bool) {
+        return role[account] == expected;
+    }
+
     /*//////////////////////////////////////////////////////////////
                            QUEUE ACCESSORS
     //////////////////////////////////////////////////////////////*/
@@ -810,14 +814,14 @@ contract ZonePortal is IZonePortal {
 
     function _requireAllowedDepositor(address account) internal view {
         if (!_isAccessEnforced) return;
-        if (_isGatewayEnforced && role[account] == Role.CallbackGateway) {
+        if (_isGatewayEnforced && hasRole(account, Role.CallbackGateway)) {
             return;
         }
-        if (role[account] != Role.Account) revert AccountNotAllowed(account);
+        if (!hasRole(account, Role.Account)) revert AccountNotAllowed(account);
     }
 
     function _isAllowed(address account) internal view returns (bool) {
-        return !_isAccessEnforced || role[account] == Role.Account;
+        return !_isAccessEnforced || hasRole(account, Role.Account);
     }
 
     function _collectDepositFunds(
@@ -1038,7 +1042,7 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.gasLimit == 0) {
             // Re-check current roles without reverting so an in-flight withdrawal to a revoked
             // account or newly registered gateway bounces without blocking the FIFO.
-            success = (!_isGatewayEnforced || role[withdrawal.to] != Role.CallbackGateway)
+            success = (!_isGatewayEnforced || !hasRole(withdrawal.to, Role.CallbackGateway))
                 && _isAllowed(withdrawal.to)
                 && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
@@ -1078,7 +1082,7 @@ contract ZonePortal is IZonePortal {
         external
         onlySelf
     {
-        if (_isGatewayEnforced && role[target] != Role.CallbackGateway) {
+        if (_isGatewayEnforced && !hasRole(target, Role.CallbackGateway)) {
             revert InvalidCallbackTarget();
         }
         if (!ITIP20(token).transfer(messenger, amount)) {

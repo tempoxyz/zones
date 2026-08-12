@@ -704,7 +704,8 @@ interface IZonePortal {
     /// @notice Change callback gateway enforcement. Only callable by the admin.
     function setGatewayMode(bool enforced) external;
 
-    function role(address account) external view returns (Role);
+    /// @notice Whether an account has a Portal role.
+    function hasRole(address account, Role role) external view returns (bool);
 
     /// @notice Assign an account's mutually exclusive Portal role.
     /// @dev Sequencer membership is managed atomically through setSequencerSet.

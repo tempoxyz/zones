@@ -608,25 +608,21 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
         assignments.len()
     );
     for (index, (account, expected_role)) in assignments.iter().enumerate() {
-        if portal
-            .role(*account)
+        if !portal
+            .hasRole(*account, *expected_role)
             .call()
             .await
             .wrap_err_with(|| format!("failed querying ZonePortal role at index {index}"))?
-            as u8
-            != *expected_role as u8
         {
-            let receipt = portal
+            let pending = portal
                 .setRole(*account, *expected_role)
                 .fee_token(fee_token)
                 .send()
                 .await
-                .wrap_err_with(|| format!("failed assigning ZonePortal role at index {index}"))?
-                .get_receipt()
-                .await
-                .wrap_err_with(|| {
-                    format!("failed waiting for ZonePortal role receipt at index {index}")
-                })?;
+                .wrap_err_with(|| format!("failed assigning ZonePortal role at index {index}"))?;
+            let receipt = pending.get_receipt().await.wrap_err_with(|| {
+                format!("failed waiting for ZonePortal role receipt at index {index}")
+            })?;
             check(&receipt, "assign ZonePortal benchmark role")?;
         }
         if (index + 1) % 10 == 0 || index + 1 == assignments.len() {
@@ -639,10 +635,13 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
     }
     for (index, (account, expected_role)) in assignments.iter().enumerate() {
         ensure!(
-            portal.role(*account).call().await.wrap_err_with(|| {
-                format!("failed verifying ZonePortal role at index {index}")
-            })? as u8
-                == *expected_role as u8,
+            portal
+                .hasRole(*account, *expected_role)
+                .call()
+                .await
+                .wrap_err_with(|| {
+                    format!("failed verifying ZonePortal role at index {index}")
+                })?,
             "ZonePortal role verification failed at index {index}"
         );
     }
