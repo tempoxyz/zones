@@ -636,7 +636,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Get the sequencer's current encryption public key
     /// @return x The X coordinate
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
-    /// @return pubkey The Ethereum address derived from the public key
+    /// @return pubkey The address derived from the public key
     function sequencerEncryptionKey()
         external
         view
