@@ -35,7 +35,7 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
         NoopNetworkBuilder, PoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
@@ -58,7 +58,7 @@ use reth_transaction_pool::{
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoInvalidTransaction;
+use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -416,7 +416,7 @@ impl ZoneNode {
         BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        NoopConsensusBuilder,
+        ZoneConsensusBuilder,
     >
     where
         N: FullNodeTypes<Types = Self>,
@@ -433,11 +433,12 @@ impl ZoneNode {
         BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        NoopConsensusBuilder,
+        ZoneConsensusBuilder,
     >
     where
         N: FullNodeTypes<Types = Self>,
     {
+        let consensus_builder = ZoneConsensusBuilder::new();
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(ZonePoolBuilder::new(
@@ -446,7 +447,7 @@ impl ZoneNode {
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
-            .noop_consensus()
+            .consensus(consensus_builder)
     }
 }
 
@@ -1532,7 +1533,7 @@ where
         BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        NoopConsensusBuilder,
+        ZoneConsensusBuilder,
     >;
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
@@ -1618,6 +1619,28 @@ impl ZoneExecutorBuilder {
             l1_state_cache,
             enabled_tokens,
         }
+    }
+}
+
+/// Builds Tempo consensus using the fully configured Zone chain specification.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZoneConsensusBuilder;
+
+impl ZoneConsensusBuilder {
+    const fn new() -> Self {
+        Self
+    }
+}
+
+impl<Node> ConsensusBuilder<Node> for ZoneConsensusBuilder
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type Consensus = TempoConsensus<ZoneChainSpec>;
+
+    async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
+        Ok(TempoConsensus::new(ctx.chain_spec()))
     }
 }
 

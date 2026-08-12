@@ -13,7 +13,9 @@ use reth_chainspec::{
 };
 use reth_network_peers::NodeRecord;
 use std::{fmt::Display, sync::Arc};
-use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork, spec::TempoHardforks};
+use tempo_chainspec::{
+    TempoChainSpec, TempoConsensusSpec, hardfork::TempoHardfork, spec::TempoHardforks,
+};
 use tempo_primitives::TempoHeader;
 
 /// Chain specification for a Tempo Zone.
@@ -151,6 +153,21 @@ impl TempoHardforks for ZoneChainSpec {
     }
 }
 
+impl TempoConsensusSpec for ZoneChainSpec {
+    fn shared_gas_limit_at(&self, _timestamp: u64, _gas_limit: u64) -> u64 {
+        0
+    }
+
+    fn general_gas_limit_at(
+        &self,
+        _timestamp: u64,
+        _gas_limit: u64,
+        _shared_gas_limit: u64,
+    ) -> u64 {
+        0
+    }
+}
+
 impl EthExecutorSpec for ZoneChainSpec {
     fn deposit_contract_address(&self) -> Option<Address> {
         self.inner.deposit_contract_address()
@@ -203,6 +220,14 @@ mod tests {
 
         assert_ne!(DEV.next_block_base_fee(parent, timestamp), Some(0));
         assert_eq!(zone.next_block_base_fee(parent, timestamp), Some(0));
+    }
+
+    #[test]
+    fn consensus_gas_limits_disable_tempo_gas_sections() {
+        let zone = dev_zone_spec(3);
+
+        assert_eq!(zone.shared_gas_limit_at(0, 30_000_000), 0);
+        assert_eq!(zone.general_gas_limit_at(0, 30_000_000, 0), 0);
     }
 
     #[cfg(feature = "cli")]
