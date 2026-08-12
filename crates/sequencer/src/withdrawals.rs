@@ -428,7 +428,7 @@ impl WithdrawalProcessor {
     #[instrument(skip_all)]
     async fn process_queue(&self) -> eyre::Result<()> {
         if self.portal.paused().call().await? {
-            debug!("Portal is paused; withdrawal processor is quiescent");
+            debug!("Portal is paused; withdrawal processor is idle");
             return Ok(());
         }
 
@@ -1314,7 +1314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_queue_is_quiescent_while_portal_is_paused() {
+    async fn process_queue_is_idle_while_portal_is_paused() {
         let l1 = Asserter::new();
         l1.push_success(&abi_encode_u64(1));
         let repair_notify = Arc::new(Notify::new());

@@ -2107,7 +2107,7 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A portal-wide pause rejects deposits and keeps finalized withdrawals queued on L1.
+/// A portal-wide pause rejects deposits and keeps already-finalized withdrawals queued on L1.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -2128,6 +2128,14 @@ async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyr
 
     let admin_provider = l1.admin_provider();
     let portal = ZonePortal::new(portal_address, &admin_provider);
+    let initial_withdrawal_batch = portal.withdrawalBatchIndex().call().await?;
+    let zone_outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let initial_zone_withdrawal_batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
+    let withdrawal_amount = 500_000u128;
+    let mut recipient_account =
+        ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
+    recipient_account.withdraw(withdrawal_amount).await?;
+
     let pause_receipt = portal.pause().send().await?.get_receipt().await?;
     eyre::ensure!(pause_receipt.status(), "global pause transaction failed");
     eyre::ensure!(portal.paused().call().await?, "portal should be paused");
@@ -2137,15 +2145,8 @@ async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyr
         .await
         .expect_err("deposit simulation should revert while the portal is paused");
 
-    let sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
-    let initial_withdrawal_batch = portal.withdrawalBatchIndex().call().await?;
-    let zone_outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
-    let initial_zone_withdrawal_batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
     let withdrawal_start_block = l1.provider().get_block_number().await?;
-    let withdrawal_amount = 500_000u128;
-    let mut recipient_account =
-        ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
-    recipient_account.withdraw(withdrawal_amount).await?;
+    let sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     poll_until(
         L1_TIMEOUT,

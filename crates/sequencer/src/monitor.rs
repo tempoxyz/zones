@@ -297,7 +297,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     async fn process_available_blocks(&mut self) {
         match self.batch_submitter.is_portal_paused().await {
             Ok(true) => {
-                debug!("Portal is paused; settlement monitor is quiescent");
+                debug!("Portal is paused; settlement monitor is idle");
                 return;
             }
             Ok(false) => {}
@@ -666,7 +666,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             }
         }
 
-        // A pause is a quiescent protocol state, not a submission divergence. Keep the discovery
+        // A pause is an expected protocol state, not a submission divergence. Keep the discovery
         // cursor and retry after the bounded monitor poll instead of rewinding to the portal.
         if self.batch_submitter.is_portal_paused().await? {
             return Err(eyre::eyre!(
@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_available_blocks_is_quiescent_while_portal_is_paused() {
+    async fn process_available_blocks_is_idle_while_portal_is_paused() {
         let l1 = Asserter::new();
         l1.push_success(&abi_encode_u64(1));
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());

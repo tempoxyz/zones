@@ -19,7 +19,7 @@ use tempo_zone_contracts::{
     IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal::Role, ZonePortalError,
 };
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_PAUSE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -79,14 +79,13 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let packed_pause = U256::from_be_bytes(l1.read_portal_slot(PORTAL_PAUSE_SLOT)?.0);
-        let pause_expiry = (packed_pause >> 64usize).to::<u64>();
-        if self.storage.timestamp().to::<u64>() < pause_expiry {
-            return Err(ZonePortalError::portal_is_paused().into());
-        }
-
         if !l1.read_portal(|portal| &portal.token_configs[token].enabled)? {
             return Err(ZonePortalError::token_not_enabled().into());
+        }
+
+        let pause_expiry = l1.read_portal(|portal| &portal.pause_expiry)?;
+        if self.storage.timestamp().to::<u64>() < pause_expiry {
+            return Err(ZonePortalError::portal_is_paused().into());
         }
 
         let access_enforced = l1.read_portal(|portal| &portal.is_access_enforced)?;
