@@ -109,6 +109,14 @@ pub struct RoleStatus {
 /// Shared handle to the live [`RoleStatus`].
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
+fn membership_promotion_reasons(is_quorum_member: bool) -> Vec<String> {
+    if is_quorum_member {
+        Vec::new()
+    } else {
+        vec!["rpc-only nodes are not eligible for promotion".to_string()]
+    }
+}
+
 /// Leader-only background task dependencies (batch submission, withdrawal processing).
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
@@ -633,10 +641,10 @@ pub(crate) async fn run_role_controller<P, Pool>(
         // An rpc-only member is not registered with `ZonePortal`, so it can never be named
         // leader by a finalized transition. Fencing it explicitly means a corrupt or wrongly
         // provisioned record cannot start a producer whose blocks nobody could settle.
-        let can_lead = context.sequencer.is_some()
-            && context
-                .schedule
-                .is_quorum_member(&context.local_ed25519_public_key);
+        let is_quorum_member = context
+            .schedule
+            .is_quorum_member(&context.local_ed25519_public_key);
+        let can_lead = context.sequencer.is_some() && is_quorum_member;
         let mut retry_decision = false;
         let mut desired = match desired_role(
             &context.provider,
@@ -654,7 +662,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
         // Only forced recovery has an additional promotion barrier. Normal transitions are
         // complete when the local next anchor is assigned to this node.
-        let mut promotion_reasons = Vec::new();
+        let mut promotion_reasons = membership_promotion_reasons(is_quorum_member);
         if let DesiredRole::Leader { epoch, next_anchor } = desired
             && !current
                 .as_ref()
@@ -1132,8 +1140,8 @@ mod tests {
     use zone_sequencer::ZoneSequencerHandle;
 
     use super::{
-        EventSinks, TaskEnd, latest_sealed_header, route_backfill_requests,
-        route_backfill_responses, supervise_sequencer_tasks,
+        EventSinks, TaskEnd, latest_sealed_header, membership_promotion_reasons,
+        route_backfill_requests, route_backfill_responses, supervise_sequencer_tasks,
     };
 
     struct DropSignal(Option<oneshot::Sender<()>>);
@@ -1154,6 +1162,14 @@ mod tests {
             latest_sealed_header(&provider).is_err(),
             "leader startup must fail when its canonical head cannot be read"
         );
+    }
+
+    #[test]
+    fn rpc_only_nodes_are_not_ready_for_promotion() {
+        let reasons = membership_promotion_reasons(false);
+
+        assert_eq!(reasons, ["rpc-only nodes are not eligible for promotion"]);
+        assert!(!reasons.is_empty());
     }
 
     #[tokio::test]
