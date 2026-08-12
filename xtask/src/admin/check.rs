@@ -651,7 +651,7 @@ where
 }
 
 async fn query_nodes(nodes: &[OperatorEndpoint], rpc_timeout: Duration) -> Vec<NodeSnapshot> {
-    join_all(nodes.iter().cloned().map(|endpoint| async move {
+    join_all(nodes.iter().map(|endpoint| async move {
         let name = endpoint.display_name().to_owned();
         let url = endpoint.url.clone();
         let result = timeout(rpc_timeout, async {
