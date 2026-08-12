@@ -12,7 +12,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
 use reth_chain_state::CanonStateSubscriptions;
 use reth_storage_api::{BlockReader, StateProviderFactory};
-use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
+use tempo_alloy::{TempoNetwork, fillers::FeeTokenFiller, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tokio::sync::Notify;
 
@@ -96,6 +96,8 @@ pub struct ZoneSequencerConfig {
     pub l1_rpc_url: String,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
+    /// Default fee token for sequencer-submitted L1 transactions.
+    pub fee_token: Address,
     /// Fallback interval for reconciling the canonical Zone head.
     ///
     /// Canonical-state notifications normally trigger reconciliation immediately.
@@ -152,6 +154,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     let l1_provider = connect_l1_provider(
         &config.l1_rpc_url,
         config.retry_connection_interval,
+        config.fee_token,
         signer.clone(),
     )
     .await
@@ -219,11 +222,13 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
 async fn connect_l1_provider(
     l1_rpc_url: &str,
     retry_connection_interval: Duration,
+    fee_token: Address,
     signer: PrivateKeySigner,
 ) -> TransportResult<DynProvider<TempoNetwork>> {
     let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .with_nonce_key_filler()
+        .filler(FeeTokenFiller::new(fee_token))
         .wallet(wallet)
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
@@ -318,10 +323,14 @@ mod tests {
             serve_block_number(second_stream, "0x2", false).await;
         });
 
-        let provider =
-            connect_l1_provider(&url, Duration::from_millis(10), PrivateKeySigner::random())
-                .await
-                .unwrap();
+        let provider = connect_l1_provider(
+            &url,
+            Duration::from_millis(10),
+            Address::ZERO,
+            PrivateKeySigner::random(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(provider.get_block_number().await.unwrap(), 1);
         assert_eq!(

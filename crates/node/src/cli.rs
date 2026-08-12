@@ -13,6 +13,7 @@ use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
+use zone_primitives::constants::ZONE_TOKEN_ADDRESS;
 
 use crate::{
     ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
@@ -207,6 +208,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,
+                fee_token: args.sequencer_fee_token,
                 zone_id: args.zone_id,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_anchor_config: BatchAnchorConfig::default(),
@@ -311,6 +313,14 @@ pub struct ZoneArgs {
         value_name = "PATH"
     )]
     pub sequencer_key_file: Option<PathBuf>,
+
+    /// Fee token used for sequencer-submitted L1 transactions.
+    #[arg(
+        long = "sequencer.fee-token",
+        env = "SEQUENCER_FEE_TOKEN",
+        default_value_t = ZONE_TOKEN_ADDRESS
+    )]
+    pub sequencer_fee_token: Address,
 
     /// File containing additional deposit decryption keys, one hex key per line.
     #[arg(
@@ -530,11 +540,13 @@ fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
 mod tests {
     use std::{io::Write as _, process::Command, thread, time::Duration};
 
+    use alloy_primitives::Address;
     use clap::Parser as _;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
-        validate_l1_rpc_url, validate_p2p_transaction_size_limit, validate_portal_address,
+        Role, ZONE_TOKEN_ADDRESS, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer,
+        sequencer_enabled, validate_l1_rpc_url, validate_p2p_transaction_size_limit,
+        validate_portal_address,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -608,6 +620,30 @@ mod tests {
             ZoneArgsParser::try_parse_from(common.into_iter().chain(["--sequencer-key", "0x01"]))
                 .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn sequencer_fee_token_defaults_to_pathusd_and_accepts_an_override() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let parsed = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert_eq!(parsed.zone.sequencer_fee_token, ZONE_TOKEN_ADDRESS);
+
+        let fee_token = Address::repeat_byte(0x42);
+        let fee_token_arg = fee_token.to_string();
+        let parsed = ZoneArgsParser::try_parse_from(
+            common
+                .into_iter()
+                .chain(["--sequencer.fee-token", fee_token_arg.as_str()]),
+        )
+        .unwrap();
+        assert_eq!(parsed.zone.sequencer_fee_token, fee_token);
     }
 
     #[tokio::test(flavor = "current_thread")]

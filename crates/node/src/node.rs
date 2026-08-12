@@ -193,6 +193,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
     pub l1_transaction_signer: Option<PrivateKeySigner>,
+    /// Default fee token for sequencer-submitted L1 transactions.
+    pub fee_token: Address,
     /// Zone ID used by sequencer encryption.
     pub zone_id: u32,
     /// Fallback interval for reconciling the canonical Zone head.
@@ -694,6 +696,10 @@ where
             let manifest = config.manifest().clone();
             let local_secp256k1_address = config.secp256k1_address();
             let individual_signer = config.block_attestation_signer();
+            let sequencer_fee_token = self
+                .sequencer_config
+                .as_ref()
+                .map(|config| config.fee_token);
             // Created before the network starts so requests arriving ahead of the serving
             // task (spawned once the provider exists) buffer instead of dropping.
             let (backfill_requests_tx, backfill_requests_rx) =
@@ -708,10 +714,15 @@ where
             let peer_tips = PeerTipRegistry::default();
             let relayer = match individual_signer {
                 Some(signer) => {
-                    use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
+                    use tempo_alloy::{
+                        fillers::FeeTokenFiller, provider::ext::TempoProviderBuilderExt as _,
+                    };
                     let provider =
                         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                             .with_nonce_key_filler()
+                            .filler(FeeTokenFiller::new(sequencer_fee_token.expect(
+                                "quorum members with an L1 signer have sequencer configuration",
+                            )))
                             .wallet(alloy_network::EthereumWallet::from(signer))
                             .connect_with_config(
                                 &self.l1_config.l1_rpc_url,
@@ -1189,6 +1200,7 @@ where
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
+            fee_token: config.fee_token,
             zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
             withdrawal_batch_limits: config.withdrawal_batch_limits,
@@ -1403,6 +1415,7 @@ where
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
+            fee_token: config.fee_token,
             zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
             withdrawal_batch_limits: config.withdrawal_batch_limits,

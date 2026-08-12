@@ -1352,6 +1352,7 @@ impl ZoneTestNode {
                 .with_sequencer(ZoneSequencerAddOnsConfig {
                     sequencer_signer: sequencer_signer.clone(),
                     l1_transaction_signer,
+                    fee_token: PATH_USD_ADDRESS,
                     zone_id,
                     zone_poll_interval: Duration::from_secs(1),
                     batch_anchor_config: Default::default(),
@@ -3459,6 +3460,7 @@ pub(crate) async fn spawn_sequencer_with_config(
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),
+        fee_token: PATH_USD_ADDRESS,
         zone_poll_interval: Duration::from_secs(1),
         withdrawal_poll_interval: Duration::from_millis(500),
         withdrawal_batch_limits,
