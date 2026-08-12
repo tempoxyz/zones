@@ -460,6 +460,16 @@ resume-deposits token:
     just _portal-admin-token-call resumeDeposits {{token}}
 
 [group('zone')]
+[doc('Pauses all new deposits and L1 withdrawal processing. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY for an admin, sequencer, or pause-role account.')]
+pause-portal:
+    cargo run -p tempo-xtask -- pause-portal
+
+[group('zone')]
+[doc('Resumes all new deposits and L1 withdrawal processing. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and the admin PRIVATE_KEY.')]
+resume-portal:
+    cargo run -p tempo-xtask -- resume-portal
+
+[group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
 list-enabled-tokens portal="":
     #!/bin/bash

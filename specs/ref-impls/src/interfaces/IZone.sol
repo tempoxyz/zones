@@ -13,7 +13,8 @@ enum Role {
     None,
     Sequencer,
     Account,
-    CallbackGateway
+    CallbackGateway,
+    Pause
 }
 
 /// @title IZoneToken
@@ -584,6 +585,12 @@ interface IZonePortal {
     /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
 
+    /// @notice Emitted when portal deposits and withdrawal processing are paused.
+    event PortalPaused(address indexed account);
+
+    /// @notice Emitted when the portal is resumed by the admin.
+    event PortalResumed(address indexed account);
+
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
@@ -608,6 +615,8 @@ interface IZonePortal {
 
     error NotSequencer();
     error NotAdmin();
+    error NotPauseAuthority();
+    error PortalIsPaused();
     error NotFactory();
     error NotSelf();
     error AlreadyInitialized();
@@ -792,6 +801,15 @@ interface IZonePortal {
 
     /// @notice Append-only commitment to enabled token addresses and metadata
     function tokenEnablementHash() external view returns (bytes32);
+
+    /// @notice Whether new deposits and L1 withdrawal processing are paused.
+    function paused() external view returns (bool);
+
+    /// @notice Pause new deposits and L1 withdrawal processing.
+    function pause() external;
+
+    /// @notice Resume new deposits and L1 withdrawal processing. Only callable by admin.
+    function resume() external;
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.

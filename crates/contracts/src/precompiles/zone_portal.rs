@@ -24,7 +24,8 @@ crate::sol! {
             None,
             Sequencer,
             Account,
-            CallbackGateway
+            CallbackGateway,
+            PauseGuardian
         }
 
         struct Withdrawal {
@@ -99,6 +100,8 @@ crate::sol! {
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
         event DepositsPaused(address indexed token);
         event DepositsResumed(address indexed token);
+        event PortalPaused(address indexed account);
+        event PortalResumed(address indexed account);
         event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(
@@ -184,6 +187,8 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
+        error NotPauseAuthority();
+        error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
@@ -235,10 +240,13 @@ crate::sol! {
         function lastProcessedDepositNumber() external view returns (uint64);
         function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
+        function paused() external view returns (bool);
 
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
+        function pause() external;
+        function resume() external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -557,6 +565,8 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
+            Self::NotPauseAuthority(_) => f.write_str("NotPauseAuthority"),
+            Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),

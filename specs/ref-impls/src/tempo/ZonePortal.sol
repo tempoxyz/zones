@@ -205,6 +205,10 @@ contract ZonePortal is IZonePortal {
     uint64 internal _tokenEnableCountBlock;
     uint64 internal _tokensEnabledInCurrentBlock;
 
+    /// @notice Whether new deposits and L1 withdrawal processing are paused.
+    /// @dev Appended for upgrade-safe storage layout.
+    bool public paused;
+
     /// @notice Append-only commitment to every enabled token and its metadata.
     /// @dev Stored at slot 26 so the existing portal layout remains unchanged.
     bytes32 public tokenEnablementHash;
@@ -289,6 +293,18 @@ contract ZonePortal is IZonePortal {
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
+        _;
+    }
+
+    modifier onlyPauseAuthority() {
+        if (msg.sender != admin && !isSequencer[msg.sender] && role[msg.sender] != Role.Pause) {
+            revert NotPauseAuthority();
+        }
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert PortalIsPaused();
         _;
     }
 
@@ -556,7 +572,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Check if deposits are currently active for a token
     function areDepositsActive(address _token) external view returns (bool) {
         TokenConfig storage cfg = _tokenConfigs[_token];
-        return cfg.enabled && cfg.depositsActive;
+        return !paused && cfg.enabled && cfg.depositsActive;
     }
 
     /// @notice Get the token configuration for a specific token
@@ -572,6 +588,18 @@ contract ZonePortal is IZonePortal {
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address) {
         return _enabledTokens[index];
+    }
+
+    /// @notice Pause new deposits and L1 withdrawal processing.
+    function pause() external onlyPauseAuthority {
+        paused = true;
+        emit PortalPaused(msg.sender);
+    }
+
+    /// @notice Resume new deposits and L1 withdrawal processing. Only callable by admin.
+    function resume() external onlyAdmin {
+        paused = false;
+        emit PortalResumed(msg.sender);
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
@@ -817,6 +845,7 @@ contract ZonePortal is IZonePortal {
     }
 
     function _validateDepositsActive(address _token) internal view {
+        if (paused) revert PortalIsPaused();
         TokenConfig storage cfg = _tokenConfigs[_token];
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
@@ -1018,6 +1047,7 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
+        whenNotPaused
         nonReentrantWithdrawal
     {
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);

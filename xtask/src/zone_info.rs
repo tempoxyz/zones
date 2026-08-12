@@ -80,6 +80,7 @@ impl ZoneInfoCmd {
         let leader = portal.leader().call().await?;
         let leader_epoch = portal.leaderEpoch().call().await?;
         let leader_activation = portal.leaderActivationTempoBlock().call().await?;
+        let paused = portal.paused().call().await?;
 
         println!("\nPortal State");
         println!("  Active Sequencers:     {sequencers:?}");
@@ -92,6 +93,7 @@ impl ZoneInfoCmd {
             println!("  Leader Activation:     Tempo block {leader_activation}");
         }
         println!("  Zone Gas Rate:         {gas_rate}");
+        println!("  Paused:                {paused}");
         println!("  Withdrawal Batch:      {batch_index}");
         println!("  Block Hash:            {block_hash}");
         println!("  Deposit Queue Hash:    {deposit_queue}");

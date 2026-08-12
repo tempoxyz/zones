@@ -1492,6 +1492,51 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.areDepositsActive(address(pathUSD)));
     }
 
+    function test_pause_blocksDepositsAndWithdrawalProcessing() public {
+        vm.prank(sequencer);
+        portal.pause();
+
+        assertTrue(portal.paused());
+        assertFalse(portal.areDepositsActive(address(pathUSD)));
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        portal.deposit(address(pathUSD), 1000e6, 0, _makeDepositPayload(), alice);
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        portal.processWithdrawals(new Withdrawal[](0), bytes32(0));
+
+        vm.prank(admin);
+        portal.resume();
+        assertFalse(portal.paused());
+        assertTrue(portal.areDepositsActive(address(pathUSD)));
+    }
+
+    function test_pauseRoleCanPause() public {
+        vm.prank(admin);
+        portal.setRole(alice, Role.Pause);
+
+        vm.prank(alice);
+        portal.pause();
+        assertTrue(portal.paused());
+    }
+
+    function test_pause_revertsWithoutAuthority() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotPauseAuthority.selector);
+        portal.pause();
+    }
+
+    function test_resume_revertsIfNotAdmin() public {
+        vm.prank(sequencer);
+        portal.pause();
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.resume();
+    }
+
     function test_tokenGovernance_revertsIfNotAdmin() public {
         vm.startPrank(sequencer);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
