@@ -944,24 +944,18 @@ impl BatchSubmitter {
         &self,
         zone_provider: &P,
         outbox_address: Address,
-    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+    ) -> Result<WithdrawalPage> {
         // Step 1: read pending slot range from the L1 portal and bound this recovery page.
         let (head, tail) = self.read_portal_withdrawal_queue_bounds().await?;
         let page_tail = tail.min(head.saturating_add(WITHDRAWAL_RECOVERY_PAGE_SIZE));
 
         if head >= tail {
-            info!(head, tail, "No pending withdrawals to restore");
-            return Ok(BTreeMap::new());
+            return Ok(WithdrawalPage {
+                head,
+                tail: head,
+                batches: BTreeMap::new(),
+            });
         }
-
-        info!(
-            head,
-            tail,
-            page_tail,
-            pending = tail - head,
-            page_slots = page_tail - head,
-            "Restoring pending withdrawal page"
-        );
 
         // Step 2: query BatchSubmitted events for this page [head, page_tail)
         // plus the predecessor (head-1) by their indexed withdrawalQueueIndex.
@@ -1028,7 +1022,13 @@ impl BatchSubmitter {
         }
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
-        resolve_pending_slots(head, page_tail, &events, &slot_withdrawals, head_slot_hash)
+        resolve_pending_slots(head, page_tail, &events, &slot_withdrawals, head_slot_hash).map(
+            |batches| WithdrawalPage {
+                head,
+                tail: tail2,
+                batches,
+            },
+        )
     }
 
     /// Fetch `BatchSubmitted` events for logical queue indices `[first_index, tail)`
@@ -1087,6 +1087,17 @@ impl BatchSubmitter {
 
         Ok(found)
     }
+}
+
+/// Verified bounded window of the portal withdrawal queue reconstructed from chain history.
+#[derive(Debug)]
+pub struct WithdrawalPage {
+    /// Portal head observed before reconstructing the page.
+    pub head: u64,
+    /// Portal tail observed after reconstruction was validated.
+    pub tail: u64,
+    /// Verified payloads keyed by logical portal queue index.
+    pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
 /// Data required to submit a single batch to the ZonePortal on L1.
@@ -1366,6 +1377,10 @@ fn resolve_pending_slots(
     slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
     head_slot_hash: B256,
 ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+    if head < tail && head_slot_hash.is_zero() {
+        eyre::bail!("pending withdrawal head slot {head} is zero for queue range {head}..{tail}");
+    }
+
     let mut result: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
 
     for portal_slot in head..tail {
@@ -2462,7 +2477,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_single_slot_fully_processed() {
+    fn resolve_single_pending_slot_rejects_zero_hash() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
@@ -2472,10 +2487,9 @@ mod tests {
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, withdrawals);
 
-        // B256::ZERO = queue_hash(&[]), all consumed. find_processed_offset returns
-        // Some(1) (offset == len), so remaining is empty and slot is not stored.
-        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap();
-        assert!(result.is_empty());
+        let error =
+            resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap_err();
+        assert!(error.to_string().contains("head slot 5 is zero"));
     }
 
     #[test]

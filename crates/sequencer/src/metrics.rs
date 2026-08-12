@@ -131,4 +131,7 @@ pub(crate) struct ZoneMonitorMetrics {
 
     /// Failed attempts to rebuild the in-memory withdrawal store from chain state.
     pub withdrawal_store_restore_failure_total: Counter,
+
+    /// Head-page refills requested by the withdrawal processor.
+    pub withdrawal_store_refill_total: Counter,
 }
