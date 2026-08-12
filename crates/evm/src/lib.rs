@@ -294,14 +294,6 @@ where
 {
     /// Creates a Zone EVM config from the node's canonical, composed chain specification.
     pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1, portal_address: Address) -> Self {
-        Self::from_chain_spec(chain_spec, l1_provider, portal_address)
-    }
-
-    fn from_chain_spec(
-        chain_spec: Arc<ZoneChainSpec>,
-        l1_provider: L1,
-        portal_address: Address,
-    ) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
@@ -332,7 +324,7 @@ where
         RecordingL1StorageReader<L1>,
     ) {
         let reader = RecordingL1StorageReader::new(self.zone_factory.l1_reader.clone());
-        let config = ZoneEvmConfig::from_chain_spec(
+        let config = ZoneEvmConfig::new(
             self.chain_spec.clone(),
             reader.clone(),
             self.zone_factory.portal_address,
@@ -358,7 +350,7 @@ impl ZoneEvmConfig {
             ..Default::default()
         };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::from_chain_spec(chain_spec, l1_provider, Address::ZERO)
+        Self::new(chain_spec, l1_provider, Address::ZERO)
     }
 }
 

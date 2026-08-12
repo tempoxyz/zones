@@ -7,6 +7,7 @@
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::{B256, U256, keccak256};
 use alloy_rlp::Decodable as _;
+use reth_chainspec::EthChainSpec as _;
 use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::noop::NoopProvider;
@@ -40,6 +41,17 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // state root selects the initial Zone state.
     if witness.zone_blocks.is_empty() {
         return Err(Error::EmptyZoneBatch);
+    }
+    let expected_chain_id = zone_primitives::constants::zone_chain_id(
+        witness.public_inputs.parent_chain_id,
+        witness.public_inputs.zone_id,
+    )?;
+    let configured_chain_id = config.chain_spec().chain().id();
+    if configured_chain_id != expected_chain_id {
+        return Err(Error::ChainIdMismatch {
+            expected: configured_chain_id,
+            actual: expected_chain_id,
+        });
     }
     if witness.public_inputs.portal != config.portal() {
         return Err(Error::PortalMismatch {
@@ -150,8 +162,6 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             execution::evm::BlockReplayContext {
                 parent: &previous_header,
                 block_index,
-                parent_chain_id: witness.public_inputs.parent_chain_id,
-                zone_id: witness.public_inputs.zone_id,
             },
             block,
         );
@@ -427,6 +437,9 @@ pub enum Error {
     /// A batch must execute at least one Zone block.
     #[error("zone batch contains no blocks")]
     EmptyZoneBatch,
+    /// The witness identifies a Zone other than the verifier-selected chain specification.
+    #[error("Zone chain ID mismatch: expected {expected}, got {actual}")]
+    ChainIdMismatch { expected: u64, actual: u64 },
     /// The prover supplied a portal other than the verifier-selected portal.
     #[error("Zone portal mismatch: expected {expected:?}, got {actual:?}")]
     PortalMismatch {
@@ -588,7 +601,6 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-    use reth_chainspec::EthChainSpec as _;
     use reth_evm::ConfigureEvm;
     use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
     use revm::{
@@ -625,7 +637,7 @@ mod tests {
 
         BatchWitness {
             public_inputs: PublicInputs {
-                parent_chain_id: 1_337,
+                parent_chain_id: tempo_chainspec::spec::MODERATO.chain().id(),
                 zone_id: 1,
                 portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
@@ -752,6 +764,34 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_witness_for_a_different_zone_chain() {
+        let config = test_config();
+        let mut witness = minimal_batch_witness();
+        witness.public_inputs.zone_id = 2;
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash_slow(),
+            timestamp: 0,
+            beneficiary: Address::ZERO,
+            tempo_header_rlp: Bytes::new(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        });
+
+        assert_eq!(
+            prove_zone_batch(&config, witness),
+            Err(Error::ChainIdMismatch {
+                expected: config.chain_spec().chain().id(),
+                actual: zone_chain_id(tempo_chainspec::spec::MODERATO.chain().id(), 2).unwrap(),
+            })
+        );
+    }
+
+    #[test]
     fn rejects_a_zone_witness_without_the_parent_state_root_node() {
         let database = WitnessDatabase::from_zone_state_witness(
             ZoneStateWitness {
@@ -823,18 +863,11 @@ mod tests {
         tempo_database: TempoWitnessDatabase,
         parent: &TempoHeader,
         block: &ZoneBlock,
-        parent_chain_id: u64,
-        zone_id: u32,
     ) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
         let attributes = next_block_env_attributes(config.chain_spec().as_ref(), parent, block)?;
-        let mut env =
-            ZoneEvmConfig::new(config.chain_spec().clone(), tempo_database, config.portal())
-                .next_evm_env(parent, &attributes)
-                .map_err(|_| Error::EvmEnvironment)?;
-
-        // ZoneEvmConfig applies these overrides after delegating environment
-        // construction to TempoEvmConfig. Keep replay identical to production.
-        env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
+        let env = ZoneEvmConfig::new(config.chain_spec().clone(), tempo_database, config.portal())
+            .next_evm_env(parent, &attributes)
+            .map_err(|_| Error::EvmEnvironment)?;
         Ok(env)
     }
 
@@ -1034,23 +1067,9 @@ mod tests {
         let tempo_database =
             TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness.clone())
                 .unwrap();
-        let env = next_block_evm_env(
-            &config,
-            tempo_database,
-            &witness.parent_header,
-            &block,
-            witness.public_inputs.parent_chain_id,
-            witness.public_inputs.zone_id,
-        )
-        .unwrap();
-        assert_eq!(
-            env.cfg_env.chain_id,
-            zone_primitives::constants::zone_chain_id(
-                witness.public_inputs.parent_chain_id,
-                witness.public_inputs.zone_id,
-            )
-            .unwrap()
-        );
+        let env =
+            next_block_evm_env(&config, tempo_database, &witness.parent_header, &block).unwrap();
+        assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain().id());
         assert_eq!(env.block_env.inner.basefee, 0);
     }
 

@@ -30,7 +30,6 @@ use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
-use zone_primitives::constants::zone_chain_id;
 
 use crate::{
     Error, ZoneBlock,
@@ -54,8 +53,6 @@ pub(crate) struct ExecutedZoneBlock {
 pub(crate) struct BlockReplayContext<'a> {
     pub(crate) parent: &'a TempoHeader,
     pub(crate) block_index: usize,
-    pub(crate) parent_chain_id: u64,
-    pub(crate) zone_id: u32,
 }
 
 /// Execute a complete Zone block in system-then-user order.
@@ -72,8 +69,6 @@ pub(crate) fn execute_zone_block(
     let BlockReplayContext {
         parent,
         block_index: zone_block_index,
-        parent_chain_id,
-        zone_id,
     } = replay;
     let user_transactions = decode_user_transactions(zone_block_index, &block.transactions)?;
     let mut transactions = Vec::with_capacity(
@@ -100,11 +95,9 @@ pub(crate) fn execute_zone_block(
         .insert(parent_number, block.parent_hash);
 
     let attributes = next_block_env_attributes(evm_config.chain_spec(), parent, block)?;
-    let mut env = evm_config
+    let env = evm_config
         .next_evm_env(parent, &attributes)
         .map_err(|_| Error::EvmEnvironment)?;
-    // The parent and Zone IDs are verifier-bound independently of the local chain specification.
-    env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
     let chain_id = env.cfg_env.chain_id;
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;

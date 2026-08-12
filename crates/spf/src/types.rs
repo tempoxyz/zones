@@ -16,10 +16,10 @@ use zone_precompiles::L1StorageReader;
 /// Trusted network configuration for Zone execution.
 ///
 /// This is deliberately separate from [`BatchWitness`]: it is selected by the
-/// verifier for the network it serves, not supplied by the prover. The zone
-/// chain specification provides the parent Tempo hard-fork schedule. Block gas
-/// limits and other inherited execution fields come from the canonical parent
-/// Tempo header carried by the witness.
+/// verifier for the Zone it serves, not supplied by the prover. The chain
+/// specification contains the actual Zone genesis and the parent Tempo hard-fork
+/// schedule. Block gas limits and other inherited execution fields come from the
+/// canonical parent Tempo header carried by the witness.
 #[derive(Debug, Clone)]
 pub struct SpfConfig {
     chain_spec: Arc<ZoneChainSpec>,

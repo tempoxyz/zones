@@ -793,7 +793,8 @@ jobs:
           for name in \
             L1_RPC_URL L1_WS_RPC_URL ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS \
             ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL ZONE_REDACTED_RPC_URL \
-            ZONES_BENCH_TEMPO_GENESIS L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
+            ZONES_BENCH_TEMPO_GENESIS ZONES_BENCH_ZONE_GENESIS \
+            L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
             ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
             ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
             ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
@@ -831,7 +832,7 @@ jobs:
             taskset --cpu-list "$ZONES_BENCH_CPUSET" \
               "$SPF_BIN" generate-input \
               --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
-              --tempo-genesis "$ZONES_BENCH_TEMPO_GENESIS" \
+              --chain "$ZONES_BENCH_ZONE_GENESIS" \
               --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
               --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
               --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
