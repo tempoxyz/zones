@@ -21,8 +21,9 @@ import {
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     QueuedDeposit,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_MESSENGER_ADDRESS,
@@ -235,8 +236,8 @@ contract ZoneBridgeTest is BaseTest {
 
         l2TempoState.setMockStorageValue(
             address(l1Portal),
-            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
-            bytes32(uint256(1))
+            keccak256(abi.encode(sequencer, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
         for (uint256 i; i < bridgeAccounts.length; ++i) {

@@ -796,9 +796,11 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
     let portal = ZonePortal::new(portal_address, l1.provider());
     let account_address = l1.user_signer().address();
     assert!(!portal.isAccessEnforced().call().await?);
-    assert_eq!(
-        portal.role(account_address).call().await? as u8,
-        PortalRole::None as u8
+    assert!(
+        portal
+            .hasRole(account_address, PortalRole::None)
+            .call()
+            .await?
     );
     zone.assert_access_enforced(false).await?;
 
@@ -927,10 +929,7 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
     let outsider_signer = l1.signer_at(3);
     let outsider = outsider_signer.address();
     let portal = ZonePortal::new(portal_address, l1.provider());
-    assert_eq!(
-        portal.role(outsider).call().await? as u8,
-        PortalRole::None as u8
-    );
+    assert!(portal.hasRole(outsider, PortalRole::None).call().await?);
 
     let mut outsider_account =
         ZoneAccount::with_signer(outsider_signer, &l1, &zone, portal_address);

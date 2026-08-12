@@ -22,10 +22,9 @@ pub(crate) fn check_caller_or_sequencer<P: L1StorageReader>(
     }
 
     match l1.read_portal(|portal| &portal.role[caller]) {
-        Ok(role) if has_portal_role(
-            role,
-            tempo_zone_contracts::ZonePortal::Role::Sequencer,
-        ) => CallCheck::Continue,
+        Ok(role) if has_portal_role(role, tempo_zone_contracts::ZonePortal::Role::Sequencer) => {
+            CallCheck::Continue
+        }
         Ok(_) => CallCheck::Revert(Unauthorized {}.abi_encode().into()),
         Err(error) => CallCheck::Error(CallRuleError::Tempo(error)),
     }

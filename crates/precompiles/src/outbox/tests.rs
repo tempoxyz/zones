@@ -11,8 +11,8 @@ use tempo_precompiles::{
 };
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::{
-    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
-    PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, TEMPO_STATE_ADDRESS,
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT, TEMPO_STATE_ADDRESS,
 };
 
 use crate::{
@@ -47,13 +47,12 @@ impl Harness {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
-        let sequencer_membership_slot =
-            keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        let sequencer_membership_slot = keccak256((SEQUENCER, PORTAL_ROLE_SLOT).abi_encode());
         l1.insert(
             PORTAL,
             sequencer_membership_slot.into(),
             ANCHOR,
-            U256::from(1),
+            U256::from(u8::from(IZonePortal::Role::Sequencer)),
         );
         l1.insert(
             PORTAL,
@@ -213,7 +212,7 @@ impl Harness {
     fn set_role(&self, account: Address, role: IZonePortal::Role) {
         let slot = keccak256((account, PORTAL_ROLE_SLOT).abi_encode());
         self.l1
-            .insert(PORTAL, slot.into(), ANCHOR, U256::from(role as u8));
+            .insert(PORTAL, slot.into(), ANCHOR, U256::from(u8::from(role)));
     }
 
     fn set_token_enabled(&self, enabled: bool) {
@@ -250,6 +249,19 @@ fn assert_revert(result: PrecompileResult, error: impl SolInterface) {
     let output = result.expect("precompile error");
     assert!(output.is_revert());
     assert_eq!(output.bytes, error.abi_encode());
+}
+
+#[test]
+fn role_binding_order_matches_solidity_role_enum() {
+    assert_eq!(
+        [
+            u8::from(IZonePortal::Role::None),
+            u8::from(IZonePortal::Role::Sequencer),
+            u8::from(IZonePortal::Role::Account),
+            u8::from(IZonePortal::Role::CallbackGateway),
+        ],
+        [0, 1, 2, 3]
+    );
 }
 
 #[test]
@@ -297,12 +309,7 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
 
     let portal = ZonePortalStorage::new(PORTAL);
     assert_eq!(harness.l1.storage_requests().len(), 5);
-    assert_eq!(
-        harness
-            .l1
-            .request_count(ANCHOR, &portal.is_sequencer[SEQUENCER]),
-        1
-    );
+    assert_eq!(harness.l1.request_count(ANCHOR, &portal.role[SEQUENCER]), 1);
     assert_eq!(
         harness.l1.request_count(ANCHOR, &portal.max_tempo_gas_rate),
         1

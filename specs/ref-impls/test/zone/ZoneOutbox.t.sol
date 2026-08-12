@@ -7,8 +7,9 @@ import {
     IZonePortal,
     LastBatch,
     PORTAL_ACCESS_MODE_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     PendingWithdrawal,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_TX_CONTEXT
@@ -60,8 +61,8 @@ contract ZoneOutboxTest is Test {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         tempoState.setMockStorageValue(
             mockPortal,
-            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
-            bytes32(uint256(1))
+            keccak256(abi.encode(sequencer, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
         tempoState.setMockMaxTempoGasRate(mockPortal, TEST_MAX_TEMPO_GAS_RATE);
@@ -578,7 +579,9 @@ contract ZoneOutboxTest is Test {
 
         // Any additional active member has the same authority.
         tempoState.setMockStorageValue(
-            mockPortal, keccak256(abi.encode(bob, PORTAL_IS_SEQUENCER_SLOT)), bytes32(uint256(1))
+            mockPortal,
+            keccak256(abi.encode(bob, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         vm.prank(bob);
         bytes32 hash = outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);

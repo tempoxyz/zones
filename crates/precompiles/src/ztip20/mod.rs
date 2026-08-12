@@ -482,8 +482,10 @@ mod tests {
 
         harness.l1_reader.with_storage(TEMPO_BLOCK_NUMBER, || {
             let mut portal = ZonePortal::new(PORTAL_ADDRESS);
-            portal.is_sequencer[harness.sequencer].write(false)?;
-            portal.is_sequencer[next_sequencer].write(true)
+            portal.role[harness.sequencer]
+                .write(u8::from(tempo_zone_contracts::ZonePortal::Role::None))?;
+            portal.role[next_sequencer]
+                .write(u8::from(tempo_zone_contracts::ZonePortal::Role::Sequencer))
         })?;
 
         assert!(
