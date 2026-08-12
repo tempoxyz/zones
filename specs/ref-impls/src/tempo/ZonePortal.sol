@@ -323,10 +323,10 @@ contract ZonePortal is IZonePortal {
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
-            if (signer == admin) revert AdminSequencerConflict(signer);
+            if (signer == admin) revert RoleConflict(signer);
             Role existing = role[signer];
             if (existing != Role.None && existing != Role.Sequencer) {
-                revert RoleConflict(signer, existing, Role.Sequencer);
+                revert RoleConflict(signer);
             }
 
             for (uint256 j = 0; j < i; ++j) {
@@ -449,7 +449,7 @@ contract ZonePortal is IZonePortal {
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
     function transferAdmin(address newAdmin) external onlyAdmin {
         if (isSequencer(newAdmin)) {
-            revert AdminSequencerConflict(newAdmin);
+            revert RoleConflict(newAdmin);
         }
         pendingAdmin = newAdmin;
         emit AdminTransferStarted(admin, newAdmin);
@@ -462,7 +462,7 @@ contract ZonePortal is IZonePortal {
     function acceptAdmin() external {
         if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotPendingAdmin();
         if (isSequencer(pendingAdmin)) {
-            revert AdminSequencerConflict(pendingAdmin);
+            revert RoleConflict(pendingAdmin);
         }
         address previousAdmin = admin;
         admin = pendingAdmin;

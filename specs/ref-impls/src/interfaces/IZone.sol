@@ -647,8 +647,7 @@ interface IZonePortal {
     error CallbackDidNotReturnToZone();
     error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
-    error AdminSequencerConflict(address account);
-    error RoleConflict(address account, Role existingRole, Role requestedRole);
+    error RoleConflict(address account);
 
     /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);

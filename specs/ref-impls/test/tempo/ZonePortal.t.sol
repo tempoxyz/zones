@@ -1066,27 +1066,18 @@ contract ZonePortalTest is BaseTest {
         signers[0] = sequencer;
         signers[1] = admin;
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AdminSequencerConflict.selector, admin));
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.RoleConflict.selector, admin));
         portal.setSequencerSet(signers, 2);
 
         signers[1] = alice;
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.RoleConflict.selector, alice, Role.Account, Role.Sequencer
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.RoleConflict.selector, alice));
         portal.setSequencerSet(signers, 2);
 
         signers[1] = address(zoneGateway);
         vm.prank(admin);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.RoleConflict.selector,
-                address(zoneGateway),
-                Role.CallbackGateway,
-                Role.Sequencer
-            )
+            abi.encodeWithSelector(IZonePortal.RoleConflict.selector, address(zoneGateway))
         );
         portal.setSequencerSet(signers, 2);
     }

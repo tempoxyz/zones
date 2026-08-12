@@ -184,8 +184,7 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
-        error AdminSequencerConflict(address account);
-        error RoleConflict(address account, Role existingRole, Role requestedRole);
+        error RoleConflict(address account);
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
@@ -558,7 +557,6 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
-            Self::AdminSequencerConflict(_) => f.write_str("AdminSequencerConflict"),
             Self::RoleConflict(_) => f.write_str("RoleConflict"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
