@@ -200,13 +200,14 @@ The following table lists every privileged action and the role authorized to inv
 | Action | Contract | Authorized caller |
 |---|---|---|
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pause()` | [`ZonePortal`](#izoneportal) | **admin, sequencer, or pause role** |
 | `resume()` | [`ZonePortal`](#izoneportal) | **admin** |
-| `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAllowedAccount(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `disablePause()` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setPauseGuardian(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `abdicatePause()` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAccessMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGatewayMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -342,12 +343,16 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 The admin manages which TIP-20 tokens are available on the zone (see [Access Control](#access-control)):
 
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
+- `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
+- `resumeDeposits(token)`: Resume deposits for a previously paused token.
 - `pause()`: Pause batch submissions, all new deposits, and L1 withdrawal processing for the
   public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
   extended while active.
-- `disablePause()`: Permanently disable pausing and clear any active pause. This is admin-only.
+- `abdicatePause()`: Permanently disable future pauses after one full `PAUSE_DURATION` delay.
+  It does not clear an active pause; any pause started before abdication takes effect runs to
+  its own expiry.
 
-The portal maintains a `TokenConfig` per token with a permanent `enabled` flag, along with an append-only `enabledTokens` list. The legacy `depositsActive` field remains true and is retained only for storage compatibility. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Token Enablement Commitment
 
@@ -1614,7 +1619,7 @@ struct DepositQueueTransition {
 
 struct TokenConfig {
     bool enabled;
-    bool depositsActive; // deprecated; retained for storage compatibility
+    bool depositsActive;
 }
 
 address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
@@ -1741,8 +1746,10 @@ interface IZonePortal {
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
+    event DepositsPaused(address indexed token);
+    event DepositsResumed(address indexed token);
     event PortalPaused(address indexed account);
-    event PauseCapabilityDisabled(address indexed account);
+    event PauseAbdicationScheduled(address indexed account, uint64 effectiveAt);
     event RoleUpdated(address indexed account, Role prev, Role next);
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
@@ -1767,6 +1774,7 @@ interface IZonePortal {
     error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
+    error DepositsNotActive();
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
@@ -1783,11 +1791,14 @@ interface IZonePortal {
 
     // Token management
     function enableToken(address token) external;
+    function pauseDeposits(address token) external;
+    function resumeDeposits(address token) external;
     function paused() external view returns (bool);
     function pauseExpiry() external view returns (uint64);
-    function pauseDisabled() external view returns (bool);
+    function pauseAbdicationEffectiveAt() external view returns (uint64);
+    function pauseAbdicated() external view returns (bool);
     function pause() external;
-    function disablePause() external;
+    function abdicatePause() external;
     function isTokenEnabled(address token) external view returns (bool);
     function areDepositsActive(address token) external view returns (bool);
     function tokenConfig(address token) external view returns (TokenConfig memory);

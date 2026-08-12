@@ -358,7 +358,7 @@ interface IZoneTxContext {
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
 //            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
 //   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64)
-//            + pauseDisabled (bool) [packed]
+//            + pauseAbdicationEffectiveAt (uint64) [packed]
 //   slot 26: tokenEnablementHash (bytes32)
 //
 // These constants are the single source of truth for cross-domain reads.
@@ -490,10 +490,11 @@ interface IZoneFactory {
 }
 
 /// @notice Per-token configuration in the portal's token registry
-/// @dev depositsActive is retained for storage compatibility and is always true for enabled tokens.
+/// @dev enabled is permanent (write-once true); depositsActive can be toggled by admin.
+///      Once enabled, withdrawals can never be disabled (non-custodial guarantee).
 struct TokenConfig {
     bool enabled; // true once admin enables this token (permanent, irreversible)
-    bool depositsActive; // deprecated; retained for storage compatibility
+    bool depositsActive; // admin can pause/unpause deposits; does not affect withdrawals
 }
 
 /// @title IZonePortal
@@ -580,11 +581,17 @@ interface IZonePortal {
     /// @notice Emitted when admin enables a new TIP-20 token for bridging
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
+    /// @notice Emitted when admin pauses deposits for a token
+    event DepositsPaused(address indexed token);
+
+    /// @notice Emitted when admin resumes deposits for a token
+    event DepositsResumed(address indexed token);
+
     /// @notice Emitted when batch submissions, deposits, and withdrawal processing are paused.
     event PortalPaused(address indexed account);
 
-    /// @notice Emitted when the admin permanently disables the pause capability.
-    event PauseCapabilityDisabled(address indexed account);
+    /// @notice Emitted when the admin schedules permanent pause-capability abdication.
+    event PauseAbdicationScheduled(address indexed account, uint64 effectiveAt);
 
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
@@ -611,7 +618,8 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotPauseAuthority();
-    error PauseDisabled();
+    error PauseAbdicated();
+    error PauseAbdicationAlreadyScheduled();
     error PortalIsPaused();
     error NotFactory();
     error NotSelf();
@@ -636,6 +644,7 @@ interface IZonePortal {
     error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
+    error DepositsNotActive();
     error TokenAlreadyEnabled();
     error TokenTransferPolicyNotSet();
     error InvalidBouncebackRecipient();
@@ -802,17 +811,26 @@ interface IZonePortal {
 
     function pauseExpiry() external view returns (uint64);
 
-    function pauseDisabled() external view returns (bool);
+    function pauseAbdicationEffectiveAt() external view returns (uint64);
+
+    function pauseAbdicated() external view returns (bool);
 
     /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
     function pause() external;
 
-    /// @notice Permanently disable the pause capability. Only callable by admin.
-    function disablePause() external;
+    /// @notice Schedule permanent pause-capability abdication. Only callable by admin.
+    function abdicatePause() external;
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
     function enableToken(address token) external;
+
+    /// @notice Pause deposits for a token. Only callable by admin.
+    /// @dev Does not affect withdrawal processing (non-custodial guarantee).
+    function pauseDeposits(address token) external;
+
+    /// @notice Resume deposits for a token. Only callable by admin.
+    function resumeDeposits(address token) external;
 
     /// @notice The zone's operator RPC endpoint
     /// @return The stored RPC URL, or empty string if unset

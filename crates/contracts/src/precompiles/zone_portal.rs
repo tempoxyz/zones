@@ -98,8 +98,10 @@ crate::sol! {
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
+        event DepositsPaused(address indexed token);
+        event DepositsResumed(address indexed token);
         event PortalPaused(address indexed account);
-        event PauseCapabilityDisabled(address indexed account);
+        event PauseAbdicationScheduled(address indexed account, uint64 effectiveAt);
         event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(
@@ -186,7 +188,8 @@ crate::sol! {
         error NotSequencer();
         error NotAdmin();
         error NotPauseAuthority();
-        error PauseDisabled();
+        error PauseAbdicated();
+        error PauseAbdicationAlreadyScheduled();
         error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
@@ -241,13 +244,14 @@ crate::sol! {
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function paused() external view returns (bool);
         function pauseExpiry() external view returns (uint64);
-        function pauseDisabled() external view returns (bool);
+        function pauseAbdicationEffectiveAt() external view returns (uint64);
+        function pauseAbdicated() external view returns (bool);
 
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
         function pause() external;
-        function disablePause() external;
+        function abdicatePause() external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -262,6 +266,8 @@ crate::sol! {
         ) external;
 
         function enableToken(address token) external;
+        function pauseDeposits(address token) external;
+        function resumeDeposits(address token) external;
 
         function setZoneGasRate(uint128 newZoneGasRate) external;
         function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
@@ -565,7 +571,10 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
             Self::NotPauseAuthority(_) => f.write_str("NotPauseAuthority"),
-            Self::PauseDisabled(_) => f.write_str("PauseDisabled"),
+            Self::PauseAbdicated(_) => f.write_str("PauseAbdicated"),
+            Self::PauseAbdicationAlreadyScheduled(_) => {
+                f.write_str("PauseAbdicationAlreadyScheduled")
+            }
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),

@@ -82,7 +82,8 @@ impl ZoneInfoCmd {
         let leader_activation = portal.leaderActivationTempoBlock().call().await?;
         let paused = portal.paused().call().await?;
         let pause_expiry = portal.pauseExpiry().call().await?;
-        let pause_disabled = portal.pauseDisabled().call().await?;
+        let pause_abdication_effective_at = portal.pauseAbdicationEffectiveAt().call().await?;
+        let pause_abdicated = portal.pauseAbdicated().call().await?;
 
         println!("\nPortal State");
         println!("  Active Sequencers:     {sequencers:?}");
@@ -97,7 +98,8 @@ impl ZoneInfoCmd {
         println!("  Zone Gas Rate:         {gas_rate}");
         println!("  Paused:                {paused}");
         println!("  Pause expiry:          {pause_expiry}");
-        println!("  Pause disabled:        {pause_disabled}");
+        println!("  Pause abdication:      {pause_abdicated}");
+        println!("  Abdication effective:  {pause_abdication_effective_at}");
         println!("  Withdrawal Batch:      {batch_index}");
         println!("  Block Hash:            {block_hash}");
         println!("  Deposit Queue Hash:    {deposit_queue}");
