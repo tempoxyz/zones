@@ -34,7 +34,7 @@ impl ZoneChainSpec {
     pub fn from_genesis(genesis: Genesis) -> Result<Self, ZoneChainSpecError> {
         let mut zone = Arc::new(TempoChainSpec::from_genesis(genesis));
         let parent_chain_id = decode_l1_chain_id(zone.chain().id())?;
-        let parent = tempo_chain_spec_for_parent(parent_chain_id)
+        let parent = tempo_chain_spec_for_l1(parent_chain_id)
             .ok_or(ZoneChainSpecError::UnsupportedParent(parent_chain_id))?;
 
         let inner = Arc::make_mut(&mut zone);
@@ -194,7 +194,7 @@ pub enum ZoneChainSpecError {
 ///
 /// Tempo Anvil uses chain ID 31337 and the Tempo DEV schedule. Additional
 /// dev-schedule chain IDs can be listed in `ZONE_L1_DEV_CHAIN_IDS`.
-pub fn tempo_chain_spec_for_parent(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
+pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1_337 | 31_337 => Some(DEV.clone()),
         _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
