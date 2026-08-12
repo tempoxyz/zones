@@ -593,7 +593,7 @@ interface IZonePortal {
     /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
 
-    /// @notice Emitted when batch submissions, deposits, and withdrawal processing are paused.
+    /// @notice Emitted when deposits and withdrawal processing are paused.
     event PortalPaused(address indexed account);
 
     /// @notice Emitted when the admin schedules permanent abdication of a capability.
@@ -812,14 +812,14 @@ interface IZonePortal {
     /// @notice Append-only commitment to enabled token addresses and metadata
     function tokenEnablementHash() external view returns (bytes32);
 
-    /// @notice Whether batch submissions, new deposits, and L1 withdrawal processing are paused.
+    /// @notice Whether new deposits and withdrawal processing are paused.
     function paused() external view returns (bool);
 
     function pauseExpiry() external view returns (uint64);
 
     function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
-    /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
+    /// @notice Pause deposits and withdrawal processing for 30 days.
     function pause() external;
 
     /// @notice Schedule permanent abdication of a Portal capability. Only callable by admin.

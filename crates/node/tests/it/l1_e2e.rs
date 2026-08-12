@@ -2107,7 +2107,7 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A portal-wide pause rejects deposits and keeps already-finalized withdrawals queued on L1.
+/// A portal-wide pause rejects deposits and withdrawal processing while settlement continues.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -2165,11 +2165,19 @@ async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyr
         !sequencer.withdrawal_handle.is_finished(),
         "withdrawal processor exited while the portal was paused"
     );
-    assert_eq!(
-        portal.withdrawalBatchIndex().call().await?,
-        initial_withdrawal_batch,
-        "withdrawal batch must not be submitted while the portal is paused"
-    );
+    poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(250),
+        "withdrawal batch to settle while the portal is paused",
+        || {
+            let portal = &portal;
+            async move {
+                let batch = portal.withdrawalBatchIndex().call().await?;
+                Ok((batch > initial_withdrawal_batch).then_some(()))
+            }
+        },
+    )
+    .await?;
 
     let processed_while_paused = portal
         .WithdrawalProcessed_filter()

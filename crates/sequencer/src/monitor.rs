@@ -295,18 +295,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     }
 
     async fn process_available_blocks(&mut self) {
-        match self.batch_submitter.is_portal_paused().await {
-            Ok(true) => {
-                debug!("Portal is paused; settlement monitor is idle");
-                return;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                warn!(%error, "Failed to read portal pause state");
-                return;
-            }
-        }
-
         let latest_zone_block = match self.provider.best_block_number() {
             Ok(number) => number,
             Err(error) => {
@@ -633,11 +621,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
-                    if self.batch_submitter.is_portal_paused().await? {
-                        return Err(eyre::eyre!(
-                            "portal paused while submitting zone block {last_zone_block}"
-                        ));
-                    }
                     if attempt < MAX_RETRIES {
                         self.metrics.batch_submit_retry_total.increment(1);
                         warn!(
@@ -664,14 +647,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                 }
             }
-        }
-
-        // A pause is an expected protocol state, not a submission divergence. Keep the discovery
-        // cursor and retry after the bounded monitor poll instead of rewinding to the portal.
-        if self.batch_submitter.is_portal_paused().await? {
-            return Err(eyre::eyre!(
-                "portal paused while submitting zone block {last_zone_block}"
-            ));
         }
 
         // All retries exhausted — resync from portal.
@@ -1047,18 +1022,6 @@ mod tests {
                 "failed to resolve portal-confirmed zone block during zone monitor startup"
             )
         );
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn process_available_blocks_is_idle_while_portal_is_paused() {
-        let l1 = Asserter::new();
-        l1.push_success(&abi_encode_u64(1));
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-
-        monitor.process_available_blocks().await;
-
-        assert_eq!(monitor.latest_observed_zone_block, 50);
         assert!(l1.read_q().is_empty());
     }
 

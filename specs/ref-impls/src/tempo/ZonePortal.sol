@@ -611,7 +611,7 @@ contract ZonePortal is IZonePortal {
         return block.timestamp < pauseExpiry;
     }
 
-    /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
+    /// @notice Pause deposits and withdrawal processing for 30 days.
     function pause() external {
         if (paused()) revert PortalIsPaused();
         _requireCapabilityActive(Capability.PausePortal);
@@ -1302,7 +1302,6 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
-        whenNotPaused
     {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
