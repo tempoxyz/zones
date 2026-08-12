@@ -447,8 +447,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     ) -> Result<()> {
         let to = boundary.block_number;
         let finalized_batch =
-            fetch_finalized_batch(&self.provider, self.config.outbox_address, from, &boundary)
-                .await?;
+            fetch_finalized_batch(&self.provider, self.config.outbox_address, &boundary).await?;
         let end_state = read_zone_block_snapshot(&self.provider, self.config.inbox_address, to)?;
 
         if !finalized_batch.withdrawals.is_empty() {

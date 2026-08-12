@@ -928,12 +928,12 @@ impl BatchSubmitter {
     ///
     /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
     ///    to determine which bounded page starts at the current head.
-    /// 2. Querying the `BatchSubmitted` event for each slot in that page (plus the
-    ///    predecessor for zone block range boundaries) via the indexed
-    ///    `withdrawalQueueIndex` topic.
+    /// 2. Querying the `BatchSubmitted` event for each slot in that page via the
+    ///    indexed `withdrawalQueueIndex` topic.
     /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
     /// 4. Fetching `WithdrawalRequested` events from the **zone L2** outbox in
-    ///    the corresponding block range.
+    ///    that block. A non-empty withdrawal batch is finalized in the same
+    ///    zone block as its requests.
     /// 5. Reading the head slot's current on-chain hash for partial processing
     ///    detection.
     /// 6. Verifying the hash chain and trimming already-processed withdrawals.
@@ -958,14 +958,11 @@ impl BatchSubmitter {
         }
 
         // Step 2: query BatchSubmitted events for this page [head, page_tail)
-        // plus the predecessor (head-1) by their indexed withdrawalQueueIndex.
-        let events = self
-            .find_batch_events_by_index(head.saturating_sub(1), page_tail)
-            .await?;
+        // by their indexed withdrawalQueueIndex.
+        let events = self.find_batch_events_by_index(head, page_tail).await?;
 
         // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
-        // Maps portal_slot → last zone L2 block in that batch.
-        let mut zone_end_by_slot: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut zone_block_by_slot: BTreeMap<u64, u64> = BTreeMap::new();
         for (&portal_slot, event) in &events {
             let block_number = zone_provider
                 .block_number(event.nextBlockHash)?
@@ -975,29 +972,17 @@ impl BatchSubmitter {
                         event.nextBlockHash
                     )
                 })?;
-            zone_end_by_slot.insert(portal_slot, block_number);
+            zone_block_by_slot.insert(portal_slot, block_number);
         }
 
         // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
         let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
         for portal_slot in head..page_tail {
-            if !events.contains_key(&portal_slot) {
-                continue;
-            }
-            let zone_end = zone_end_by_slot[&portal_slot];
-            let zone_start = if portal_slot == 0 {
-                1
-            } else if let Some(prev_end) = zone_end_by_slot.get(&(portal_slot - 1)) {
-                prev_end + 1
-            } else {
-                warn!(
-                    portal_slot,
-                    "predecessor event missing, cannot determine zone block range start"
-                );
+            let Some(&zone_block) = zone_block_by_slot.get(&portal_slot) else {
                 continue;
             };
             let withdrawals =
-                fetch_slot_withdrawals(zone_provider, outbox_address, zone_start, zone_end).await?;
+                fetch_slot_withdrawals(zone_provider, outbox_address, zone_block).await?;
             slot_withdrawals.insert(portal_slot, withdrawals);
         }
 
@@ -1036,11 +1021,6 @@ impl BatchSubmitter {
     /// `withdrawalQueueIndex` topic. Logical queue indices never repeat
     /// (head/tail are non-wrapping counters), so the topic filter identifies
     /// each batch exactly without positional counting.
-    ///
-    /// The caller passes `first_index = head - 1` so the predecessor batch is
-    /// included (its `nextBlockHash` bounds the zone block range of the first
-    /// pending slot). When `head == 0` the predecessor does not exist; the
-    /// caller falls back to zone block 1.
     async fn find_batch_events_by_index(
         &self,
         first_index: u64,
@@ -1208,15 +1188,6 @@ struct CachedAncestryHeader {
 struct ResolvedAncestry {
     headers: Vec<Bytes>,
     fetched_headers: Vec<(u64, CachedAncestryHeader)>,
-}
-
-#[derive(Debug)]
-struct RequestedWithdrawalLog {
-    block_number: u64,
-    tx_index: u64,
-    log_index: u64,
-    tx_hash: B256,
-    event: abi::IZoneOutbox::WithdrawalRequested,
 }
 
 /// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
@@ -1530,28 +1501,38 @@ pub(crate) async fn fetch_finalized_batch_boundaries<P: ZoneSequencerProvider>(
     Ok(boundaries)
 }
 
-/// Fetch one finalized L2 withdrawal batch for a range ending at `to`.
+/// Fetch one finalized L2 withdrawal batch.
 ///
 /// The submitted hash and index come from the supplied `BatchFinalized` event.
 /// Withdrawal structs are reconstructed from `WithdrawalRequested` logs in the
-/// supplied boundary-aligned range so the off-chain processor can service the
-/// portal queue.
+/// same block: every non-empty withdrawal batch is finalized in the block that
+/// contains its requests.
 pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
     zone_provider: &P,
     outbox_address: Address,
-    from: u64,
     target: &FinalizedBatchLog,
 ) -> Result<FinalizedBatch> {
-    let to = target.block_number;
-    let request_from = from;
+    let (block, receipts) = block_with_receipts(zone_provider, target.block_number)?;
+    let mut requests = Vec::new();
+    for (tx, receipt) in block.body.transactions.iter().zip(&receipts) {
+        for log in receipt.logs() {
+            if log.address != outbox_address
+                || log.topics().first() != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
+            {
+                continue;
+            }
+            let event = IZoneOutbox::WithdrawalRequested::decode_log(log)
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "invalid WithdrawalRequested log in zone block {}: {err}",
+                        target.block_number
+                    )
+                })?
+                .data;
+            requests.push((*tx.tx_hash(), event));
+        }
+    }
 
-    let requests = if request_from <= to {
-        fetch_requested_withdrawal_logs(zone_provider, outbox_address, request_from, to)?
-    } else {
-        Vec::new()
-    };
-
-    let (block, _) = block_with_receipts(zone_provider, target.block_number)?;
     let finalize_tx = block
         .body
         .transactions
@@ -1586,8 +1567,8 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
     let withdrawals = requests
         .into_iter()
         .zip(encrypted_senders)
-        .map(|(request, encrypted_sender)| {
-            abi::Withdrawal::from_requested_event(&request.event, request.tx_hash, encrypted_sender)
+        .map(|((tx_hash, event), encrypted_sender)| {
+            abi::Withdrawal::from_requested_event(&event, tx_hash, encrypted_sender)
         })
         .collect::<Vec<_>>();
 
@@ -1609,67 +1590,27 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
 }
 
 /// Fetch `WithdrawalRequested` events for one portal queue slot.
+///
+/// A portal queue slot is created only for a non-empty withdrawal batch. The
+/// outbox finalizes pending withdrawals in the same zone block as their
+/// requests, so recovery needs to inspect only the block referenced by the
+/// slot's `BatchSubmitted.nextBlockHash`.
 pub(crate) async fn fetch_slot_withdrawals(
     zone_provider: &impl ZoneSequencerProvider,
     outbox_address: Address,
-    from: u64,
-    to: u64,
+    block_number: u64,
 ) -> Result<Vec<abi::Withdrawal>> {
     let boundaries =
-        fetch_finalized_batch_boundaries(zone_provider, outbox_address, to, to).await?;
-    let target = boundaries
-        .into_iter()
-        .next()
-        .ok_or_else(|| eyre::eyre!("zone block {to} does not contain a BatchFinalized boundary"))?;
+        fetch_finalized_batch_boundaries(zone_provider, outbox_address, block_number, block_number)
+            .await?;
+    let target = boundaries.into_iter().next().ok_or_else(|| {
+        eyre::eyre!("zone block {block_number} does not contain a BatchFinalized boundary")
+    })?;
     Ok(
-        fetch_finalized_batch(zone_provider, outbox_address, from, &target)
+        fetch_finalized_batch(zone_provider, outbox_address, &target)
             .await?
             .withdrawals,
     )
-}
-
-fn fetch_requested_withdrawal_logs<P: ZoneSequencerProvider>(
-    provider: &P,
-    outbox_address: Address,
-    from: u64,
-    to: u64,
-) -> Result<Vec<RequestedWithdrawalLog>> {
-    let mut requests = Vec::new();
-    for block_number in from..=to {
-        let (block, receipts) = block_with_receipts(provider, block_number)?;
-        for (tx_index, (tx, receipt)) in block
-            .body
-            .transactions
-            .iter()
-            .zip(receipts.iter())
-            .enumerate()
-        {
-            for (log_index, log) in receipt.logs().iter().enumerate() {
-                if log.address != outbox_address
-                    || log.topics().first()
-                        != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
-                {
-                    continue;
-                }
-                requests.push(RequestedWithdrawalLog {
-                    block_number,
-                    tx_index: tx_index as u64,
-                    log_index: log_index as u64,
-                    tx_hash: *tx.tx_hash(),
-                    event: IZoneOutbox::WithdrawalRequested::decode_log(log)
-                        .map_err(|err| {
-                            eyre::eyre!(
-                                "invalid WithdrawalRequested log in zone block {block_number}: {err}"
-                            )
-                        })?
-                        .data,
-                });
-            }
-        }
-    }
-    requests.sort_by_key(|request| (request.block_number, request.tx_index, request.log_index));
-
-    Ok(requests)
 }
 
 fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
