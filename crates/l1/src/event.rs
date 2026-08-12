@@ -24,7 +24,7 @@ pub struct EncryptionKeyRotation {
     pub x: B256,
     /// Compressed public-key prefix (`0x02` or `0x03`).
     pub y_parity: u8,
-    /// Ethereum address derived from the compressed public key.
+    /// Address derived from the compressed public key.
     pub pubkey: Address,
     /// Index assigned by the Portal's append-only key history.
     pub key_index: U256,
@@ -32,7 +32,7 @@ pub struct EncryptionKeyRotation {
     pub activation_block: u64,
 }
 
-/// Derive the Ethereum address for a compressed secp256k1 encryption public key.
+/// Derive the address for a compressed secp256k1 encryption public key.
 pub fn encryption_key_address(x: B256, y_parity: u8) -> eyre::Result<Address> {
     let mut compressed = [0; 33];
     compressed[0] = y_parity;

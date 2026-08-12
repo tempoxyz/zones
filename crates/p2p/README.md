@@ -58,7 +58,7 @@ Ed25519 public key.
 
 The Commonware Ed25519 identity answers which configured network peer sent a
 message. It is not an on-chain quorum identity. The quorum design will
-also give each node an individual secp256k1 key whose Ethereum address is
+also give each node an individual secp256k1 key whose address is
 registered with `ZonePortal`. 
 
 The authenticated-network namespace includes the P2P wire-protocol version,
