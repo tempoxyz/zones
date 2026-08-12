@@ -12,6 +12,7 @@ import {
     PORTAL_ACCESS_MODE_SLOT,
     PORTAL_GATEWAY_MODE_SLOT,
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_PAUSE_SLOT,
     PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
     PendingWithdrawal,
@@ -246,6 +247,8 @@ contract ZoneOutbox is IZoneOutbox {
     )
         internal
     {
+        if (_isPortalPaused()) revert IZonePortal.PortalIsPaused();
+
         // Always require a valid fallback recipient
         if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
@@ -329,6 +332,13 @@ contract ZoneOutbox is IZoneOutbox {
         emit WithdrawalRequested(
             index, msg.sender, token, to, amount, fee, memo, gasLimit, fallbackNonce, data, revealTo
         );
+    }
+
+    /// @dev Read the packed pause expiry from the latest finalized Tempo checkpoint.
+    function _isPortalPaused() internal view returns (bool) {
+        uint256 packed = uint256(tempoState.readTempoStorageSlot(tempoPortal, PORTAL_PAUSE_SLOT));
+        uint64 pauseExpiry = uint64(packed >> 64);
+        return block.timestamp < pauseExpiry;
     }
 
     /// @notice Enqueue a failed-deposit bounce-back withdrawal.

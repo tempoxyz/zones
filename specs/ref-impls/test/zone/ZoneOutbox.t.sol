@@ -8,6 +8,7 @@ import {
     LastBatch,
     PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ROLE_SLOT,
+    PORTAL_PAUSE_SLOT,
     PendingWithdrawal,
     Role,
     Withdrawal,
@@ -332,6 +333,20 @@ contract ZoneOutboxTest is Test {
 
         assertEq(_pendingWithdrawalsCount(), 0);
         assertEq(disabledToken.balanceOf(alice), 1000e6);
+    }
+
+    function test_requestWithdrawal_revertsWhilePortalPaused() public {
+        uint64 expiry = uint64(block.timestamp + 30 days);
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_PAUSE_SLOT, bytes32(uint256(expiry) << 64)
+        );
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
+
+        assertEq(_pendingWithdrawalsCount(), 0);
+        assertEq(zoneToken.balanceOf(alice), 10_000e6);
     }
 
     function test_requestWithdrawal_openAccessStillEnforcesGatewayRegistration() public {

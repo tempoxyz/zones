@@ -7,8 +7,9 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 use eyre::{WrapErr as _, ensure};
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_zone_contracts::ZonePortal;
+use zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY;
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct PortalPauseArgs {
@@ -43,15 +44,22 @@ async fn pause(args: PortalPauseArgs) -> eyre::Result<()> {
         .strip_prefix("0x")
         .unwrap_or(&args.private_key);
     let signer: PrivateKeySigner = key.parse().wrap_err("PRIVATE_KEY is not valid")?;
+    let signer_address = signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .wallet(EthereumWallet::from(signer))
         .connect(&args.l1_rpc_url)
         .await
         .wrap_err("failed connecting to Tempo L1 RPC")?;
     let portal = ZonePortal::new(args.portal, &provider);
+    let nonce = provider
+        .get_transaction_count_with_nonce_key(signer_address, ADMIN_OPS_NONCE_KEY)
+        .await
+        .wrap_err("failed reading portal pause nonce")?;
 
     let pending = portal
         .pause()
+        .nonce_key(ADMIN_OPS_NONCE_KEY)
+        .nonce(nonce)
         .send()
         .await
         .wrap_err("failed sending ZonePortal.pause")?;

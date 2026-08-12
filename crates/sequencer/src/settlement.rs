@@ -214,6 +214,11 @@ impl BatchSubmitter {
         &self.l1_provider
     }
 
+    /// Return whether the Tempo L1 portal is currently paused.
+    pub(crate) async fn is_portal_paused(&self) -> Result<bool> {
+        Ok(self.portal.paused().call().await?)
+    }
+
     /// Create a batch submitter without a certificate signer.
     ///
     /// This is useful for read-only operations and tests. Batch submission returns an error.

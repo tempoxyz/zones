@@ -99,6 +99,7 @@ crate::sol! {
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
         event PortalPaused(address indexed account);
+        event PauseCapabilityDisabled(address indexed account);
         event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(

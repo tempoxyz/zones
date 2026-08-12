@@ -357,7 +357,8 @@ interface IZoneTxContext {
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
 //            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
-//   slot 25: _tokensEnabledInCurrentBlock (uint64)
+//   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64)
+//            + pauseDisabled (bool) [packed]
 //   slot 26: tokenEnablementHash (bytes32)
 //
 // These constants are the single source of truth for cross-domain reads.
@@ -378,6 +379,7 @@ bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
 bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_LEADER_SLOT = bytes32(uint256(PORTAL_MAX_TEMPO_GAS_RATE_SLOT) + 1);
+bytes32 constant PORTAL_PAUSE_SLOT = bytes32(uint256(25));
 bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT =
     bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
 
@@ -580,6 +582,9 @@ interface IZonePortal {
 
     /// @notice Emitted when batch submissions, deposits, and withdrawal processing are paused.
     event PortalPaused(address indexed account);
+
+    /// @notice Emitted when the admin permanently disables the pause capability.
+    event PauseCapabilityDisabled(address indexed account);
 
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);

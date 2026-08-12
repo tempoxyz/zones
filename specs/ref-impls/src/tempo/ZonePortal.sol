@@ -606,6 +606,7 @@ contract ZonePortal is IZonePortal {
     function disablePause() external onlyAdmin {
         pauseDisabled = true;
         pauseExpiry = 0;
+        emit PauseCapabilityDisabled(msg.sender);
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.

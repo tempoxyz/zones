@@ -1646,6 +1646,47 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     assert!(events.leader_transitions.is_empty());
 }
 
+#[test]
+fn pause_events_invalidate_cached_portal_storage() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let portal = subscriber.config.portal_address;
+    let account = address!("0x0000000000000000000000000000000000000123");
+    let pause_slot = B256::with_last_byte(25);
+    {
+        let mut cache = subscriber.config.l1_state_cache.lock();
+        cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
+    }
+    let logs = vec![
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: crate::abi::ZonePortal::PortalPaused { account }.encode_log_data(),
+            },
+            ..Default::default()
+        },
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: crate::abi::ZonePortal::PauseCapabilityDisabled { account }.encode_log_data(),
+            },
+            ..Default::default()
+        },
+    ];
+    let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
+
+    let (_, invalidated) = subscriber.extract_events(1, &[receipt]).unwrap();
+    assert!(invalidated.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &invalidated);
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .lock()
+            .get(portal, pause_slot, 1),
+        None
+    );
+}
+
 #[tokio::test]
 async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));

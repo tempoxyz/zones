@@ -11,8 +11,8 @@ use tempo_precompiles::{
 };
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::{
-    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT, TEMPO_STATE_ADDRESS,
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_PAUSE_SLOT,
+    PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, TEMPO_STATE_ADDRESS,
 };
 
 use crate::{
@@ -224,6 +224,15 @@ impl Harness {
         );
     }
 
+    fn set_pause_expiry(&self, expiry: u64) {
+        self.l1.insert(
+            PORTAL,
+            PORTAL_PAUSE_SLOT.into(),
+            ANCHOR,
+            U256::from(expiry) << 64,
+        );
+    }
+
     fn balance_of(&mut self, account: Address) -> eyre::Result<U256> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
@@ -308,7 +317,13 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
     harness.request(1, BOB, B256::ZERO)?;
 
     let portal = ZonePortalStorage::new(PORTAL);
-    assert_eq!(harness.l1.storage_requests().len(), 5);
+    assert_eq!(harness.l1.storage_requests().len(), 6);
+    assert!(
+        harness
+            .l1
+            .storage_requests()
+            .contains(&(PORTAL, PORTAL_PAUSE_SLOT, ANCHOR))
+    );
     assert_eq!(harness.l1.request_count(ANCHOR, &portal.role[SEQUENCER]), 1);
     assert_eq!(
         harness.l1.request_count(ANCHOR, &portal.max_tempo_gas_rate),
@@ -383,6 +398,23 @@ fn request_withdrawal_rejects_portal_disabled_token_before_state_mutation() -> e
     assert_revert(
         harness.request(1, BOB, B256::ZERO),
         ZonePortalError::token_not_enabled(),
+    );
+    assert_eq!(harness.balance_of(ALICE)?, balance_before);
+    assert!(harness.pending()?.is_empty());
+    assert_eq!(harness.last_fallback_nonce()?, 0);
+    Ok(())
+}
+
+#[test]
+fn request_withdrawal_rejects_active_portal_pause_before_state_mutation() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.ctx.block.timestamp = U256::from(100);
+    harness.set_pause_expiry(200);
+    let balance_before = harness.balance_of(ALICE)?;
+
+    assert_revert(
+        harness.request(1, BOB, B256::ZERO),
+        ZonePortalError::portal_is_paused(),
     );
     assert_eq!(harness.balance_of(ALICE)?, balance_before);
     assert!(harness.pending()?.is_empty());

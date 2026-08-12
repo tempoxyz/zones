@@ -1556,6 +1556,8 @@ contract ZonePortalTest is BaseTest {
         vm.prank(sequencer);
         portal.pause();
 
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.PauseCapabilityDisabled(admin);
         vm.prank(admin);
         portal.disablePause();
         assertTrue(portal.pauseDisabled());
