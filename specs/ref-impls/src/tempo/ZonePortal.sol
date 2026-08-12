@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {
     BlockTransition,
+    Capability,
     Deposit,
     DepositPayload,
     DepositQueueTransition,
@@ -86,6 +87,9 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Duration of every emergency pause.
     uint64 public constant PAUSE_DURATION = 30 days;
+
+    /// @notice Delay before a capability abdication becomes effective.
+    uint64 public constant ABDICATION_DELAY = PAUSE_DURATION;
 
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -209,16 +213,15 @@ contract ZonePortal is IZonePortal {
     uint64 internal _tokensEnabledInCurrentBlock;
 
     /// @notice Timestamp at which the current emergency pause expires.
-    /// @dev Packed with pauseAbdicationEffectiveAt in slot 25 for upgrade-safe storage layout.
+    /// @dev Packed after the token-enablement counter in slot 25.
     uint64 public pauseExpiry;
 
-    /// @notice Timestamp after which no new emergency pause may start.
-    /// @dev A pause started before this timestamp still runs until pauseExpiry.
-    uint64 public pauseAbdicationEffectiveAt;
-
     /// @notice Append-only commitment to every enabled token and its metadata.
-    /// @dev Stored at slot 26 so the existing portal layout remains unchanged.
+    /// @dev Stored at slot 26.
     bytes32 public tokenEnablementHash;
+
+    /// @notice Time after which the corresponding configuration surface is permanently closed.
+    mapping(Capability => uint64) public abdicationEffectiveAt;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -486,12 +489,14 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Enable or disable account allowlist enforcement without discarding membership.
     function setAccessMode(bool enforced) external onlyAdmin {
+        _requireCapabilityActive(Capability.AccessPolicy);
         _isAccessEnforced = enforced;
         emit EnforcementModesUpdated(enforced, _isGatewayEnforced);
     }
 
     /// @notice Enable or disable callback gateway registration enforcement.
     function setGatewayMode(bool enforced) external onlyAdmin {
+        _requireCapabilityActive(Capability.AccessPolicy);
         _isGatewayEnforced = enforced;
         emit EnforcementModesUpdated(_isAccessEnforced, enforced);
     }
@@ -510,6 +515,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Returns without emitting when the requested membership is already configured.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
         if (allowed) require(account != messenger);
+        if (allowed) _requireCapabilityActive(Capability.AccessPolicy);
         Role previous = role[account];
         Role next = allowed ? Role.Account : Role.None;
         if (previous == next) return;
@@ -521,10 +527,21 @@ contract ZonePortal is IZonePortal {
     /// @notice Add or remove a callback gateway.
     /// @dev Returns without emitting when the requested membership is already configured.
     function setGateway(address account, bool allowed) external onlyAdmin {
+        if (allowed) _requireCapabilityActive(Capability.AccessPolicy);
         Role previous = role[account];
         Role next = allowed ? Role.CallbackGateway : Role.None;
         if (previous == next) return;
         require(previous == (allowed ? Role.None : Role.CallbackGateway));
+        role[account] = next;
+        emit RoleUpdated(account, previous, next);
+    }
+
+    /// @notice Add or remove a pause guardian.
+    function setPauseGuardian(address account, bool allowed) external onlyAdmin {
+        if (allowed) _requireCapabilityActive(Capability.PausePortal);
+        Role previous = role[account];
+        require(previous != Role.Sequencer);
+        Role next = allowed ? Role.PauseGuardian : Role.None;
         role[account] = next;
         emit RoleUpdated(account, previous, next);
     }
@@ -594,28 +611,36 @@ contract ZonePortal is IZonePortal {
         return block.timestamp < pauseExpiry;
     }
 
-    function pauseAbdicated() public view returns (bool) {
-        return pauseAbdicationEffectiveAt != 0 && block.timestamp >= pauseAbdicationEffectiveAt;
-    }
-
     /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
     function pause() external {
         if (paused()) revert PortalIsPaused();
-        if (pauseAbdicated()) revert PauseAbdicated();
-        if (msg.sender != admin && !isSequencer[msg.sender] && role[msg.sender] != Role.Pause) {
+        _requireCapabilityActive(Capability.PausePortal);
+        if (
+            msg.sender != admin && !isSequencer(msg.sender)
+                && !hasRole(msg.sender, Role.PauseGuardian)
+        ) {
             revert NotPauseAuthority();
         }
         pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
         emit PortalPaused(msg.sender);
     }
 
-    /// @notice Schedule permanent pause-capability abdication after one full pause period.
-    /// @dev Does not clear an active pause, and a pause started before the effective time runs
-    ///      until its own expiry.
-    function abdicatePause() external onlyAdmin {
-        if (pauseAbdicationEffectiveAt != 0) revert PauseAbdicationAlreadyScheduled();
-        pauseAbdicationEffectiveAt = uint64(block.timestamp) + PAUSE_DURATION;
-        emit PauseAbdicationScheduled(msg.sender, pauseAbdicationEffectiveAt);
+    /// @notice Schedule permanent abdication of a Portal configuration surface.
+    function abdicate(Capability capability) external onlyAdmin {
+        if (paused()) revert PortalIsPaused();
+        if (abdicationEffectiveAt[capability] != 0) revert AbdicationAlreadyScheduled(capability);
+        uint64 effectiveAt = uint64(block.timestamp) + ABDICATION_DELAY;
+        abdicationEffectiveAt[capability] = effectiveAt;
+        emit AbdicationScheduled(capability, effectiveAt);
+    }
+
+    function _isCapabilityActive(Capability capability) internal view returns (bool) {
+        uint64 effectiveAt = abdicationEffectiveAt[capability];
+        return effectiveAt == 0 || block.timestamp < effectiveAt;
+    }
+
+    function _requireCapabilityActive(Capability capability) internal view {
+        if (!_isCapabilityActive(capability)) revert CapabilityAbdicated(capability);
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.

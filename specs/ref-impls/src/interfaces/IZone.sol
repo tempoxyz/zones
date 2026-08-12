@@ -14,7 +14,13 @@ enum Role {
     Sequencer,
     Account,
     CallbackGateway,
-    Pause
+    PauseGuardian
+}
+
+/// @notice Independently abdicated Portal configuration surfaces.
+enum Capability {
+    PausePortal,
+    AccessPolicy
 }
 
 /// @title IZoneToken
@@ -357,9 +363,9 @@ interface IZoneTxContext {
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
 //            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
-//   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64)
-//            + pauseAbdicationEffectiveAt (uint64) [packed]
+//   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64) [packed]
 //   slot 26: tokenEnablementHash (bytes32)
+//   slot 27: abdicationEffectiveAt (mapping(Capability => uint64))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -590,8 +596,8 @@ interface IZonePortal {
     /// @notice Emitted when batch submissions, deposits, and withdrawal processing are paused.
     event PortalPaused(address indexed account);
 
-    /// @notice Emitted when the admin schedules permanent pause-capability abdication.
-    event PauseAbdicationScheduled(address indexed account, uint64 effectiveAt);
+    /// @notice Emitted when the admin schedules permanent abdication of a capability.
+    event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
 
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
@@ -618,8 +624,8 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotPauseAuthority();
-    error PauseAbdicated();
-    error PauseAbdicationAlreadyScheduled();
+    error CapabilityAbdicated(Capability capability);
+    error AbdicationAlreadyScheduled(Capability capability);
     error PortalIsPaused();
     error NotFactory();
     error NotSelf();
@@ -811,15 +817,13 @@ interface IZonePortal {
 
     function pauseExpiry() external view returns (uint64);
 
-    function pauseAbdicationEffectiveAt() external view returns (uint64);
-
-    function pauseAbdicated() external view returns (bool);
+    function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
     /// @notice Pause batch submissions, deposits, and withdrawal processing for 30 days.
     function pause() external;
 
-    /// @notice Schedule permanent pause-capability abdication. Only callable by admin.
-    function abdicatePause() external;
+    /// @notice Schedule permanent abdication of a Portal capability. Only callable by admin.
+    function abdicate(Capability capability) external;
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.

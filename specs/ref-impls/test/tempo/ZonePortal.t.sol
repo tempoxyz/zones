@@ -7,6 +7,7 @@ import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 import {
     BlockTransition,
+    Capability,
     Deposit,
     DepositPayload,
     DepositQueueTransition,
@@ -1534,7 +1535,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_pauseRoleCanPause() public {
         vm.prank(admin);
-        portal.setRole(alice, Role.Pause);
+        portal.setRole(alice, Role.PauseGuardian);
 
         vm.prank(alice);
         portal.pause();
@@ -1562,36 +1563,26 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.pauseExpiry(), originalExpiry);
     }
 
-    function test_abdicatePause_delaysPermanentDisableWithoutClearingActivePause() public {
-        vm.prank(sequencer);
-        portal.pause();
-        uint64 pauseExpiry = portal.pauseExpiry();
-
+    function test_abdicatePause_delaysPermanentDisable() public {
         uint64 effectiveAt = uint64(block.timestamp) + 30 days;
         vm.expectEmit(true, false, false, true);
-        emit IZonePortal.PauseAbdicationScheduled(admin, effectiveAt);
+        emit IZonePortal.AbdicationScheduled(Capability.PausePortal, effectiveAt);
         vm.prank(admin);
-        portal.abdicatePause();
-        assertEq(portal.pauseAbdicationEffectiveAt(), effectiveAt);
-        assertFalse(portal.pauseAbdicated());
-        assertTrue(portal.paused());
-        assertEq(portal.pauseExpiry(), pauseExpiry);
-
-        vm.warp(effectiveAt);
-        assertTrue(portal.pauseAbdicated());
-        assertTrue(portal.paused());
-
-        vm.warp(pauseExpiry);
+        portal.abdicate(Capability.PausePortal);
+        assertEq(portal.abdicationEffectiveAt(Capability.PausePortal), effectiveAt);
         assertFalse(portal.paused());
 
+        vm.warp(effectiveAt);
         vm.prank(sequencer);
-        vm.expectRevert(IZonePortal.PauseAbdicated.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
+        );
         portal.pause();
     }
 
     function test_abdicatePause_allowsStartingAPauseBeforeItTakesEffect() public {
         vm.prank(admin);
-        portal.abdicatePause();
+        portal.abdicate(Capability.PausePortal);
 
         vm.warp(block.timestamp + 29 days);
         vm.prank(sequencer);
@@ -1599,22 +1590,27 @@ contract ZonePortalTest is BaseTest {
         uint64 pauseExpiry = portal.pauseExpiry();
 
         vm.warp(block.timestamp + 1 days);
-        assertTrue(portal.pauseAbdicated());
         assertTrue(portal.paused());
 
         vm.warp(pauseExpiry);
         vm.prank(sequencer);
-        vm.expectRevert(IZonePortal.PauseAbdicated.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
+        );
         portal.pause();
     }
 
     function test_abdicatePause_cannotBeRescheduled() public {
         vm.prank(admin);
-        portal.abdicatePause();
+        portal.abdicate(Capability.PausePortal);
 
         vm.prank(admin);
-        vm.expectRevert(IZonePortal.PauseAbdicationAlreadyScheduled.selector);
-        portal.abdicatePause();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.AbdicationAlreadyScheduled.selector, Capability.PausePortal
+            )
+        );
+        portal.abdicate(Capability.PausePortal);
     }
 
     function test_pause_revertsWithoutAuthority() public {
@@ -1865,7 +1861,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.prank(admin);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.abdicatePause();
+        portal.abdicate(Capability.PausePortal);
     }
 
     function test_transferAdmin_revertsIfNotAdmin() public {
@@ -5091,7 +5087,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 16: verifier + _initialized + sequencerSetVersion + threshold [packed]
     ///        slot 17: zoneHeight
     ///        slot 18: _sequencers.length
-    ///        slot 19: isSequencer mapping
+    ///        slot 19: reserved for future use
     ///        slot 20: role mapping
     ///        slot 21: account/gateway enforcement booleans [packed]
     ///        slot 22: maxTempoGasRate (uint128)

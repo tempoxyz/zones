@@ -1667,8 +1667,8 @@ fn pause_events_invalidate_cached_portal_storage() {
         Log {
             inner: alloy_primitives::Log {
                 address: portal,
-                data: crate::abi::ZonePortal::PauseAbdicationScheduled {
-                    account,
+                data: crate::abi::ZonePortal::AbdicationScheduled {
+                    capability: crate::abi::ZonePortal::Capability::PausePortal,
                     effectiveAt: 0,
                 }
                 .encode_log_data(),

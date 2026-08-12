@@ -28,6 +28,11 @@ crate::sol! {
             PauseGuardian
         }
 
+        enum Capability {
+            PausePortal,
+            AccessPolicy
+        }
+
         struct Withdrawal {
             address token;
             bytes32 senderTag;
@@ -101,7 +106,7 @@ crate::sol! {
         event DepositsPaused(address indexed token);
         event DepositsResumed(address indexed token);
         event PortalPaused(address indexed account);
-        event PauseAbdicationScheduled(address indexed account, uint64 effectiveAt);
+        event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
         event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(
@@ -188,8 +193,8 @@ crate::sol! {
         error NotSequencer();
         error NotAdmin();
         error NotPauseAuthority();
-        error PauseAbdicated();
-        error PauseAbdicationAlreadyScheduled();
+        error CapabilityAbdicated(Capability capability);
+        error AbdicationAlreadyScheduled(Capability capability);
         error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
@@ -244,14 +249,13 @@ crate::sol! {
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function paused() external view returns (bool);
         function pauseExpiry() external view returns (uint64);
-        function pauseAbdicationEffectiveAt() external view returns (uint64);
-        function pauseAbdicated() external view returns (bool);
+        function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
         function pause() external;
-        function abdicatePause() external;
+        function abdicate(Capability capability) external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -571,10 +575,8 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
             Self::NotPauseAuthority(_) => f.write_str("NotPauseAuthority"),
-            Self::PauseAbdicated(_) => f.write_str("PauseAbdicated"),
-            Self::PauseAbdicationAlreadyScheduled(_) => {
-                f.write_str("PauseAbdicationAlreadyScheduled")
-            }
+            Self::CapabilityAbdicated(_) => f.write_str("CapabilityAbdicated"),
+            Self::AbdicationAlreadyScheduled(_) => f.write_str("AbdicationAlreadyScheduled"),
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
