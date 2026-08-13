@@ -190,7 +190,8 @@ Each zone has an **admin** authority and a set of **sequencers** registered on t
 - Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
 - Hold the encryption private keys corresponding to the portal's encryption public keys and used to decrypt [deposits](#deposits).
 
-A zone MUST NOT include its admin in the sequencer set.
+The admin may also be a member of the sequencer set. Admin authorization remains independent of
+the account's mutually exclusive portal role.
 
 ### Permission Matrix
 
@@ -303,7 +304,7 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 |----------|---------|
 | [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 
-The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. An account has exactly one of `None`, `Sequencer`, `Account`, or `CallbackGateway`. The admin manages account and gateway membership through `setAllowedAccount` and `setGateway`, while sequencer membership changes only through `setSequencerSet`. Account and gateway setters atomically replace the prior non-sequencer role. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
+The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. An account has exactly one of `None`, `Sequencer`, `Account`, or `CallbackGateway`. The admin manages account and gateway membership through `setAllowedAccount` and `setGateway`, while sequencer membership changes only through `setSequencerSet`. Each account or gateway setter manages only its corresponding role, so changing between those roles requires first clearing the current role and then assigning the new one. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
 
 Account and gateway membership is evaluated when each portal or zone-side action executes. Revoked in-flight destinations and gateways bounce back, while revoked refund recipients have funds parked until membership is restored.
 
