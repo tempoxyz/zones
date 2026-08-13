@@ -358,8 +358,8 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
   `ABDICATION_DELAY` (30 days). It does not clear an active pause; any pause started before
   abdication takes effect runs to its own expiry.
-- `abdicate(Capability.AccessPolicy)`: Permanently disable future account-role, gateway-role,
-  and enforcement-mode assignments after the same delay. Existing roles may still be removed.
+- `abdicate(Capability.AccessPolicy)`: Permanently freeze account roles, gateway roles, and
+  enforcement modes after the same delay. Existing access roles cannot be revoked afterward.
 
 The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 

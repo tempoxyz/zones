@@ -517,8 +517,8 @@ contract ZonePortal is IZonePortal {
     /// @notice Add or remove an account from closed-loop portal flows.
     /// @dev Returns without emitting when the requested membership is already configured.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        _requireCapabilityActive(Capability.AccessPolicy);
         if (allowed) require(account != messenger);
-        if (allowed) _requireCapabilityActive(Capability.AccessPolicy);
         Role previous = role[account];
         Role next = allowed ? Role.Account : Role.None;
         if (previous == next) return;
@@ -530,7 +530,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Add or remove a callback gateway.
     /// @dev Returns without emitting when the requested membership is already configured.
     function setGateway(address account, bool allowed) external onlyAdmin {
-        if (allowed) _requireCapabilityActive(Capability.AccessPolicy);
+        _requireCapabilityActive(Capability.AccessPolicy);
         Role previous = role[account];
         Role next = allowed ? Role.CallbackGateway : Role.None;
         if (previous == next) return;

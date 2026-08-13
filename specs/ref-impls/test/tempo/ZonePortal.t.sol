@@ -1562,6 +1562,31 @@ contract ZonePortalTest is BaseTest {
         portal.setPauseGuardian(bob, true);
     }
 
+    function test_accessRoles_cannotBeRemovedAfterCapabilityAbdication() public {
+        vm.prank(admin);
+        portal.abdicate(Capability.AccessPolicy);
+        vm.warp(block.timestamp + 30 days);
+
+        vm.startPrank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.CapabilityAbdicated.selector, Capability.AccessPolicy
+            )
+        );
+        portal.setAllowedAccount(alice, false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.CapabilityAbdicated.selector, Capability.AccessPolicy
+            )
+        );
+        portal.setGateway(address(zoneGateway), false);
+        vm.stopPrank();
+
+        assertTrue(portal.hasRole(alice, Role.Account));
+        assertTrue(portal.hasRole(address(zoneGateway), Role.CallbackGateway));
+    }
+
     function test_pause_expiresAfterThirtyDays() public {
         vm.prank(sequencer);
         portal.pause(true);
