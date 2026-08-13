@@ -197,15 +197,6 @@ impl<P: L1StorageReader> L1State<P> {
     ) -> tempo_precompiles::Result<bool> {
         Ok(self.read_portal(|portal| &portal.role[account])? == u8::from(expected))
     }
-
-    /// Read one raw slot from the configured `ZonePortal` at the active anchor.
-    pub fn read_portal_slot(&self, slot: B256) -> tempo_precompiles::Result<B256> {
-        let anchor = match self.get_anchor() {
-            Some(anchor) => anchor,
-            None => TempoState::new().tempo_block_number.read()?,
-        };
-        self.read_l1_storage(self.portal_address, slot, anchor)
-    }
 }
 
 impl<P> fmt::Debug for L1State<P> {
