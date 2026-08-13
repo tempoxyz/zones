@@ -229,15 +229,26 @@ impl AttestationStore {
         Ok(signature_count)
     }
 
-    /// Wait until any statement at `height` has at least `quorum` distinct signatures. If there aren't
-    /// enough to meet quorum, the zone blocks will stall, this is intentional.
-    pub async fn wait_for_settlement(&self, height: u64, quorum: usize) -> SettlementCertificate {
-        loop {
-            let notified = self.settlement_changed.notified();
-            if let Some(certificate) = self.settlement_at(height, quorum) {
-                return certificate;
-            }
-            notified.await;
+    /// Wait until any statement at `height` has at least `quorum` distinct signatures, or return
+    /// `None` when the leader generation is cancelled.
+    pub async fn wait_for_settlement(
+        &self,
+        height: u64,
+        quorum: usize,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> Option<SettlementCertificate> {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => None,
+            certificate = async {
+                loop {
+                    let notified = self.settlement_changed.notified();
+                    if let Some(certificate) = self.settlement_at(height, quorum) {
+                        break certificate;
+                    }
+                    notified.await;
+                }
+            } => Some(certificate),
         }
     }
 
@@ -450,7 +461,11 @@ mod tests {
 
         let waiting = {
             let store = store.clone();
-            tokio::spawn(async move { store.wait_for_settlement(10, 2).await })
+            tokio::spawn(async move {
+                store
+                    .wait_for_settlement(10, 2, &tokio_util::sync::CancellationToken::new())
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
@@ -460,7 +475,7 @@ mod tests {
             signer_b.address(),
             SignedSettlementAttestation::sign(attestation, domain(), &signer_b).unwrap(),
         );
-        let certificate = waiting.await.unwrap();
+        let certificate = waiting.await.unwrap().unwrap();
         assert_eq!(certificate.signatures.len(), 2);
 
         store.remove_submitted(10);

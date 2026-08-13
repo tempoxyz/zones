@@ -40,9 +40,9 @@ use crate::{
     prover::ShadowProver,
     resolve_portal_zone_anchor,
     settlement::{
-        BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog, WithdrawalPage,
-        ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
-        read_zone_block_snapshot,
+        BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog,
+        SettlementQuorumWaitCancelled, WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch,
+        fetch_finalized_batch_boundaries, read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -268,7 +268,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let mut fallback = tokio::time::interval(self.config.poll_interval);
 
         loop {
-            self.process_available_blocks().await;
+            self.process_available_blocks(shutdown).await;
 
             tokio::select! {
                 biased;
@@ -294,7 +294,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    async fn process_available_blocks(&mut self) {
+    async fn process_available_blocks(&mut self, shutdown: &tokio_util::sync::CancellationToken) {
         let latest_zone_block = match self.provider.best_block_number() {
             Ok(number) => number,
             Err(error) => {
@@ -307,8 +307,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             return;
         }
 
-        match self.process_block_range(scan_from, latest_zone_block).await {
+        match self
+            .process_block_range(scan_from, latest_zone_block, shutdown)
+            .await
+        {
             Ok(_) => self.record_observed_zone_block(latest_zone_block),
+            Err(error)
+                if error
+                    .downcast_ref::<SettlementQuorumWaitCancelled>()
+                    .is_some() => {}
             Err(error) => {
                 error!(
                     from = scan_from,
@@ -392,7 +399,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// The monitor must walk those boundaries one at a time so the L2 outbox
     /// index and L1 portal index advance in lockstep.
     #[instrument(skip(self), fields(from, to))]
-    async fn process_block_range(&mut self, from: u64, to: u64) -> Result<bool> {
+    async fn process_block_range(
+        &mut self,
+        from: u64,
+        to: u64,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> Result<bool> {
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
@@ -426,7 +438,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 "Submitting finalized zone batch"
             );
             let before_submit = self.last_submitted_zone_block;
-            self.process_finalized_batch(range_start, boundary).await?;
+            self.process_finalized_batch(range_start, boundary, shutdown)
+                .await?;
             if self.last_submitted_zone_block < boundary_block {
                 return Err(eyre::eyre!(
                     "zone batch boundary {boundary_block} remains unsubmitted after reconciliation \
@@ -444,6 +457,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         &mut self,
         from: u64,
         boundary: FinalizedBatchLog,
+        shutdown: &tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let to = boundary.block_number;
         let finalized_batch =
@@ -477,7 +491,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         if let Some(prover) = &self.shadow_prover {
             prover.try_enqueue(from, to, batch_data.clone());
         }
-        self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals)
+        self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals, shutdown)
             .await
     }
 
@@ -501,6 +515,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         batch_data: &BatchData,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
+        shutdown: &tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let mut delay = INITIAL_RETRY_DELAY;
 
@@ -549,7 +564,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             }
 
             let submit_started = std::time::Instant::now();
-            match self.batch_submitter.submit_batch(batch_data).await {
+            match self
+                .batch_submitter
+                .submit_batch(batch_data, shutdown)
+                .await
+            {
                 Ok(event) => {
                     let portal_index = if event.withdrawalQueueIndex == NO_QUEUE_INDEX {
                         None
@@ -618,6 +637,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     return Ok(());
                 }
                 Err(e) => {
+                    if e.downcast_ref::<SettlementQuorumWaitCancelled>().is_some() {
+                        return Err(e);
+                    }
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
@@ -987,6 +1009,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leader_demotion_stops_batch_submission_waiting_for_settlement_quorum() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor
+            .batch_submitter
+            .set_attestation_store(Some(AttestationStore::default()));
+
+        let batch_data = BatchData {
+            zone_height: 71,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0xbb),
+            next_block_hash: B256::repeat_byte(0xcc),
+            prev_processed_deposit_hash: B256::repeat_byte(0xaa),
+            next_processed_deposit_hash: B256::repeat_byte(0xdd),
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 1,
+        };
+
+        // Preflight portal hash, followed by submission metadata with a 2-of-N threshold.
+        l1.push_success(&abi_encode_b256(batch_data.prev_block_hash));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(0),
+            abi_encode_u64(1),
+            abi_encode_u64(2),
+            abi_encode_u64(1),
+            Address::ZERO.abi_encode().into(),
+            abi_encode_u64(7),
+            abi_encode_u64(42431),
+        ]));
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let submission_shutdown = shutdown.clone();
+        let submission = tokio::spawn(async move {
+            monitor
+                .submit_batch_with_retry(&batch_data, 71, Vec::new(), &submission_shutdown)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !l1.read_q().is_empty() {
+                assert!(
+                    !submission.is_finished(),
+                    "batch submission stopped before waiting for settlement quorum"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("batch submission did not reach the settlement quorum wait");
+        assert!(!submission.is_finished());
+
+        shutdown.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(1), submission)
+            .await
+            .expect("batch submission did not stop after leader demotion")
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("settlement quorum wait cancelled")
+        );
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
     async fn new_returns_error_when_startup_l1_read_fails() {
         let l1 = Asserter::new();
         let portal_address = Address::repeat_byte(0x11);
@@ -1225,7 +1315,12 @@ mod tests {
         };
 
         monitor
-            .submit_batch_with_retry(&batch_data, 20, Vec::new())
+            .submit_batch_with_retry(
+                &batch_data,
+                20,
+                Vec::new(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -1272,7 +1367,12 @@ mod tests {
         };
 
         let error = monitor
-            .submit_batch_with_retry(&batch_data, pending_boundary, Vec::new())
+            .submit_batch_with_retry(
+                &batch_data,
+                pending_boundary,
+                Vec::new(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await
             .unwrap_err();
 
@@ -1310,7 +1410,12 @@ mod tests {
         };
 
         let error = monitor
-            .submit_batch_with_retry(&batch_data, 20, Vec::new())
+            .submit_batch_with_retry(
+                &batch_data,
+                20,
+                Vec::new(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
             .await
             .unwrap_err();
 

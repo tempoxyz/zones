@@ -50,6 +50,17 @@ use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
+#[derive(Debug)]
+pub(crate) struct SettlementQuorumWaitCancelled;
+
+impl fmt::Display for SettlementQuorumWaitCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("settlement quorum wait cancelled")
+    }
+}
+
+impl std::error::Error for SettlementQuorumWaitCancelled {}
+
 /// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
 const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 
@@ -290,7 +301,8 @@ impl BatchSubmitter {
     /// `verifierConfig` and `proof` are empty until real proof generation is
     /// implemented.
     ///
-    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt.
+    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
+    /// settlement quorum is cancelled when the leader generation shuts down.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
@@ -300,7 +312,11 @@ impl BatchSubmitter {
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
         withdrawal_batch_index = batch.withdrawal_batch_index,
     ))]
-    pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
+    pub async fn submit_batch(
+        &self,
+        batch: &BatchData,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> Result<ZonePortal::BatchSubmitted> {
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -327,8 +343,9 @@ impl BatchSubmitter {
                     threshold, "Waiting for settlement quorum"
                 );
                 let certificate = store
-                    .wait_for_settlement(batch.zone_height, threshold)
-                    .await;
+                    .wait_for_settlement(batch.zone_height, threshold, shutdown)
+                    .await
+                    .ok_or(SettlementQuorumWaitCancelled)?;
                 let anchor_mode = match self
                     .validate_certificate(batch, batch.zone_height, metadata, &certificate)
                     .await

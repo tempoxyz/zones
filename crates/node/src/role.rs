@@ -60,7 +60,10 @@ use crate::{
 /// Backoff after a transient role or promotion-readiness derivation failure.
 const ROLE_DECISION_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// How long a stopping generation may take before its remaining tasks are aborted.
-const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Must cover the longest in-flight L1 confirmation (`processWithdrawals` and `submitBatch`
+/// both wait up to 30s for a receipt) plus a 10s margin so demotion does not abort those waits.
+const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(40);
 /// Backoff after a generation task fails unexpectedly.
 const GENERATION_RESTART_BACKOFF: Duration = Duration::from_millis(500);
 /// Buffer size for per-generation event channels.
