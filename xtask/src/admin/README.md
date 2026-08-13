@@ -106,9 +106,13 @@ can relay the request.
 During a one-for-one membership rollout, use `--rolling-membership` together
 with `--zone-manifest <next-manifest>` only for the handoff that lets the old
 leader restart. This permits expected old/new loaded-manifest disagreements
-while still requiring the target to have loaded the finalized Portal set. The
-execute path waits for finalized leadership, progress, and target agreement;
-then restart the former leader immediately and run the full cluster check.
+while still requiring both the target and `--via` relay to have loaded the
+finalized Portal set and supplied next manifest. The rotated target can relay
+its own handoff; alternatively, use a retained follower that already runs the
+next manifest. The old-manifest leader cannot resolve a replacement identity.
+The execute path waits for finalized leadership and target agreement, then
+returns so the former leader can restart immediately. The full cluster check
+supplies the progress and settlement gate.
 
 ## Shared-key rotation
 

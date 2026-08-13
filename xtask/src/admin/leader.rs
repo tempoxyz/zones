@@ -9,6 +9,7 @@ use alloy::{
 use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
 use tempo_alloy::TempoNetwork;
+use zone_p2p::ZoneManifest;
 use zone_rpc::types::SetLeaderResponse;
 
 use super::{
@@ -147,29 +148,7 @@ impl LeaderSet {
                 address_set(&manifest_members) == address_set(&view.portal.sequencers),
                 "rolling manifest quorum does not match finalized Portal membership"
             );
-            ensure!(
-                target_info
-                    .manifest_sequencer_set_version
-                    .is_some_and(|version| version.to::<u64>() == view.portal.sequencer_set_version),
-                "target {} has not loaded finalized manifest version {}",
-                target_node.name,
-                view.portal.sequencer_set_version
-            );
-            ensure!(
-                target_info.manifest_membership_digest == Some(manifest.membership_digest()),
-                "target {} has not loaded the supplied rolling manifest",
-                target_node.name
-            );
-            let target_members = target_info
-                .peers
-                .iter()
-                .filter_map(|peer| peer.sequencer_address)
-                .collect::<Vec<_>>();
-            ensure!(
-                address_set(&target_members) == address_set(&view.portal.sequencers),
-                "target {} has not loaded finalized Portal membership",
-                target_node.name
-            );
+            ensure_rolling_node_manifest(target_node, manifest, &view.portal)?;
         }
         ensure!(
             is_rpc_only(target_info) != Some(true),
@@ -244,6 +223,15 @@ impl LeaderSet {
             via_node.name,
             relayer
         );
+        if self.rolling_membership {
+            ensure_rolling_node_manifest(
+                via_node,
+                view.manifest
+                    .as_ref()
+                    .expect("rolling manifest checked above"),
+                &view.portal,
+            )?;
+        }
 
         let expected_epoch = view.portal.leader_epoch.saturating_add(1);
 
@@ -306,7 +294,7 @@ impl LeaderSet {
                 later.nodes.iter().all(node_reports_leader)
             };
             let progressed = later.portal.zone_height > initial_height;
-            if leader_ok && nodes_agree && progressed {
+            if handoff_ready(self.rolling_membership, leader_ok, nodes_agree, progressed) {
                 return self.print_report(LeaderSetReport {
                     ok: true,
                     dry_run: false,
@@ -378,6 +366,49 @@ fn ensure_target_differs_from_finalized_leader(
     Ok(())
 }
 
+fn ensure_rolling_node_manifest(
+    node: &NodeSnapshot,
+    manifest: &ZoneManifest,
+    portal: &super::snapshot::PortalSnapshot,
+) -> eyre::Result<()> {
+    let info = node
+        .sequencer
+        .as_ref()
+        .ok_or_else(|| eyre!("node {} has no sequencer status", node.name))?;
+    ensure!(
+        info.manifest_sequencer_set_version
+            .is_some_and(|version| version.to::<u64>() == portal.sequencer_set_version),
+        "node {} has not loaded finalized manifest version {}",
+        node.name,
+        portal.sequencer_set_version
+    );
+    ensure!(
+        info.manifest_membership_digest == Some(manifest.membership_digest()),
+        "node {} has not loaded the supplied rolling manifest",
+        node.name
+    );
+    let members = info
+        .peers
+        .iter()
+        .filter_map(|peer| peer.sequencer_address)
+        .collect::<Vec<_>>();
+    ensure!(
+        address_set(&members) == address_set(&portal.sequencers),
+        "node {} has not loaded finalized Portal membership",
+        node.name
+    );
+    Ok(())
+}
+
+fn handoff_ready(
+    rolling_membership: bool,
+    leader_ok: bool,
+    nodes_agree: bool,
+    progressed: bool,
+) -> bool {
+    leader_ok && nodes_agree && (rolling_membership || progressed)
+}
+
 fn is_expected_rolling_failure(name: &str) -> bool {
     matches!(
         name,
@@ -427,7 +458,8 @@ mod tests {
     use alloy::primitives::Address;
 
     use super::{
-        ensure_target_differs_from_finalized_leader, is_expected_rolling_failure, select_via,
+        ensure_target_differs_from_finalized_leader, handoff_ready, is_expected_rolling_failure,
+        select_via,
     };
     use crate::admin::snapshot::{test_node_snapshot, test_sequencer_info};
 
@@ -468,5 +500,18 @@ mod tests {
         assert!(!is_expected_rolling_failure("portal_leader"));
         assert!(!is_expected_rolling_failure("canonical_state"));
         assert!(!is_expected_rolling_failure("manifest_membership"));
+    }
+
+    #[test]
+    fn rolling_handoff_returns_before_cluster_progress() {
+        assert!(handoff_ready(true, true, true, false));
+        assert!(!handoff_ready(true, true, false, false));
+        assert!(!handoff_ready(true, false, true, false));
+    }
+
+    #[test]
+    fn normal_handoff_still_requires_cluster_progress() {
+        assert!(!handoff_ready(false, true, true, false));
+        assert!(handoff_ready(false, true, true, true));
     }
 }
