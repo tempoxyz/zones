@@ -123,7 +123,9 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## System Overview
 
-Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. Each zone also has a separate **admin** role that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+Each zone is operated by one or more **sequencers** that collect transactions, produce blocks, generate proofs, and submit batches to Tempo. Each zone also has an independent **admin** authority that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). The admin address may also be assigned a portal role, including `Sequencer`. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+
+The admin may also schedule permanent abdication of independently controlled portal capabilities.
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
@@ -169,13 +171,14 @@ sequenceDiagram
 
 ## Access Control
 
-Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal): an **admin** and a set of **sequencers**. The roles are intentionally separated so that mission-critical governance powers can be held in a cold key (or multisig) while day-to-day block production runs from operational keys. An admin MAY also be a sequencer; the protocol does not enforce separation.
+Each zone has an **admin** authority and a set of **sequencers** registered on the [`ZonePortal`](#izoneportal). They can be operationally separated so mission-critical governance powers remain in a cold key or multisig, but the protocol does not require distinct addresses: admin authority is independent from the mutually exclusive portal role assigned to an address.
 
 ### Roles
 
 **Admin.**
 
 - Holds governance powers over the zone (token enablement, deposit pause/resume, and account and gateway membership).
+- Can schedule permanent abdication of portal capabilities after a delay.
 - Expected to be a cold key, multisig, or governance contract.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
 - Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
@@ -190,7 +193,8 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
 - Hold the encryption private keys corresponding to the portal's encryption public keys and used to decrypt [deposits](#deposits).
 
-A zone MAY include its admin in the sequencer set. The protocol still treats each privileged call as belonging to its role.
+The admin may also be a member of the sequencer set. Admin authorization remains independent of
+the account's mutually exclusive portal role.
 
 ### Permission Matrix
 
@@ -201,7 +205,12 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setRole(account, role)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `pause()` | [`ZonePortal`](#izoneportal) | **admin, sequencer, or pause guardian** |
+| `resume()` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setAllowedAccount(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setPauseGuardian(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `abdicate(capability)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAccessMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGatewayMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -222,6 +231,7 @@ The following table lists every privileged action and the role authorized to inv
 Rationale notes:
 
 - **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
+- **Capability abdication is admin-only** because it permanently removes a Portal configuration surface after the delay.
 - **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
 - **Encryption public-key management is admin- or sequencer-authorized**. Both paths require a proof of possession from the corresponding encryption private key, so neither role can register a public key it cannot decrypt with.
 - **Zone-side system calls** to `ZoneOutbox` use `msg.sender == address(0)`. Withdrawal finalization is system-only; sequencers may call the gas-rate and withdrawal-limit setters directly.
@@ -302,7 +312,7 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 |----------|---------|
 | [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 
-The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. Portal roles are managed atomically with `setRole(account, role)`. An account has exactly one of `None`, `Account`, or `CallbackGateway`; the messenger cannot have the `Account` role. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
+The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. An account has exactly one of `None`, `Sequencer`, `Account`, `CallbackGateway`, or `PauseGuardian`. The admin manages these roles through `setAllowedAccount`, `setGateway`, and `setPauseGuardian`, while sequencer membership changes only through `setSequencerSet`. Each managed-role setter controls only its corresponding role, so changing roles requires first clearing the current role and then assigning the new one. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
 
 Account and gateway membership is evaluated when each portal or zone-side action executes. Revoked in-flight destinations and gateways bounce back, while revoked refund recipients have funds parked until membership is restored.
 
@@ -339,6 +349,17 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
+- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
+  the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
+  extended while active. Proof-verified batch submission continues so settlement remains current
+  and an expired pause does not require recovery across the full pause interval.
+- `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
+  remains available after `Capability.PausePortal` is abdicated.
+- `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
+  `ABDICATION_DELAY` (30 days). It does not clear an active pause; any pause started before
+  abdication takes effect runs to its own expiry.
+- `abdicate(Capability.AccessPolicy)`: Permanently freeze account roles, gateway roles, and
+  enforcement modes after the same delay. Existing access roles cannot be revoked afterward.
 
 The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
@@ -649,7 +670,7 @@ Withdrawal requests are bounded before they enter the pending queue. `gasLimit` 
 
 The sequencer can additionally configure `maxWithdrawalsPerBlock` on the outbox. A value of `0` means unlimited. When nonzero, only that many `requestWithdrawal` calls can be accepted in a single zone block; further requests in the same block revert with `TooManyWithdrawalsThisBlock` before any token transfer or burn. The outbox tracks the last block number counted and resets the per-block counter when `block.number` changes.
 
-The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
+Before transferring or burning tokens, the outbox reads the packed pause expiry from the portal at the latest finalized Tempo checkpoint. An active pause reverts the request with `PortalIsPaused`. Otherwise the outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
 
 Keeping the recipient in zone state prevents the L1-visible withdrawal and any later bounce-back from revealing the user's private zone address. A monotonic nonce is deterministic under the zone's canonical transaction ordering, including multi-sequencer execution, while remaining collision-free; it reveals only relative withdrawal order and count, not the mapped recipient.
 
@@ -1639,8 +1660,15 @@ struct LastBatch {
 ```solidity
 enum Role {
     None,
+    Sequencer,
     Account,
-    CallbackGateway
+    CallbackGateway,
+    PauseGuardian
+}
+
+enum Capability {
+    PausePortal,
+    AccessPolicy
 }
 
 interface IZoneFactory {
@@ -1735,11 +1763,18 @@ interface IZonePortal {
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
+    event PortalPaused(address indexed account);
+    event PortalResumed(address indexed account);
+    event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
     event RoleUpdated(address indexed account, Role prev, Role next);
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
     error NotSequencer();
     error NotAdmin();
+    error NotPauseAuthority();
+    error CapabilityAbdicated(Capability capability);
+    error AbdicationAlreadyScheduled(Capability capability);
+    error PortalIsPaused();
     error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
@@ -1776,6 +1811,12 @@ interface IZonePortal {
     function enableToken(address token) external;
     function pauseDeposits(address token) external;
     function resumeDeposits(address token) external;
+    function paused() external view returns (bool);
+    function pauseExpiry() external view returns (uint64);
+    function abdicationEffectiveAt(Capability capability) external view returns (uint64);
+    function pause() external;
+    function resume() external;
+    function abdicate(Capability capability) external;
     function isTokenEnabled(address token) external view returns (bool);
     function areDepositsActive(address token) external view returns (bool);
     function tokenConfig(address token) external view returns (TokenConfig memory);
@@ -1788,8 +1829,9 @@ interface IZonePortal {
     function setAccessMode(bool enforced) external; // admin-only
     function isGatewayOpen() external view returns (bool);
     function setGatewayMode(bool enforced) external; // admin-only
-    function role(address account) external view returns (Role);
-    function setRole(address account, Role role) external; // admin-only
+    function hasRole(address account, Role role) external view returns (bool);
+    function setAllowedAccount(address account, bool allowed) external; // admin-only
+    function setGateway(address account, bool allowed) external; // admin-only
 
     // Zone RPC endpoint. Published on-chain so clients can discover how to reach the zone.
     event RpcUrlUpdated(string rpcUrl);

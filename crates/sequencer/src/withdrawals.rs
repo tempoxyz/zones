@@ -433,6 +433,10 @@ impl WithdrawalProcessor {
     /// resumes exactly where the portal is.
     #[instrument(skip_all)]
     async fn process_queue(&self, shutdown: &sync::CancellationToken) -> eyre::Result<()> {
+        if self.portal.paused().call().await? {
+            debug!("Portal is paused; withdrawal processor is idle");
+            return Ok(());
+        }
         // loop through all the slots
         loop {
             if shutdown.is_cancelled() {
@@ -1278,6 +1282,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_requests_head_page_refill_when_slot_missing() {
         let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(0));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(51),
             abi_encode_u64(71),
@@ -1372,6 +1377,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_requests_refill_when_store_data_mismatches_slot_hash() {
         let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(0));
         // head = 5, tail = 6, slot hash that matches no suffix of the stored batch.
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(5),
@@ -1406,6 +1412,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_skips_cycle_when_head_slot_already_consumed() {
         let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(0));
         // head = 5, tail = 6, but slot 5 is already cleared because head advanced
         // between our bounds read and the slot read.
         l1.push_success(&abi_encode_multicall(vec![
@@ -1440,5 +1447,26 @@ mod tests {
         );
         assert!(store.lock().has_batch(5));
         assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_queue_is_idle_while_portal_is_paused() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(1));
+        let repair_notify = Arc::new(Notify::new());
+        let processor = test_processor(
+            l1.clone(),
+            SharedWithdrawalStore::new(),
+            repair_notify.clone(),
+        );
+
+        processor.process_queue().await.unwrap();
+
+        assert!(l1.read_q().is_empty());
+        assert!(
+            timeout(Duration::from_millis(50), repair_notify.notified())
+                .await
+                .is_err()
+        );
     }
 }

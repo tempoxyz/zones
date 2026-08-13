@@ -72,7 +72,7 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value_t = 1)]
     threshold: u8,
 
-    /// Admin address that controls token enablement and deposit pause/resume.
+    /// Admin address that controls token enablement and deposit pause/unpause.
     /// Pass the sequencer address explicitly when both roles should use the same key.
     #[arg(long)]
     admin: Address,

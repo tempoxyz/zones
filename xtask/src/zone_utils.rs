@@ -152,7 +152,7 @@ pub(crate) async fn fund_l1_wallet<P: Provider<TempoNetwork>>(
 
 /// Verifies that `resolved_admin` is the portal's on-chain admin.
 ///
-/// Portal governance calls (`enableToken`, deposit pause/resume) are `onlyAdmin`,
+/// Portal governance calls such as `enableToken` and portal unpause are admin-only,
 /// so a key resolved via the sequencer fallback only works on legacy zones where
 /// `admin == sequencer`. Checking against `portal.admin()` fails fast with a
 /// clear message instead of reverting on-chain with `NotAdmin`.

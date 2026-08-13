@@ -21,8 +21,9 @@ import {
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     QueuedDeposit,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_MESSENGER_ADDRESS,
@@ -180,15 +181,14 @@ contract ZoneBridgeTest is BaseTest {
         genesisTempoBlockNumber = uint64(block.number);
 
         // Deploy portal directly (bypass factory to avoid TIP20 prefix check).
-        address[] memory bridgeAccounts = new address[](8);
-        bridgeAccounts[0] = address(this);
-        bridgeAccounts[1] = admin;
-        bridgeAccounts[2] = alice;
-        bridgeAccounts[3] = bob;
-        bridgeAccounts[4] = charlie;
-        bridgeAccounts[5] = address(0x600);
-        bridgeAccounts[6] = address(0x700);
-        bridgeAccounts[7] = address(0x800);
+        address[] memory bridgeAccounts = new address[](7);
+        bridgeAccounts[0] = admin;
+        bridgeAccounts[1] = alice;
+        bridgeAccounts[2] = bob;
+        bridgeAccounts[3] = charlie;
+        bridgeAccounts[4] = address(0x600);
+        bridgeAccounts[5] = address(0x700);
+        bridgeAccounts[6] = address(0x800);
 
         ZoneMessenger messengerContract = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         l1Portal = new ZonePortal();
@@ -235,8 +235,8 @@ contract ZoneBridgeTest is BaseTest {
 
         l2TempoState.setMockStorageValue(
             address(l1Portal),
-            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
-            bytes32(uint256(1))
+            keccak256(abi.encode(sequencer, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
         for (uint256 i; i < bridgeAccounts.length; ++i) {

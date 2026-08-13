@@ -718,8 +718,8 @@ mod tests {
             B256::from(policy_slot.to_be_bytes()),
             PARENT,
         );
-        assert!(!reader.requested(CHILD, &portal.is_sequencer[sequencer]));
-        assert!(!reader.requested(PARENT, &portal.is_sequencer[sequencer]));
+        assert!(!reader.requested(CHILD, &portal.role[sequencer]));
+        assert!(!reader.requested(PARENT, &portal.role[sequencer]));
         assert!(requests.contains(&child_policy_request));
         assert!(!requests.contains(&parent_policy_request));
         assert!(reader.requested(CHILD, &portal.current_deposit_queue_hash));

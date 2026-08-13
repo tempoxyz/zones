@@ -19,6 +19,8 @@ FROM scratch AS tempo-genesis
 
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
 
+ENV SPF_TEMPO_GENESIS="/etc/tempo/genesis"
+
 COPY --from=tempo-genesis / /etc/tempo/genesis/
 
 WORKDIR /data

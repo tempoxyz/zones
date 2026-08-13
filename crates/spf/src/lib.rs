@@ -615,7 +615,7 @@ mod tests {
                 gas_limit: 30_000_000,
                 ..Default::default()
             },
-            shared_gas_limit: 30_000_000,
+            shared_gas_limit: 0,
             ..Default::default()
         };
 
@@ -1027,10 +1027,7 @@ mod tests {
         assert_eq!(attributes.suggested_fee_recipient, Address::ZERO);
         assert_eq!(attributes.gas_limit, 30_000_000);
         assert_eq!(attributes.general_gas_limit, 0);
-        assert_eq!(
-            attributes.shared_gas_limit,
-            witness.parent_header.inner.gas_limit
-        );
+        assert_eq!(attributes.shared_gas_limit, 0);
         assert_eq!(attributes.timestamp_millis_part, 321);
 
         let tempo_database =

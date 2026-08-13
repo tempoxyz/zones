@@ -6,9 +6,9 @@ the enclave performs no RPC or filesystem access.
 
 ## Protocol
 
-The server listens on vsock port `5000` by default. Each connection carries one request and one
-response, then closes. A frame consists of a four-byte, big-endian payload length followed by a
-UTF-8 JSON payload.
+The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` when `--use-tcp` is
+enabled. Each connection carries one request and one response, then closes. A frame consists of a
+four-byte, big-endian payload length followed by a UTF-8 JSON payload.
 
 Requests use this envelope:
 
@@ -22,16 +22,18 @@ Requests use this envelope:
 ```
 
 `witness` is the serde representation of `zone_spf::BatchWitness`. The prover accepts chain IDs
-compiled into Tempo plus custom genesis files configured by the enclave operator through repeated
-`--tempo-genesis` arguments. A request cannot supply its own chain specification. Responses have
+compiled into Tempo plus custom genesis files configured by the enclave operator through a
+`--tempo-genesis` directory. A request cannot supply its own chain specification. Responses have
 `status: "ok"` with a `zone_spf::BatchOutput`, or `status: "error"` with a stable `code` and a
 diagnostic `message`.
 
-Set `SPF_VSOCK_PORT` or pass `--port` to change the port. The maximum request payload defaults to
-512 MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`.
-Set `SPF_TEMPO_GENESIS` to a comma-separated list or pass `--tempo-genesis` repeatedly for trusted
-Tempo genesis JSON files. Each custom chain ID must be unique and cannot override a built-in Tempo
-network.
+Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
+operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
+pass `--port` to change the selected transport's port. The maximum request payload defaults to 512
+MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`.
+Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
+JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
+override a built-in Tempo network.
 
 ## Images and EIF
 
@@ -47,6 +49,9 @@ docker buildx bake \
   --set tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:local \
   tempo-zone-prover-enclave
 ```
+
+CI supplies the downloaded devnet genesis as a named build context. The enclave payload stores it
+in `/etc/tempo/genesis/` and exposes that directory to the prover through `SPF_TEMPO_GENESIS`.
 
 Convert the payload to an EIF with the repository's pinned Nitro CLI builder image, then build the
 host image:

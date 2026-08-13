@@ -61,8 +61,8 @@ pub struct ProvisionedZone {
 /// Provisions a fresh zone on a Tempo dev L1.
 ///
 /// Funds the dev account via `tempo_fundAddress` when needed, verifies TIP-1091's
-/// `ZoneFactory`, calls `createZone` with the dev account as
-/// both admin and sequencer, registers the sequencer encryption key on the portal, and
+/// `ZoneFactory`, calls `createZone` with the dev account as both admin and sequencer,
+/// registers the sequencer encryption key on the portal, and
 /// builds a genesis anchored immediately before `createZone` so the zone replays the
 /// portal's initial `TokenEnabled` event.
 pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<ProvisionedZone> {

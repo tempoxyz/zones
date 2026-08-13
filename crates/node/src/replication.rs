@@ -1521,7 +1521,7 @@ mod tests {
             decryptions: vec![],
             enabled_tokens: vec![],
         };
-        let tx = zone_payload::build_advance_tempo_tx(&prepared);
+        let tx = zone_payload::build_advance_tempo_tx(&prepared, 1337);
         let block = SealedBlock::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
@@ -1614,7 +1614,7 @@ mod tests {
             enabled_tokens: vec![],
         };
         let TempoTxEnvelope::Legacy(system_tx) =
-            zone_payload::build_advance_tempo_tx(&prepared).into_inner()
+            zone_payload::build_advance_tempo_tx(&prepared, 1337).into_inner()
         else {
             unreachable!("advanceTempo builder must produce a legacy transaction")
         };

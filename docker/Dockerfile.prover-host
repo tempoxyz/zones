@@ -28,7 +28,8 @@ RUN install -m 0664 -o root -g "${PROVER_GID}" /dev/null /var/log/nitro_enclaves
 WORKDIR /opt/tempo-zone-prover
 COPY --from=proxy-builder /build/target/release/tempo-vsock-proxy /usr/local/bin/tempo-vsock-proxy
 COPY --from=prover-eif /tempo-zone-prover.eif /opt/tempo-zone-prover/tempo-zone-prover.eif
-COPY scripts/run-prover-host.sh /opt/tempo-zone-prover/run-prover-host.sh
+COPY --chmod=0755 scripts/run-prover-host.sh /opt/tempo-zone-prover/run-prover-host.sh
+RUN test -x /opt/tempo-zone-prover/run-prover-host.sh
 
 EXPOSE 5000
 

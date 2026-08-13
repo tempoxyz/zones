@@ -433,6 +433,36 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Native factory creation permits one operator to hold both independent admin authority and the
+/// stored sequencer role.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_native_factory_allows_admin_as_sequencer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let factory = l1.native_zone_factory().await?;
+    let operator = l1.dev_address();
+    let portal_address = l1
+        .create_zone_with_admin_sequencer_and_config(
+            factory,
+            operator,
+            operator,
+            ZoneCreationConfig::open(),
+        )
+        .await?;
+    let portal = ZonePortal::new(portal_address, l1.provider());
+
+    assert_eq!(portal.admin().call().await?, operator);
+    assert!(portal.isSequencer(operator).call().await?);
+    assert!(
+        portal
+            .hasRole(operator, PortalRole::Sequencer)
+            .call()
+            .await?
+    );
+    Ok(())
+}
+
 /// The dev provisioner anchors immediately before `createZone`, so the zone
 /// replays the creation block and initializes a custom initial token from the
 /// portal constructor's `TokenEnabled` event.
@@ -447,8 +477,6 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
     let initial_token = l1
         .create_tip20("DevUSD", "dUSD", B256::with_last_byte(0xD0))
         .await?;
-    let dev_address = l1.dev_signer().address();
-
     let provisioned = provision_zone(ProvisionConfig {
         l1_rpc_url: l1.ws_url().to_string(),
         dev_key: l1.dev_signer(),
@@ -457,7 +485,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
         is_access_open: false,
         is_gateway_enforced: true,
         zone_gateways: vec![Address::repeat_byte(0x42)],
-        allowed_accounts: vec![dev_address],
+        allowed_accounts: vec![l1.user_signer().address()],
         rpc_url: String::new(),
     })
     .await?;
@@ -796,9 +824,11 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
     let portal = ZonePortal::new(portal_address, l1.provider());
     let account_address = l1.user_signer().address();
     assert!(!portal.isAccessEnforced().call().await?);
-    assert_eq!(
-        portal.role(account_address).call().await? as u8,
-        PortalRole::None as u8
+    assert!(
+        portal
+            .hasRole(account_address, PortalRole::None)
+            .call()
+            .await?
     );
     zone.assert_access_enforced(false).await?;
 
@@ -927,10 +957,7 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
     let outsider_signer = l1.signer_at(3);
     let outsider = outsider_signer.address();
     let portal = ZonePortal::new(portal_address, l1.provider());
-    assert_eq!(
-        portal.role(outsider).call().await? as u8,
-        PortalRole::None as u8
-    );
+    assert!(portal.hasRole(outsider, PortalRole::None).call().await?);
 
     let mut outsider_account =
         ZoneAccount::with_signer(outsider_signer, &l1, &zone, portal_address);
@@ -2080,6 +2107,91 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
     Ok(())
 }
 
+/// A portal-wide pause rejects deposits and withdrawal processing while settlement continues.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    let recipient_signer = l1.signer_at(2);
+    let recipient = recipient_signer.address();
+    let mut depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
+    let initial_deposit = 1_000_000u128;
+    l1.fund_user(depositor.address(), initial_deposit).await?;
+    depositor
+        .deposit_with_memo(initial_deposit, recipient, B256::ZERO, L1_TIMEOUT, &zone)
+        .await?;
+
+    let admin_provider = l1.admin_provider();
+    let portal = ZonePortal::new(portal_address, &admin_provider);
+    let initial_withdrawal_batch = portal.withdrawalBatchIndex().call().await?;
+    let zone_outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let initial_zone_withdrawal_batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
+    let withdrawal_amount = 500_000u128;
+    let mut recipient_account =
+        ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
+    recipient_account.withdraw(withdrawal_amount).await?;
+
+    let pause_receipt = portal.pause().send().await?.get_receipt().await?;
+    eyre::ensure!(pause_receipt.status(), "global pause transaction failed");
+    eyre::ensure!(portal.paused().call().await?, "portal should be paused");
+
+    let _ = depositor
+        .simulate_deposit(initial_deposit, depositor.address(), depositor.address())
+        .await
+        .expect_err("deposit simulation should revert while the portal is paused");
+
+    let withdrawal_start_block = l1.provider().get_block_number().await?;
+    let sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+
+    poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(250),
+        "withdrawal to be finalized into a zone batch",
+        || {
+            let zone_outbox = &zone_outbox;
+            async move {
+                let batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
+                Ok((batch > initial_zone_withdrawal_batch).then_some(()))
+            }
+        },
+    )
+    .await?;
+    eyre::ensure!(
+        !sequencer.withdrawal_handle.is_finished(),
+        "withdrawal processor exited while the portal was paused"
+    );
+    poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(250),
+        "withdrawal batch to settle while the portal is paused",
+        || {
+            let portal = &portal;
+            async move {
+                let batch = portal.withdrawalBatchIndex().call().await?;
+                Ok((batch > initial_withdrawal_batch).then_some(()))
+            }
+        },
+    )
+    .await?;
+
+    let processed_while_paused = portal
+        .WithdrawalProcessed_filter()
+        .from_block(withdrawal_start_block)
+        .query()
+        .await?;
+    assert!(
+        processed_while_paused.is_empty(),
+        "withdrawal must remain queued while the portal is paused"
+    );
+
+    Ok(())
+}
+
 /// Test that TIP-403 policy operations on L1 work correctly and the zone
 /// continues to advance normally after policy changes.
 ///
@@ -2295,11 +2407,7 @@ async fn test_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Resul
             factory,
             l1.admin_address(),
             l1.dev_address(),
-            ZoneCreationConfig::closed(vec![
-                l1.admin_address(),
-                l1.dev_address(),
-                l1.user_signer().address(),
-            ]),
+            ZoneCreationConfig::closed(vec![l1.admin_address(), l1.user_signer().address()]),
         )
         .await?;
 

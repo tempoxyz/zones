@@ -86,7 +86,6 @@ use tempo_precompiles::{
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
     tip403_registry::TIP403Registry,
 };
-
 /// Creates the zone-native fee manager precompile.
 pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
