@@ -5,24 +5,19 @@ use alloy_sol_types::SolError;
 use tempo_zone_contracts::Unauthorized;
 
 use crate::{
-    execution::{CallCheck, CallRuleError},
+    execution::CallCheck,
     storage::{L1State, L1StorageReader},
 };
 
-/// Allow a read when the immediate EVM caller owns any account named by the getter, or is an
-/// active sequencer at the transaction's anchored Tempo block.
-pub(crate) fn check_caller_or_sequencer<P: L1StorageReader>(
-    l1: &L1State<P>,
+/// Allow a read only when the immediate EVM caller owns an account named by the getter.
+pub(crate) fn check_caller<P: L1StorageReader>(
+    _l1: &L1State<P>,
     caller: Address,
     accounts: &[Address],
 ) -> CallCheck {
     if accounts.contains(&caller) {
-        return CallCheck::Continue;
-    }
-
-    match l1.has_portal_role(caller, tempo_zone_contracts::ZonePortal::Role::Sequencer) {
-        Ok(true) => CallCheck::Continue,
-        Ok(false) => CallCheck::Revert(Unauthorized {}.abi_encode().into()),
-        Err(error) => CallCheck::Error(CallRuleError::Tempo(error)),
+        CallCheck::Continue
+    } else {
+        CallCheck::Revert(Unauthorized {}.abi_encode().into())
     }
 }

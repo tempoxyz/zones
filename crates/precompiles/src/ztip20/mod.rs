@@ -15,7 +15,7 @@ use tempo_zone_contracts::Unauthorized;
 
 use crate::{
     execution::{CallCheck, CallRules},
-    privacy::check_caller_or_sequencer,
+    privacy::check_caller,
     storage::{L1State, L1StorageReader},
 };
 
@@ -63,13 +63,13 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
+                    check_caller(&self.l1, caller, &[call.account])
                 }
                 ITIP20::ITIP20Calls::allowance(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
+                    check_caller(&self.l1, caller, &[call.owner, call.spender])
                 }
                 ITIP20::ITIP20Calls::nonces(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+                    check_caller(&self.l1, caller, &[call.owner])
                 }
                 // Transfers are disabled during the initial permissioned Zone phase.
                 // Private asset movement is limited to the protocol-managed inbox and outbox paths.
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn read_privacy_rules_allow_owner_spender_and_sequencer() {
+    fn read_privacy_rules_allow_only_owner_and_spender() {
         let owner = Address::repeat_byte(0x11);
         let spender = Address::repeat_byte(0x22);
         let sequencer = Address::repeat_byte(0x33);
@@ -304,18 +304,19 @@ mod tests {
         StorageCtx::enter(&mut storage, || {
             let balance = ITIP20::balanceOfCall { account: owner };
             assert_allowed(&rules, balance.clone(), owner);
-            assert_allowed(&rules, balance.clone(), sequencer);
+            assert_unauthorized(&rules, balance.clone(), sequencer);
             assert_unauthorized(&rules, balance, outsider);
 
             let allowance = ITIP20::allowanceCall { owner, spender };
-            for caller in [owner, spender, sequencer] {
+            for caller in [owner, spender] {
                 assert_allowed(&rules, allowance.clone(), caller);
             }
+            assert_unauthorized(&rules, allowance.clone(), sequencer);
             assert_unauthorized(&rules, allowance, outsider);
 
             let nonce = ITIP20::noncesCall { owner };
             assert_allowed(&rules, nonce.clone(), owner);
-            assert_allowed(&rules, nonce.clone(), sequencer);
+            assert_unauthorized(&rules, nonce.clone(), sequencer);
             assert_unauthorized(&rules, nonce, outsider);
         });
     }
@@ -460,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn sequencer_privacy_access_uses_portal_storage_handler() -> eyre::Result<()> {
+    fn sequencer_privacy_access_is_denied_regardless_of_portal_state() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
         let next_sequencer = Address::repeat_byte(0x77);
         let calldata: Bytes = ITIP20::balanceOfCall {
@@ -472,7 +473,7 @@ mod tests {
         assert!(
             harness
                 .call(harness.sequencer, calldata.clone(), 100_000, true)?
-                .is_success()
+                .is_revert()
         );
         assert!(
             harness
@@ -491,7 +492,7 @@ mod tests {
         assert!(
             harness
                 .call(next_sequencer, calldata.clone(), 100_000, true)?
-                .is_success()
+                .is_revert()
         );
         assert!(
             harness

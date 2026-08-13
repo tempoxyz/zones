@@ -6,7 +6,7 @@ use tempo_contracts::precompiles::INonce;
 
 use crate::{
     execution::{CallCheck, CallRules},
-    privacy::check_caller_or_sequencer,
+    privacy::check_caller,
     storage::{L1State, L1StorageReader},
 };
 
@@ -31,9 +31,7 @@ impl<P: L1StorageReader> CallRules for NonceRules<P> {
 
         // Intentionally exhaustive: an upstream ABI addition must be classified here.
         match call {
-            INonce::INonceCalls::getNonce(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
+            INonce::INonceCalls::getNonce(call) => check_caller(&self.l1, caller, &[call.account]),
         }
     }
 }
@@ -53,7 +51,7 @@ mod tests {
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
 
     #[test]
-    fn nonce_reads_allow_owner_and_sequencer_but_reject_other_callers() {
+    fn nonce_reads_allow_only_owner() {
         let owner = Address::repeat_byte(0x11);
         let sequencer = Address::repeat_byte(0x22);
         let outsider = Address::repeat_byte(0x33);
@@ -69,13 +67,11 @@ mod tests {
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
 
         StorageCtx::enter(&mut storage, || {
-            for caller in [owner, sequencer] {
-                assert!(matches!(
-                    rules.admit(&call.abi_encode(), caller),
-                    CallCheck::Continue
-                ));
-            }
-            for caller in [outsider, intermediary] {
+            assert!(matches!(
+                rules.admit(&call.abi_encode(), owner),
+                CallCheck::Continue
+            ));
+            for caller in [sequencer, outsider, intermediary] {
                 assert!(matches!(
                     rules.admit(&call.abi_encode(), caller),
                     CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
