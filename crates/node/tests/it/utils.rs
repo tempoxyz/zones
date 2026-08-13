@@ -73,8 +73,8 @@ use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 use zone_primitives::constants::{
-    PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
-    ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
+    PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_PAUSE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT, ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
     zone_chain_id as derive_zone_chain_id,
 };
 
@@ -4833,6 +4833,9 @@ impl L1Fixture {
             // Synthetic fixtures use open account and gateway modes so their tests do not need
             // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
             cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            // The Portal is unpaused in synthetic fixtures. Seed the packed pause slot so
+            // withdrawal validation does not fall back to an unavailable L1 RPC endpoint.
+            cache.set(portal_address, PORTAL_PAUSE_SLOT, block, B256::ZERO);
             // Permit the protocol-wide maximum in synthetic fixtures. Production values are
             // imported from the finalized ZonePortal storage slot.
             cache.set(
