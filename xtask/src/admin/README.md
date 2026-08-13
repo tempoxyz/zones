@@ -5,6 +5,8 @@ Zones:
 
 - `admin check`: read-only cluster health and consistency checks
 - `admin leader set`: guarded `zone_setLeader` handoff
+- `admin identity prepare`: generate independent per-node P2P and sequencer keys
+- `admin sequencer-set replace`: guarded one-for-one Portal membership replacement
 - `admin encryption-key prepare`: generate a replacement shared key and a
   two-key decryption file
 - `admin encryption-key register`: verify preloading, simulate, and optionally
@@ -101,6 +103,12 @@ node to become reachable, canonical, and promotion-ready when applicable.
 differ from the current finalized Portal leader; choose a different,
 promotion-ready follower. Use `--via` when more than one configured sequencer
 can relay the request.
+During a one-for-one membership rollout, use `--rolling-membership` together
+with `--zone-manifest <next-manifest>` only for the handoff that lets the old
+leader restart. This permits expected old/new loaded-manifest disagreements
+while still requiring the target to have loaded the finalized Portal set. The
+execute path waits for finalized leadership, progress, and target agreement;
+then restart the former leader immediately and run the full cluster check.
 
 ## Shared-key rotation
 
@@ -163,3 +171,38 @@ decryption test. Then update `--sequencer-key-file`, roll nodes follower-first,
 run `admin check`, and send a second deposit. Retain every grace-valid or
 draining decryption key in the deployed keyring. Retire a specific old key only
 after its Portal expiry and the deposit queue have drained.
+run `admin check`, and send a second deposit. Retain every grace-valid or
+draining decryption key in the deployed keyring. Retire a specific old key only
+after its Portal expiry and the deposit queue have drained.
+
+## Individual identity rotation
+
+Generate a node's independent Ed25519 P2P key and secp256k1 sequencer key:
+
+```bash
+tempo-xtask admin identity prepare \
+  --node node-a \
+  --rotation-dir /secure/rotation/node-a
+```
+
+The command writes owner-only `p2p.key` and `sequencer.key` files and prints
+only their public identities. It refuses to overwrite either output unless
+`--force` is supplied.
+
+After preparing a next-version manifest containing those public identities,
+dry-run the exact one-for-one Portal replacement:
+
+```bash
+tempo-xtask admin sequencer-set replace \
+  --config zone-admin.toml \
+  --next-manifest next-zone-manifest.toml \
+  --old-member 0x... \
+  --new-member 0x... \
+  --transaction-key-file /secure/portal-admin.key \
+  --expected-version 12
+```
+
+The command requires the transaction signer to be the finalized Portal admin,
+retains the threshold and active leader, verifies exact next-manifest
+membership and version 13, and simulates `setSequencerSet`. Repeat with
+`--execute` only after reviewing the report.

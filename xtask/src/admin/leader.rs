@@ -13,7 +13,10 @@ use zone_rpc::types::SetLeaderResponse;
 
 use super::{
     config::{SharedAdminArgs, format_duration, parse_nonzero_duration},
-    invariants::{eligible_relayers, evaluate_base_invariants, is_rpc_only, resolve_node},
+    invariants::{
+        address_set, eligible_relayers, evaluate_base_invariants, is_rpc_only, l1_batch_invariant,
+        resolve_node,
+    },
     snapshot::{ClusterView, NodeSnapshot},
 };
 
@@ -56,6 +59,10 @@ struct LeaderSet {
     /// Submit the leadership transaction. Without this flag the command is a dry run.
     #[arg(long)]
     execute: bool,
+
+    /// Allow only expected old/new manifest disagreements during a membership rollout.
+    #[arg(long, requires = "zone_manifest")]
+    rolling_membership: bool,
 
     /// Deadline for finalized leader agreement. Defaults to 5m.
     #[arg(long, value_parser = parse_nonzero_duration)]
@@ -101,6 +108,7 @@ impl LeaderSet {
         let failed = invariants
             .iter()
             .filter(|result| result.required_failed())
+            .filter(|result| !self.rolling_membership || !is_expected_rolling_failure(result.name))
             .map(|result| format!("{}: {}", result.name, result.detail))
             .collect::<Vec<_>>();
         ensure!(
@@ -119,6 +127,50 @@ impl LeaderSet {
             .sequencer
             .as_ref()
             .ok_or_else(|| eyre!("target {} has no sequencer status", target_node.name))?;
+        if self.rolling_membership {
+            let manifest = view.manifest.as_ref().ok_or_else(|| {
+                eyre!(
+                    "--rolling-membership requires --zone-manifest with the finalized next manifest"
+                )
+            })?;
+            ensure!(
+                manifest.sequencer_set_version() == view.portal.sequencer_set_version,
+                "rolling manifest version {} does not match finalized Portal version {}",
+                manifest.sequencer_set_version(),
+                view.portal.sequencer_set_version
+            );
+            let manifest_members = manifest
+                .quorum_nodes()
+                .map(|(_, address)| address)
+                .collect::<Vec<_>>();
+            ensure!(
+                address_set(&manifest_members) == address_set(&view.portal.sequencers),
+                "rolling manifest quorum does not match finalized Portal membership"
+            );
+            ensure!(
+                target_info
+                    .manifest_sequencer_set_version
+                    .is_some_and(|version| version.to::<u64>() == view.portal.sequencer_set_version),
+                "target {} has not loaded finalized manifest version {}",
+                target_node.name,
+                view.portal.sequencer_set_version
+            );
+            ensure!(
+                target_info.manifest_membership_digest == Some(manifest.membership_digest()),
+                "target {} has not loaded the supplied rolling manifest",
+                target_node.name
+            );
+            let target_members = target_info
+                .peers
+                .iter()
+                .filter_map(|peer| peer.sequencer_address)
+                .collect::<Vec<_>>();
+            ensure!(
+                address_set(&target_members) == address_set(&view.portal.sequencers),
+                "target {} has not loaded finalized Portal membership",
+                target_node.name
+            );
+        }
         ensure!(
             is_rpc_only(target_info) != Some(true),
             "target {} is rpc-only and cannot become leader",
@@ -186,6 +238,12 @@ impl LeaderSet {
             "submission endpoint {} is rpc-only and cannot relay setLeader",
             via_node.name
         );
+        ensure!(
+            view.portal.sequencers.contains(&relayer),
+            "submission endpoint {} relayer {} is not a finalized Portal sequencer",
+            via_node.name,
+            relayer
+        );
 
         let expected_epoch = view.portal.leader_epoch.saturating_add(1);
 
@@ -229,7 +287,7 @@ impl LeaderSet {
                 .await?;
             let leader_ok = later.portal.leader == target_address
                 && later.portal.leader_epoch == expected_epoch;
-            let nodes_agree = later.nodes.iter().all(|node| {
+            let node_reports_leader = |node: &NodeSnapshot| {
                 node.sequencer
                     .as_ref()
                     .and_then(|info| info.active_leader.as_ref())
@@ -237,7 +295,16 @@ impl LeaderSet {
                         leader.sequencer_address == Some(target_address)
                             && leader.epoch.to::<u64>() == expected_epoch
                     })
-            });
+            };
+            let nodes_agree = if self.rolling_membership {
+                later
+                    .nodes
+                    .iter()
+                    .find(|node| node.url == target_node.url)
+                    .is_some_and(node_reports_leader)
+            } else {
+                later.nodes.iter().all(node_reports_leader)
+            };
             let progressed = later.portal.zone_height > initial_height;
             if leader_ok && nodes_agree && progressed {
                 return self.print_report(LeaderSetReport {
@@ -311,6 +378,18 @@ fn ensure_target_differs_from_finalized_leader(
     Ok(())
 }
 
+fn is_expected_rolling_failure(name: &str) -> bool {
+    matches!(
+        name,
+        "live_membership"
+            | "live_topology"
+            | "loaded_manifest_agreement"
+            | "manifest_version"
+            | "manifest_digest"
+            | "manifest_node_identity"
+    )
+}
+
 fn select_via<'a>(nodes: &'a [NodeSnapshot], via: Option<&str>) -> eyre::Result<&'a NodeSnapshot> {
     if let Some(via) = via {
         return resolve_node(nodes, via)
@@ -347,7 +426,9 @@ fn progress(message: impl fmt::Display) {
 mod tests {
     use alloy::primitives::Address;
 
-    use super::{ensure_target_differs_from_finalized_leader, select_via};
+    use super::{
+        ensure_target_differs_from_finalized_leader, is_expected_rolling_failure, select_via,
+    };
     use crate::admin::snapshot::{test_node_snapshot, test_sequencer_info};
 
     #[test]
@@ -378,5 +459,14 @@ mod tests {
         assert!(message.contains("already the finalized Portal leader"));
         assert!(message.contains("epoch 42"));
         assert!(message.contains("different, promotion-ready follower"));
+    }
+
+    #[test]
+    fn rolling_mode_relaxes_only_expected_mixed_manifest_checks() {
+        assert!(is_expected_rolling_failure("live_membership"));
+        assert!(is_expected_rolling_failure("manifest_node_identity"));
+        assert!(!is_expected_rolling_failure("portal_leader"));
+        assert!(!is_expected_rolling_failure("canonical_state"));
+        assert!(!is_expected_rolling_failure("manifest_membership"));
     }
 }
