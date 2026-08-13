@@ -222,6 +222,7 @@ crate::sol! {
         function hasRole(address account, Role role) external view returns (bool);
         function setAllowedAccount(address account, bool allowed) external;
         function setGateway(address account, bool allowed) external;
+        function setPauseGuardian(address account, bool allowed) external;
         function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);

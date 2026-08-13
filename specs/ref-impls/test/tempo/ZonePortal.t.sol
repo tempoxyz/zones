@@ -1536,30 +1536,30 @@ contract ZonePortalTest is BaseTest {
 
     function test_pauseRoleCanPause() public {
         vm.prank(admin);
-        portal.setRole(alice, Role.PauseGuardian);
+        portal.setPauseGuardian(alice, true);
 
         vm.prank(alice);
         portal.pause();
         assertTrue(portal.paused());
     }
 
-    function test_setRole_allowsRemovalAfterCapabilityAbdication() public {
+    function test_setPauseGuardian_allowsRemovalAfterCapabilityAbdication() public {
         vm.startPrank(admin);
-        portal.setRole(alice, Role.PauseGuardian);
+        portal.setPauseGuardian(alice, true);
         portal.abdicate(Capability.PausePortal);
         vm.stopPrank();
 
         vm.warp(block.timestamp + 30 days);
 
         vm.prank(admin);
-        portal.setRole(alice, Role.None);
+        portal.setPauseGuardian(alice, false);
         assertTrue(portal.hasRole(alice, Role.None));
 
         vm.prank(admin);
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
         );
-        portal.setRole(bob, Role.PauseGuardian);
+        portal.setPauseGuardian(bob, true);
     }
 
     function test_pause_expiresAfterThirtyDays() public {

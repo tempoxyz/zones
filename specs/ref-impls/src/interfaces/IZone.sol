@@ -722,13 +722,14 @@ interface IZonePortal {
     /// @notice Whether an account has a Portal role.
     function hasRole(address account, Role role) external view returns (bool);
 
-    /// @notice Assign an account's mutually exclusive Portal role.
-    /// @dev Sequencer membership is managed atomically through setSequencerSet.
     /// @notice Add or remove an account from closed-loop portal flows.
     function setAllowedAccount(address account, bool allowed) external;
 
     /// @notice Add or remove a callback gateway.
     function setGateway(address account, bool allowed) external;
+
+    /// @notice Add or remove a pause guardian.
+    function setPauseGuardian(address account, bool allowed) external;
 
     function admin() external view returns (address);
 
