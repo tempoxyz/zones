@@ -205,6 +205,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// Run the SPF over finalized candidates in detached, observational mode.
     pub enable_prover: bool,
+    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    pub prover_address: Option<String>,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -787,6 +789,7 @@ where
                 zone_id: config.zone_id,
                 chain_spec: evm_chain_spec,
                 debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+                prover_address: config.prover_address.clone(),
             });
 
         Self::launch_redacted_rpc(

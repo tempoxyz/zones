@@ -22,10 +22,16 @@ use tempo_primitives::{Block, TempoHeader};
 use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::{
+    net::TcpStream,
+    sync::mpsc::{self, error::TrySendError},
+};
 use tracing::{debug, error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
+use zone_prover::{
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+};
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
@@ -51,6 +57,8 @@ pub struct ShadowProverConfig {
     pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
+    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    pub prover_address: Option<String>,
 }
 
 impl fmt::Debug for ShadowProverConfig {
@@ -61,6 +69,7 @@ impl fmt::Debug for ShadowProverConfig {
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
+            .field("prover_address", &self.prover_address)
             .finish()
     }
 }
@@ -117,6 +126,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     info!(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
+        prover_address = ?config.prover_address,
         queue_capacity = SHADOW_PROVER_QUEUE_CAPACITY,
         "Shadow prover enabled"
     );
@@ -322,13 +332,24 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_ancestry_headers: anchor.ancestry_headers,
     };
 
-    let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
     let started = Instant::now();
-    let attempt = witness.clone();
-    let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
-        .await
-        .context("SPF worker panicked")?
-        .context("SPF rejected generated witness")?;
+    let output = if let Some(address) = &context.config.prover_address {
+        verify_remotely(
+            address,
+            context.config.parent_chain_id,
+            context.config.zone_id,
+            job,
+            &witness,
+        )
+        .await?
+    } else {
+        let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
+        let attempt = witness.clone();
+        tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
+            .await
+            .context("SPF worker panicked")?
+            .context("SPF rejected generated witness")?
+    };
     metrics
         .spf_execution_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -344,6 +365,75 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     })
+}
+
+async fn verify_remotely(
+    address: &str,
+    tempo_chain_id: u64,
+    zone_id: u32,
+    job: &ProverJob,
+    witness: &BatchWitness,
+) -> Result<BatchOutput> {
+    let request = VerifyRequest {
+        version: PROTOCOL_VERSION,
+        request_id: format!(
+            "zone-{zone_id}-{}-{}-{}",
+            job.from, job.to, job.batch.next_block_hash
+        ),
+        tempo_chain_id,
+        witness: witness.clone(),
+    };
+    let stream = TcpStream::connect(address)
+        .await
+        .wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+    let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+    connection
+        .send(&request)
+        .await
+        .wrap_err_with(|| format!("send request to remote prover at {address}"))?;
+    let response: VerifyResponse = connection
+        .receive()
+        .await
+        .wrap_err_with(|| format!("read response from remote prover at {address}"))?
+        .ok_or_else(|| eyre::eyre!("remote prover closed the connection without a response"))?;
+
+    match response {
+        VerifyResponse::Ok {
+            version,
+            request_id,
+            output,
+        } => {
+            ensure!(
+                version == PROTOCOL_VERSION,
+                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+            );
+            ensure!(
+                request_id == request.request_id,
+                "remote prover response request ID {request_id:?} does not match {:?}",
+                request.request_id
+            );
+            Ok(output)
+        }
+        VerifyResponse::Error {
+            version,
+            request_id,
+            code,
+            message,
+        } => {
+            ensure!(
+                version == PROTOCOL_VERSION,
+                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+            );
+            if let Some(response_id) = request_id {
+                ensure!(
+                    response_id == request.request_id,
+                    "remote prover error request ID {response_id:?} does not match {:?}",
+                    request.request_id
+                );
+            }
+            bail!("remote prover rejected request ({code:?}): {message}")
+        }
+    }
 }
 
 fn build_zone_inputs<P: ZoneSequencerProvider>(

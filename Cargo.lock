@@ -14073,6 +14073,7 @@ dependencies = [
  "tracing",
  "zone-chainspec",
  "zone-l1",
+ "zone-prover",
  "zone-rpc",
  "zone-spf",
 ]

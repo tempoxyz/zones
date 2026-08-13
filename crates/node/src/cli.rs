@@ -227,6 +227,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     max_in_flight_batches: args.withdrawal_max_in_flight_batches,
                 },
                 enable_prover: args.enable_prover,
+                prover_address: args.prover_address,
             });
         }
         if let Some(config) = p2p_config {
@@ -486,6 +487,15 @@ pub struct ZoneArgs {
     /// Validate finalized batch candidates with the SPF without changing settlement.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
+
+    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    #[arg(
+        long = "sequencer.prover-address",
+        env = "SEQUENCER_PROVER_ADDRESS",
+        value_name = "HOST:PORT",
+        requires = "enable_prover"
+    )]
+    pub prover_address: Option<String>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
