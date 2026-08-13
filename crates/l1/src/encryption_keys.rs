@@ -161,6 +161,7 @@ mod tests {
         EncryptionKeyRotation {
             x,
             y_parity,
+            pubkey: crate::encryption_key_address(x, y_parity).unwrap(),
             key_index: U256::from(key_index),
             activation_block,
         }

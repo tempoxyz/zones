@@ -65,7 +65,7 @@ impl Secp256k1Identity {
             .map_err(|source| Secp256k1IdentityError::Invalid(source.to_string()))
     }
 
-    /// Returns the Ethereum address corresponding to this private key.
+    /// Returns the address corresponding to this private key.
     pub(crate) fn address(&self) -> Address {
         self.0.address()
     }

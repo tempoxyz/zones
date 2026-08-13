@@ -314,7 +314,6 @@ impl ZoneOutbox {
 
         let mut withdrawal_queue_hash = B256::ZERO;
         if count > 0 {
-            withdrawal_queue_hash = zone_primitives::constants::EMPTY_SENTINEL;
             for (index, encrypted_sender) in call.encryptedSenders.into_iter().enumerate().rev() {
                 let pending = self.pending_withdrawals[index].read()?;
                 let withdrawal = pending.into_withdrawal(encrypted_sender)?;

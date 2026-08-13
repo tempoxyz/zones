@@ -29,7 +29,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-ADMIN-NONZERO` | Portal `admin != address(0)` for every zone | 🟡 | Token governance can become permanently unavailable |
 | `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can govern tokens and access modes or set `zoneGasRate`, `maxTempoGasRate`, and `bouncebackGas` | 🟡 | A sequencer or user can enable malicious assets, reopen paused deposits, alter access policy, or exceed governance fee bounds |
-| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set `tempoGasRate`, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
+| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only a registered sequencer can set `tempoGasRate`, set RPC URL, submit batches, and process withdrawals; the portal admin or a registered sequencer can set encryption keys | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
 | `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `maxTempoGasRate` never exceed `MAX_GAS_FEE_RATE`, and `tempoGasRate` never exceeds the finalized `maxTempoGasRate` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
 
 ### Token Registry and Supply
@@ -84,7 +84,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-ENCRYPTED-SENDER-SHAPE` | If `revealTo` is set, `encryptedSender` is present and exactly 113 bytes; otherwise it is empty | 🟢 | Selective reveal consumers cannot authenticate sender metadata reliably |
 | `TEMPO-ZONE-WITHDRAWAL-BATCH-INDEX` | `finalizeWithdrawalBatch` advances `withdrawalBatchIndex` exactly once per submitted batch, including zero-withdrawal batches | 🔴 | Sequencer can omit or replay batches containing withdrawals |
 | `TEMPO-ZONE-WITHDRAWAL-HASH-LIFO-FIFO` | Outbox builds each withdrawal hash chain LIFO so the portal processes user withdrawals FIFO | 🔴 | Withdrawal order can be reversed, skipped, or duplicated |
-| `TEMPO-ZONE-WITHDRAWAL-QUEUE-RING` | Portal withdrawal queue satisfies `tail >= head`, `tail - head <= WITHDRAWAL_QUEUE_CAPACITY`, and empty slots equal `EMPTY_SENTINEL` | 🔴 | Queue overflow or stale slot reuse can lose or replay withdrawals |
+| `TEMPO-ZONE-WITHDRAWAL-QUEUE-FIFO` | Portal withdrawal queue uses monotonically increasing logical indices with `tail >= head`; slots in `[head, tail)` contain non-zero hash chains, consumed slots are cleared to zero, and backlog size cannot block batch submission | 🔴 | Queue capacity or stale entries can block batch submission, lose withdrawals, or permit replay |
 | `TEMPO-ZONE-WITHDRAWAL-DEQUEUE-AUTH` | `processWithdrawals` only dequeues when `keccak256(abi.encode(withdrawal, remainingQueue))` matches the current head slot | 🔴 | Sequencer can process arbitrary withdrawals or steal portal escrow |
 | `TEMPO-ZONE-WITHDRAWAL-POP-ONCE` | Each processed withdrawal is popped exactly once, whether transfer/callback succeeds or bounces back | 🔴 | Failed withdrawals can block the queue or successful withdrawals can be replayed |
 | `TEMPO-ZONE-WITHDRAWAL-FAIL-BOUNCEBACK` | Any failed user-facing transfer or callback enqueues exactly one withdrawal bounce-back deposit for `amount`, excluding fee | 🔴 | Failed withdrawals can lose funds or duplicate refunds |

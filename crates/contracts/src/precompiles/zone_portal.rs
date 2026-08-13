@@ -8,18 +8,13 @@ pub use ZonePortal::{
 use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
-use zone_primitives::constants::EMPTY_SENTINEL;
 
-/// Maximum number of deposits that may remain unprocessed in the portal queue.
-pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+/// Maximum number of deposits accepted by a portal in one Tempo block.
+pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
 /// Maximum number of token enablements imported from one Tempo block.
 pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
-/// Maximum UTF-8 byte length of an enabled token name.
-pub const MAX_TOKEN_NAME_BYTES: usize = 64;
-/// Maximum UTF-8 byte length of an enabled token symbol.
-pub const MAX_TOKEN_SYMBOL_BYTES: usize = 31;
-/// Maximum UTF-8 byte length of an enabled token currency code.
-pub const MAX_TOKEN_CURRENCY_BYTES: usize = 31;
+/// Maximum UTF-8 byte length of each enabled token metadata string.
+pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -108,6 +103,7 @@ crate::sol! {
         event SequencerEncryptionKeyUpdated(
             bytes32 x,
             uint8 yParity,
+            address pubkey,
             uint256 keyIndex,
             uint64 activationBlock
         );
@@ -232,7 +228,7 @@ crate::sol! {
         function lastSyncedTempoBlockNumber() external view returns (uint64);
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
-        function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
+        function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32);
         function calculateDepositFee() external view returns (uint128 fee);
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
@@ -299,13 +295,17 @@ crate::sol! {
         function isTokenEnabled(address token) external view returns (bool);
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
+        function tokenEnablementHash() external view returns (bytes32);
         function zoneGasRate() external view returns (uint128);
         function maxTempoGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
 
-        function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+        function sequencerEncryptionKey()
+            external
+            view
+            returns (bytes32 x, uint8 yParity, address pubkey);
 
         function encryptionKeyCount() external view returns (uint256);
         function encryptionKeyAt(uint256 index)
@@ -447,10 +447,22 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
             .block(alloy_rpc_types_eth::BlockId::number(block_number))
             .call()
             .await?;
+        let mut compressed = [0; 33];
+        compressed[0] = key.yParity;
+        compressed[1..].copy_from_slice(key.x.as_slice());
+        let verifying_key =
+            k256::ecdsa::VerifyingKey::from_sec1_bytes(&compressed).map_err(|err| {
+                alloy_contract::Error::TransportError(
+                    alloy_transport::TransportErrorKind::custom_str(&format!(
+                        "invalid Portal encryption public key: {err}"
+                    )),
+                )
+            })?;
         Ok((
             ZonePortal::sequencerEncryptionKeyReturn {
                 x: key.x,
                 yParity: key.yParity,
+                pubkey: alloy_signer::utils::public_key_to_address(&verifying_key),
             },
             key.keyIndex,
         ))
@@ -464,15 +476,20 @@ mod tests {
     use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
     use alloy_sol_types::SolCall;
     use alloy_transport::mock::Asserter;
+    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 
     #[tokio::test]
     async fn encryption_key_reads_key_and_index_from_one_snapshot() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
         let block_number = 42_u64;
+        let private_key = k256::SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let compressed = private_key.public_key().to_encoded_point(true);
+        let verifying_key =
+            k256::ecdsa::VerifyingKey::from_sec1_bytes(compressed.as_bytes()).unwrap();
         let expected = ZonePortal::encryptionKeyAtBlockReturn {
-            x: B256::repeat_byte(0x11),
-            yParity: 1,
+            x: B256::from_slice(compressed.x().unwrap()),
+            yParity: compressed.as_bytes()[0],
             keyIndex: U256::from(7),
         };
 
@@ -486,6 +503,10 @@ mod tests {
 
         assert_eq!(key.x, expected.x);
         assert_eq!(key.yParity, expected.yParity);
+        assert_eq!(
+            key.pubkey,
+            alloy_signer::utils::public_key_to_address(&verifying_key)
+        );
         assert_eq!(key_index, expected.keyIndex);
         assert!(asserter.read_q().is_empty());
     }
@@ -634,17 +655,13 @@ impl Withdrawal {
     /// The hash chain has the oldest withdrawal at the outermost layer for efficient FIFO removal:
     ///
     /// ```text
-    /// hash = keccak256(encode(w[0], keccak256(encode(w[1], keccak256(encode(w[2], EMPTY_SENTINEL))))))
+    /// hash = keccak256(encode(w[0], keccak256(encode(w[1], keccak256(encode(w[2], 0))))))
     /// ```
     ///
     /// Building proceeds from the newest (innermost) to the oldest (outermost).
     /// Returns `B256::ZERO` if `withdrawals` is empty.
     pub fn queue_hash(withdrawals: &[Self]) -> B256 {
-        if withdrawals.is_empty() {
-            return B256::ZERO;
-        }
-
-        let mut hash = EMPTY_SENTINEL;
+        let mut hash = B256::ZERO;
         for withdrawal in withdrawals.iter().rev() {
             hash = withdrawal.hash_with_tail(hash);
         }

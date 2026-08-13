@@ -3,9 +3,6 @@
 use alloy_primitives::{Address, B256, U256, address};
 use tempo_hardfork::constants::{mainnet::MAINNET_CHAIN_ID, moderato::MODERATO_CHAIN_ID};
 
-/// Sentinel value for empty withdrawal queue slots.
-pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
-
 /// Sentinel emitted as `BatchSubmitted.withdrawalQueueIndex` when a batch carried no
 /// withdrawals and therefore consumed no queue index (`NO_QUEUE_INDEX` in Solidity).
 pub const NO_QUEUE_INDEX: U256 = U256::MAX;
@@ -67,6 +64,9 @@ pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
 /// ZonePortal storage slot 6: `_tokenConfigs` mapping.
 pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 
+/// ZonePortal storage slot 26: append-only token-enablement commitment.
+pub const PORTAL_TOKEN_ENABLEMENT_HASH_SLOT: B256 = B256::with_last_byte(26);
+
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
@@ -99,6 +99,9 @@ pub const ZONE_INBOX_PROCESSED_NUMBER_SLOT: U256 = {
     le[0] = 1;
     U256::from_le_bytes(le)
 };
+
+/// ZoneInbox storage slot 3: `processedTokenEnablementHash` (bytes32).
+pub const ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT: B256 = B256::with_last_byte(3);
 
 /// ZoneOutbox storage slot 1: `_withdrawalQueueHash` (bytes32).
 ///

@@ -571,7 +571,7 @@ mod tests {
 
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_rlp::Encodable;
-    use alloy_sol_types::SolCall;
+    use alloy_sol_types::{SolCall, SolValue};
     use reth_chainspec::{EthChainSpec, ForkCondition};
     use revm::{
         context::result::ExecutionResult,
@@ -633,6 +633,15 @@ mod tests {
         let reader = MockL1Reader::default();
 
         reader.seed_active_sequencer(portal, CHILD, sequencer);
+        let token_enablement_hash =
+            keccak256((B256::ZERO, token, "Adversarial Token", "ADV", "USD").abi_encode_params());
+        let portal_storage = ZonePortalStorage::new(portal);
+        reader.insert(
+            portal,
+            portal_storage.token_enablement_hash.slot(),
+            CHILD,
+            U256::from_be_bytes(token_enablement_hash.0),
+        );
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
         let parent_policy = U256::from(0xaaaa);

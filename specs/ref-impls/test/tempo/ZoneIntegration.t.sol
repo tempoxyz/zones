@@ -27,7 +27,6 @@ import {
     ZONE_VERIFIER_ADDRESS,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
-import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
@@ -297,7 +296,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         QueuedDeposit[] memory queuedDeposits = _wrapDeposits(deposits);
         vm.prank(address(0));
-        l2Inbox.advanceTempo(new bytes[](1), queuedDeposits, decryptions, new EnabledToken[](0));
+        l2Inbox.advanceTempo("", queuedDeposits, decryptions, new EnabledToken[](0));
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
@@ -864,7 +863,7 @@ contract ZoneIntegrationTest is BaseTest {
         Withdrawal memory w1 = _withdrawal(1, alice, charlie, 2000e6, bytes32(0), 0, alice, "");
         Withdrawal memory w2 = _withdrawal(2, bob, charlie, 1500e6, bytes32(0), 0, alice, "");
 
-        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 innerHash = keccak256(abi.encode(w2, bytes32(0)));
         uint256 charlieBefore = l2ZoneToken.balanceOf(charlie);
 
         l1Portal.processWithdrawals(_singleWithdrawal(w1), innerHash);

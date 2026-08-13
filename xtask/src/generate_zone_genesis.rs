@@ -249,13 +249,6 @@ impl GenerateZoneGenesis {
             );
         }
 
-        if let Some(sequencer) = self.sequencer {
-            genesis_alloc.entry(sequencer).or_default().balance =
-                U256::from(1_000_000_000_000_000_000_000u128);
-        }
-        genesis_alloc.entry(self.admin).or_default().balance =
-            U256::from(1_000_000_000_000_000_000_000u128);
-
         let chain_config = ChainConfig {
             chain_id: self.chain_id,
             homestead_block: Some(0),

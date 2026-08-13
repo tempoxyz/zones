@@ -56,6 +56,8 @@ pub struct ZoneInbox {
     processed_deposit_number: u64,
     /// Withdrawal bounce-back mints that failed and can be claimed later.
     withdrawal_bounce_backs: Mapping<Address, Mapping<Address, u128>>,
+    /// Append-only token-enablement commitment already applied by this zone.
+    processed_token_enablement_hash: B256,
 }
 
 impl ZoneInbox {
@@ -95,7 +97,23 @@ impl ZoneInbox {
         tempo_state.finalize_checkpoint(l1, call.header)?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
 
+        let has_token_enablements = !call.enabledTokens.is_empty();
+        let mut next_token_enablement_hash = self.processed_token_enablement_hash.read()?;
+        for enabled in &call.enabledTokens {
+            next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
+        }
+
+        if !portal.is_zero()
+            && l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
+        {
+            return Err(ZoneInboxError::invalid_token_enablement_hash().into());
+        }
+
         self.enable_tokens(call.enabledTokens)?;
+        if has_token_enablements {
+            self.processed_token_enablement_hash
+                .write(next_token_enablement_hash)?;
+        }
 
         // Step 2: Process deposits and build hash chain
         let tempo_block_hash = tempo_state.tempo_block_hash()?;

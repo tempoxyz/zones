@@ -471,6 +471,25 @@ just send-deposit 1000000 "" 0x0000000000000000000000000000000000000000000000000
 just check-balance "$ADDR" <token-address>
 ```
 
+### Verify Closed-Loop Configuration
+
+After deploying the Earn stack and configuring its ZonePortal, run the read-only automated checks
+and print the current account allowlist for manual confirmation using the Earn router:
+
+```bash
+L1_RPC_URL=https://... just verify-closed-loop \
+  0x<earn-router>
+```
+
+The verifier derives the Zone and Portal from the router, finds the Zone's deployment event, and
+reconstructs the current role and enabled-token sets from Portal events through one pinned L1 block.
+It requires the Earn router to be the only `CallbackGateway` and the boundary-crossing tokens
+(`privateAsset` and `earnShare`) to be the exact enabled-token set with active deposits. The vault
+asset remains on L1 and is not Portal-enabled unless it is also the private asset. The current
+`Account` role set is printed in sorted order and must be compared manually with the approved
+deployment record; account membership is not part of the automated pass/fail result. Verification
+performs no transactions and requires no private key.
+
 ### Blacklist a Sender
 
 This example creates a blacklist policy that prevents a specific address from sending transfers, while still allowing them to receive deposits.
@@ -669,6 +688,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `just deploy-zone <name> [<tip20>] [open\|closed] [enforced\|open]` | One-shot: keygen → fund → create → genesis → start node |
 | `just create-zone <name> [<tip20>] [open\|closed] [enforced\|open]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
+| `just verify-closed-loop <earn-router>` | Verify an existing Earn deployment's closed-loop Portal configuration (read-only) |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |
 | `just send-deposit [amount] [to] [memo] [token] [rpc]` | Deposit tokens from L1 to the zone with an encrypted recipient and memo |

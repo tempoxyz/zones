@@ -24,10 +24,22 @@ pub struct EncryptionKeyRotation {
     pub x: B256,
     /// Compressed public-key prefix (`0x02` or `0x03`).
     pub y_parity: u8,
+    /// Address derived from the compressed public key.
+    pub pubkey: Address,
     /// Index assigned by the Portal's append-only key history.
     pub key_index: U256,
     /// L1 block at which this key became current.
     pub activation_block: u64,
+}
+
+/// Derive the address for a compressed secp256k1 encryption public key.
+pub fn encryption_key_address(x: B256, y_parity: u8) -> eyre::Result<Address> {
+    let mut compressed = [0; 33];
+    compressed[0] = y_parity;
+    compressed[1..].copy_from_slice(x.as_slice());
+    let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&compressed)
+        .map_err(|err| eyre::eyre!("invalid compressed encryption public key: {err}"))?;
+    Ok(alloy_signer::utils::public_key_to_address(&verifying_key))
 }
 
 /// A decoded `LeaderUpdated` portal event.
@@ -179,6 +191,7 @@ impl L1PortalEvents {
             ZonePortalEvents::SequencerEncryptionKeyUpdated(event) => {
                 info!(
                     l1_block = block_number,
+                    pubkey = %event.pubkey,
                     key_index = %event.keyIndex,
                     activation_block = event.activationBlock,
                     "Sequencer encryption key rotated on L1"
@@ -186,6 +199,7 @@ impl L1PortalEvents {
                 self.encryption_key_rotations.push(EncryptionKeyRotation {
                     x: event.x,
                     y_parity: event.yParity,
+                    pubkey: event.pubkey,
                     key_index: event.keyIndex,
                     activation_block: event.activationBlock,
                 });

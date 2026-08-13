@@ -37,7 +37,7 @@ library Secp256k1Lib {
         return yParity == 0x02 || yParity == 0x03;
     }
 
-    /// @notice Derive the Ethereum address corresponding to a compressed secp256k1 public key.
+    /// @notice Derive the address corresponding to a compressed secp256k1 public key.
     function deriveAddress(bytes32 x, uint8 yParity) internal view returns (address addr) {
         uint256 px = uint256(x);
         uint256 rhs = _curveRhs(px);

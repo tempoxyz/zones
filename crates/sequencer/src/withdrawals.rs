@@ -42,10 +42,10 @@ use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    abi::{self, EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
+    abi::{self, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
     metrics::{SequencerMetrics, WithdrawalProcessorMetrics},
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
-    settlement::{WITHDRAWAL_QUEUE_CAPACITY, find_processed_offset},
+    settlement::{WithdrawalPage, find_processed_offset},
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
 
@@ -88,6 +88,12 @@ pub const MAX_WITHDRAWAL_BATCH_GAS: u64 = 20_000_000;
 
 /// Default maximum number of ordered withdrawal transactions kept in flight.
 pub const DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES: usize = 8;
+
+/// Generous safety bound for withdrawal payloads retained in memory.
+///
+/// Far-tail payloads beyond this limit remain reconstructible from canonical Zone history when
+/// they approach the portal head.
+const MAX_CACHED_WITHDRAWAL_SLOTS: usize = 10_000;
 
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]
@@ -176,21 +182,50 @@ impl WithdrawalStore {
     /// Add a withdrawal to the given batch.
     ///
     /// Withdrawals within a batch are stored in FIFO order (oldest first).
-    pub fn add_withdrawal(&mut self, batch_index: u64, withdrawal: abi::Withdrawal) {
+    pub fn add_withdrawal(&mut self, batch_index: u64, withdrawal: abi::Withdrawal) -> bool {
+        if self.batches.len() >= MAX_CACHED_WITHDRAWAL_SLOTS
+            && !self.batches.contains_key(&batch_index)
+        {
+            return false;
+        }
+
         self.batches
             .entry(batch_index)
             .or_default()
             .push(withdrawal);
+        true
     }
 
     /// Set all withdrawals for a batch at once, replacing any existing data.
-    pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) {
+    pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) -> bool {
+        if self.batches.len() >= MAX_CACHED_WITHDRAWAL_SLOTS
+            && !self.batches.contains_key(&batch_index)
+        {
+            return false;
+        }
+
         self.batches.insert(batch_index, withdrawals);
+        true
     }
 
-    /// Replace the entire store with an authoritative set of pending batches.
-    pub(crate) fn replace_batches(&mut self, batches: BTreeMap<u64, Vec<abi::Withdrawal>>) {
-        self.batches = batches;
+    /// Reconcile a verified head page while preserving useful cached tail payloads.
+    ///
+    /// Entries outside the observed portal bounds are stale. If the merged cache exceeds its
+    /// generous safety bound, farthest-tail entries are evicted first because head-adjacent data
+    /// is immediately useful to the processor and omitted tails can be reconstructed later.
+    pub(crate) fn replace_page(&mut self, page: WithdrawalPage) -> usize {
+        self.remove_before(page.head);
+        drop(self.batches.split_off(&page.tail));
+        for (index, withdrawals) in page.batches {
+            self.batches.insert(index, withdrawals);
+        }
+
+        let mut evicted = 0;
+        while self.batches.len() > MAX_CACHED_WITHDRAWAL_SLOTS {
+            self.batches.pop_last();
+            evicted += 1;
+        }
+        evicted
     }
 
     /// Get all withdrawals for a batch.
@@ -205,7 +240,7 @@ impl WithdrawalStore {
 
     /// Remove slots that the portal head has already passed.
     fn remove_before(&mut self, batch_index: u64) {
-        self.batches.retain(|&index, _| index >= batch_index);
+        self.batches = self.batches.split_off(&batch_index);
     }
 
     pub fn has_batch(&self, batch_index: u64) -> bool {
@@ -470,13 +505,13 @@ impl WithdrawalProcessor {
             // already consumed.
             let slot_hash = self
                 .portal
-                .withdrawalQueueSlot(U256::from(head_val % WITHDRAWAL_QUEUE_CAPACITY))
+                .withdrawalQueueSlot(U256::from(head_val))
                 .call()
                 .await?;
 
-            if slot_hash == EMPTY_SENTINEL {
-                // The slot was fully consumed and head advanced between our reads.
-                // Re-check on the next cycle.
+            if slot_hash.is_zero() {
+                // Exhausting a slot clears it before advancing the head. The head advanced between
+                // our bounds read and this slot read, so re-check on the next cycle.
                 debug!(
                     slot = head_val,
                     "Head slot already consumed; skipping cycle"
@@ -841,7 +876,6 @@ enum SubmitOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::EMPTY_SENTINEL;
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_provider::{Provider, ProviderBuilder};
     use alloy_sol_types::SolValue;
@@ -887,7 +921,7 @@ mod tests {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
         let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
-        let expected = keccak256((w, EMPTY_SENTINEL).abi_encode_params());
+        let expected = keccak256((w, B256::ZERO).abi_encode_params());
         assert_eq!(hash, expected);
     }
 
@@ -898,7 +932,7 @@ mod tests {
 
         let hash = abi::Withdrawal::queue_hash(&[w0.clone(), w1.clone()]);
 
-        let inner = keccak256((w1, EMPTY_SENTINEL).abi_encode_params());
+        let inner = keccak256((w1, B256::ZERO).abi_encode_params());
         let expected = keccak256((w0, inner).abi_encode_params());
         assert_eq!(hash, expected);
     }
@@ -917,8 +951,8 @@ mod tests {
             encryptedSender: Default::default(),
         };
 
-        let tuple_value_hash = keccak256((w.clone(), EMPTY_SENTINEL).abi_encode());
-        let param_hash = keccak256((w, EMPTY_SENTINEL).abi_encode_params());
+        let tuple_value_hash = keccak256((w.clone(), B256::ZERO).abi_encode());
+        let param_hash = keccak256((w, B256::ZERO).abi_encode_params());
 
         assert_ne!(
             tuple_value_hash, param_hash,
@@ -1083,24 +1117,78 @@ mod tests {
     }
 
     #[test]
-    fn store_replace_batches_reconciles_authoritative_view() {
+    fn store_reconciles_head_page_and_preserves_tail() {
         let mut store = WithdrawalStore::new();
         let addr = address!("0x0000000000000000000000000000000000000042");
 
         store.add_batch(0, vec![test_withdrawal(addr, 100)]);
         store.add_batch(9, vec![test_withdrawal(addr, 900)]);
+        store.add_batch(12, vec![test_withdrawal(addr, 1_200)]);
 
-        let mut reconciled = BTreeMap::new();
-        reconciled.insert(5, vec![test_withdrawal(addr, 500)]);
-        reconciled.insert(6, vec![test_withdrawal(addr, 600)]);
+        let mut batches = BTreeMap::new();
+        batches.insert(5, vec![test_withdrawal(addr, 500)]);
+        batches.insert(6, vec![test_withdrawal(addr, 600)]);
+        let evicted = store.replace_page(WithdrawalPage {
+            head: 5,
+            tail: 10,
+            batches,
+        });
 
-        store.replace_batches(reconciled);
-
+        assert_eq!(evicted, 0);
         assert!(!store.has_batch(0));
-        assert!(!store.has_batch(9));
         assert!(store.has_batch(5));
         assert!(store.has_batch(6));
-        assert_eq!(store.batch_count(), 2);
+        assert!(store.has_batch(9));
+        assert!(!store.has_batch(12));
+        assert_eq!(store.batch_count(), 3);
+    }
+
+    #[test]
+    fn store_reconciles_recovery_page_without_discarding_backlog_beyond_100_slots() {
+        let mut store = WithdrawalStore::new();
+        let withdrawal = test_withdrawal(Address::repeat_byte(0x42), 100);
+        for index in 100..201 {
+            assert!(store.add_batch(index, vec![withdrawal.clone()]));
+        }
+
+        let batches = (0..100)
+            .map(|index| (index, vec![withdrawal.clone()]))
+            .collect();
+        let evicted = store.replace_page(WithdrawalPage {
+            head: 0,
+            tail: 201,
+            batches,
+        });
+
+        assert_eq!(evicted, 0);
+        assert_eq!(store.batch_count(), 201);
+        assert!((0..201).all(|index| store.has_batch(index)));
+    }
+
+    #[test]
+    fn store_cache_limit_prioritizes_recovered_head_page() {
+        let mut store = WithdrawalStore::new();
+        let withdrawal = test_withdrawal(Address::repeat_byte(0x42), 100);
+        for index in 1..=MAX_CACHED_WITHDRAWAL_SLOTS as u64 {
+            store.batches.insert(index, vec![withdrawal.clone()]);
+        }
+        assert!(!store.add_batch(
+            MAX_CACHED_WITHDRAWAL_SLOTS as u64 + 1,
+            vec![withdrawal.clone()]
+        ));
+
+        let mut batches = BTreeMap::new();
+        batches.insert(0, vec![withdrawal]);
+        let evicted = store.replace_page(WithdrawalPage {
+            head: 0,
+            tail: MAX_CACHED_WITHDRAWAL_SLOTS as u64 + 1,
+            batches,
+        });
+
+        assert_eq!(evicted, 1);
+        assert_eq!(store.batch_count(), MAX_CACHED_WITHDRAWAL_SLOTS);
+        assert!(store.has_batch(0));
+        assert!(!store.has_batch(MAX_CACHED_WITHDRAWAL_SLOTS as u64));
     }
 
     fn abi_encode_b256(value: B256) -> Bytes {
@@ -1128,7 +1216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_queue_requests_monitor_resync_when_head_slot_missing() {
+    async fn process_queue_requests_head_page_refill_when_slot_missing() {
         let l1 = Asserter::new();
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(51),
@@ -1146,12 +1234,12 @@ mod tests {
 
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
-            .expect("missing head slot should request a monitor resync");
+            .expect("missing head slot should request a page refill");
         assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
-    async fn process_queue_requests_repair_when_store_data_mismatches_slot_hash() {
+    async fn process_queue_requests_refill_when_store_data_mismatches_slot_hash() {
         let l1 = Asserter::new();
         // head = 5, tail = 6, slot hash that matches no suffix of the stored batch.
         l1.push_success(&abi_encode_multicall(vec![
@@ -1177,21 +1265,21 @@ mod tests {
 
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
-            .expect("mismatched slot hash should request a monitor resync");
+            .expect("mismatched slot hash should request a page refill");
         assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
     async fn process_queue_skips_cycle_when_head_slot_already_consumed() {
         let l1 = Asserter::new();
-        // head = 5, tail = 6, slot already contains EMPTY_SENTINEL (head advanced
-        // between our head read and the slot read).
+        // head = 5, tail = 6, but slot 5 is already cleared because head advanced
+        // between our bounds read and the slot read.
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(5),
             abi_encode_u64(6),
         ]));
         l1.push_success(&abi_encode_u64(0));
-        l1.push_success(&abi_encode_b256(EMPTY_SENTINEL));
+        l1.push_success(&abi_encode_b256(B256::ZERO));
 
         let store = SharedWithdrawalStore::new();
         store.lock().add_batch(
