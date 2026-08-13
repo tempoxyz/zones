@@ -1,31 +1,13 @@
 //! Programmatic conformance tests for Solidity and native Rust storage layouts.
 
-use std::path::PathBuf;
-
-use tempo_precompiles::test_util::{
-    foundry_artifact_path,
-    storage_conformance::{
-        RustStorageField, RustStorageSlot, assert_foundry_layout, assert_foundry_slots,
-    },
-};
+use super::{RustStorageField, artifact, assert_layout};
+use tempo_precompiles::test_util::storage_conformance::{RustStorageSlot, assert_foundry_slots};
 use tempo_precompiles_macros::gen_test_fields_layout as layout_fields;
 use zone_primitives::constants::{
     PORTAL_ADMIN_SLOT, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
 };
-
-fn artifact(contract: &str) -> PathBuf {
-    foundry_artifact_path(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out"),
-        &format!("{contract}.sol"),
-        contract,
-    )
-}
-
-fn assert_layout(contract: &str, rust: Vec<RustStorageField>) {
-    assert_foundry_layout(&artifact(contract), &rust);
-}
 
 #[test]
 fn zone_portal_slot_constants_match_solidity() {
@@ -49,7 +31,7 @@ fn zone_portal_slot_constants_match_solidity() {
 
 #[test]
 fn tempo_state_layout_matches_solidity() {
-    use crate::tempo_state::slots;
+    use zone_precompiles::tempo_state::slots;
     assert_layout(
         "TempoState",
         layout_fields!(tempo_block_hash, tempo_block_number),
@@ -58,7 +40,7 @@ fn tempo_state_layout_matches_solidity() {
 
 #[test]
 fn zone_inbox_layout_matches_solidity() {
-    use crate::inbox::slots;
+    use zone_precompiles::inbox::slots;
     assert_layout(
         "ZoneInbox",
         layout_fields!(
@@ -78,7 +60,7 @@ fn zone_inbox_layout_matches_solidity() {
 
 #[test]
 fn zone_outbox_layout_matches_solidity() {
-    use crate::outbox::slots;
+    use zone_precompiles::outbox::slots;
     assert_layout(
         "ZoneOutbox",
         layout_fields!(

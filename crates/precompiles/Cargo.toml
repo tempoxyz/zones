@@ -70,3 +70,8 @@ std = [
     "rand/std",
     "tracing/std",
 ]
+
+[[test]]
+name = "storage"
+path = "tests/mod.rs"
+required-features = ["test-utils"]
