@@ -74,7 +74,7 @@ use tempo_transaction_pool::{
 };
 use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
 use tracing::{debug, info, warn};
-use zone_chainspec::{ZoneChainSpec, tempo_chain_spec_for_l1};
+use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
@@ -1611,13 +1611,10 @@ where
         .await?;
 
         let l1_chain_id = l1_provider.chain_id().await?;
-        tempo_chain_spec_for_l1(l1_chain_id)
-            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
-        let genesis_parent_chain_id =
-            decode_l1_chain_id(ctx.chain_spec().genesis().config.chain_id)?;
+        let genesis_l1_chain_id = decode_l1_chain_id(ctx.chain_spec().genesis().config.chain_id)?;
         eyre::ensure!(
-            l1_chain_id == genesis_parent_chain_id,
-            "parent chain ID mismatch: genesis requires {genesis_parent_chain_id}, but L1 RPC reports {l1_chain_id}"
+            l1_chain_id == genesis_l1_chain_id,
+            "L1 chain ID mismatch: genesis requires {genesis_l1_chain_id}, but L1 RPC reports {l1_chain_id}"
         );
         let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, portal_address);
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
@@ -1788,6 +1785,7 @@ mod tests {
     use tempo_primitives::transaction::{
         AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
     };
+    use zone_chainspec::tempo_chain_spec_for_l1;
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
         TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))
