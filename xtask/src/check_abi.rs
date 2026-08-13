@@ -13,22 +13,22 @@ struct InterfaceSpec {
 }
 
 macro_rules! interface {
-    ($name:ident, $artifact:literal, $source:literal) => {
+    ($name:ident, $artifact:literal) => {
         InterfaceSpec {
             name: stringify!($name),
             artifact_name: $artifact,
-            source: $source,
+            source: "IZone.sol",
             rust: || AbiSurface::from_abi(&tempo_zone_contracts::$name::abi::contract()),
         }
     };
 }
 
 const INTERFACES: &[InterfaceSpec] = &[
-    interface!(TempoState, "TempoState", "TempoState.sol"),
-    interface!(IZoneInbox, "IZoneInbox", "IZone.sol"),
-    interface!(IZoneOutbox, "IZoneOutbox", "IZone.sol"),
-    interface!(ZoneFactory, "IZoneFactory", "IZone.sol"),
-    interface!(ZonePortal, "IZonePortal", "IZone.sol"),
+    interface!(TempoState, "ITempoState"),
+    interface!(IZoneInbox, "IZoneInbox"),
+    interface!(IZoneOutbox, "IZoneOutbox"),
+    interface!(ZoneFactory, "IZoneFactory"),
+    interface!(ZonePortal, "IZonePortal"),
 ];
 
 #[derive(Debug, clap::Args)]

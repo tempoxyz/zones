@@ -3,9 +3,15 @@
 use std::path::PathBuf;
 
 use tempo_precompiles::test_util::conformance::{
-    RustStorageField, SolidityStorageLayout, compare_storage_layout, load_foundry_storage_layout,
+    RustStorageField, RustStorageSlot, SolidityStorageLayout, compare_storage_layout,
+    compare_storage_slots, load_foundry_storage_layout,
 };
 use tempo_precompiles_macros::gen_test_fields_layout as layout_fields;
+use zone_primitives::constants::{
+    PORTAL_ADMIN_SLOT, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
+};
 
 fn artifact(contract: &str) -> SolidityStorageLayout {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,6 +30,28 @@ fn assert_layout(contract: &str, rust: Vec<RustStorageField>) {
     compare_storage_layout(&solidity, &rust).unwrap_or_else(|errors| {
         panic!("{contract} storage layout differs:\n{}", errors.join("\n"))
     });
+}
+
+#[test]
+fn zone_portal_slot_constants_match_solidity() {
+    let solidity = artifact("ZonePortal");
+    let fields = [
+        ("admin", PORTAL_ADMIN_SLOT),
+        (
+            "currentDepositQueueHash",
+            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        ),
+        ("_encryptionKeys", PORTAL_ENCRYPTION_KEYS_SLOT),
+        ("_tokenConfigs", PORTAL_TOKEN_CONFIGS_SLOT),
+        ("isSequencer", PORTAL_IS_SEQUENCER_SLOT),
+        ("role", PORTAL_ROLE_SLOT),
+        ("_isAccessEnforced", PORTAL_ENFORCEMENT_MODES_SLOT),
+        ("maxTempoGasRate", PORTAL_MAX_TEMPO_GAS_RATE_SLOT),
+        ("tokenEnablementHash", PORTAL_TOKEN_ENABLEMENT_HASH_SLOT),
+    ]
+    .map(|(name, slot)| RustStorageSlot::new(name, slot.into()));
+    compare_storage_slots(&solidity, &fields)
+        .unwrap_or_else(|errors| panic!("ZonePortal storage slots differ:\n{}", errors.join("\n")));
 }
 
 #[test]
