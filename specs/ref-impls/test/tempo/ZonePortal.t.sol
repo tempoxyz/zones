@@ -261,6 +261,43 @@ contract ZonePortalProxyStorageTest is Test {
             );
     }
 
+    function test_initialize_rejectsMessengerAsAllowedAccount() public {
+        ZonePortal implementation = new ZonePortal();
+        address proxy = makeAddr("portal proxy");
+        vm.etch(
+            proxy,
+            abi.encodePacked(
+                hex"363d3d373d3d3d363d73",
+                address(implementation),
+                hex"5af43d82803e903d91602b57fd5bf3"
+            )
+        );
+
+        address portalMessenger = makeAddr("messenger");
+        address[] memory allowedAccounts = new address[](1);
+        allowedAccounts[0] = portalMessenger;
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer");
+
+        vm.prank(ZONE_FACTORY_ADDRESS);
+        vm.expectRevert();
+        ZonePortal(proxy)
+            .initialize(
+                1,
+                makeAddr("initial token"),
+                true,
+                true,
+                allowedAccounts,
+                _emptyAddresses(),
+                portalMessenger,
+                makeAddr("admin"),
+                sequencers,
+                1,
+                makeAddr("verifier"),
+                ""
+            );
+    }
+
     function test_proxyMetadataIsReadFromPortalStorage() public {
         address initialToken = makeAddr("initial token");
         address[] memory tokens = new address[](1);
@@ -1784,10 +1821,11 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.hasRole(replacement, Role.CallbackGateway));
     }
 
-    function test_setGateway_overwritesAccountRole() public {
+    function test_setGateway_cannotOverwriteAccountRole() public {
         vm.prank(admin);
+        vm.expectRevert();
         portal.setGateway(alice, true);
-        assertTrue(portal.hasRole(alice, Role.CallbackGateway));
+        assertTrue(portal.hasRole(alice, Role.Account));
     }
 
     function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
@@ -1885,10 +1923,19 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.hasRole(account, Role.None));
     }
 
-    function test_setAllowedAccount_overwritesGatewayRole() public {
+    function test_setAllowedAccount_cannotOverwriteGatewayRole() public {
         vm.prank(admin);
+        vm.expectRevert();
         portal.setAllowedAccount(address(zoneGateway), true);
-        assertTrue(portal.hasRole(address(zoneGateway), Role.Account));
+        assertTrue(portal.hasRole(address(zoneGateway), Role.CallbackGateway));
+    }
+
+    function test_setAllowedAccount_rejectsMessenger() public {
+        vm.prank(admin);
+        vm.expectRevert();
+        portal.setAllowedAccount(address(messenger), true);
+
+        assertTrue(portal.hasRole(address(messenger), Role.None));
     }
 
     function test_setAllowedAccount_removalEventIncludesPreviousRole() public {

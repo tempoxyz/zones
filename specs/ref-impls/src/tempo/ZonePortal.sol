@@ -257,6 +257,7 @@ contract ZonePortal is IZonePortal {
         }
         for (uint256 i; i < _allowedAccounts.length; ++i) {
             address account = _allowedAccounts[i];
+            require(account != _messenger);
             require(role[account] == Role.None);
             role[account] = Role.Account;
             emit RoleUpdated(account, Role.None, Role.Account);
@@ -489,8 +490,9 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Add or remove an account from closed-loop portal flows.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        if (allowed) require(account != messenger);
         Role previous = role[account];
-        require(previous != Role.Sequencer);
+        require(previous == (allowed ? Role.None : Role.Account));
         Role next = allowed ? Role.Account : Role.None;
         role[account] = next;
         emit RoleUpdated(account, previous, next);
@@ -499,7 +501,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Add or remove a callback gateway.
     function setGateway(address account, bool allowed) external onlyAdmin {
         Role previous = role[account];
-        require(previous != Role.Sequencer);
+        require(previous == (allowed ? Role.None : Role.CallbackGateway));
         Role next = allowed ? Role.CallbackGateway : Role.None;
         role[account] = next;
         emit RoleUpdated(account, previous, next);
