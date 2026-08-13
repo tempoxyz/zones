@@ -489,20 +489,24 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Add or remove an account from closed-loop portal flows.
+    /// @dev Returns without emitting when the requested membership is already configured.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
         if (allowed) require(account != messenger);
         Role previous = role[account];
-        require(previous == (allowed ? Role.None : Role.Account));
         Role next = allowed ? Role.Account : Role.None;
+        if (previous == next) return;
+        require(previous == (allowed ? Role.None : Role.Account));
         role[account] = next;
         emit RoleUpdated(account, previous, next);
     }
 
     /// @notice Add or remove a callback gateway.
+    /// @dev Returns without emitting when the requested membership is already configured.
     function setGateway(address account, bool allowed) external onlyAdmin {
         Role previous = role[account];
-        require(previous == (allowed ? Role.None : Role.CallbackGateway));
         Role next = allowed ? Role.CallbackGateway : Role.None;
+        if (previous == next) return;
+        require(previous == (allowed ? Role.None : Role.CallbackGateway));
         role[account] = next;
         emit RoleUpdated(account, previous, next);
     }
