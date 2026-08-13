@@ -57,7 +57,7 @@ async fn pause(args: PortalPauseArgs) -> eyre::Result<()> {
         .wrap_err("failed reading portal pause nonce")?;
 
     let pending = portal
-        .pause(true)
+        .pause()
         .nonce_key(ADMIN_OPS_NONCE_KEY)
         .nonce(nonce)
         .send()

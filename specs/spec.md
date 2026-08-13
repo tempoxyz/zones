@@ -205,8 +205,8 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `pause(true)` | [`ZonePortal`](#izoneportal) | **admin, sequencer, or pause guardian** |
-| `pause(false)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `pause()` | [`ZonePortal`](#izoneportal) | **admin, sequencer, or pause guardian** |
+| `resume()` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAllowedAccount(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setPauseGuardian(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -349,11 +349,11 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
-- `pause(true)`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
+- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
   the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
   extended while active. Proof-verified batch submission continues so settlement remains current
   and an expired pause does not require recovery across the full pause interval.
-- `pause(false)`: Allow the admin to resume those flows before the bounded pause expires. Resuming
+- `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
   `ABDICATION_DELAY` (30 days). It does not clear an active pause; any pause started before
@@ -1814,7 +1814,8 @@ interface IZonePortal {
     function paused() external view returns (bool);
     function pauseExpiry() external view returns (uint64);
     function abdicationEffectiveAt(Capability capability) external view returns (uint64);
-    function pause(bool shouldPause) external;
+    function pause() external;
+    function resume() external;
     function abdicate(Capability capability) external;
     function isTokenEnabled(address token) external view returns (bool);
     function areDepositsActive(address token) external view returns (bool);

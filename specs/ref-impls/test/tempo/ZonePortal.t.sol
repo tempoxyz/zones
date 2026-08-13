@@ -1495,7 +1495,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_pause_blocksDepositsAndWithdrawalProcessingButAllowsBatchSubmission() public {
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
 
         assertTrue(portal.paused());
         assertEq(portal.pauseExpiry(), block.timestamp + 30 days);
@@ -1539,7 +1539,7 @@ contract ZonePortalTest is BaseTest {
         portal.setPauseGuardian(alice, true);
 
         vm.prank(alice);
-        portal.pause(true);
+        portal.pause();
         assertTrue(portal.paused());
     }
 
@@ -1589,7 +1589,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_pause_expiresAfterThirtyDays() public {
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
 
         vm.warp(block.timestamp + 30 days);
         assertFalse(portal.paused());
@@ -1597,13 +1597,13 @@ contract ZonePortalTest is BaseTest {
 
     function test_pause_adminCanResumeEarly() public {
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
 
         vm.warp(block.timestamp + 1 days);
         vm.expectEmit(true, false, false, false);
         emit IZonePortal.PortalResumed(admin);
         vm.prank(admin);
-        portal.pause(false);
+        portal.resume();
 
         assertFalse(portal.paused());
         assertEq(portal.pauseExpiry(), 0);
@@ -1613,15 +1613,15 @@ contract ZonePortalTest is BaseTest {
         vm.prank(admin);
         portal.setPauseGuardian(alice, true);
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
 
         vm.prank(sequencer);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.pause(false);
+        portal.resume();
 
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.pause(false);
+        portal.resume();
 
         assertTrue(portal.paused());
     }
@@ -1632,11 +1632,11 @@ contract ZonePortalTest is BaseTest {
 
         vm.warp(block.timestamp + 29 days);
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
 
         vm.warp(block.timestamp + 1 days);
         vm.prank(admin);
-        portal.pause(false);
+        portal.resume();
 
         assertFalse(portal.paused());
         assertEq(portal.pauseExpiry(), 0);
@@ -1644,13 +1644,13 @@ contract ZonePortalTest is BaseTest {
 
     function test_pause_cannotExtendActivePause() public {
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
         uint64 originalExpiry = portal.pauseExpiry();
 
         vm.warp(block.timestamp + 15 days);
         vm.prank(sequencer);
         vm.expectRevert(IZonePortal.PortalIsPaused.selector);
-        portal.pause(true);
+        portal.pause();
 
         assertEq(portal.pauseExpiry(), originalExpiry);
     }
@@ -1669,7 +1669,7 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
         );
-        portal.pause(true);
+        portal.pause();
     }
 
     function test_abdicatePause_allowsStartingAPauseBeforeItTakesEffect() public {
@@ -1678,7 +1678,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.warp(block.timestamp + 29 days);
         vm.prank(sequencer);
-        portal.pause(true);
+        portal.pause();
         uint64 pauseExpiry = portal.pauseExpiry();
 
         vm.warp(block.timestamp + 1 days);
@@ -1689,7 +1689,7 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
         );
-        portal.pause(true);
+        portal.pause();
     }
 
     function test_abdicatePause_cannotBeRescheduled() public {
@@ -1708,7 +1708,7 @@ contract ZonePortalTest is BaseTest {
     function test_pause_revertsWithoutAuthority() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotPauseAuthority.selector);
-        portal.pause(true);
+        portal.pause();
     }
 
     function test_tokenGovernance_revertsIfNotAdmin() public {
@@ -1947,7 +1947,7 @@ contract ZonePortalTest is BaseTest {
 
         // New admin can exercise governance powers.
         vm.prank(alice);
-        portal.pause(true);
+        portal.pause();
         assertTrue(portal.paused());
 
         vm.prank(admin);

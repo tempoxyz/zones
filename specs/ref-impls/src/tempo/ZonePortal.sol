@@ -515,7 +515,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Add or remove an account from closed-loop portal flows.
-    /// @dev Returns without emitting when the requested membership is already configured.
+    /// @dev Returns without emitting when already configured. Abdication freezes all changes.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
         _requireCapabilityActive(Capability.AccessPolicy);
         if (allowed) require(account != messenger);
@@ -528,7 +528,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Add or remove a callback gateway.
-    /// @dev Returns without emitting when the requested membership is already configured.
+    /// @dev Returns without emitting when already configured. Abdication freezes all changes.
     function setGateway(address account, bool allowed) external onlyAdmin {
         _requireCapabilityActive(Capability.AccessPolicy);
         Role previous = role[account];
@@ -540,6 +540,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Add or remove a pause guardian.
+    /// @dev Only additions require an active pause capability; removal remains possible after abdication.
     function setPauseGuardian(address account, bool allowed) external onlyAdmin {
         if (allowed) _requireCapabilityActive(Capability.PausePortal);
         Role previous = role[account];
@@ -599,28 +600,31 @@ contract ZonePortal is IZonePortal {
         return _enabledTokens[index];
     }
 
+    /// @notice Whether deposits and withdrawal processing are currently paused.
+    /// @dev The pause expires automatically once block.timestamp reaches pauseExpiry.
     function paused() public view returns (bool) {
         return block.timestamp < pauseExpiry;
     }
 
-    /// @notice Pause deposits and withdrawal processing for 30 days, or resume them early.
-    function pause(bool shouldPause) external {
-        if (shouldPause) {
-            if (paused()) revert PortalIsPaused();
-            _requireCapabilityActive(Capability.PausePortal);
-            if (
-                msg.sender != admin && !isSequencer(msg.sender)
-                    && !hasRole(msg.sender, Role.PauseGuardian)
-            ) {
-                revert NotPauseAuthority();
-            }
-            pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
-            emit PortalPaused(msg.sender);
-        } else {
-            if (msg.sender != admin) revert NotAdmin();
-            pauseExpiry = 0;
-            emit PortalResumed(msg.sender);
+    /// @notice Pause deposits and withdrawal processing for 30 days.
+    function pause() external {
+        if (paused()) revert PortalIsPaused();
+        _requireCapabilityActive(Capability.PausePortal);
+        if (
+            msg.sender != admin && !isSequencer(msg.sender)
+                && !hasRole(msg.sender, Role.PauseGuardian)
+        ) {
+            revert NotPauseAuthority();
         }
+        pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
+        emit PortalPaused(msg.sender);
+    }
+
+    /// @notice Resume deposits and withdrawal processing before the pause expires.
+    /// @dev Admin recovery remains available after the pause capability is abdicated.
+    function resume() external onlyAdmin {
+        pauseExpiry = 0;
+        emit PortalResumed(msg.sender);
     }
 
     /// @notice Schedule permanent abdication of a Portal configuration surface.
@@ -632,13 +636,11 @@ contract ZonePortal is IZonePortal {
         emit AbdicationScheduled(capability, effectiveAt);
     }
 
-    function _isCapabilityActive(Capability capability) internal view returns (bool) {
-        uint64 effectiveAt = abdicationEffectiveAt[capability];
-        return effectiveAt == 0 || block.timestamp < effectiveAt;
-    }
-
     function _requireCapabilityActive(Capability capability) internal view {
-        if (!_isCapabilityActive(capability)) revert CapabilityAbdicated(capability);
+        uint64 effectiveAt = abdicationEffectiveAt[capability];
+        if (effectiveAt != 0 && block.timestamp >= effectiveAt) {
+            revert CapabilityAbdicated(capability);
+        }
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.

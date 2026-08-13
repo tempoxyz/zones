@@ -823,8 +823,11 @@ interface IZonePortal {
 
     function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
-    /// @notice Pause deposits and withdrawal processing for 30 days, or resume them early.
-    function pause(bool shouldPause) external;
+    /// @notice Pause deposits and withdrawal processing for 30 days.
+    function pause() external;
+
+    /// @notice Resume deposits and withdrawal processing before the pause expires.
+    function resume() external;
 
     /// @notice Schedule permanent abdication of a Portal capability. Only callable by admin.
     function abdicate(Capability capability) external;

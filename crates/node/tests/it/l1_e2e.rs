@@ -2136,7 +2136,7 @@ async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyr
         ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
     recipient_account.withdraw(withdrawal_amount).await?;
 
-    let pause_receipt = portal.pause(true).send().await?.get_receipt().await?;
+    let pause_receipt = portal.pause().send().await?.get_receipt().await?;
     eyre::ensure!(pause_receipt.status(), "global pause transaction failed");
     eyre::ensure!(portal.paused().call().await?, "portal should be paused");
 

@@ -256,7 +256,8 @@ crate::sol! {
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
-        function pause(bool shouldPause) external;
+        function pause() external;
+        function resume() external;
         function abdicate(Capability capability) external;
 
         function submitBatch(
