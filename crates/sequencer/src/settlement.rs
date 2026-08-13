@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock};
+use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 
 use crate::{
     ZoneSequencerProvider,
@@ -61,12 +61,26 @@ impl fmt::Display for SettlementQuorumWaitCancelled {
 
 impl std::error::Error for SettlementQuorumWaitCancelled {}
 
+#[derive(Debug)]
+pub(crate) struct SettlementWaitBecameStale;
+
+impl fmt::Display for SettlementWaitBecameStale {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("portal advanced while waiting for settlement quorum")
+    }
+}
+
+impl std::error::Error for SettlementWaitBecameStale {}
+
 /// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
 const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
+
+/// How often a quorum wait rechecks whether another leader has advanced the portal.
+const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
@@ -342,10 +356,15 @@ impl BatchSubmitter {
                     zone_height = batch.zone_height,
                     threshold, "Waiting for settlement quorum"
                 );
-                let certificate = store
-                    .wait_for_settlement(batch.zone_height, threshold, shutdown)
-                    .await
-                    .ok_or(SettlementQuorumWaitCancelled)?;
+                let certificate = self
+                    .wait_for_settlement_or_portal_progress(
+                        store,
+                        batch.zone_height,
+                        threshold,
+                        batch.prev_block_hash,
+                        shutdown,
+                    )
+                    .await?;
                 let anchor_mode = match self
                     .validate_certificate(batch, batch.zone_height, metadata, &certificate)
                     .await
@@ -475,6 +494,42 @@ impl BatchSubmitter {
         );
 
         Ok(event)
+    }
+
+    /// Wait for a local quorum while periodically checking that the proposal still extends the
+    /// portal tip. A portal change means another submission won the handoff race and the monitor
+    /// must resynchronize before attempting more work.
+    async fn wait_for_settlement_or_portal_progress(
+        &self,
+        store: &AttestationStore,
+        height: u64,
+        threshold: usize,
+        expected_portal_hash: B256,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> Result<SettlementCertificate> {
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    return Err(SettlementQuorumWaitCancelled.into());
+                }
+                certificate = store.wait_for_settlement(height, threshold, shutdown) => {
+                    return certificate.ok_or_else(|| SettlementQuorumWaitCancelled.into());
+                }
+                () = tokio::time::sleep(SETTLEMENT_PORTAL_POLL_INTERVAL) => {}
+            }
+
+            let portal_hash = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    return Err(SettlementQuorumWaitCancelled.into());
+                }
+                result = self.read_portal_block_hash() => result?,
+            };
+            if portal_hash != expected_portal_hash {
+                return Err(SettlementWaitBecameStale.into());
+            }
+        }
     }
 
     fn sign_settlement_attestation(
@@ -1738,6 +1793,29 @@ mod tests {
 
         assert_eq!(anchor.block_hash, B256::ZERO);
         assert_eq!(anchor.block_number, 0);
+    }
+
+    #[tokio::test]
+    async fn quorum_wait_stops_when_the_portal_advances() {
+        let l1 = Asserter::new();
+        let advanced_hash = B256::repeat_byte(0x42);
+        l1.push_success(&Bytes::copy_from_slice(advanced_hash.as_slice()));
+        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+        let store = AttestationStore::default();
+
+        let error = submitter
+            .wait_for_settlement_or_portal_progress(
+                &store,
+                120,
+                2,
+                B256::repeat_byte(0x24),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("portal progress must invalidate the stale quorum wait");
+
+        assert!(error.downcast_ref::<SettlementWaitBecameStale>().is_some());
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]

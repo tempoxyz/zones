@@ -41,8 +41,9 @@ use crate::{
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog,
-        SettlementQuorumWaitCancelled, WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch,
-        fetch_finalized_batch_boundaries, read_zone_block_snapshot,
+        SettlementQuorumWaitCancelled, SettlementWaitBecameStale, WithdrawalPage,
+        ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
+        read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -639,6 +640,24 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 Err(e) => {
                     if e.downcast_ref::<SettlementQuorumWaitCancelled>().is_some() {
                         return Err(e);
+                    }
+                    if e.downcast_ref::<SettlementWaitBecameStale>().is_some() {
+                        self.metrics
+                            .batch_submit_latency_seconds
+                            .record(submit_started.elapsed().as_secs_f64());
+                        warn!(
+                            local_prev = %batch_data.prev_block_hash,
+                            last_zone_block,
+                            "Portal advanced while waiting for settlement quorum; resyncing"
+                        );
+                        let portal_anchor = self.resync_from_portal().await?;
+                        if portal_anchor < last_zone_block {
+                            return Err(eyre::eyre!(
+                                "portal resynced to zone block {portal_anchor}, before pending batch \
+                                 boundary {last_zone_block}"
+                            ));
+                        }
+                        return Ok(());
                     }
                     self.metrics
                         .batch_submit_latency_seconds
