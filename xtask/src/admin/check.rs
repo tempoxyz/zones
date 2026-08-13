@@ -12,7 +12,7 @@ use alloy::{
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{Context as _, ensure, eyre};
-use futures::future::join_all;
+use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::{ZoneFactory, ZonePortal};
@@ -22,10 +22,13 @@ use zone_rpc::types::{SequencerInfoResponse, ZoneInfoResponse};
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
+// Two minutes at Tempo's expected 500 ms block time.
+const MAX_ZONE_HEIGHT_LAG_BLOCKS: u64 = 240;
+
 #[cfg(test)]
 const DEFAULT_OBSERVE_FOR: Duration = Duration::from_secs(5);
 #[cfg(test)]
-const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read-only consistency and health audit for a Zone.
 #[derive(Debug, clap::Parser)]
@@ -63,7 +66,7 @@ pub(crate) struct Check {
     observe_for: Duration,
 
     /// Timeout applied to each operator snapshot and Portal snapshot.
-    #[arg(long, default_value = "5s", value_parser = parse_nonzero_duration)]
+    #[arg(long, default_value = "10s", value_parser = parse_nonzero_duration)]
     rpc_timeout: Duration,
 
     /// Require the finalized Portal to have exactly this sequencer-set version.
@@ -555,7 +558,19 @@ where
     let withdrawal_batch_call = portal.withdrawalBatchIndex().block(block_id);
     let deposit_queue_call = portal.currentDepositQueueHash().block(block_id);
     let enabled_token_count_call = portal.enabledTokenCount().block(block_id);
-    let encryption_key_call = portal.sequencerEncryptionKey().block(block_id);
+    let encryption_key_call = async {
+        let key_count = portal.encryptionKeyCount().block(block_id).call().await?;
+        if key_count == U256::ZERO {
+            Ok(None)
+        } else {
+            portal
+                .sequencerEncryptionKey()
+                .block(block_id)
+                .call()
+                .await
+                .map(Some)
+        }
+    };
     let (
         zone_id,
         admin,
@@ -589,7 +604,7 @@ where
         withdrawal_batch_call.call(),
         deposit_queue_call.call(),
         enabled_token_count_call.call(),
-        async { Ok::<_, alloy::contract::Error>(encryption_key_call.call().await.ok()) },
+        encryption_key_call,
     )
     .wrap_err("failed reading finalized ZonePortal snapshot")?;
     ensure!(
@@ -597,30 +612,30 @@ where
         "Portal reports Zone ID {zone_id}, expected {expected_zone_id}"
     );
 
-    let mut sequencers = Vec::with_capacity(sequencer_count.to::<usize>());
-    for index in 0..sequencer_count.to::<usize>() {
-        sequencers.push(
+    let sequencers = try_join_all((0..sequencer_count.to::<usize>()).map(|index| {
+        let portal = &portal;
+        async move {
             portal
                 .sequencerAt(U256::from(index))
                 .block(block_id)
                 .call()
                 .await
-                .wrap_err_with(|| format!("failed reading finalized sequencer index {index}"))?,
-        );
-    }
-    let mut enabled_tokens = Vec::with_capacity(enabled_token_count.to::<usize>());
-    for index in 0..enabled_token_count.to::<usize>() {
-        enabled_tokens.push(
+                .wrap_err_with(|| format!("failed reading finalized sequencer index {index}"))
+        }
+    }))
+    .await?;
+    let enabled_tokens = try_join_all((0..enabled_token_count.to::<usize>()).map(|index| {
+        let portal = &portal;
+        async move {
             portal
                 .enabledTokenAt(U256::from(index))
                 .block(block_id)
                 .call()
                 .await
-                .wrap_err_with(|| {
-                    format!("failed reading finalized enabled token index {index}")
-                })?,
-        );
-    }
+                .wrap_err_with(|| format!("failed reading finalized enabled token index {index}"))
+        }
+    }))
+    .await?;
 
     let encryption_key = encryption_key
         .filter(|key| key.x != B256::ZERO)
@@ -920,6 +935,11 @@ fn evaluate_invariants(
             format!("topology disagreements: {}", topology_failures.join("; "))
         },
     );
+    results.push(loaded_manifest_agreement_invariant(
+        config.zone_id,
+        portal.sequencer_set_version,
+        nodes,
+    ));
 
     let leader_failures = live_nodes
         .iter()
@@ -954,14 +974,24 @@ fn evaluate_invariants(
         ),
     );
 
-    let readiness_failures = readiness_failures(&live_nodes);
-    let readiness_ok = live_nodes.len() == nodes.len() && readiness_failures.is_empty();
+    let readiness = assess_readiness(&live_nodes);
+    let readiness_ok = live_nodes.len() == nodes.len()
+        && readiness.sequencer_nodes > 0
+        && readiness.failures.is_empty();
+    let excluded_detail = if readiness.rpc_only_nodes.is_empty() {
+        "no rpc-only nodes excluded".to_owned()
+    } else {
+        format!("rpc-only excluded: {}", readiness.rpc_only_nodes.join(", "))
+    };
     add_check(
         &mut results,
         "promotion_readiness",
         readiness_ok,
-        "all nodes are promotion-ready with no pending transitions".to_owned(),
-        readiness_failures.join("; "),
+        format!(
+            "all {} sequencer node(s) are promotion-ready with no pending transitions; {excluded_detail}",
+            readiness.sequencer_nodes
+        ),
+        readiness.failures.join("; "),
     );
 
     match portal.encryption_key {
@@ -1097,6 +1127,7 @@ fn evaluate_invariants(
         ),
         canonical_failure,
     );
+    results.push(zone_height_lag_invariant(nodes));
 
     if let Some(manifest) = manifest {
         let node_manifest_zones = live_nodes
@@ -1291,6 +1322,174 @@ fn l1_batch_invariant(portal: &PortalSnapshot) -> InvariantResult {
     }
 }
 
+fn loaded_manifest_agreement_invariant(
+    expected_zone_id: u32,
+    expected_sequencer_set_version: u64,
+    nodes: &[NodeSnapshot],
+) -> InvariantResult {
+    let infos = nodes
+        .iter()
+        .filter_map(|node| node.sequencer.as_ref().map(|info| (node, info)))
+        .collect::<Vec<_>>();
+    if infos.len() != nodes.len() {
+        let missing = nodes
+            .iter()
+            .filter(|node| node.sequencer.is_none())
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>();
+        return InvariantResult {
+            name: "loaded_manifest_agreement",
+            status: CheckStatus::Fail,
+            detail: format!("no sequencer status reported by: {}", missing.join(", ")),
+        };
+    }
+    if infos.iter().all(|(_, info)| info.mode == "single") {
+        return InvariantResult {
+            name: "loaded_manifest_agreement",
+            status: CheckStatus::Skipped,
+            detail: "all nodes report single-node mode; no loaded manifest to compare".to_owned(),
+        };
+    }
+    if !infos.iter().all(|(_, info)| info.mode == "multi") {
+        return InvariantResult {
+            name: "loaded_manifest_agreement",
+            status: CheckStatus::Fail,
+            detail: format!(
+                "inconsistent node modes: {}",
+                infos
+                    .iter()
+                    .map(|(node, info)| format!("{}={}", node.name, info.mode))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+    }
+
+    let Some((_, first)) = infos.first() else {
+        return InvariantResult {
+            name: "loaded_manifest_agreement",
+            status: CheckStatus::Fail,
+            detail: "no operator nodes configured".to_owned(),
+        };
+    };
+    let (Some(zone_id), Some(version), Some(digest)) = (
+        first.manifest_zone_id.map(|id| id.to::<u32>()),
+        first
+            .manifest_sequencer_set_version
+            .map(|version| version.to::<u64>()),
+        first.manifest_membership_digest,
+    ) else {
+        return InvariantResult {
+            name: "loaded_manifest_agreement",
+            status: CheckStatus::Fail,
+            detail: format!(
+                "{} did not report complete loaded manifest metadata",
+                infos[0].0.name
+            ),
+        };
+    };
+    let failures = infos
+        .iter()
+        .filter_map(|(node, info)| {
+            let observed = (
+                info.manifest_zone_id.map(|id| id.to::<u32>()),
+                info.manifest_sequencer_set_version
+                    .map(|version| version.to::<u64>()),
+                info.manifest_membership_digest,
+            );
+            (observed != (Some(zone_id), Some(version), Some(digest))).then(|| {
+                format!(
+                    "{} reports zone={:?}, version={:?}, digest={:?}",
+                    node.name, observed.0, observed.1, observed.2
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected_matches = zone_id == expected_zone_id && version == expected_sequencer_set_version;
+    InvariantResult {
+        name: "loaded_manifest_agreement",
+        status: if expected_matches && failures.is_empty() {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: if expected_matches && failures.is_empty() {
+            format!(
+                "all nodes report manifest Zone {zone_id}, version {version}, and membership digest {digest}"
+            )
+        } else if !expected_matches {
+            format!(
+                "loaded manifest reports Zone {zone_id}, version {version}; expected Zone {expected_zone_id}, finalized Portal version {expected_sequencer_set_version}; disagreements: {}",
+                failures.join("; ")
+            )
+        } else {
+            format!("loaded manifest disagreements: {}", failures.join("; "))
+        },
+    }
+}
+
+fn zone_height_lag_invariant(nodes: &[NodeSnapshot]) -> InvariantResult {
+    let heights = nodes
+        .iter()
+        .filter_map(|node| {
+            node.sequencer
+                .as_ref()?
+                .local_tip
+                .as_ref()
+                .map(|tip| (node, tip.zone_height.to::<u64>()))
+        })
+        .collect::<Vec<_>>();
+    if heights.len() != nodes.len() {
+        let missing = nodes
+            .iter()
+            .filter(|node| {
+                node.sequencer
+                    .as_ref()
+                    .and_then(|info| info.local_tip.as_ref())
+                    .is_none()
+            })
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>();
+        return InvariantResult {
+            name: "zone_height_lag",
+            status: CheckStatus::Fail,
+            detail: format!("no local Zone height reported by: {}", missing.join(", ")),
+        };
+    }
+
+    let newest_height = heights
+        .iter()
+        .map(|(_, height)| *height)
+        .max()
+        .expect("heights includes every configured node");
+    let lagging = heights
+        .iter()
+        .filter_map(|(node, height)| {
+            let lag = newest_height - *height;
+            (lag > MAX_ZONE_HEIGHT_LAG_BLOCKS)
+                .then(|| format!("{} at {} ({lag} blocks behind)", node.name, height))
+        })
+        .collect::<Vec<_>>();
+    InvariantResult {
+        name: "zone_height_lag",
+        status: if lagging.is_empty() {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: if lagging.is_empty() {
+            format!(
+                "all nodes are within {MAX_ZONE_HEIGHT_LAG_BLOCKS} Zone blocks of newest height {newest_height}"
+            )
+        } else {
+            format!(
+                "newest Zone height {newest_height}; allowed lag {MAX_ZONE_HEIGHT_LAG_BLOCKS} blocks; lagging: {}",
+                lagging.join("; ")
+            )
+        },
+    }
+}
+
 fn zone_height_invariant(
     initial_nodes: &[NodeSnapshot],
     later_nodes: &[NodeSnapshot],
@@ -1416,29 +1615,56 @@ fn node_error_detail(nodes: &[NodeSnapshot]) -> String {
     }
 }
 
-fn readiness_failures(
-    nodes: &[(&NodeSnapshot, &ZoneInfoResponse, &SequencerInfoResponse)],
-) -> Vec<String> {
-    nodes
-        .iter()
-        .filter_map(|(node, _, info)| match (&info.readiness, &info.progress) {
+struct ReadinessAssessment<'a> {
+    sequencer_nodes: usize,
+    rpc_only_nodes: Vec<&'a str>,
+    failures: Vec<String>,
+}
+
+fn assess_readiness<'a>(
+    nodes: &'a [(&NodeSnapshot, &ZoneInfoResponse, &SequencerInfoResponse)],
+) -> ReadinessAssessment<'a> {
+    let mut sequencer_nodes = 0_usize;
+    let mut rpc_only_nodes = Vec::new();
+    let mut failures = Vec::new();
+    for (node, _, info) in nodes {
+        match is_rpc_only(info) {
+            Some(true) => {
+                rpc_only_nodes.push(node.name.as_str());
+                continue;
+            }
+            Some(false) => sequencer_nodes += 1,
+            None => {
+                failures.push(format!(
+                    "{} does not report whether its local node is rpc-only",
+                    node.name
+                ));
+                continue;
+            }
+        }
+        match (&info.readiness, &info.progress) {
             (Some(readiness), Some(progress))
                 if readiness.ready_for_promotion
-                    && progress.pending_transitions.to::<u64>() == 0 =>
-            {
-                None
-            }
-            (Some(readiness), Some(progress)) => Some(format!(
+                    && progress.pending_transitions.to::<u64>() == 0 => {}
+            (Some(readiness), Some(progress)) => failures.push(format!(
                 "{}: ready={}, pending transitions={}, reasons=[{}]",
                 node.name,
                 readiness.ready_for_promotion,
                 progress.pending_transitions,
                 readiness.reasons.join(", ")
             )),
-            (None, _) => Some(format!("{}: readiness status unavailable", node.name)),
-            (_, None) => Some(format!("{}: progress status unavailable", node.name)),
-        })
-        .collect()
+            (None, _) => failures.push(format!("{}: readiness status unavailable", node.name)),
+            (_, None) => failures.push(format!("{}: progress status unavailable", node.name)),
+        }
+    }
+    if sequencer_nodes == 0 {
+        failures.push("no non-rpc-only sequencer nodes were checked".to_owned());
+    }
+    ReadinessAssessment {
+        sequencer_nodes,
+        rpc_only_nodes,
+        failures,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1538,16 +1764,20 @@ fn render_node_table(report: &CheckReport) {
                         && leader.epoch.to::<u64>() == report.portal.leader_epoch
                 })
             }));
-            let ready = status(node.sequencer.as_ref().map(|sequencer| {
-                sequencer
-                    .readiness
-                    .as_ref()
-                    .zip(sequencer.progress.as_ref())
-                    .is_some_and(|(readiness, progress)| {
-                        readiness.ready_for_promotion
-                            && progress.pending_transitions.to::<u64>() == 0
-                    })
-            }));
+            let ready = match node.sequencer.as_ref().and_then(is_rpc_only) {
+                Some(true) => TableStatus::NotAvailable,
+                Some(false) => status(node.sequencer.as_ref().map(|sequencer| {
+                    sequencer
+                        .readiness
+                        .as_ref()
+                        .zip(sequencer.progress.as_ref())
+                        .is_some_and(|(readiness, progress)| {
+                            readiness.ready_for_promotion
+                                && progress.pending_transitions.to::<u64>() == 0
+                        })
+                })),
+                None => status(None),
+            };
             let key = match report.portal.encryption_key {
                 None => TableStatus::NotAvailable,
                 Some(active_key) => match node.sequencer.as_ref().and_then(is_rpc_only) {
@@ -1895,5 +2125,175 @@ operator_rpc_url = "https://old.example"
         assert_eq!(command.observe_for, Duration::ZERO);
         assert!(command.zone_manifest.is_none());
         assert!(command.json);
+    }
+
+    fn node_snapshot(name: &str, sequencer: SequencerInfoResponse) -> NodeSnapshot {
+        NodeSnapshot {
+            name: name.to_owned(),
+            url: format!("http://{name}.example"),
+            zone: Some(ZoneInfoResponse {
+                zone_id: U64::from(1),
+                is_access_enforced: false,
+                is_gateway_open: false,
+                zone_tokens: Vec::new(),
+                sequencers: Vec::new(),
+                chain_id: U64::from(1),
+                tempo_block_number: U64::from(1),
+            }),
+            sequencer: Some(sequencer),
+            common_block: None,
+            error: None,
+        }
+    }
+
+    fn sequencer_info(rpc_only: bool, ready_for_promotion: bool) -> SequencerInfoResponse {
+        SequencerInfoResponse {
+            mode: "multi".to_owned(),
+            portal: Address::ZERO,
+            manifest_zone_id: None,
+            manifest_sequencer_set_version: None,
+            manifest_membership_digest: None,
+            decryption_keys: None,
+            local: None,
+            active_leader: None,
+            local_tip: None,
+            peers: vec![zone_rpc::types::SequencerPeerInfo {
+                name: "node".to_owned(),
+                sequencer_address: (!rpc_only).then_some(Address::ZERO),
+                rpc_only,
+                is_local: true,
+                tip: None,
+            }],
+            progress: Some(zone_rpc::types::SequencerProgress {
+                zone_height: U64::from(1),
+                tempo_block_number: U64::from(1),
+                latest_observed_leadership_epoch: None,
+                locally_applied_leadership_epoch: None,
+                pending_transitions: U64::from(0),
+            }),
+            readiness: Some(zone_rpc::types::SequencerReadiness {
+                ready_for_promotion,
+                reasons: if ready_for_promotion {
+                    Vec::new()
+                } else {
+                    vec!["rpc-only nodes cannot get promoted".to_owned()]
+                },
+            }),
+        }
+    }
+
+    fn with_local_tip(mut info: SequencerInfoResponse, height: u64) -> SequencerInfoResponse {
+        info.local_tip = Some(zone_rpc::types::PeerTipInfo {
+            zone_height: U64::from(height),
+            zone_hash: B256::ZERO,
+            tempo_block_number: U64::from(height),
+            tempo_block_hash: B256::ZERO,
+        });
+        info
+    }
+
+    fn with_manifest(
+        mut info: SequencerInfoResponse,
+        zone_id: u32,
+        version: u64,
+        digest: B256,
+    ) -> SequencerInfoResponse {
+        info.manifest_zone_id = Some(U64::from(zone_id));
+        info.manifest_sequencer_set_version = Some(U64::from(version));
+        info.manifest_membership_digest = Some(digest);
+        info
+    }
+
+    #[test]
+    fn promotion_readiness_skips_rpc_only_nodes() {
+        let leader = node_snapshot("leader", sequencer_info(false, true));
+        let rpc = node_snapshot("rpc", sequencer_info(true, false));
+        let live = [
+            (
+                &leader,
+                leader.zone.as_ref().unwrap(),
+                leader.sequencer.as_ref().unwrap(),
+            ),
+            (
+                &rpc,
+                rpc.zone.as_ref().unwrap(),
+                rpc.sequencer.as_ref().unwrap(),
+            ),
+        ];
+
+        let readiness = assess_readiness(&live);
+        assert_eq!(readiness.sequencer_nodes, 1);
+        assert_eq!(readiness.rpc_only_nodes, ["rpc"]);
+        assert!(readiness.failures.is_empty());
+    }
+
+    #[test]
+    fn zone_height_lag_allows_nodes_within_two_minutes() {
+        let newest = node_snapshot("newest", with_local_tip(sequencer_info(false, true), 1_000));
+        let lagging = node_snapshot(
+            "lagging",
+            with_local_tip(
+                sequencer_info(false, true),
+                1_000 - MAX_ZONE_HEIGHT_LAG_BLOCKS,
+            ),
+        );
+
+        let result = zone_height_lag_invariant(&[newest, lagging]);
+        assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn zone_height_lag_rejects_nodes_more_than_two_minutes_behind() {
+        let newest = node_snapshot("newest", with_local_tip(sequencer_info(false, true), 1_000));
+        let lagging = node_snapshot(
+            "lagging",
+            with_local_tip(
+                sequencer_info(false, true),
+                999 - MAX_ZONE_HEIGHT_LAG_BLOCKS,
+            ),
+        );
+
+        let result = zone_height_lag_invariant(&[newest, lagging]);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("lagging at 759 (241 blocks behind)"));
+    }
+
+    #[test]
+    fn loaded_manifest_agreement_detects_different_membership_digests() {
+        let first = node_snapshot(
+            "first",
+            with_manifest(sequencer_info(false, true), 1, 7, B256::ZERO),
+        );
+        let second = node_snapshot(
+            "second",
+            with_manifest(sequencer_info(false, true), 1, 7, B256::from([1; 32])),
+        );
+
+        let result = loaded_manifest_agreement_invariant(1, 7, &[first, second]);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("second reports"));
+    }
+
+    #[test]
+    fn loaded_manifest_agreement_accepts_matching_multi_node_manifests() {
+        let first = node_snapshot(
+            "first",
+            with_manifest(sequencer_info(false, true), 1, 7, B256::ZERO),
+        );
+        let second = node_snapshot(
+            "second",
+            with_manifest(sequencer_info(false, true), 1, 7, B256::ZERO),
+        );
+
+        let result = loaded_manifest_agreement_invariant(1, 7, &[first, second]);
+        assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn loaded_manifest_agreement_skips_single_node_mode() {
+        let mut info = sequencer_info(false, true);
+        info.mode = "single".to_owned();
+        let result = loaded_manifest_agreement_invariant(1, 7, &[node_snapshot("single", info)]);
+        assert_eq!(result.status, CheckStatus::Skipped);
     }
 }

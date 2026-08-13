@@ -56,9 +56,10 @@ Node names are optional, but recommended. An explicit name is checked against
 the local manifest name reported by that endpoint.
 
 The expected Zone manifest is also optional. Without it, the command checks
-live consistency and clearly reports that the desired topology was not
-verified. Supplying it adds manifest Zone ID, version, membership, digest, and
-node-identity checks.
+live consistency, including agreement on the loaded manifest Zone ID, version,
+and membership digest for multi-node deployments, and clearly reports that the
+desired topology was not independently verified. Supplying it additionally
+checks those values and every node identity against the expected manifest.
 
 ### CLI arguments
 
@@ -82,7 +83,7 @@ Other useful options are:
 ```text
 --zone-manifest <path>
 --observe-for <duration>                    default: 5s
---rpc-timeout <duration>                    default: 5s
+--rpc-timeout <duration>                    default: 10s
 --require-sequencer-set-version <version>
 --require-leader <node-name-or-address>
 --require-encryption-key <x-coordinate>:<parity>
@@ -100,11 +101,14 @@ The command:
    finalized Tempo block.
 2. Queries every operator RPC concurrently.
 3. Checks Zone and Portal identity, endpoint labels, live quorum membership,
-   topology, finalized leader agreement, and promotion readiness.
+   topology, finalized leader agreement, and promotion readiness on
+   non-RPC-only sequencer nodes. RPC-only nodes cannot be promoted and are
+   reported as `N/A` for readiness.
 4. Verifies the active shared decryption key on non-RPC-only sequencer nodes.
    RPC-only nodes do not hold that key and are reported as `N/A`.
-5. Compares block hash and state root across all nodes at their lowest common
-   available Zone height.
+5. Fails when any node's local Zone height is more than 240 blocks (about two
+   minutes) behind the newest node, then compares block hash and state root
+   across all nodes at their lowest common available Zone height.
 6. Reports the finalized L1 batch index and settled Zone height. A new L1 batch
    is not required during the short observation window.
 7. Samples the operator nodes again after `--observe-for` and verifies that each
