@@ -1535,31 +1535,37 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_pauseRoleCanPause() public {
+        address guardian = makeAddr("pause guardian");
         vm.prank(admin);
-        portal.setPauseGuardian(alice, true);
+        portal.setPauseGuardian(guardian, true);
 
-        vm.prank(alice);
+        vm.prank(guardian);
         portal.pause();
         assertTrue(portal.paused());
     }
 
-    function test_setPauseGuardian_allowsRemovalAfterCapabilityAbdication() public {
+    function test_setPauseGuardian_cannotBeRemovedAfterCapabilityAbdication() public {
+        address guardian = makeAddr("pause guardian");
         vm.startPrank(admin);
-        portal.setPauseGuardian(alice, true);
+        portal.setPauseGuardian(guardian, true);
         portal.abdicate(Capability.PausePortal);
         vm.stopPrank();
 
         vm.warp(block.timestamp + 30 days);
 
         vm.prank(admin);
-        portal.setPauseGuardian(alice, false);
-        assertTrue(portal.hasRole(alice, Role.None));
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
+        );
+        portal.setPauseGuardian(guardian, false);
 
         vm.prank(admin);
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.CapabilityAbdicated.selector, Capability.PausePortal)
         );
         portal.setPauseGuardian(bob, true);
+
+        assertTrue(portal.hasRole(guardian, Role.PauseGuardian));
     }
 
     function test_accessRoles_cannotBeRemovedAfterCapabilityAbdication() public {
@@ -1582,19 +1588,27 @@ contract ZonePortalTest is BaseTest {
         );
         portal.setGateway(address(zoneGateway), false);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.CapabilityAbdicated.selector, Capability.AccessPolicy
-            )
-        );
+        vm.stopPrank();
+
+        assertTrue(portal.hasRole(alice, Role.Account));
+        assertTrue(portal.hasRole(address(zoneGateway), Role.CallbackGateway));
+    }
+
+    function test_setPauseGuardian_cannotModifyAccessRoles() public {
+        vm.startPrank(admin);
+
+        vm.expectRevert();
         portal.setPauseGuardian(alice, false);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.CapabilityAbdicated.selector, Capability.AccessPolicy
-            )
-        );
+        vm.expectRevert();
+        portal.setPauseGuardian(alice, true);
+
+        vm.expectRevert();
+        portal.setPauseGuardian(address(zoneGateway), false);
+
+        vm.expectRevert();
         portal.setPauseGuardian(address(zoneGateway), true);
+
         vm.stopPrank();
 
         assertTrue(portal.hasRole(alice, Role.Account));
@@ -1624,8 +1638,9 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_pause_onlyAdminCanResumeEarly() public {
+        address guardian = makeAddr("pause guardian");
         vm.prank(admin);
-        portal.setPauseGuardian(alice, true);
+        portal.setPauseGuardian(guardian, true);
         vm.prank(sequencer);
         portal.pause();
 
@@ -1633,7 +1648,7 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.resume();
 
-        vm.prank(alice);
+        vm.prank(guardian);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.resume();
 
