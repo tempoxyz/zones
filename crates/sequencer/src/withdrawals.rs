@@ -39,6 +39,7 @@ use parking_lot::Mutex;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt};
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tokio::sync::Notify;
+use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
@@ -374,7 +375,7 @@ impl WithdrawalProcessor {
     /// token is observed at the wait boundary so an in-flight processing cycle completes
     /// first.
     #[instrument(skip_all, fields(portal = %self.config.portal_address))]
-    pub async fn run(&self, shutdown: &tokio_util::sync::CancellationToken) {
+    pub async fn run(&self, shutdown: &sync::CancellationToken) {
         info!("Withdrawal processor started");
 
         loop {
@@ -431,10 +432,7 @@ impl WithdrawalProcessor {
     /// ([`find_processed_offset`]), so a crash, timeout, or restart mid-slot
     /// resumes exactly where the portal is.
     #[instrument(skip_all)]
-    async fn process_queue(
-        &self,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) -> eyre::Result<()> {
+    async fn process_queue(&self, shutdown: &sync::CancellationToken) -> eyre::Result<()> {
         // loop through all the slots
         loop {
             if shutdown.is_cancelled() {
@@ -587,6 +585,7 @@ impl WithdrawalProcessor {
                     remaining,
                     batches,
                     shutdown,
+                    || {},
                 )
                 .await?;
             self.record_slot_duration(slot_started_at.elapsed());
@@ -622,28 +621,7 @@ impl WithdrawalProcessor {
         first_nonce: u64,
         withdrawals: &[abi::Withdrawal],
         batches: Vec<WithdrawalBatch>,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) -> eyre::Result<SubmitOutcome> {
-        self.submit_and_confirm_batches_with_drain_observer(
-            slot,
-            offset,
-            first_nonce,
-            withdrawals,
-            batches,
-            shutdown,
-            || {},
-        )
-        .await
-    }
-
-    async fn submit_and_confirm_batches_with_drain_observer(
-        &self,
-        slot: u64,
-        offset: usize,
-        first_nonce: u64,
-        withdrawals: &[abi::Withdrawal],
-        batches: Vec<WithdrawalBatch>,
-        shutdown: &tokio_util::sync::CancellationToken,
+        shutdown: &sync::CancellationToken,
         mut on_batch_drained: impl FnMut(),
     ) -> eyre::Result<SubmitOutcome> {
         let nonce_count = u64::try_from(batches.len())
@@ -837,7 +815,7 @@ pub fn spawn_withdrawal_processor(
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let processor = WithdrawalProcessor::new(config, provider, store, notify, repair_notify);
@@ -1313,7 +1291,7 @@ mod tests {
         );
 
         processor
-            .process_queue(&tokio_util::sync::CancellationToken::new())
+            .process_queue(&sync::CancellationToken::new())
             .await
             .unwrap();
 
@@ -1331,7 +1309,7 @@ mod tests {
             SharedWithdrawalStore::new(),
             Arc::new(Notify::new()),
         );
-        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown = sync::CancellationToken::new();
         shutdown.cancel();
 
         processor.process_queue(&shutdown).await.unwrap();
@@ -1363,23 +1341,15 @@ mod tests {
             build_withdrawal_batches(&withdrawals, processor.config.batch_limits.max_batch_gas);
         assert_eq!(batches.len(), 3);
 
-        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown = sync::CancellationToken::new();
         let mut drained = 0;
         let outcome = processor
-            .submit_and_confirm_batches_with_drain_observer(
-                7,
-                0,
-                10,
-                &withdrawals,
-                batches,
-                &shutdown,
-                || {
-                    drained += 1;
-                    if drained == 1 {
-                        shutdown.cancel();
-                    }
-                },
-            )
+            .submit_and_confirm_batches(7, 0, 10, &withdrawals, batches, &shutdown, || {
+                drained += 1;
+                if drained == 1 {
+                    shutdown.cancel();
+                }
+            })
             .await
             .unwrap();
 
@@ -1423,7 +1393,7 @@ mod tests {
         let processor = test_processor(l1.clone(), store, repair_notify.clone());
 
         processor
-            .process_queue(&tokio_util::sync::CancellationToken::new())
+            .process_queue(&sync::CancellationToken::new())
             .await
             .unwrap();
 
@@ -1458,7 +1428,7 @@ mod tests {
         let processor = test_processor(l1.clone(), store.clone(), repair_notify.clone());
 
         processor
-            .process_queue(&tokio_util::sync::CancellationToken::new())
+            .process_queue(&sync::CancellationToken::new())
             .await
             .unwrap();
 

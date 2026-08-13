@@ -30,6 +30,7 @@ use eyre::{Result, WrapErr};
 use futures::StreamExt;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
+use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
 
 use alloy_sol_types::{ContractError, SolInterface as _};
@@ -40,9 +41,8 @@ use crate::{
     prover::ShadowProver,
     resolve_portal_zone_anchor,
     settlement::{
-        BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog,
-        SettlementQuorumWaitCancelled, SettlementWaitBecameStale, WithdrawalPage,
-        ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
+        BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
+        WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
         read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
@@ -261,7 +261,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     ))]
     /// Returns `Ok(())` only when `shutdown` fires; the token is observed at the poll
     /// boundary so an in-flight batch submission resolves before teardown.
-    pub async fn run(&mut self, shutdown: &tokio_util::sync::CancellationToken) -> Result<()> {
+    pub async fn run(&mut self, shutdown: &sync::CancellationToken) -> Result<()> {
         info!("Native zone monitor started");
 
         // Subscribe before reading the head so a block imported during startup cannot be missed.
@@ -295,7 +295,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    async fn process_available_blocks(&mut self, shutdown: &tokio_util::sync::CancellationToken) {
+    async fn process_available_blocks(&mut self, shutdown: &sync::CancellationToken) {
         let latest_zone_block = match self.provider.best_block_number() {
             Ok(number) => number,
             Err(error) => {
@@ -313,11 +313,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             .await
         {
             Ok(_) => self.record_observed_zone_block(latest_zone_block),
-            Err(error)
-                if error
-                    .downcast_ref::<SettlementQuorumWaitCancelled>()
-                    .is_some() => {}
-            Err(error) => {
+            Err(BatchSubmitError::Cancelled) => {}
+            Err(BatchSubmitError::PortalAdvanced) => {
+                unreachable!("portal advancement is reconciled by submit_batch_with_retry")
+            }
+            Err(BatchSubmitError::Other(error)) => {
                 error!(
                     from = scan_from,
                     to = latest_zone_block,
@@ -404,8 +404,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         &mut self,
         from: u64,
         to: u64,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) -> Result<bool> {
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<bool, BatchSubmitError> {
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
@@ -446,7 +446,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     "zone batch boundary {boundary_block} remains unsubmitted after reconciliation \
                      (previous anchor {before_submit}, current anchor {})",
                     self.last_submitted_zone_block
-                ));
+                )
+                .into());
             }
         }
 
@@ -458,8 +459,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         &mut self,
         from: u64,
         boundary: FinalizedBatchLog,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) -> Result<()> {
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<(), BatchSubmitError> {
         let to = boundary.block_number;
         let finalized_batch =
             fetch_finalized_batch(&self.provider, self.config.outbox_address, &boundary).await?;
@@ -516,8 +517,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         batch_data: &BatchData,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) -> Result<()> {
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<(), BatchSubmitError> {
         let mut delay = INITIAL_RETRY_DELAY;
 
         for attempt in 1..=MAX_RETRIES {
@@ -559,7 +560,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     return Err(eyre::eyre!(
                         "portal resynced to zone block {portal_anchor}, before pending batch \
                          boundary {last_zone_block}"
-                    ));
+                    )
+                    .into());
                 }
                 return Ok(());
             }
@@ -637,28 +639,27 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
                     return Ok(());
                 }
-                Err(e) => {
-                    if e.downcast_ref::<SettlementQuorumWaitCancelled>().is_some() {
-                        return Err(e);
+                Err(BatchSubmitError::Cancelled) => return Err(BatchSubmitError::Cancelled),
+                Err(BatchSubmitError::PortalAdvanced) => {
+                    self.metrics
+                        .batch_submit_latency_seconds
+                        .record(submit_started.elapsed().as_secs_f64());
+                    warn!(
+                        local_prev = %batch_data.prev_block_hash,
+                        last_zone_block,
+                        "Portal advanced while waiting for settlement quorum; resyncing"
+                    );
+                    let portal_anchor = self.resync_from_portal().await?;
+                    if portal_anchor < last_zone_block {
+                        return Err(eyre::eyre!(
+                            "portal resynced to zone block {portal_anchor}, before pending batch \
+                             boundary {last_zone_block}"
+                        )
+                        .into());
                     }
-                    if e.downcast_ref::<SettlementWaitBecameStale>().is_some() {
-                        self.metrics
-                            .batch_submit_latency_seconds
-                            .record(submit_started.elapsed().as_secs_f64());
-                        warn!(
-                            local_prev = %batch_data.prev_block_hash,
-                            last_zone_block,
-                            "Portal advanced while waiting for settlement quorum; resyncing"
-                        );
-                        let portal_anchor = self.resync_from_portal().await?;
-                        if portal_anchor < last_zone_block {
-                            return Err(eyre::eyre!(
-                                "portal resynced to zone block {portal_anchor}, before pending batch \
-                                 boundary {last_zone_block}"
-                            ));
-                        }
-                        return Ok(());
-                    }
+                    return Ok(());
+                }
+                Err(BatchSubmitError::Other(e)) => {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
@@ -697,7 +698,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
         Err(eyre::eyre!(
             "batch submission failed after {MAX_RETRIES} retries for zone block {last_zone_block}"
-        ))
+        )
+        .into())
     }
 
     /// Resync the local submission anchor from portal-confirmed on-chain state.
@@ -840,7 +842,7 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     signer: PrivateKeySigner,
     shared_state: ZoneMonitorSharedState,
     shadow_prover: Option<ShadowProver>,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let ZoneMonitorSharedState {
         withdrawal_store,
@@ -1060,7 +1062,7 @@ mod tests {
             abi_encode_u64(42431),
         ]));
 
-        let shutdown = tokio_util::sync::CancellationToken::new();
+        let shutdown = sync::CancellationToken::new();
         let submission_shutdown = shutdown.clone();
         let submission = tokio::spawn(async move {
             monitor
@@ -1334,12 +1336,7 @@ mod tests {
         };
 
         monitor
-            .submit_batch_with_retry(
-                &batch_data,
-                20,
-                Vec::new(),
-                &tokio_util::sync::CancellationToken::new(),
-            )
+            .submit_batch_with_retry(&batch_data, 20, Vec::new(), &sync::CancellationToken::new())
             .await
             .unwrap();
 
@@ -1390,7 +1387,7 @@ mod tests {
                 &batch_data,
                 pending_boundary,
                 Vec::new(),
-                &tokio_util::sync::CancellationToken::new(),
+                &sync::CancellationToken::new(),
             )
             .await
             .unwrap_err();
@@ -1429,12 +1426,7 @@ mod tests {
         };
 
         let error = monitor
-            .submit_batch_with_retry(
-                &batch_data,
-                20,
-                Vec::new(),
-                &tokio_util::sync::CancellationToken::new(),
-            )
+            .submit_batch_with_retry(&batch_data, 20, Vec::new(), &sync::CancellationToken::new())
             .await
             .unwrap_err();
 
