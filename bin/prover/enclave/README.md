@@ -33,22 +33,48 @@ Set `SPF_TEMPO_GENESIS` to a comma-separated list or pass `--tempo-genesis` repe
 Tempo genesis JSON files. Each custom chain ID must be unique and cannot override a built-in Tempo
 network.
 
-## Image and EIF
+## Images and EIF
 
-Build the OCI image with:
+The published `ghcr.io/tempoxyz/tempo-zone-prover` image is the Nitro host image to run on an
+enclave-enabled node. It contains the enclave EIF, Nitro CLI, and the TCP-to-vsock proxy. The
+enclave payload is an intermediate image and is not published separately.
 
-```console
-docker buildx bake tempo-zone-prover
-```
-
-Release images are published as `ghcr.io/tempoxyz/tempo-zone-prover`. Resolve an immutable image
-digest and convert it to an Enclave Image File on Linux with the Nitro CLI:
+To build the same artifacts locally, first load the payload into the local Docker image store:
 
 ```console
-nitro-cli build-enclave \
-  --docker-uri ghcr.io/tempoxyz/tempo-zone-prover@sha256:<digest> \
-  --output-file tempo-zone-prover.eif
+docker buildx bake \
+  --load \
+  --set tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:local \
+  tempo-zone-prover-enclave
 ```
 
-Retain the PCR measurements printed by `build-enclave` for future attestation policy. Attestation
-exchange and the parent-side vsock client are intentionally outside this service.
+Convert the payload to an EIF with the repository's pinned Nitro CLI builder image, then build the
+host image:
+
+```console
+docker buildx bake \
+  --load \
+  --set tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local \
+  tempo-zone-prover-eif-builder
+mkdir -p target/tempo-zone-prover-eif
+docker run --rm \
+  --platform linux/amd64 \
+  --volume /var/run/docker.sock:/var/run/docker.sock \
+  --volume "$PWD/target/tempo-zone-prover-eif:/output" \
+  tempo-zone-prover-eif-builder:local \
+  build-enclave \
+  --docker-uri tempo-zone-prover-enclave:local \
+  --output-file /output/tempo-zone-prover.eif \
+  | tee target/tempo-zone-prover-eif/measurements.json
+docker buildx bake \
+  --load \
+  --set tempo-zone-prover.tags=tempo-zone-prover:local \
+  tempo-zone-prover
+```
+
+The EIF and PCR measurements are written under `target/tempo-zone-prover-eif/`. CI embeds the EIF
+in the published image and uploads the measurements as a commit-specific workflow artifact.
+
+The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
+`PROVER_EIF_PATH`, `ENCLAVE_NAME`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_CID`,
+`PROVER_TCP_PORT`, `PROVER_VSOCK_PORT`, and `MONITOR_INTERVAL_SECONDS` as runtime configuration.
