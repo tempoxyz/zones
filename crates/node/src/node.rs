@@ -438,7 +438,8 @@ impl ZoneNode {
     where
         N: FullNodeTypes<Types = Self>,
     {
-        let consensus_builder = ZoneConsensusBuilder::new();
+        let consensus_builder =
+            ZoneConsensusBuilder::new(executor_builder.l1_state_provider_config.clone());
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(ZonePoolBuilder::new(
@@ -1622,14 +1623,18 @@ impl ZoneExecutorBuilder {
     }
 }
 
-/// Builds Tempo consensus using the fully configured Zone chain specification.
+/// Builds Tempo consensus from the Zone chain spec with Tempo fork activations inherited from L1.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZoneConsensusBuilder;
+pub struct ZoneConsensusBuilder {
+    l1_state_provider_config: L1StateProviderConfig,
+}
 
 impl ZoneConsensusBuilder {
-    const fn new() -> Self {
-        Self
+    fn new(l1_state_provider_config: L1StateProviderConfig) -> Self {
+        Self {
+            l1_state_provider_config,
+        }
     }
 }
 
@@ -1640,7 +1645,28 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(TempoConsensus::new(ctx.chain_spec()))
+        let l1_chain_id = match self.l1_state_provider_config.chain_id {
+            Some(chain_id) => chain_id,
+            None => {
+                let l1_provider = L1StateProvider::new(
+                    self.l1_state_provider_config,
+                    L1StateCache::new(),
+                    tokio::runtime::Handle::current(),
+                )
+                .await?;
+                l1_provider.chain_id().await?
+            }
+        };
+        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
+            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
+        let chain_spec = Arc::new(
+            ctx.chain_spec()
+                .as_ref()
+                .clone()
+                .with_tempo_hardforks_from(tempo_chain_spec.as_ref()),
+        );
+
+        Ok(TempoConsensus::new(chain_spec))
     }
 }
 
