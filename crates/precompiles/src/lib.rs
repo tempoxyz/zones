@@ -65,6 +65,9 @@ pub mod zone_fee_manager;
 pub mod zone_state;
 pub mod ztip20;
 
+#[cfg(test)]
+mod storage_layout_tests;
+
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};

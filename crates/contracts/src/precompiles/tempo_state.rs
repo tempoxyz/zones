@@ -4,6 +4,7 @@ pub use TempoState::{TempoStateErrors as TempoStateError, TempoStateEvents as Te
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
+    #[sol(abi)]
     contract TempoState {
         event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 

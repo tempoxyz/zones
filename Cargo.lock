@@ -11754,6 +11754,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "alloy-eips",
+ "alloy-json-abi",
  "alloy-rlp",
  "alloy-rpc-types-eth",
  "clap",
@@ -13957,6 +13958,8 @@ dependencies = [
  "paste",
  "rand 0.8.7",
  "revm",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempo-chainspec",
  "tempo-contracts",

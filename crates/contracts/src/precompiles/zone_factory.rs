@@ -17,6 +17,7 @@ pub const ZONE_MESSENGER_ADDRESS: Address = address!("0x5A4d00000000000000000000
 
 crate::sol! {
     #[derive(Debug)]
+    #[sol(abi)]
     contract ZoneFactory {
         struct ZoneInfo {
             uint32 zoneId;

@@ -11,6 +11,7 @@ use alloy_sol_types::SolValue;
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
+    #[sol(abi)]
     contract IZoneInbox {
         // -- Shared types --
 

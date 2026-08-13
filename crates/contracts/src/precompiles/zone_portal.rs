@@ -18,6 +18,7 @@ pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+    #[sol(abi)]
     contract ZonePortal {
         // -- Shared types --
         enum Role {

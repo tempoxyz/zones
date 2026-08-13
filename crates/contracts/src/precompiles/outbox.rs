@@ -7,6 +7,7 @@ pub use IZoneOutbox::{
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
+    #[sol(abi)]
     contract IZoneOutbox {
         struct LastBatch {
             bytes32 withdrawalQueueHash;
