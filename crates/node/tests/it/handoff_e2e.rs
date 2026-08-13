@@ -10,6 +10,8 @@
 use std::time::Duration;
 
 use alloy::primitives::{U256, address};
+use alloy_consensus::BlockHeader;
+use alloy_network::ReceiptResponse;
 use alloy_provider::Provider;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
@@ -100,7 +102,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     let b_producer = cluster.sequencer_signers[replacement_index].address();
     for height in recovery_start_tempo_block..=optimistic_tip {
         assert_eq!(
-            cluster.assert_same_block(height).await?.beneficiary,
+            cluster.assert_same_block(height).await?.beneficiary(),
             b_producer,
             "replacement leader B did not optimistically produce recovery block {height}"
         );
@@ -138,7 +140,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
         cluster
             .assert_same_block(portal_activation_tempo_block)
             .await?
-            .beneficiary,
+            .beneficiary(),
         c_producer,
         "portal-selected leader C did not produce the transition block"
     );
@@ -154,7 +156,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     let next_height = portal_activation_tempo_block + 1;
     cluster.wait_all_at(next_height, HANDOFF_TIMEOUT).await?;
     assert_eq!(
-        cluster.assert_same_block(next_height).await?.beneficiary,
+        cluster.assert_same_block(next_height).await?.beneficiary(),
         c_producer
     );
     Ok(())
@@ -298,7 +300,8 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
             b_producer
         };
         assert_eq!(
-            header.beneficiary, expected,
+            header.beneficiary(),
+            expected,
             "block {height} has the wrong producer (boundary at {handoff_anchor})"
         );
     }
@@ -308,7 +311,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     let next = final_height + 1;
     cluster.wait_all_at(next, HANDOFF_TIMEOUT).await?;
     let header = cluster.assert_same_block(next).await?;
-    assert_eq!(header.beneficiary, b_producer);
+    assert_eq!(header.beneficiary(), b_producer);
 
     // Every node observes the included approval.
     for node in &cluster.nodes {
@@ -399,7 +402,8 @@ async fn test_lagged_follower_promotes_only_after_catching_up() -> eyre::Result<
             b_producer
         };
         assert_eq!(
-            header.beneficiary, expected,
+            header.beneficiary(),
+            expected,
             "block {height} has the wrong producer (boundary at {handoff_anchor})"
         );
     }
@@ -407,7 +411,10 @@ async fn test_lagged_follower_promotes_only_after_catching_up() -> eyre::Result<
     // B keeps producing; everyone follows.
     cluster.inject_block(vec![])?;
     cluster.wait_all_at(7, HANDOFF_TIMEOUT).await?;
-    assert_eq!(cluster.assert_same_block(7).await?.beneficiary, b_producer);
+    assert_eq!(
+        cluster.assert_same_block(7).await?.beneficiary(),
+        b_producer
+    );
     Ok(())
 }
 
@@ -526,7 +533,8 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
             b_producer
         };
         assert_eq!(
-            header.beneficiary, expected,
+            header.beneficiary(),
+            expected,
             "block {height} has the wrong producer (boundary at {handoff_anchor})"
         );
     }

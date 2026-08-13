@@ -10,6 +10,7 @@ use std::{net::TcpListener, time::Duration};
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
+use alloy_network::ReceiptResponse;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;

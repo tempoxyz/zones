@@ -444,7 +444,7 @@ fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8
 
 /// Helper to check TIP-403 authorization through the trusted operator RPC.
 pub(crate) struct Check403Registry {
-    pub(crate) provider: DynProvider,
+    pub(crate) provider: DynProvider<TempoNetwork>,
     pub(crate) token: Address,
 }
 
@@ -475,7 +475,8 @@ impl Check403Registry {
                 TransactionRequest::default()
                     .to(TIP403_REGISTRY_ADDRESS)
                     .from(Address::ZERO)
-                    .input(data.into()),
+                    .input(data.into())
+                    .into(),
             )
             .await
             .ok()
@@ -738,8 +739,8 @@ impl ZoneTestNode {
     }
 
     /// Returns an HTTP provider connected to this zone node.
-    pub(crate) fn provider(&self) -> alloy_provider::DynProvider {
-        ProviderBuilder::new()
+    pub(crate) fn provider(&self) -> alloy_provider::DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network()
             .connect_http(self.http_url.clone())
             .erased()
     }
@@ -3685,11 +3686,8 @@ impl P2pCluster {
     }
 
     /// Assert every node holds the same block at `height` and return its header.
-    pub(crate) async fn assert_same_block(
-        &self,
-        height: u64,
-    ) -> eyre::Result<alloy_rpc_types_eth::Header> {
-        let mut reference: Option<alloy_rpc_types_eth::Header> = None;
+    pub(crate) async fn assert_same_block(&self, height: u64) -> eyre::Result<TempoHeaderResponse> {
+        let mut reference: Option<TempoHeaderResponse> = None;
         for (index, node) in self.nodes.iter().enumerate() {
             let block = node
                 .provider()
@@ -3730,11 +3728,8 @@ impl RealP2pCluster {
     }
 
     /// Assert all nodes have the same canonical block at `height`.
-    pub(crate) async fn assert_same_block(
-        &self,
-        height: u64,
-    ) -> eyre::Result<alloy_rpc_types_eth::Header> {
-        let mut reference: Option<alloy_rpc_types_eth::Header> = None;
+    pub(crate) async fn assert_same_block(&self, height: u64) -> eyre::Result<TempoHeaderResponse> {
+        let mut reference: Option<TempoHeaderResponse> = None;
         for (index, node) in self.nodes.iter().enumerate() {
             let block = node
                 .provider()

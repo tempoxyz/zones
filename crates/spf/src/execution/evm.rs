@@ -13,7 +13,6 @@ use alloy_evm::{
     eth::EthBlockExecutionCtx,
 };
 use alloy_primitives::{B256, Bytes, U256};
-use alloy_rlp::Decodable as _;
 use alloy_sol_types::{ContractError, SolCall as _, SolInterface as _};
 use reth_chainspec::EthereumHardforks as _;
 use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
@@ -171,13 +170,6 @@ pub(crate) fn next_block_env_attributes(
 ) -> Result<TempoNextBlockEnvAttributes, Error> {
     let block_gas_limit = parent.inner.gas_limit;
 
-    let mut encoded = block.tempo_header_rlp.as_ref();
-    let header = TempoHeader::decode(&mut encoded)
-        .map_err(|_| crate::WitnessDatabaseError::InvalidTempoHeader)?;
-    if !encoded.is_empty() {
-        return Err(crate::WitnessDatabaseError::InvalidTempoHeader.into());
-    }
-
     Ok(TempoNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
             timestamp: block.timestamp,
@@ -195,7 +187,7 @@ pub(crate) fn next_block_env_attributes(
         },
         general_gas_limit: 0,
         shared_gas_limit: block_gas_limit,
-        timestamp_millis_part: header.timestamp_millis_part,
+        timestamp_millis_part: block.timestamp_millis_part,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
     })

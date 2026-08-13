@@ -1030,6 +1030,7 @@ interface ITempoState {
 
     error InvalidParentHash();
     error InvalidBlockNumber();
+    error InvalidTimestamp();
     error InvalidRlpData();
     error OnlyZoneInbox();
 
@@ -1040,7 +1041,7 @@ interface ITempoState {
     function tempoBlockNumber() external view returns (uint64);
 
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity (parent hash must match, number must be +1).
+    /// @dev Validates chain continuity and exact timestamp alignment with the Zone block.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;

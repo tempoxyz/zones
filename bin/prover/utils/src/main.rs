@@ -908,6 +908,7 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
             number: header.number(),
             parent_hash: header.parent_hash(),
             timestamp: header.timestamp(),
+            timestamp_millis_part: header.timestamp_millis_part,
             beneficiary: header.beneficiary(),
             tempo_header_rlp,
             deposits,

@@ -503,6 +503,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         number: header.number(),
         parent_hash: header.parent_hash(),
         timestamp: header.timestamp(),
+        timestamp_millis_part: header.timestamp_millis_part,
         beneficiary: header.beneficiary(),
         tempo_header_rlp,
         deposits,

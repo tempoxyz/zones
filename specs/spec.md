@@ -843,7 +843,7 @@ Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a gene
 
 ### Header Finalization
 
-`ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo. This function decodes the RLP header, validates chain continuity (parent hash must match the previous finalized header, block number must increment by one), stores the new checkpoint, and emits the decoded state root in `TempoBlockFinalized`.
+`ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo. This function decodes the RLP header, requires its timestamp (seconds and millisecond component) to exactly match the executing zone block, validates chain continuity (parent hash must match the previous finalized header, block number must increment by one), stores the new checkpoint, and emits the decoded state root in `TempoBlockFinalized`.
 
 Canonical deployed Zones start with the nonzero pre-portal Tempo checkpoint recorded in genesis. Their first import begins with its immediate child—the portal-creation block—and ordinary parent-hash and consecutive-number validation applies from that block onward. The standalone zero-hash genesis template MUST be anchored before use and MUST NOT bootstrap a deployed portal from an arbitrary later snapshot.
 
@@ -1059,7 +1059,7 @@ The witness contains everything needed to re-execute the batch:
 
 - **PublicInputs**: `parent_chain_id`, `zone_id`, `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. The verifier binds `parent_chain_id` to the L1 execution environment's chain ID; the portal supplies the remaining values, and the proof must be consistent with them.
 - **BatchWitness**: the public inputs, the parent header, the zone blocks to execute, the initial zone state, the Tempo state witness, and Tempo ancestry headers (for ancestry validation).
-- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
+- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `timestamp_millis_part`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: a deduplicated pool of zone-state trie nodes and a bytecode pool. Account and storage values are decoded directly from trie leaves; the initial state root comes from the parent header. The witness includes EIP-2935 history-contract slots used by `BLOCKHASH`. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
 - **TempoStateWitness**: the RLP-encoded Tempo header for the checkpoint already bound in the parent zone state and a deduplicated pool of Tempo-state trie nodes. The header supplies the authenticated initial Tempo state root for L1 storage reads.
 
@@ -1078,7 +1078,7 @@ flowchart TB
 
         subgraph ZBL["zone_blocks"]
             direction TB
-            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>beneficiary<br/>tempo_header_rlp<br/>enabled_tokens<br/>finalize_withdrawal_batch_count<br/>finalize_withdrawal_batch_encrypted_senders<br/>transactions"]
+            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>timestamp_millis_part<br/>beneficiary<br/>tempo_header_rlp<br/>enabled_tokens<br/>finalize_withdrawal_batch_count<br/>finalize_withdrawal_batch_encrypted_senders<br/>transactions"]
 
             subgraph DEP["deposits"]
                 direction TB
@@ -1191,6 +1191,9 @@ pub struct ZoneBlock {
 
     /// Timestamp
     pub timestamp: u64,
+
+    /// Millisecond component of the timestamp
+    pub timestamp_millis_part: u64,
 
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
@@ -1325,7 +1328,7 @@ The stateless execution function must reject the witness on any failed check, mi
    In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `(public_inputs.parent_chain_id, public_inputs.zone_id)`, including `chain_id = zone_chain_id(parent_chain_id, zone_id)` under the rules in [Chain ID](#chain-id); its parent hash is zero and it contains no user or system transactions. Apply the ordinary block rules to every remaining bootstrap block and to every block in an ordinary batch: require `block.parent_hash == prev_block_hash`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlp` to be present. Require `finalize_withdrawal_batch_count` to be absent in the genesis block and all intermediate blocks, and present in the final block of a batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
 
 5. **Execute `advanceTempo` if the block imports a Tempo header.**
-   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
+   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This requires the imported Tempo header's timestamp and millisecond component to exactly match the zone block, validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
 
 6. **Authenticate token enablements inside `advanceTempo`.**
    Using the now-bound Tempo root for this block, verify the portal's `tokenEnablementHash`. Execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order. Starting from the pre-state `ZoneInbox.processedTokenEnablementHash`, apply the [token enablement commitment](#token-enablement-commitment) transition to each entry and require the result to equal the portal's `tokenEnablementHash` proven against the imported Tempo root. Reject omitted, extra, reordered, or modified entries. After equality is established, initialize each enabled token and its bridge roles, then update `processedTokenEnablementHash`. Token activation must complete before processing any deposit in the call.
@@ -1911,6 +1914,8 @@ Address: `0x1c00000000000000000000000000000000000000`
 ```solidity
 interface ITempoState {
     event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
+
+    error InvalidTimestamp();
 
     function tempoBlockHash() external view returns (bytes32);
     function tempoBlockNumber() external view returns (uint64);
