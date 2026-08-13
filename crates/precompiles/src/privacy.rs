@@ -6,7 +6,6 @@ use tempo_zone_contracts::Unauthorized;
 
 use crate::{
     execution::{CallCheck, CallRuleError},
-    has_portal_role,
     storage::{L1State, L1StorageReader},
 };
 
@@ -21,11 +20,9 @@ pub(crate) fn check_caller_or_sequencer<P: L1StorageReader>(
         return CallCheck::Continue;
     }
 
-    match l1.read_portal(|portal| &portal.role[caller]) {
-        Ok(role) if has_portal_role(role, tempo_zone_contracts::ZonePortal::Role::Sequencer) => {
-            CallCheck::Continue
-        }
-        Ok(_) => CallCheck::Revert(Unauthorized {}.abi_encode().into()),
+    match l1.has_portal_role(caller, tempo_zone_contracts::ZonePortal::Role::Sequencer) {
+        Ok(true) => CallCheck::Continue,
+        Ok(false) => CallCheck::Revert(Unauthorized {}.abi_encode().into()),
         Err(error) => CallCheck::Error(CallRuleError::Tempo(error)),
     }
 }

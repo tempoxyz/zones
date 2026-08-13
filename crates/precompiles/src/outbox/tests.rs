@@ -52,7 +52,7 @@ impl Harness {
             PORTAL,
             sequencer_membership_slot.into(),
             ANCHOR,
-            U256::from(u8::from(IZonePortal::Role::Sequencer)),
+            U256::from(u8::from(Role::Sequencer)),
         );
         l1.insert(
             PORTAL,
@@ -209,7 +209,7 @@ impl Harness {
             .insert(PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT.into(), ANCHOR, modes);
     }
 
-    fn set_role(&self, account: Address, role: IZonePortal::Role) {
+    fn set_role(&self, account: Address, role: Role) {
         let slot = keccak256((account, PORTAL_ROLE_SLOT).abi_encode());
         self.l1
             .insert(PORTAL, slot.into(), ANCHOR, U256::from(u8::from(role)));
@@ -255,10 +255,10 @@ fn assert_revert(result: PrecompileResult, error: impl SolInterface) {
 fn role_binding_order_matches_solidity_role_enum() {
     assert_eq!(
         [
-            u8::from(IZonePortal::Role::None),
-            u8::from(IZonePortal::Role::Sequencer),
-            u8::from(IZonePortal::Role::Account),
-            u8::from(IZonePortal::Role::CallbackGateway),
+            u8::from(Role::None),
+            u8::from(Role::Sequencer),
+            u8::from(Role::Account),
+            u8::from(Role::CallbackGateway),
         ],
         [0, 1, 2, 3]
     );
@@ -409,7 +409,7 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     );
     assert_eq!(closed_open.balance_of(ALICE)?, balance_before);
     assert!(closed_open.pending()?.is_empty());
-    closed_open.set_role(BOB, IZonePortal::Role::Account);
+    closed_open.set_role(BOB, Role::Account);
     closed_open.request(1, BOB, B256::ZERO)?;
     closed_open.request_with_gas(1, FEE_PAYER, B256::ZERO, 1)?;
 
@@ -417,7 +417,7 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     // gateways require callback gas and callback targets must have the CallbackGateway role.
     let mut open_enforced = Harness::new()?;
     open_enforced.set_modes(false, true);
-    open_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway);
+    open_enforced.set_role(GATEWAY, Role::CallbackGateway);
     open_enforced.request(1, BOB, B256::ZERO)?;
     let pending_before = open_enforced.pending()?.len();
     let balance_before = open_enforced.balance_of(ALICE)?;
@@ -436,8 +436,8 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     // Closed access, enforced gateway: plain and callback paths enforce their distinct roles.
     let mut closed_enforced = Harness::new()?;
     closed_enforced.set_modes(true, true);
-    closed_enforced.set_role(BOB, IZonePortal::Role::Account);
-    closed_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway);
+    closed_enforced.set_role(BOB, Role::Account);
+    closed_enforced.set_role(GATEWAY, Role::CallbackGateway);
     closed_enforced.request(1, BOB, B256::ZERO)?;
     closed_enforced.request_with_gas(1, GATEWAY, B256::ZERO, 1)?;
     let pending_before = closed_enforced.pending()?.len();
