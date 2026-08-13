@@ -169,6 +169,9 @@ pub enum ZoneChainIdError {
     /// Generic parent chain IDs must fit the supported tooling-safe range.
     #[error("generic parent chain ID must be in 1..={MAX_GENERIC_PARENT_CHAIN_ID}, got {0}")]
     InvalidParentChainId(u64),
+    /// The chain ID is not a valid Zone chain ID.
+    #[error("chain ID {0} is not a valid zone chain ID")]
+    InvalidZoneChainId(u64),
 }
 
 /// Derives a zone EIP-155 chain ID from its parent Tempo chain and ZoneFactory ID.
@@ -185,6 +188,32 @@ pub fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChai
     };
 
     Ok(chain_id)
+}
+
+/// Decodes the parent Tempo chain ID from a Zone chain ID.
+pub fn decode_l1_chain_id(chain_id: u64) -> Result<u64, ZoneChainIdError> {
+    let (parent_chain_id, zone_id) =
+        if (ZONE_CHAIN_ID_BASE..ZONE_CHAIN_ID_BASE + ZONE_CHAIN_ID_RANGE).contains(&chain_id) {
+            (MAINNET_CHAIN_ID, (chain_id - ZONE_CHAIN_ID_BASE) as u32)
+        } else if (ZONE_CHAIN_ID_BASE_TESTNET
+            ..ZONE_CHAIN_ID_BASE_TESTNET + ZONE_CHAIN_ID_RANGE_TESTNET)
+            .contains(&chain_id)
+        {
+            (
+                MODERATO_CHAIN_ID,
+                (chain_id - ZONE_CHAIN_ID_BASE_TESTNET) as u32,
+            )
+        } else if chain_id >= 1 << 32 {
+            (chain_id >> 32, chain_id as u32)
+        } else {
+            return Err(ZoneChainIdError::InvalidZoneChainId(chain_id));
+        };
+
+    if zone_chain_id(parent_chain_id, zone_id) == Ok(chain_id) {
+        Ok(parent_chain_id)
+    } else {
+        Err(ZoneChainIdError::InvalidZoneChainId(chain_id))
+    }
 }
 
 fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
@@ -246,5 +275,22 @@ mod tests {
         let max_generic_chain_id = zone_chain_id(MAX_GENERIC_PARENT_CHAIN_ID, u32::MAX).unwrap();
         let max_legacy_v = max_generic_chain_id * 2 + 36;
         assert!(max_legacy_v < (1 << 53));
+    }
+
+    #[test]
+    fn decodes_parent_chain_id() {
+        for (parent_chain_id, zone_id) in [
+            (MAINNET_CHAIN_ID, 7),
+            (MODERATO_CHAIN_ID, 8),
+            (1_337, 9),
+            (MAX_GENERIC_PARENT_CHAIN_ID, u32::MAX),
+        ] {
+            let chain_id = zone_chain_id(parent_chain_id, zone_id).unwrap();
+            assert_eq!(decode_l1_chain_id(chain_id), Ok(parent_chain_id));
+        }
+
+        assert!(decode_l1_chain_id(ZONE_CHAIN_ID_BASE - 1).is_err());
+        assert!(decode_l1_chain_id(1 << 31).is_err());
+        assert!(decode_l1_chain_id((MAINNET_CHAIN_ID << 32) | 7).is_err());
     }
 }
