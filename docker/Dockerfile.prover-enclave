@@ -27,4 +27,4 @@ WORKDIR /data
 COPY --from=builder /app/target/release/tempo-zone-prover-enclave /usr/local/bin/tempo-zone-prover-enclave
 
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave"]
+ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave", "--tempo-genesis", "/etc/tempo/genesis"]
