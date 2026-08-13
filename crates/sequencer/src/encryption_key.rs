@@ -6,8 +6,53 @@ use alloy_provider::Provider;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolValue;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
+
+/// Proof of possession for a sequencer encryption public key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncryptionKeyProof {
+    /// Compressed public-key X coordinate.
+    pub x: B256,
+    /// Canonical SEC1 compressed prefix (`0x02` or `0x03`).
+    pub y_parity: u8,
+    /// Ethereum address derived from the public key.
+    pub address: Address,
+    /// Recovery identifier (`v`) with the Ethereum `+ 27` offset.
+    pub pop_v: u8,
+    /// Signature `r`.
+    pub pop_r: B256,
+    /// Signature `s`.
+    pub pop_s: B256,
+}
+
+/// Derive the compressed secp256k1 public identity for `signer`.
+pub fn encryption_key_identity(signer: &PrivateKeySigner) -> eyre::Result<(B256, u8, Address)> {
+    let secret = k256::SecretKey::from_slice(signer.to_bytes().as_slice())?;
+    let encoded = secret.public_key().to_encoded_point(true);
+    let x = B256::from_slice(encoded.x().expect("compressed point has x").as_slice());
+    let y_parity = encoded.as_bytes()[0];
+    Ok((x, y_parity, signer.address()))
+}
+
+/// Sign a proof of possession over `(portal, x, yParity)` for `signer`.
+pub fn prove_encryption_key_possession(
+    portal: Address,
+    signer: &PrivateKeySigner,
+) -> eyre::Result<EncryptionKeyProof> {
+    let (x, y_parity, address) = encryption_key_identity(signer)?;
+    let message = keccak256((portal, x, U256::from(y_parity)).abi_encode());
+    let signature = signer.sign_hash_sync(&message)?;
+    Ok(EncryptionKeyProof {
+        x,
+        y_parity,
+        address,
+        pop_v: signature.v() as u8 + 27,
+        pop_r: B256::from(signature.r().to_be_bytes::<32>()),
+        pop_s: B256::from(signature.s().to_be_bytes::<32>()),
+    })
+}
 
 /// Registers `signer` as the sequencer encryption key on `portal`.
 ///
@@ -18,23 +63,15 @@ pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
     portal: Address,
     signer: &PrivateKeySigner,
 ) -> eyre::Result<B256> {
-    use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
-
-    let secret = k256::SecretKey::from_slice(signer.to_bytes().as_slice())?;
-    let scalar: Scalar = *secret.to_nonzero_scalar();
-    let public = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-    let encoded = public.to_encoded_point(true);
-    let x = B256::from_slice(encoded.x().expect("compressed point has x").as_slice());
-    let y_parity: u8 = encoded.as_bytes()[0]; // 0x02 or 0x03
-
-    let message = keccak256((portal, x, U256::from(y_parity)).abi_encode());
-    let signature = signer.sign_hash_sync(&message)?;
-    let pop_v = signature.v() as u8 + 27;
-    let pop_r = B256::from(signature.r().to_be_bytes::<32>());
-    let pop_s = B256::from(signature.s().to_be_bytes::<32>());
-
+    let proof = prove_encryption_key_possession(portal, signer)?;
     let receipt = ZonePortal::new(portal, provider)
-        .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
+        .setSequencerEncryptionKey(
+            proof.x,
+            proof.y_parity,
+            proof.pop_v,
+            proof.pop_r,
+            proof.pop_s,
+        )
         .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
         .max_priority_fee_per_gas(0)
         .send_sync()
@@ -45,4 +82,27 @@ pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
         "setSequencerEncryptionKey reverted (tx: {tx_hash})"
     );
     Ok(tx_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Address;
+    use alloy_signer_local::PrivateKeySigner;
+
+    use super::{encryption_key_identity, prove_encryption_key_possession};
+
+    #[test]
+    fn proof_covers_the_derived_public_identity() {
+        let signer = PrivateKeySigner::from_slice(&[0x11; 32]).unwrap();
+        let portal = Address::repeat_byte(0x42);
+        let (x, y_parity, address) = encryption_key_identity(&signer).unwrap();
+        let proof = prove_encryption_key_possession(portal, &signer).unwrap();
+
+        assert_eq!(proof.x, x);
+        assert_eq!(proof.y_parity, y_parity);
+        assert_eq!(proof.address, address);
+        assert_eq!(proof.address, signer.address());
+        assert!(proof.y_parity == 0x02 || proof.y_parity == 0x03);
+        assert!(proof.pop_v == 27 || proof.pop_v == 28);
+    }
 }
