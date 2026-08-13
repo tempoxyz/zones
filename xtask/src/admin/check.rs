@@ -251,6 +251,8 @@ struct CheckReport {
     ok: bool,
     zone_id: u32,
     manifest_supplied: bool,
+    #[serde(skip)]
+    manifest_path: Option<PathBuf>,
     desired_topology_verified: Option<bool>,
     observe_for_ms: u64,
     portal: PortalSnapshot,
@@ -384,6 +386,7 @@ impl Check {
             ok,
             zone_id: config.zone_id,
             manifest_supplied: manifest.is_some(),
+            manifest_path: config.manifest,
             desired_topology_verified,
             observe_for_ms: self.observe_for.as_millis().try_into().unwrap_or(u64::MAX),
             portal,
@@ -1837,7 +1840,7 @@ fn render_node_table(report: &CheckReport) {
         "Membership",
         "Leader",
         "Ready",
-        "SharedDecryptKey"
+        "SharedEncKey"
     );
     println!(
         "{:-<name_width$}  {:-<height_width$}  {:-<5}  {:-<8}  {:-<8}  {:-<10}  {:-<6}  {:-<5}  {:-<16}",
@@ -1892,8 +1895,8 @@ fn render_human(report: &CheckReport) {
         Some(key) => println!("Encryption key: x={} parity={}", key.x, key.y_parity),
         None => println!("Encryption key: not configured"),
     }
-    if report.manifest_supplied {
-        println!("Desired manifest: supplied");
+    if let Some(path) = report.manifest_path.as_ref() {
+        println!("Desired manifest: {}", path.display());
     } else {
         println!("Desired manifest: not supplied (live consistency only)");
     }
