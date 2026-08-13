@@ -583,11 +583,13 @@ impl WithdrawalProcessor {
             }
             let outcome = self
                 .submit_and_confirm_batches(
-                    head_val,
-                    offset,
-                    first_nonce,
-                    remaining,
-                    batches,
+                    SubmitBatches {
+                        slot: head_val,
+                        offset,
+                        first_nonce,
+                        withdrawals: remaining,
+                        batches,
+                    },
                     shutdown,
                     || {},
                 )
@@ -620,14 +622,17 @@ impl WithdrawalProcessor {
     /// on-chain queue and retries only the unfinished suffix.
     async fn submit_and_confirm_batches(
         &self,
-        slot: u64,
-        offset: usize,
-        first_nonce: u64,
-        withdrawals: &[abi::Withdrawal],
-        batches: Vec<WithdrawalBatch>,
+        submission: SubmitBatches<'_>,
         shutdown: &sync::CancellationToken,
         mut on_batch_drained: impl FnMut(),
     ) -> eyre::Result<SubmitOutcome> {
+        let SubmitBatches {
+            slot,
+            offset,
+            first_nonce,
+            withdrawals,
+            batches,
+        } = submission;
         let nonce_count = u64::try_from(batches.len())
             .map_err(|_| eyre::eyre!("processWithdrawals batch count overflow"))?;
         first_nonce.checked_add(nonce_count).ok_or_else(|| {
@@ -805,6 +810,14 @@ impl WithdrawalProcessor {
             .slot_processing_duration_seconds
             .record(duration.as_secs_f64());
     }
+}
+
+struct SubmitBatches<'a> {
+    slot: u64,
+    offset: usize,
+    first_nonce: u64,
+    withdrawals: &'a [abi::Withdrawal],
+    batches: Vec<WithdrawalBatch>,
 }
 
 /// Spawn the withdrawal processor as a background task.
@@ -1349,12 +1362,22 @@ mod tests {
         let shutdown = sync::CancellationToken::new();
         let mut drained = 0;
         let outcome = processor
-            .submit_and_confirm_batches(7, 0, 10, &withdrawals, batches, &shutdown, || {
-                drained += 1;
-                if drained == 1 {
-                    shutdown.cancel();
-                }
-            })
+            .submit_and_confirm_batches(
+                SubmitBatches {
+                    slot: 7,
+                    offset: 0,
+                    first_nonce: 10,
+                    withdrawals: &withdrawals,
+                    batches,
+                },
+                &shutdown,
+                || {
+                    drained += 1;
+                    if drained == 1 {
+                        shutdown.cancel();
+                    }
+                },
+            )
             .await
             .unwrap();
 
@@ -1460,7 +1483,10 @@ mod tests {
             repair_notify.clone(),
         );
 
-        processor.process_queue().await.unwrap();
+        processor
+            .process_queue(&sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         assert!(l1.read_q().is_empty());
         assert!(
