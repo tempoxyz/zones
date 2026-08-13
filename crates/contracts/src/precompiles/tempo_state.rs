@@ -3,6 +3,7 @@
 pub use TempoState::{TempoStateErrors as TempoStateError, TempoStateEvents as TempoStateEvent};
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract TempoState {
         event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);

@@ -10,6 +10,7 @@ use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::SolValue;
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract IZoneInbox {
         // -- Shared types --

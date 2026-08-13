@@ -30,6 +30,34 @@ env:
   FOUNDRY_REF: 6902a96211da7bcc3d9c4d8e97910ac5c9d5d2c6
 
 jobs:
+  conformance:
+    name: ABI and storage conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          toolchain: stable
+
+      - name: Install Foundry
+        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          version: nightly
+
+      - name: Build Solidity artifacts
+        working-directory: specs/ref-impls
+        run: forge build --sizes
+
+      - name: Check Solidity and Rust ABIs
+        run: cargo run -p tempo-xtask -- check-abi
+
+      - name: Check Solidity and Rust storage layouts
+        run: cargo test -p zone-precompiles storage_layout_tests
+
   build:
     name: Forge Build
     runs-on: ubuntu-latest
@@ -222,6 +250,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - conformance
       - build
       - lint
       - test

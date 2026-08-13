@@ -16,6 +16,7 @@ pub const ZONE_VERIFIER_ADDRESS: Address = address!("0x5a56000000000000000000000
 pub const ZONE_MESSENGER_ADDRESS: Address = address!("0x5A4d000000000000000000000000000000000000");
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug)]
     contract ZoneFactory {
         struct ZoneInfo {

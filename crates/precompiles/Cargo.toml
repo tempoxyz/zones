@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+autotests = false
 
 [lints]
 workspace = true
@@ -48,6 +49,7 @@ tracing = { version = "0.1.41", default-features = false }
 [dev-dependencies]
 const-hex.workspace = true
 eyre.workspace = true
+serde.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 
 [features]
@@ -69,3 +71,8 @@ std = [
     "rand/std",
     "tracing/std",
 ]
+
+[[test]]
+name = "storage"
+path = "tests/mod.rs"
+required-features = ["test-utils"]
