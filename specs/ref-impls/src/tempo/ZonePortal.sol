@@ -330,6 +330,8 @@ contract ZonePortal is IZonePortal {
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
+            Role existing = role[signer];
+            require(existing == Role.None || existing == Role.Sequencer);
 
             for (uint256 j = 0; j < i; ++j) {
                 if (newSequencers[j] == signer) revert InvalidSequencerSet();
@@ -517,9 +519,6 @@ contract ZonePortal is IZonePortal {
 
     function _setSequencer(address account, bool enabled) internal {
         Role previous = role[account];
-        if (enabled) {
-            require(previous == Role.None || previous == Role.Sequencer);
-        }
         Role next = enabled ? Role.Sequencer : Role.None;
         role[account] = next;
         emit RoleUpdated(account, previous, next);
