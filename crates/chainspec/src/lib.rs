@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn consensus_gas_limits_disable_tempo_gas_sections() {
-        let zone = dev_zone_spec(3);
+        let zone = ZoneChainSpec::from(DEV.clone());
 
         assert_eq!(zone.shared_gas_limit_at(0, 30_000_000), 0);
         assert_eq!(zone.general_gas_limit_at(0, 30_000_000, 0), 0);
