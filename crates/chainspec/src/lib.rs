@@ -32,27 +32,57 @@ pub struct ZoneChainSpec {
 impl ZoneChainSpec {
     /// Converts a genesis configuration into a Zone chain specification.
     pub fn from_genesis(genesis: Genesis) -> Result<Self, ZoneChainSpecError> {
-        let mut zone = Arc::new(TempoChainSpec::from_genesis(genesis));
-        let parent_chain_id = decode_l1_chain_id(zone.chain().id())?;
+        let parent_chain_id = decode_l1_chain_id(genesis.config.chain_id)?;
         let parent = tempo_chain_spec_for_l1(parent_chain_id)
             .ok_or(ZoneChainSpecError::UnsupportedParent(parent_chain_id))?;
-
-        let inner = Arc::make_mut(&mut zone);
-        for &hardfork in EthereumHardfork::VARIANTS {
-            inner
-                .inner
-                .hardforks
-                .insert(hardfork, parent.ethereum_fork_activation(hardfork));
-        }
-        for &hardfork in TempoHardfork::VARIANTS {
-            inner
-                .inner
-                .hardforks
-                .insert(hardfork, parent.tempo_fork_activation(hardfork));
-        }
-
-        Ok(Self { inner: zone })
+        Self::from_genesis_with_l1(genesis, parent.as_ref())
     }
+
+    /// Converts a genesis configuration using an already-resolved L1 chain specification.
+    ///
+    /// This supports custom L1 chains whose hardfork schedule is not globally registered.
+    pub fn from_genesis_with_l1(
+        mut genesis: Genesis,
+        l1: &TempoChainSpec,
+    ) -> Result<Self, ZoneChainSpecError> {
+        decode_l1_chain_id(genesis.config.chain_id)?;
+        inherit_parent_fork_activations(&mut genesis, l1)?;
+        let zone = TempoChainSpec::from_genesis(genesis);
+
+        Ok(Self {
+            inner: Arc::new(zone),
+        })
+    }
+}
+
+/// Fills missing fork activation fields in the Zone genesis from its parent.
+///
+/// Chain config serializes Ethereum and Tempo activations as camelCase `*Block` and `*Time`
+/// fields. Composing them before constructing the chain spec ensures that its cached genesis
+/// header is built with the inherited activations. Explicit Zone activations take precedence.
+fn inherit_parent_fork_activations(
+    zone_genesis: &mut Genesis,
+    l1: &TempoChainSpec,
+) -> Result<(), serde_json::Error> {
+    let mut zone_config = serde_json::to_value(&zone_genesis.config)?;
+    let l1_config = serde_json::to_value(&l1.genesis().config)?;
+    let zone_fields = zone_config
+        .as_object_mut()
+        .expect("ChainConfig must serialize as a JSON object");
+    let l1_fields = l1_config
+        .as_object()
+        .expect("ChainConfig must serialize as a JSON object");
+
+    for (name, value) in l1_fields {
+        if name.ends_with("Block") || name.ends_with("Time") {
+            zone_fields
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+
+    zone_genesis.config = serde_json::from_value(zone_config)?;
+    Ok(())
 }
 
 impl Hardforks for ZoneChainSpec {
@@ -188,6 +218,9 @@ pub enum ZoneChainSpecError {
     /// The parent Tempo hardfork schedule is unknown.
     #[error("unsupported parent Tempo chain ID {0}")]
     UnsupportedParent(u64),
+    /// The inherited parent fork activations could not be applied to the Zone genesis.
+    #[error("failed to compose Zone genesis config: {0}")]
+    InvalidGenesisConfig(#[from] serde_json::Error),
 }
 
 /// Returns the Tempo chain specification whose hardfork schedule a parent uses.
@@ -236,19 +269,36 @@ mod tests {
     }
 
     #[test]
-    fn genesis_uses_parent_hardforks_everywhere() {
-        let mut genesis = DEV.genesis().clone();
+    fn genesis_inherits_missing_parent_hardforks_everywhere() {
+        let mut genesis = MODERATO.genesis().clone();
         genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 7).unwrap();
-        genesis.config.osaka_time = Some(123);
+        genesis.config.london_block = None;
+        genesis.config.shanghai_time = None;
+        genesis.config.cancun_time = None;
+        genesis.config.prague_time = None;
         let raw = TempoChainSpec::from_genesis(genesis.clone());
         let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
 
         assert_eq!(zone.chain().id(), raw.chain().id());
-        assert_eq!(zone.genesis_hash(), raw.genesis_hash());
-        assert_ne!(
-            raw.ethereum_fork_activation(EthereumHardfork::Osaka),
-            MODERATO.ethereum_fork_activation(EthereumHardfork::Osaka)
+        assert_ne!(zone.genesis_hash(), raw.genesis_hash());
+        assert!(raw.genesis_header().inner.base_fee_per_gas.is_none());
+        assert!(raw.genesis_header().inner.withdrawals_root.is_none());
+        assert!(
+            raw.genesis_header()
+                .inner
+                .parent_beacon_block_root
+                .is_none()
         );
+        assert!(raw.genesis_header().inner.requests_hash.is_none());
+        assert!(zone.genesis_header().inner.base_fee_per_gas.is_some());
+        assert!(zone.genesis_header().inner.withdrawals_root.is_some());
+        assert!(
+            zone.genesis_header()
+                .inner
+                .parent_beacon_block_root
+                .is_some()
+        );
+        assert!(zone.genesis_header().inner.requests_hash.is_some());
         for &hardfork in EthereumHardfork::VARIANTS {
             assert_eq!(
                 zone.ethereum_fork_activation(hardfork),
@@ -264,6 +314,40 @@ mod tests {
     }
 
     #[test]
+    fn genesis_accepts_an_already_resolved_custom_l1_spec() {
+        const CUSTOM_L1_CHAIN_ID: u64 = 31_318;
+
+        let mut l1_genesis = DEV.genesis().clone();
+        l1_genesis.config.chain_id = CUSTOM_L1_CHAIN_ID;
+        l1_genesis.config.osaka_time = Some(456);
+        let l1 = TempoChainSpec::from_genesis(l1_genesis);
+
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(CUSTOM_L1_CHAIN_ID, 8).unwrap();
+        zone_genesis.config.osaka_time = Some(123);
+        zone_genesis
+            .config
+            .extra_fields
+            .insert_value("zoneForkTime".to_string(), 789)
+            .unwrap();
+        let zone = ZoneChainSpec::from_genesis_with_l1(zone_genesis, &l1).unwrap();
+
+        assert_eq!(
+            zone.ethereum_fork_activation(EthereumHardfork::Osaka),
+            ForkCondition::Timestamp(123)
+        );
+        assert_eq!(
+            zone.genesis()
+                .config
+                .extra_fields
+                .get_deserialized::<u64>("zoneForkTime")
+                .unwrap()
+                .unwrap(),
+            789
+        );
+    }
+
+    #[test]
     fn next_block_base_fee_is_zero() {
         let zone = dev_zone_spec(2);
         let parent = zone.genesis_header();
@@ -275,7 +359,7 @@ mod tests {
 
     #[test]
     fn consensus_gas_limits_disable_tempo_gas_sections() {
-        let zone = ZoneChainSpec::from(DEV.clone());
+        let zone = dev_zone_spec(3);
 
         assert_eq!(zone.shared_gas_limit_at(0, 30_000_000), 0);
         assert_eq!(zone.general_gas_limit_at(0, 30_000_000, 0), 0);

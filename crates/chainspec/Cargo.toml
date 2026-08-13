@@ -29,10 +29,8 @@ alloy-primitives.workspace = true
 
 # misc
 eyre = { workspace = true, optional = true }
-thiserror = { version = "2", default-features = false }
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror = { version = "2", default-features = false }
 
 [features]
 default = []

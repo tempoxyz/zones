@@ -486,7 +486,9 @@ mod tests {
     fn withdrawal_requests_require_same_block_finalization() {
         let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
-        let chain_spec = ZoneChainSpec::from(DEV.clone());
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain_spec = ZoneChainSpec::from_genesis(zone_genesis).unwrap();
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,

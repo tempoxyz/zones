@@ -1590,17 +1590,7 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        let l1_chain_id = decode_l1_chain_id(ctx.chain_spec().chain().id())?;
-        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
-            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
-        let chain_spec = Arc::new(
-            ctx.chain_spec()
-                .as_ref()
-                .clone()
-                .with_tempo_hardforks_from(tempo_chain_spec.as_ref()),
-        );
-
-        Ok(TempoConsensus::new(chain_spec))
+        Ok(TempoConsensus::new(ctx.chain_spec()))
     }
 }
 

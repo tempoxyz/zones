@@ -256,7 +256,7 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
     // the full Zone chain ID instead of synthesizing one from the parent Tempo genesis.
     let mut zone_genesis = tempo_spec.inner.genesis.clone();
     zone_genesis.config.chain_id = zone_chain_id;
-    let zone_spec = match ZoneChainSpec::from_genesis(zone_genesis) {
+    let zone_spec = match ZoneChainSpec::from_genesis_with_l1(zone_genesis, tempo_spec.as_ref()) {
         Ok(spec) => spec,
         Err(error) => {
             return VerifyResponse::Error {

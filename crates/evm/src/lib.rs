@@ -557,7 +557,7 @@ mod tests {
     };
     use tempo_chainspec::{
         hardfork::TempoHardfork,
-        spec::{DEV, MODERATO, TempoHardforks},
+        spec::{MODERATO, TempoHardforks},
     };
     use tempo_precompiles::{
         TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
@@ -690,7 +690,11 @@ mod tests {
 
     #[test]
     fn tempo_evm_selects_parent_fork_from_zone_block_timestamp() {
-        let mut genesis = DEV.genesis().clone();
+        let mut genesis = MODERATO.genesis().clone();
+        genesis
+            .config
+            .extra_fields
+            .retain(|name, _| !name.ends_with("Time"));
         genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 1).unwrap();
         let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
