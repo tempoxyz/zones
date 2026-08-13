@@ -87,11 +87,12 @@ pub(crate) use auth_tokens::{
     sign_webauthn_signature,
 };
 
-/// Atomic counter for unique chain IDs across concurrent tests.
-static NEXT_CHAIN_ID: AtomicU64 = AtomicU64::new(71_000);
+/// Atomic counter for unique zone IDs across concurrent tests.
+static NEXT_ZONE_ID: AtomicU64 = AtomicU64::new(71_000);
 
 fn next_unique_chain_id() -> u64 {
-    NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed)
+    derive_zone_chain_id(1_337, NEXT_ZONE_ID.fetch_add(1, Ordering::Relaxed) as u32)
+        .expect("test zone ID fits in u32")
 }
 
 fn l1_dev_signer() -> alloy_signer_local::PrivateKeySigner {
@@ -3933,7 +3934,7 @@ pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2
         })
         .collect();
 
-    let unique = NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed);
+    let unique = NEXT_ZONE_ID.fetch_add(1, Ordering::Relaxed);
     let config_dir = std::env::temp_dir().join(format!(
         "tempo-zone-p2p-test-{}-{unique}",
         std::process::id()
