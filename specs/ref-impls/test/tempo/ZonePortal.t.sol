@@ -1112,6 +1112,21 @@ contract ZonePortalTest is BaseTest {
         portal.setSequencerSet(signers, 2);
     }
 
+    function test_setSequencerSet_allowsAdminAsSequencer() public {
+        address[] memory signers = new address[](2);
+        signers[0] = sequencer;
+        signers[1] = admin;
+
+        vm.startPrank(admin);
+        portal.setAllowedAccount(admin, false);
+        portal.setSequencerSet(signers, 2);
+        vm.stopPrank();
+
+        assertTrue(portal.isSequencer(admin));
+        assertTrue(portal.hasRole(admin, Role.Sequencer));
+        assertEq(portal.admin(), admin);
+    }
+
     function test_roleSetters_cannotModifySequencers() public {
         vm.startPrank(admin);
         vm.expectRevert();

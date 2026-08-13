@@ -514,7 +514,6 @@ contract ZonePortal is IZonePortal {
     function _setSequencer(address account, bool enabled) internal {
         Role previous = role[account];
         if (enabled) {
-            require(account != admin);
             require(previous == Role.None || previous == Role.Sequencer);
         }
         Role next = enabled ? Role.Sequencer : Role.None;
