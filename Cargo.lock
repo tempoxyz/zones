@@ -11780,6 +11780,7 @@ dependencies = [
  "tempo-zone-contracts",
  "tokio",
  "toml",
+ "zeroize",
  "zone-p2p",
  "zone-precompiles",
  "zone-primitives",

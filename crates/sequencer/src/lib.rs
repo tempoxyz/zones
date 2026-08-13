@@ -31,7 +31,10 @@ pub mod settlement;
 pub mod withdrawals;
 
 pub use attestation::AttestationStore;
-pub use encryption_key::register_encryption_key;
+pub use encryption_key::{
+    EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
+    register_encryption_key,
+};
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
