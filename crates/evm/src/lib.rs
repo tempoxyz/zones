@@ -679,7 +679,10 @@ mod tests {
         .unwrap();
 
         let factory = ZoneEvmFactory::new(reader.clone(), portal);
-        let mut evm = factory.create_evm(db, EvmEnv::default());
+        let mut env = EvmEnv::<TempoHardfork, TempoBlockEnv>::default();
+        env.block_env.inner.timestamp = U256::from(child.inner.timestamp);
+        env.block_env.timestamp_millis_part = child.timestamp_millis_part;
+        let mut evm = factory.create_evm(db, env);
         let calldata = IZoneInbox::advanceTempoCall {
             header: Bytes::from(child_rlp),
             deposits: Vec::new(),
