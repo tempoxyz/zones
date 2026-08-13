@@ -797,8 +797,6 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
-    let expected_owner_balance = ctx.zone.balance_of(PATH_USD_ADDRESS, owner).await?;
-
     let balance_call = PrecompileTip20::balanceOfCall { account: owner };
     let balance_data = format!("0x{}", hex::encode(balance_call.abi_encode()));
     let allowance_call = PrecompileTip20::allowanceCall { owner, spender };
@@ -853,15 +851,9 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             ]),
         )
         .await?;
-    let sequencer_balance_bytes = hex::decode(
-        sequencer_balance["result"]
-            .as_str()
-            .expect("sequencer balanceOf should return hex")
-            .trim_start_matches("0x"),
-    )?;
-    assert_eq!(
-        PrecompileTip20::balanceOfCall::abi_decode_returns(&sequencer_balance_bytes)?,
-        expected_owner_balance
+    assert!(
+        sequencer_balance.get("error").is_some(),
+        "sequencer balanceOf(other) should revert"
     );
 
     let sequencer_allowance = ctx
@@ -877,15 +869,9 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             ]),
         )
         .await?;
-    let sequencer_allowance_bytes = hex::decode(
-        sequencer_allowance["result"]
-            .as_str()
-            .expect("sequencer allowance should return hex")
-            .trim_start_matches("0x"),
-    )?;
-    assert_eq!(
-        PrecompileTip20::allowanceCall::abi_decode_returns(&sequencer_allowance_bytes)?,
-        U256::from(allowance_amount)
+    assert!(
+        sequencer_allowance.get("error").is_some(),
+        "sequencer allowance(owner, spender) should revert"
     );
 
     Ok(())
