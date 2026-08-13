@@ -106,6 +106,7 @@ crate::sol! {
         event DepositsPaused(address indexed token);
         event DepositsResumed(address indexed token);
         event PortalPaused(address indexed account);
+        event PortalResumed(address indexed account);
         event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
         event RpcUrlUpdated(string rpcUrl);
 
@@ -255,7 +256,7 @@ crate::sol! {
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
-        function pause() external;
+        function pause(bool shouldPause) external;
         function abdicate(Capability capability) external;
 
         function submitBatch(

@@ -596,6 +596,9 @@ interface IZonePortal {
     /// @notice Emitted when deposits and withdrawal processing are paused.
     event PortalPaused(address indexed account);
 
+    /// @notice Emitted when the admin resumes deposits and withdrawal processing early.
+    event PortalResumed(address indexed account);
+
     /// @notice Emitted when the admin schedules permanent abdication of a capability.
     event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
 
@@ -820,8 +823,8 @@ interface IZonePortal {
 
     function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
-    /// @notice Pause deposits and withdrawal processing for 30 days.
-    function pause() external;
+    /// @notice Pause deposits and withdrawal processing for 30 days, or resume them early.
+    function pause(bool shouldPause) external;
 
     /// @notice Schedule permanent abdication of a Portal capability. Only callable by admin.
     function abdicate(Capability capability) external;

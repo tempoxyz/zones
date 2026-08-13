@@ -611,18 +611,24 @@ contract ZonePortal is IZonePortal {
         return block.timestamp < pauseExpiry;
     }
 
-    /// @notice Pause deposits and withdrawal processing for 30 days.
-    function pause() external {
-        if (paused()) revert PortalIsPaused();
-        _requireCapabilityActive(Capability.PausePortal);
-        if (
-            msg.sender != admin && !isSequencer(msg.sender)
-                && !hasRole(msg.sender, Role.PauseGuardian)
-        ) {
-            revert NotPauseAuthority();
+    /// @notice Pause deposits and withdrawal processing for 30 days, or resume them early.
+    function pause(bool shouldPause) external {
+        if (shouldPause) {
+            if (paused()) revert PortalIsPaused();
+            _requireCapabilityActive(Capability.PausePortal);
+            if (
+                msg.sender != admin && !isSequencer(msg.sender)
+                    && !hasRole(msg.sender, Role.PauseGuardian)
+            ) {
+                revert NotPauseAuthority();
+            }
+            pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
+            emit PortalPaused(msg.sender);
+        } else {
+            if (msg.sender != admin) revert NotAdmin();
+            pauseExpiry = 0;
+            emit PortalResumed(msg.sender);
         }
-        pauseExpiry = uint64(block.timestamp) + PAUSE_DURATION;
-        emit PortalPaused(msg.sender);
     }
 
     /// @notice Schedule permanent abdication of a Portal configuration surface.
