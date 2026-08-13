@@ -645,10 +645,7 @@ interface IZonePortal {
     error InvalidQuorumCertificate();
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
-    error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
-    error RoleConflict(address account);
-
     /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);
 
@@ -708,7 +705,11 @@ interface IZonePortal {
 
     /// @notice Assign an account's mutually exclusive Portal role.
     /// @dev Sequencer membership is managed atomically through setSequencerSet.
-    function setRole(address account, Role role) external;
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external;
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external;
 
     function admin() external view returns (address);
 

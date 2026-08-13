@@ -201,7 +201,8 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setRole(account, role)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setAllowedAccount(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAccessMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGatewayMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -302,7 +303,7 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 |----------|---------|
 | [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 
-The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. An account has exactly one of `None`, `Sequencer`, `Account`, or `CallbackGateway`. Admin-managed roles change atomically through `setRole(account, role)`, while sequencer membership changes only through `setSequencerSet`. The messenger cannot have the `Account` role. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
+The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. An account has exactly one of `None`, `Sequencer`, `Account`, or `CallbackGateway`. The admin manages account and gateway membership through `setAllowedAccount` and `setGateway`, while sequencer membership changes only through `setSequencerSet`. Account and gateway setters atomically replace the prior non-sequencer role. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
 
 Account and gateway membership is evaluated when each portal or zone-side action executes. Revoked in-flight destinations and gateways bounce back, while revoked refund recipients have funds parked until membership is restored.
 
@@ -1789,7 +1790,8 @@ interface IZonePortal {
     function isGatewayOpen() external view returns (bool);
     function setGatewayMode(bool enforced) external; // admin-only
     function hasRole(address account, Role role) external view returns (bool);
-    function setRole(address account, Role role) external; // admin-only
+    function setAllowedAccount(address account, bool allowed) external; // admin-only
+    function setGateway(address account, bool allowed) external; // admin-only
 
     // Zone RPC endpoint. Published on-chain so clients can discover how to reach the zone.
     event RpcUrlUpdated(string rpcUrl);

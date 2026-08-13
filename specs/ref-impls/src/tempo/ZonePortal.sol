@@ -236,7 +236,7 @@ contract ZonePortal is IZonePortal {
         _initialized = true;
         zoneId = _zoneId;
         messenger = _messenger;
-        admin = _admin;
+        _setAdmin(_admin);
         verifier = _verifier;
         _isAccessEnforced = accessEnforced;
         _isGatewayEnforced = gatewayEnforced;
@@ -250,10 +250,16 @@ contract ZonePortal is IZonePortal {
         _setLeader(initialSequencers[0]);
 
         for (uint256 i; i < _zoneGateways.length; ++i) {
-            _setRole(_zoneGateways[i], Role.CallbackGateway);
+            address account = _zoneGateways[i];
+            require(role[account] == Role.None);
+            role[account] = Role.CallbackGateway;
+            emit RoleUpdated(account, Role.None, Role.CallbackGateway);
         }
         for (uint256 i; i < _allowedAccounts.length; ++i) {
-            _setRole(_allowedAccounts[i], Role.Account);
+            address account = _allowedAccounts[i];
+            require(role[account] == Role.None);
+            role[account] = Role.Account;
+            emit RoleUpdated(account, Role.None, Role.Account);
         }
 
         // Enable the initial token
@@ -323,11 +329,6 @@ contract ZonePortal is IZonePortal {
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
-            if (signer == admin) revert RoleConflict(signer);
-            Role existing = role[signer];
-            if (existing != Role.None && existing != Role.Sequencer) {
-                revert RoleConflict(signer);
-            }
 
             for (uint256 j = 0; j < i; ++j) {
                 if (newSequencers[j] == signer) revert InvalidSequencerSet();
@@ -348,13 +349,13 @@ contract ZonePortal is IZonePortal {
         }
 
         for (uint256 i = 0; i < _sequencers.length; ++i) {
-            role[_sequencers[i]] = Role.None;
+            _setSequencer(_sequencers[i], false);
         }
         delete _sequencers;
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             _sequencers.push(signer);
-            role[signer] = Role.Sequencer;
+            _setSequencer(signer, true);
         }
         // Rotating out the active leader would strand block production: transfer leadership
         // first (add the replacement, setLeader, then remove the old member).
@@ -448,9 +449,6 @@ contract ZonePortal is IZonePortal {
     ///      Passing address(0) cancels a pending transfer.
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
     function transferAdmin(address newAdmin) external onlyAdmin {
-        if (isSequencer(newAdmin)) {
-            revert RoleConflict(newAdmin);
-        }
         pendingAdmin = newAdmin;
         emit AdminTransferStarted(admin, newAdmin);
     }
@@ -461,11 +459,8 @@ contract ZonePortal is IZonePortal {
     ///      The Admin key can only be rotated, never renounced.
     function acceptAdmin() external {
         if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotPendingAdmin();
-        if (isSequencer(pendingAdmin)) {
-            revert RoleConflict(pendingAdmin);
-        }
         address previousAdmin = admin;
-        admin = pendingAdmin;
+        _setAdmin(pendingAdmin);
         pendingAdmin = address(0);
         emit AdminTransferred(previousAdmin, admin);
     }
@@ -492,20 +487,35 @@ contract ZonePortal is IZonePortal {
         return !_isGatewayEnforced;
     }
 
-    /// @notice Assign an account's mutually exclusive Portal role.
-    /// @dev Sequencer membership is managed atomically through setSequencerSet.
-    function setRole(address account, Role next) external onlyAdmin {
-        if (role[account] == Role.Sequencer || next == Role.Sequencer) {
-            revert InvalidSequencerSet();
-        }
-        _setRole(account, next);
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        Role previous = role[account];
+        require(previous != Role.Sequencer);
+        Role next = allowed ? Role.Account : Role.None;
+        role[account] = next;
+        emit RoleUpdated(account, previous, next);
     }
 
-    function _setRole(address account, Role next) internal {
-        if (next == Role.Account && account == messenger) {
-            revert InvalidAllowedAccount();
-        }
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external onlyAdmin {
         Role previous = role[account];
+        require(previous != Role.Sequencer);
+        Role next = allowed ? Role.CallbackGateway : Role.None;
+        role[account] = next;
+        emit RoleUpdated(account, previous, next);
+    }
+
+    function _setAdmin(address next) internal {
+        admin = next;
+    }
+
+    function _setSequencer(address account, bool enabled) internal {
+        Role previous = role[account];
+        if (enabled) {
+            require(account != admin);
+            require(previous == Role.None || previous == Role.Sequencer);
+        }
+        Role next = enabled ? Role.Sequencer : Role.None;
         role[account] = next;
         emit RoleUpdated(account, previous, next);
     }

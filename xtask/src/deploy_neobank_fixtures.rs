@@ -614,12 +614,26 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
             .await
             .wrap_err_with(|| format!("failed querying ZonePortal role at index {index}"))?
         {
-            let pending = portal
-                .setRole(*account, *expected_role)
-                .fee_token(fee_token)
-                .send()
-                .await
-                .wrap_err_with(|| format!("failed assigning ZonePortal role at index {index}"))?;
+            let pending = match expected_role {
+                PortalRole::Account => {
+                    portal
+                        .setAllowedAccount(*account, true)
+                        .fee_token(fee_token)
+                        .send()
+                        .await
+                }
+                PortalRole::CallbackGateway => {
+                    portal
+                        .setGateway(*account, true)
+                        .fee_token(fee_token)
+                        .send()
+                        .await
+                }
+                unsupported => eyre::bail!(
+                    "unsupported benchmark ZonePortal role {unsupported:?} at index {index}"
+                ),
+            }
+            .wrap_err_with(|| format!("failed assigning ZonePortal role at index {index}"))?;
             let receipt = pending.get_receipt().await.wrap_err_with(|| {
                 format!("failed waiting for ZonePortal role receipt at index {index}")
             })?;

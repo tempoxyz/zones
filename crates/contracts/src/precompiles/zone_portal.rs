@@ -184,7 +184,6 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
-        error RoleConflict(address account);
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
@@ -209,7 +208,8 @@ crate::sol! {
         function isGatewayOpen() external view returns (bool);
         function setGatewayMode(bool enforced) external;
         function hasRole(address account, Role role) external view returns (bool);
-        function setRole(address account, Role role) external;
+        function setAllowedAccount(address account, bool allowed) external;
+        function setGateway(address account, bool allowed) external;
         function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
@@ -557,7 +557,6 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
-            Self::RoleConflict(_) => f.write_str("RoleConflict"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),

@@ -2294,18 +2294,18 @@ impl L1TestNode {
         use tempo_zone_contracts::ZonePortal;
         let provider = self.provider_with_signer(admin_signer);
         let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .setGateway(gateway, enabled)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setGateway failed");
         let expected_role = if enabled {
             PortalRole::CallbackGateway
         } else {
             PortalRole::None
         };
-        let receipt = portal
-            .setRole(gateway, expected_role)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "setRole for gateway failed");
         eyre::ensure!(
             portal.hasRole(gateway, expected_role).call().await?,
             "L1 ZonePortal gateway role for {gateway} did not equal {expected_role:?}"
@@ -2340,18 +2340,18 @@ impl L1TestNode {
         use tempo_zone_contracts::ZonePortal;
         let provider = self.provider_with_signer(admin_signer);
         let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .setAllowedAccount(account, enabled)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setAllowedAccount failed");
         let expected_role = if enabled {
             PortalRole::Account
         } else {
             PortalRole::None
         };
-        let receipt = portal
-            .setRole(account, expected_role)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "setRole for account failed");
         eyre::ensure!(
             portal.hasRole(account, expected_role).call().await?,
             "L1 ZonePortal account role for {account} did not equal {expected_role:?}"
