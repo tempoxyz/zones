@@ -190,7 +190,7 @@ pub(crate) fn next_block_env_attributes(
         },
         general_gas_limit: 0,
         shared_gas_limit: 0,
-        timestamp_millis_part: header.timestamp_millis_part,
+        timestamp_millis_part: block.timestamp_millis_part,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
     })
