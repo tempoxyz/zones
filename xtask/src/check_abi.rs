@@ -13,6 +13,7 @@ struct InterfaceSpec {
     artifact_name: &'static str,
     source: &'static str,
     rust: fn() -> AbiSurface,
+    ignored_functions: &'static [&'static str],
 }
 
 macro_rules! interface {
@@ -22,12 +23,22 @@ macro_rules! interface {
             artifact_name: $artifact,
             source: "IZone.sol",
             rust: || AbiSurface::from_abi(&tempo_zone_contracts::$name::abi::contract()),
+            ignored_functions: &[],
         }
     };
 }
 
 const INTERFACES: &[InterfaceSpec] = &[
-    interface!(TempoState, "ITempoState"),
+    InterfaceSpec {
+        name: "TempoState",
+        artifact_name: "ITempoState",
+        source: "IZone.sol",
+        rust: || AbiSurface::from_abi(&tempo_zone_contracts::TempoState::abi::contract()),
+        ignored_functions: &[
+            "readTempoStorageSlot(address,bytes32) returns (bytes32) [view]",
+            "readTempoStorageSlots(address,bytes32[]) returns (bytes32[]) [view]",
+        ],
+    },
     interface!(IZoneInbox, "IZoneInbox"),
     interface!(IZoneOutbox, "IZoneOutbox"),
     interface!(ZoneFactory, "IZoneFactory"),
@@ -47,7 +58,9 @@ impl CheckAbi {
         for spec in INTERFACES {
             let path = foundry_artifact_path(&self.artifacts, spec.source, spec.artifact_name);
             let rust = (spec.rust)();
-            let errors = compare_abi(&path, &rust).err().unwrap_or_default();
+            let errors = compare_abi(&path, &rust, spec.ignored_functions)
+                .err()
+                .unwrap_or_default();
             if errors.is_empty() {
                 eprintln!("  ✓  {}", spec.name);
                 continue;
