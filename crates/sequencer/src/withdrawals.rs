@@ -433,6 +433,10 @@ impl WithdrawalProcessor {
     /// resumes exactly where the portal is.
     #[instrument(skip_all)]
     async fn process_queue(&self, shutdown: &sync::CancellationToken) -> eyre::Result<()> {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+
         if self.portal.paused().call().await? {
             debug!("Portal is paused; withdrawal processor is idle");
             return Ok(());
