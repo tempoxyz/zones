@@ -23,10 +23,8 @@ use zone_sequencer::register_encryption_key;
 pub struct ProvisionConfig {
     /// Tempo L1 RPC URL (http(s) or ws(s)).
     pub l1_rpc_url: String,
-    /// Dev key: factory owner, L1 fee payer, and zone sequencer.
+    /// Dev key: factory owner, L1 fee payer, portal admin, and zone sequencer.
     pub dev_key: PrivateKeySigner,
-    /// Portal admin key, which must be distinct from the sequencer key.
-    pub admin_key: PrivateKeySigner,
     /// Optional factory override, which must equal TIP-1091's protocol address.
     pub factory: Option<Address>,
     /// Initial TIP-20 enabled on the portal.
@@ -63,7 +61,7 @@ pub struct ProvisionedZone {
 /// Provisions a fresh zone on a Tempo dev L1.
 ///
 /// Funds the dev account via `tempo_fundAddress` when needed, verifies TIP-1091's
-/// `ZoneFactory`, calls `createZone` with distinct admin and sequencer accounts,
+/// `ZoneFactory`, calls `createZone` with the dev account as both admin and sequencer,
 /// registers the sequencer encryption key on the portal, and
 /// builds a genesis anchored immediately before `createZone` so the zone replays the
 /// portal's initial `TokenEnabled` event.
@@ -71,7 +69,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let ProvisionConfig {
         l1_rpc_url,
         dev_key,
-        admin_key,
         factory,
         initial_token,
         is_access_open,
@@ -81,11 +78,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         rpc_url,
     } = config;
     let dev_address = dev_key.address();
-    let admin_address = admin_key.address();
-    eyre::ensure!(
-        admin_address != dev_address,
-        "portal admin and sequencer must be distinct"
-    );
     let wallet = EthereumWallet::from(dev_key.clone());
 
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -95,7 +87,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
 
     ensure_canonical_tempo_header_hash(&provider).await?;
     fund_dev_account(&provider, dev_address).await?;
-    fund_dev_account(&provider, admin_address).await?;
 
     if let Some(address) = factory {
         eyre::ensure!(
@@ -130,7 +121,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             gatewayMode: is_gateway_enforced,
             allowedAccounts: allowed_accounts,
             zoneGateways: zone_gateways,
-            admin: admin_address,
+            admin: dev_address,
             sequencers: vec![dev_address],
             threshold: 1,
             rpcUrl: rpc_url,
@@ -258,8 +249,6 @@ mod command {
     /// Default dev private key (account #0 of the standard `test test ... junk` mnemonic).
     const DEFAULT_DEV_KEY: &str =
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-    const DEFAULT_ADMIN_KEY: &str =
-        "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
     /// Provisions a fresh zone against a Tempo dev L1 and runs the zone node.
     #[derive(Debug, clap::Parser)]
@@ -280,7 +269,7 @@ mod command {
         #[arg(long = "l1.factory-address", env = "ZONE_FACTORY")]
         factory_address: Option<Address>,
 
-        /// Dev private key (hex): L1 fee payer and zone sequencer. Funded via
+        /// Dev private key (hex): L1 fee payer, portal admin, and zone sequencer. Funded via
         /// `tempo_fundAddress` when the L1 supports it.
         #[arg(
             long = "dev.key",
@@ -289,15 +278,6 @@ mod command {
             default_value = DEFAULT_DEV_KEY
         )]
         dev_key: String,
-
-        /// Portal admin private key (hex). Must differ from the sequencer key.
-        #[arg(
-            long = "dev.admin-key",
-            env = "ADMIN_KEY",
-            hide_env_values = true,
-            default_value = DEFAULT_ADMIN_KEY
-        )]
-        admin_key: String,
 
         /// Initial TIP-20 token enabled on the portal. Defaults to pathUSD.
         #[arg(long = "dev.token", default_value_t = PATH_USD_ADDRESS)]
@@ -356,12 +336,6 @@ mod command {
                 .unwrap_or(&self.dev_key)
                 .parse()
                 .map_err(|err| eyre::eyre!("invalid --dev.key: {err}"))?;
-            let admin_key: PrivateKeySigner = self
-                .admin_key
-                .strip_prefix("0x")
-                .unwrap_or(&self.admin_key)
-                .parse()
-                .map_err(|err| eyre::eyre!("invalid --dev.admin-key: {err}"))?;
             let ws_port = self
                 .http_port
                 .checked_add(1)
@@ -383,7 +357,6 @@ mod command {
                 runtime.block_on(provision_zone(ProvisionConfig {
                     l1_rpc_url: self.l1_rpc_url.clone(),
                     dev_key: dev_key.clone(),
-                    admin_key: admin_key.clone(),
                     factory: self.factory_address,
                     initial_token: self.initial_token,
                     is_access_open: !self.access_mode,
@@ -411,8 +384,7 @@ mod command {
                 "gatewayMode": self.gateway_mode,
                 "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                "admin": format!("{}", admin_key.address()),
-                "adminKey": self.admin_key,
+                "admin": format!("{}", dev_key.address()),
                 "sequencer": format!("{}", dev_key.address()),
                 "sequencerKey": self.dev_key,
                 "tempoAnchorBlock": provisioned.anchor_block_number,
