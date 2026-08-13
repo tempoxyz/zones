@@ -1,4 +1,4 @@
-//! Pauses ZonePortal batch submissions, deposits, and L1 withdrawal processing for 30 days.
+//! Pauses ZonePortal deposits and L1 withdrawal processing for 30 days.
 
 use alloy::{
     network::{EthereumWallet, ReceiptResponse as _},
@@ -57,7 +57,7 @@ async fn pause(args: PortalPauseArgs) -> eyre::Result<()> {
         .wrap_err("failed reading portal pause nonce")?;
 
     let pending = portal
-        .pause()
+        .pause(true)
         .nonce_key(ADMIN_OPS_NONCE_KEY)
         .nonce(nonce)
         .send()
