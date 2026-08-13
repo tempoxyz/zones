@@ -819,8 +819,10 @@ interface IZonePortal {
     /// @notice Whether new deposits and withdrawal processing are paused.
     function paused() external view returns (bool);
 
+    /// @notice Timestamp at which the current Portal pause expires.
     function pauseExpiry() external view returns (uint64);
 
+    /// @notice Timestamp at which permanent abdication of a capability takes effect.
     function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
     /// @notice Pause deposits and withdrawal processing for 30 days.
