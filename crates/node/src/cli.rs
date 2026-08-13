@@ -5,9 +5,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
-use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
+use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -96,8 +96,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
     let components = |spec: Arc<ZoneChainSpec>| {
         (
-            ZoneEvmConfig::new_without_l1(spec),
-            NoopConsensus::default(),
+            ZoneEvmConfig::new_without_l1(spec.clone()),
+            TempoConsensus::new(spec),
         )
     };
 
