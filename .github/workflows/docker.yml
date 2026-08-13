@@ -14,7 +14,17 @@ on:
         description: "Tag nightly"
         type: boolean
         default: false
+      tempo_genesis_url:
+        description: "Tempo genesis JSON URL to embed in the prover image"
+        type: string
+        default: "https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json"
   workflow_call:
+    inputs:
+      tempo_genesis_url:
+        description: "Tempo genesis JSON URL to embed in the prover image"
+        required: false
+        type: string
+        default: "https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json"
   schedule:
     - cron: "5 9 * * *"
     - cron: "30 20 * * *"
@@ -24,6 +34,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io/tempoxyz
+  TEMPO_DEVNET_GENESIS_URL: ${{ inputs.tempo_genesis_url || 'https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json' }}
 
 jobs:
   build-and-push:
@@ -112,6 +123,22 @@ jobs:
       - id: shortsha
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Download Tempo devnet genesis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .tempo-genesis
+          curl --proto '=https' --tlsv1.2 \
+            --fail-with-body --location \
+            --output .tempo-genesis/genesis.json \
+            "$TEMPO_DEVNET_GENESIS_URL"
+          jq -e '.config.chainId | type == "number"' \
+            .tempo-genesis/genesis.json >/dev/null
+
+          genesis_sha=$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)
+          echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
+
       - name: Build and push Docker images
         uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
         with:
@@ -137,7 +164,9 @@ jobs:
         with:
           files: docker/docker-bake.hcl
           targets: tempo-zone-prover-enclave
-          set: tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
+          set: |
+            tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
+            tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
           project: 0c6tg19qsp
           load: true
           no-cache: ${{ github.event_name == 'schedule' }}

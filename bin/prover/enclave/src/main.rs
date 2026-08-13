@@ -7,8 +7,6 @@ use tempo_zone_prover_enclave::{DEFAULT_MAX_REQUEST_BYTES, DEFAULT_VSOCK_PORT, T
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-const EMBEDDED_TEMPO_GENESIS: &str = "/etc/tempo/genesis/genesis.json";
-
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -47,14 +45,9 @@ struct Cli {
     )]
     max_request_bytes: usize,
 
-    /// Trusted custom Tempo genesis JSON file. May be specified more than once.
-    #[arg(
-        long,
-        env = "SPF_TEMPO_GENESIS",
-        value_name = "PATH",
-        value_delimiter = ','
-    )]
-    tempo_genesis: Vec<PathBuf>,
+    /// Directory containing trusted custom Tempo genesis JSON files.
+    #[arg(long, env = "SPF_TEMPO_GENESIS", value_name = "DIR")]
+    tempo_genesis: Option<PathBuf>,
 }
 
 impl Cli {
@@ -78,11 +71,17 @@ impl Cli {
 
     fn load_trusted_chain_specs(&self) -> io::Result<TrustedChainSpecs> {
         let mut specs = TrustedChainSpecs::default();
-        let mut paths = self.tempo_genesis.clone();
-        let embedded = PathBuf::from(EMBEDDED_TEMPO_GENESIS);
-        if embedded.is_file() && !paths.contains(&embedded) {
-            paths.push(embedded);
-        }
+        let Some(directory) = &self.tempo_genesis else {
+            return Ok(specs);
+        };
+        let mut paths = std::fs::read_dir(directory)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        paths.retain(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        });
+        paths.sort();
 
         for path in paths {
             let raw = std::fs::read(&path)?;
