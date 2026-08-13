@@ -89,6 +89,16 @@ impl ZoneInfoCmd {
             );
         }
         println!("  Zone Gas Rate:         {}", snapshot.zone_gas_rate);
+        println!("  Paused:                {}", snapshot.paused);
+        println!("  Pause expiry:          {}", snapshot.pause_expiry);
+        println!(
+            "  Pause abdication at:   {}",
+            snapshot.pause_abdication_effective_at
+        );
+        println!(
+            "  Access abdication at:  {}",
+            snapshot.access_abdication_effective_at
+        );
         println!(
             "  Withdrawal Batch:      {}",
             snapshot.withdrawal_batch_index

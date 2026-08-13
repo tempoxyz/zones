@@ -17,9 +17,10 @@ import {
     PATH_USD_ADDRESS,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     QueuedDeposit,
+    Role,
     WithdrawalBounceBackDeposit,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
@@ -420,8 +421,9 @@ contract ZoneInbox is IZoneInbox {
     }
 
     function _isSequencer(address account) internal view returns (bool) {
-        bytes32 slot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
-        return uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)) != 0;
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        return uint8(uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)))
+            == uint8(Role.Sequencer);
     }
 
     function _processWithdrawalBounceBack(WithdrawalBounceBackDeposit memory d) internal {

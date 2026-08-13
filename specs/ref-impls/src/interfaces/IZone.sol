@@ -11,8 +11,16 @@ address constant ZONE_MESSENGER_ADDRESS = 0x5A4d00000000000000000000000000000000
 /// @notice Mutually exclusive authorization role assigned to a Tempo account.
 enum Role {
     None,
+    Sequencer,
     Account,
-    CallbackGateway
+    CallbackGateway,
+    PauseGuardian
+}
+
+/// @notice Independently abdicated Portal configuration surfaces.
+enum Capability {
+    PausePortal,
+    AccessPolicy
 }
 
 /// @title IZoneToken
@@ -348,15 +356,16 @@ interface IZoneTxContext {
 //            + sequencerThreshold (uint8) [packed]
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
-//   slot 19: isSequencer (mapping(address => bool))
+//   slot 19: _reservedSlot19 (available for future use)
 //   slot 20: role (mapping(address => Role))
 //   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //   slot 22: maxTempoGasRate (uint128)
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
 //            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
-//   slot 25: _tokensEnabledInCurrentBlock (uint64)
+//   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64) [packed]
 //   slot 26: tokenEnablementHash (bytes32)
+//   slot 27: abdicationEffectiveAt (mapping(Capability => uint64))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -369,14 +378,14 @@ bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_TOKEN_ENABLEMENT_HASH_SLOT = bytes32(uint256(26));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
-bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
-bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
+bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(20));
 bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
 bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
     bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
 bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_LEADER_SLOT = bytes32(uint256(PORTAL_MAX_TEMPO_GAS_RATE_SLOT) + 1);
+bytes32 constant PORTAL_PAUSE_SLOT = bytes32(uint256(25));
 bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT =
     bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
 
@@ -584,6 +593,15 @@ interface IZonePortal {
     /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
 
+    /// @notice Emitted when deposits and withdrawal processing are paused.
+    event PortalPaused(address indexed account);
+
+    /// @notice Emitted when the admin resumes deposits and withdrawal processing early.
+    event PortalResumed(address indexed account);
+
+    /// @notice Emitted when the admin schedules permanent abdication of a capability.
+    event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
+
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
@@ -608,6 +626,10 @@ interface IZonePortal {
 
     error NotSequencer();
     error NotAdmin();
+    error NotPauseAuthority();
+    error CapabilityAbdicated(Capability capability);
+    error AbdicationAlreadyScheduled(Capability capability);
+    error PortalIsPaused();
     error NotFactory();
     error NotSelf();
     error AlreadyInitialized();
@@ -645,9 +667,7 @@ interface IZonePortal {
     error InvalidQuorumCertificate();
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
-    error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
-
     /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);
 
@@ -702,16 +722,17 @@ interface IZonePortal {
     /// @notice Change callback gateway enforcement. Only callable by the admin.
     function setGatewayMode(bool enforced) external;
 
-    function role(address account) external view returns (Role);
-
-    /// @notice Assign an account's portal role. Only callable by the admin.
-    function setRole(address account, Role role) external;
+    /// @notice Whether an account has a Portal role.
+    function hasRole(address account, Role role) external view returns (bool);
 
     /// @notice Add or remove an account from closed-loop portal flows.
     function setAllowedAccount(address account, bool allowed) external;
 
     /// @notice Add or remove a callback gateway.
     function setGateway(address account, bool allowed) external;
+
+    /// @notice Add or remove a pause guardian.
+    function setPauseGuardian(address account, bool allowed) external;
 
     function admin() external view returns (address);
 
@@ -794,6 +815,24 @@ interface IZonePortal {
 
     /// @notice Append-only commitment to enabled token addresses and metadata
     function tokenEnablementHash() external view returns (bytes32);
+
+    /// @notice Whether new deposits and withdrawal processing are paused.
+    function paused() external view returns (bool);
+
+    /// @notice Timestamp at which the current Portal pause expires.
+    function pauseExpiry() external view returns (uint64);
+
+    /// @notice Timestamp at which permanent abdication of a capability takes effect.
+    function abdicationEffectiveAt(Capability capability) external view returns (uint64);
+
+    /// @notice Pause deposits and withdrawal processing for 30 days.
+    function pause() external;
+
+    /// @notice Resume deposits and withdrawal processing before the pause expires.
+    function resume() external;
+
+    /// @notice Schedule permanent abdication of a Portal capability. Only callable by admin.
+    function abdicate(Capability capability) external;
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
@@ -1030,6 +1069,7 @@ interface ITempoState {
 
     error InvalidParentHash();
     error InvalidBlockNumber();
+    error InvalidTimestamp();
     error InvalidRlpData();
     error OnlyZoneInbox();
 
@@ -1040,7 +1080,7 @@ interface ITempoState {
     function tempoBlockNumber() external view returns (uint64);
 
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity (parent hash must match, number must be +1).
+    /// @dev Validates chain continuity and exact timestamp alignment with the Zone block.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;

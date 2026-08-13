@@ -178,12 +178,11 @@ contract BaseTest is Test {
     }
 
     function _closedLoopAccounts() internal view returns (address[] memory accounts) {
-        accounts = new address[](5);
-        accounts[0] = address(this);
-        accounts[1] = admin;
-        accounts[2] = alice;
-        accounts[3] = bob;
-        accounts[4] = charlie;
+        accounts = new address[](4);
+        accounts[0] = admin;
+        accounts[1] = alice;
+        accounts[2] = bob;
+        accounts[3] = charlie;
     }
 
     /// @notice Installs the shared runtimes managed by the native TIP-1091 factory.

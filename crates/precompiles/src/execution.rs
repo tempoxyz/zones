@@ -27,7 +27,6 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
     dispatch::selector_from_calldata,
-    error::TempoPrecompileError,
     input_cost,
     storage::{
         PrecompileStorageProvider, StorageCtx, actions::StorageActions,
@@ -65,14 +64,6 @@ pub(crate) enum CallCheck {
     Continue,
     /// Revert with ABI-encoded data. The execution wrapper MUST apply input gas and reservoir.
     Revert(Bytes),
-    /// Abort admission because a state read failed.
-    Error(CallRuleError),
-}
-
-/// State-read failures raised while applying pre-execution rules.
-pub(crate) enum CallRuleError {
-    /// Error from Zone-local or L1-mirrored precompile storage.
-    Tempo(TempoPrecompileError),
 }
 
 /// Selector and caller dependent precompile call rules evaluated after storage setup.
@@ -150,9 +141,6 @@ pub(crate) fn create_precompile(
                 let s = StorageCtx::default();
                 let output = s.revert_output(output);
                 add_input_cost(s, data, Ok(output))
-            }
-            CallCheck::Error(CallRuleError::Tempo(error)) => {
-                StorageCtx::default().error_result(error)
             }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {

@@ -9,6 +9,7 @@ crate::sol! {
 
         error InvalidParentHash();
         error InvalidBlockNumber();
+        error InvalidTimestamp();
         error InvalidRlpData();
         error OnlyZoneInbox();
 

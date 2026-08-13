@@ -188,6 +188,15 @@ impl<P: L1StorageReader> L1State<P> {
         let portal = ZonePortal::new(self.portal_address);
         self.read_l1(select_slot(&portal))
     }
+
+    /// Returns whether `account` has `expected` in the configured ZonePortal's role mapping.
+    pub fn has_portal_role(
+        &self,
+        account: Address,
+        expected: tempo_zone_contracts::ZonePortal::Role,
+    ) -> tempo_precompiles::Result<bool> {
+        Ok(self.read_portal(|portal| &portal.role[account])? == u8::from(expected))
+    }
 }
 
 impl<P> fmt::Debug for L1State<P> {

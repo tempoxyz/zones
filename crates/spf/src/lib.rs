@@ -615,7 +615,7 @@ mod tests {
                 gas_limit: 30_000_000,
                 ..Default::default()
             },
-            shared_gas_limit: 30_000_000,
+            shared_gas_limit: 0,
             ..Default::default()
         };
 
@@ -727,6 +727,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::new(),
             deposits: Vec::new(),
@@ -1003,6 +1004,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 321,
             beneficiary: Address::ZERO,
             tempo_header_rlp: witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
             deposits: Vec::new(),
@@ -1025,11 +1027,8 @@ mod tests {
         assert_eq!(attributes.suggested_fee_recipient, Address::ZERO);
         assert_eq!(attributes.gas_limit, 30_000_000);
         assert_eq!(attributes.general_gas_limit, 0);
-        assert_eq!(
-            attributes.shared_gas_limit,
-            witness.parent_header.inner.gas_limit
-        );
-        assert_eq!(attributes.timestamp_millis_part, 0);
+        assert_eq!(attributes.shared_gas_limit, 0);
+        assert_eq!(attributes.timestamp_millis_part, 321);
 
         let tempo_database =
             TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness.clone())
@@ -1061,6 +1060,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
@@ -1081,6 +1081,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
@@ -1109,6 +1110,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),

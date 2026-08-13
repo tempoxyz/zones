@@ -11,12 +11,12 @@ use alloy_genesis::Genesis;
 use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
+use alloy_rpc_types_eth::{Block, BlockNumberOrTag, EIP1186AccountProofResponse, Transaction};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
-use futures::{SinkExt, StreamExt, TryStreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -24,15 +24,15 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tempo_zone_prover_enclave::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, VerifyRequest, VerifyResponse, framed,
-};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
 use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
+use zone_prover::{
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+};
 use zone_rpc::{
     ZoneProvider, ZoneProviderConfig,
     types::{TempoStorageRead, ZoneExecutionWitness},
@@ -411,24 +411,19 @@ async fn send_to_prover(
     request: &VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
-    let payload = serde_json::to_vec(request).context("serialize prover request")?;
-    let request_bytes = payload.len();
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
-    let mut stream = framed(stream, DEFAULT_MAX_REQUEST_BYTES);
-    stream
-        .send(payload.into())
+    let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+    let request_bytes = connection
+        .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
-    let response_payload = stream
-        .next()
+    let response: VerifyResponse = connection
+        .receive()
         .await
-        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?
-        .map_err(|error| eyre!(error))
-        .wrap_err_with(|| format!("read response from target prover at {target}"))?;
-    let response = serde_json::from_slice::<VerifyResponse>(&response_payload)
-        .wrap_err_with(|| format!("decode response from target prover at {target}"))?;
+        .wrap_err_with(|| format!("read response from target prover at {target}"))?
+        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
 
     match response {
         VerifyResponse::Ok {
@@ -908,6 +903,7 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
             number: header.number(),
             parent_hash: header.parent_hash(),
             timestamp: header.timestamp(),
+            timestamp_millis_part: header.timestamp_millis_part,
             beneficiary: header.beneficiary(),
             tempo_header_rlp,
             deposits,
@@ -1063,33 +1059,44 @@ async fn tempo_state_witness(
 ) -> Result<TempoStateWitness> {
     let requests = reads
         .into_iter()
-        .flat_map(|(block, accounts)| {
-            accounts.into_iter().map(move |(account, slots)| {
-                (block, account, slots.into_iter().collect::<Vec<_>>())
-            })
+        .map(|(block, accounts)| {
+            let targets = accounts
+                .into_iter()
+                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            (block, targets)
         })
         .collect::<Vec<_>>();
     let proofs = stream::iter(requests)
-        .map(|(block, account, slots)| async move {
+        .map(|(block, targets)| async move {
             let started = Instant::now();
             debug!(
                 tempo_block = block,
-                account = %account,
-                storage_slots = slots.len(),
-                "requesting Tempo state proof"
+                accounts = targets.len(),
+                storage_slots = targets.iter().map(|(_, slots)| slots.len()).sum::<usize>(),
+                "requesting Tempo state multiproof"
             );
             let proof = tempo
-                .get_proof(account, slots)
-                .block_id(BlockId::number(block))
+                .client()
+                .request::<_, Vec<EIP1186AccountProofResponse>>(
+                    "eth_getMultiProof",
+                    (targets, BlockId::number(block)),
+                )
                 .await
-                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))?;
+                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))?;
             debug!(
                 tempo_block = block,
-                account = %account,
-                account_proof_nodes = proof.account_proof.len(),
-                storage_proofs = proof.storage_proof.len(),
+                accounts = proof.len(),
+                account_proof_nodes = proof
+                    .iter()
+                    .map(|proof| proof.account_proof.len())
+                    .sum::<usize>(),
+                storage_proofs = proof
+                    .iter()
+                    .map(|proof| proof.storage_proof.len())
+                    .sum::<usize>(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "received Tempo state proof"
+                "received Tempo state multiproof"
             );
             Ok::<_, eyre::Report>(proof)
         })
@@ -1098,13 +1105,15 @@ async fn tempo_state_witness(
         .await?;
 
     let mut nodes = BTreeMap::new();
-    for proof in proofs {
-        for node in proof.account_proof {
-            nodes.entry(keccak256(&node)).or_insert(node);
-        }
-        for storage in proof.storage_proof {
-            for node in storage.proof {
+    for block_proofs in proofs {
+        for proof in block_proofs {
+            for node in proof.account_proof {
                 nodes.entry(keccak256(&node)).or_insert(node);
+            }
+            for storage in proof.storage_proof {
+                for node in storage.proof {
+                    nodes.entry(keccak256(&node)).or_insert(node);
+                }
             }
         }
     }

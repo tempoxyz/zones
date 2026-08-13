@@ -188,6 +188,10 @@ pub(crate) struct PortalSnapshot {
     pub(crate) last_synced_tempo_block: u64,
     pub(crate) block_hash: B256,
     pub(crate) zone_gas_rate: u128,
+    pub(crate) paused: bool,
+    pub(crate) pause_expiry: u64,
+    pub(crate) pause_abdication_effective_at: u64,
+    pub(crate) access_abdication_effective_at: u64,
     pub(crate) withdrawal_batch_index: u64,
     pub(crate) current_deposit_queue_hash: B256,
     pub(crate) enabled_tokens: Vec<Address>,
@@ -558,6 +562,14 @@ where
     let last_synced_call = portal.lastSyncedTempoBlockNumber().block(block_id);
     let block_hash_call = portal.blockHash().block(block_id);
     let zone_gas_rate_call = portal.zoneGasRate().block(block_id);
+    let paused_call = portal.paused().block(block_id);
+    let pause_expiry_call = portal.pauseExpiry().block(block_id);
+    let pause_abdication_call = portal
+        .abdicationEffectiveAt(ZonePortal::Capability::PausePortal)
+        .block(block_id);
+    let access_abdication_call = portal
+        .abdicationEffectiveAt(ZonePortal::Capability::AccessPolicy)
+        .block(block_id);
     let withdrawal_batch_call = portal.withdrawalBatchIndex().block(block_id);
     let deposit_queue_call = portal.currentDepositQueueHash().block(block_id);
     let enabled_token_count_call = portal.enabledTokenCount().block(block_id);
@@ -587,6 +599,10 @@ where
         last_synced_tempo_block,
         block_hash,
         zone_gas_rate,
+        paused,
+        pause_expiry,
+        pause_abdication_effective_at,
+        access_abdication_effective_at,
         withdrawal_batch_index,
         current_deposit_queue_hash,
         enabled_token_count,
@@ -604,6 +620,10 @@ where
         last_synced_call.call(),
         block_hash_call.call(),
         zone_gas_rate_call.call(),
+        paused_call.call(),
+        pause_expiry_call.call(),
+        pause_abdication_call.call(),
+        access_abdication_call.call(),
         withdrawal_batch_call.call(),
         deposit_queue_call.call(),
         enabled_token_count_call.call(),
@@ -672,6 +692,10 @@ where
         last_synced_tempo_block,
         block_hash,
         zone_gas_rate,
+        paused,
+        pause_expiry,
+        pause_abdication_effective_at,
+        access_abdication_effective_at,
         withdrawal_batch_index,
         current_deposit_queue_hash,
         enabled_tokens,

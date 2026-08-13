@@ -138,29 +138,19 @@ where
         precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
             Some(create_tip403_precompile(&tip403_env))
         });
-        let tip20_l1 = l1.clone();
-        let nonce_l1 = l1.clone();
-        let account_keychain_l1 = l1.clone();
-        let storage_credits_l1 = l1.clone();
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
-                Some(create_tip20_precompile(*address, &env, tip20_l1.clone()))
+                Some(create_tip20_precompile(*address, &env))
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                Some(create_nonce_manager_precompile(&env, nonce_l1.clone()))
+                Some(create_nonce_manager_precompile(&env))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                Some(create_account_keychain_precompile(
-                    &env,
-                    account_keychain_l1.clone(),
-                ))
+                Some(create_account_keychain_precompile(&env))
             } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
                 Some(create_receive_policy_guard_precompile(&env))
             } else if *address == STORAGE_CREDITS_ADDRESS {
-                Some(create_storage_credits_precompile(
-                    &env,
-                    storage_credits_l1.clone(),
-                ))
+                Some(create_storage_credits_precompile(&env))
             } else {
                 None
             }
@@ -679,7 +669,10 @@ mod tests {
         .unwrap();
 
         let factory = ZoneEvmFactory::new(reader.clone(), portal);
-        let mut evm = factory.create_evm(db, EvmEnv::default());
+        let mut env = EvmEnv::<TempoHardfork, TempoBlockEnv>::default();
+        env.block_env.inner.timestamp = U256::from(child.inner.timestamp);
+        env.block_env.timestamp_millis_part = child.timestamp_millis_part;
+        let mut evm = factory.create_evm(db, env);
         let calldata = IZoneInbox::advanceTempoCall {
             header: Bytes::from(child_rlp),
             deposits: Vec::new(),
@@ -715,8 +708,8 @@ mod tests {
             B256::from(policy_slot.to_be_bytes()),
             PARENT,
         );
-        assert!(!reader.requested(CHILD, &portal.is_sequencer[sequencer]));
-        assert!(!reader.requested(PARENT, &portal.is_sequencer[sequencer]));
+        assert!(!reader.requested(CHILD, &portal.role[sequencer]));
+        assert!(!reader.requested(PARENT, &portal.role[sequencer]));
         assert!(requests.contains(&child_policy_request));
         assert!(!requests.contains(&parent_policy_request));
         assert!(reader.requested(CHILD, &portal.current_deposit_queue_hash));

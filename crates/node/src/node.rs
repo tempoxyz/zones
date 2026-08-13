@@ -35,7 +35,7 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
         NoopNetworkBuilder, PoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
@@ -58,7 +58,7 @@ use reth_transaction_pool::{
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoInvalidTransaction;
+use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -90,7 +90,7 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
@@ -100,11 +100,9 @@ use zone_sequencer::{
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
 /// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
-///
-/// Additional dev-schedule L1 chain IDs (devnets that activate all Tempo
-/// hardforks at genesis) can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
+/// Additional dev-schedule L1 chain IDs can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
 /// environment variable as a comma-separated list.
-fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
+pub(crate) fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1337 | 31337 => Some(DEV.clone()),
         _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
@@ -207,6 +205,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// Run the SPF over finalized candidates in detached, observational mode.
     pub enable_prover: bool,
+    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    pub prover_address: Option<String>,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -406,47 +406,6 @@ impl ZoneNode {
     /// Returns the shared encrypted-deposit key ring, when configured.
     pub fn deposit_decryption_keys(&self) -> Option<EncryptionKeyRing> {
         self.l1_config.encryption_keys.clone()
-    }
-    /// Returns a [`ComponentsBuilder`] configured for a Zone node.
-    pub fn components<N>(
-        executor_builder: ZoneExecutorBuilder,
-    ) -> ComponentsBuilder<
-        N,
-        ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
-        NoopNetworkBuilder<ZoneNetworkPrimitives>,
-        ZoneExecutorBuilder,
-        NoopConsensusBuilder,
-    >
-    where
-        N: FullNodeTypes<Types = Self>,
-    {
-        Self::components_with_payload_factory(executor_builder, ZonePayloadFactory::default())
-    }
-
-    fn components_with_payload_factory<N>(
-        executor_builder: ZoneExecutorBuilder,
-        payload_factory: ZonePayloadFactory,
-    ) -> ComponentsBuilder<
-        N,
-        ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
-        NoopNetworkBuilder<ZoneNetworkPrimitives>,
-        ZoneExecutorBuilder,
-        NoopConsensusBuilder,
-    >
-    where
-        N: FullNodeTypes<Types = Self>,
-    {
-        ComponentsBuilder::default()
-            .node_types::<N>()
-            .pool(ZonePoolBuilder::new(
-                executor_builder.enabled_tokens.clone(),
-            ))
-            .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(payload_factory))
-            .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
-            .noop_consensus()
     }
 }
 
@@ -831,6 +790,7 @@ where
                 zone_id: config.zone_id,
                 chain_spec: evm_chain_spec,
                 debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+                prover_address: config.prover_address.clone(),
             });
 
         Self::launch_redacted_rpc(
@@ -1533,7 +1493,7 @@ where
         BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        NoopConsensusBuilder,
+        ZoneConsensusBuilder,
     >;
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
@@ -1547,7 +1507,15 @@ where
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
             payload_factory = payload_factory.with_withdrawal_reveal_encryptor(encryptor);
         }
-        Self::components_with_payload_factory(executor_builder, payload_factory)
+        ComponentsBuilder::default()
+            .node_types::<N>()
+            .pool(ZonePoolBuilder::new(
+                executor_builder.enabled_tokens.clone(),
+            ))
+            .executor(executor_builder)
+            .payload(BasicPayloadServiceBuilder::new(payload_factory))
+            .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
+            .consensus(ZoneConsensusBuilder::default())
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -1619,6 +1587,38 @@ impl ZoneExecutorBuilder {
             l1_state_cache,
             enabled_tokens,
         }
+    }
+}
+
+/// Builds Tempo consensus from the Zone chain spec with Tempo fork activations inherited from L1.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZoneConsensusBuilder;
+
+impl Default for ZoneConsensusBuilder {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<Node> ConsensusBuilder<Node> for ZoneConsensusBuilder
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type Consensus = TempoConsensus<ZoneChainSpec>;
+
+    async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
+        let l1_chain_id = decode_l1_chain_id(ctx.chain_spec().chain().id())?;
+        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
+            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
+        let chain_spec = Arc::new(
+            ctx.chain_spec()
+                .as_ref()
+                .clone()
+                .with_tempo_hardforks_from(tempo_chain_spec.as_ref()),
+        );
+
+        Ok(TempoConsensus::new(chain_spec))
     }
 }
 

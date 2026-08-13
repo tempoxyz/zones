@@ -7,8 +7,10 @@ import {
     IZonePortal,
     LastBatch,
     PORTAL_ACCESS_MODE_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_PAUSE_SLOT,
+    PORTAL_ROLE_SLOT,
     PendingWithdrawal,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_TX_CONTEXT
@@ -60,12 +62,11 @@ contract ZoneOutboxTest is Test {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         tempoState.setMockStorageValue(
             mockPortal,
-            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
-            bytes32(uint256(1))
+            keccak256(abi.encode(sequencer, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
         tempoState.setMockMaxTempoGasRate(mockPortal, TEST_MAX_TEMPO_GAS_RATE);
-        tempoState.setMockAccountAllowed(mockPortal, sequencer, true);
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);
@@ -334,6 +335,20 @@ contract ZoneOutboxTest is Test {
         assertEq(disabledToken.balanceOf(alice), 1000e6);
     }
 
+    function test_requestWithdrawal_revertsWhilePortalPaused() public {
+        uint64 expiry = uint64(block.timestamp + 30 days);
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_PAUSE_SLOT, bytes32(uint256(expiry) << 64)
+        );
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
+
+        assertEq(_pendingWithdrawalsCount(), 0);
+        assertEq(zoneToken.balanceOf(alice), 10_000e6);
+    }
+
     function test_requestWithdrawal_openAccessStillEnforcesGatewayRegistration() public {
         address outsider = address(0x999);
         _setModes(false, true);
@@ -578,7 +593,9 @@ contract ZoneOutboxTest is Test {
 
         // Any additional active member has the same authority.
         tempoState.setMockStorageValue(
-            mockPortal, keccak256(abi.encode(bob, PORTAL_IS_SEQUENCER_SLOT)), bytes32(uint256(1))
+            mockPortal,
+            keccak256(abi.encode(bob, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         vm.prank(bob);
         bytes32 hash = outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);

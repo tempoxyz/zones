@@ -86,7 +86,6 @@ use tempo_precompiles::{
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
     tip403_registry::TIP403Registry,
 };
-
 /// Creates the zone-native fee manager precompile.
 pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
@@ -136,59 +135,34 @@ pub fn create_receive_policy_guard_precompile(env: &ZonePrecompileEnv) -> DynPre
 }
 
 /// Creates upstream NonceManager execution with Zone account-scoped read rules.
-pub fn create_nonce_manager_precompile<P>(env: &ZonePrecompileEnv, l1: L1State<P>) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
-    execution::create_precompile(
-        "NonceManager",
-        env,
-        nonce::NonceRules::new(l1),
-        |data, caller| NonceManager::new().call(data, caller),
-    )
+pub fn create_nonce_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
+    execution::create_precompile("NonceManager", env, nonce::NonceRules, |data, caller| {
+        NonceManager::new().call(data, caller)
+    })
 }
 
 /// Creates upstream AccountKeychain execution with Zone account-scoped read rules.
-pub fn create_account_keychain_precompile<P>(
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_account_keychain_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
         "AccountKeychain",
         env,
-        account_keychain::AccountKeychainRules::new(l1),
+        account_keychain::AccountKeychainRules,
         |data, caller| AccountKeychain::new().call(data, caller),
     )
 }
 
 /// Creates upstream StorageCredits execution with Zone account-scoped read rules.
-pub fn create_storage_credits_precompile<P>(
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_storage_credits_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
         "StorageCredits",
         env,
-        storage_credits::StorageCreditsRules::new(l1),
+        storage_credits::StorageCreditsRules,
         |data, caller| StorageCredits::new().call(data, caller),
     )
 }
 
 /// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
-pub fn create_tip20_precompile<P>(
-    address: Address,
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_tip20_precompile(address: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
     // Redacts TIP20 transfer from reverts that reveal user balances to the spender.
     let redact = |mut res: revm::precompile::PrecompileOutput| {
         if res.is_revert() && res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
@@ -200,7 +174,7 @@ where
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules::new(l1),
+        ztip20::TIP20Rules,
         move |data, caller| {
             TIP20Token::from_address_unchecked(address)
                 .call(data, caller)

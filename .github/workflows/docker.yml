@@ -14,7 +14,17 @@ on:
         description: "Tag nightly"
         type: boolean
         default: false
+      tempo_genesis_url:
+        description: "Tempo genesis JSON URL to embed in the prover image"
+        type: string
+        default: "https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json"
   workflow_call:
+    inputs:
+      tempo_genesis_url:
+        description: "Tempo genesis JSON URL to embed in the prover image"
+        required: false
+        type: string
+        default: "https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json"
   schedule:
     - cron: "5 9 * * *"
     - cron: "30 20 * * *"
@@ -24,6 +34,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io/tempoxyz
+  TEMPO_DEVNET_GENESIS_URL: ${{ inputs.tempo_genesis_url || 'https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json' }}
 
 jobs:
   build-and-push:
@@ -112,13 +123,28 @@ jobs:
       - id: shortsha
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Download Tempo devnet genesis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p .tempo-genesis
+          curl --proto '=https' --tlsv1.2 \
+            --fail-with-body --location \
+            --output .tempo-genesis/genesis.json \
+            "$TEMPO_DEVNET_GENESIS_URL"
+          jq -e '.config.chainId | type == "number"' \
+            .tempo-genesis/genesis.json >/dev/null
+
+          genesis_sha=$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)
+          echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
+
       - name: Build and push Docker images
         uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
         with:
           files: |
             docker/docker-bake.hcl
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
-            ${{ steps.meta-tempo-zone-prover.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
@@ -131,6 +157,73 @@ jobs:
         env:
           VERGEN_GIT_SHA: ${{ github.sha }}
           VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
+
+      # Nitro CLI converts an image from the runner's local Docker image store.
+      - name: Load tempo-zone-prover enclave payload
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        with:
+          files: docker/docker-bake.hcl
+          targets: tempo-zone-prover-enclave
+          set: |
+            tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
+            tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
+          project: 0c6tg19qsp
+          load: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          pull: ${{ github.event_name == 'schedule' }}
+
+      - name: Load tempo-zone-prover EIF builder
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        with:
+          files: docker/docker-bake.hcl
+          targets: tempo-zone-prover-eif-builder
+          set: tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
+          project: 0c6tg19qsp
+          load: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          pull: ${{ github.event_name == 'schedule' }}
+
+      - name: Build tempo-zone-prover EIF
+        env:
+          PROVER_IMAGE: tempo-zone-prover-enclave:eif-source
+          EIF_BUILDER_IMAGE: tempo-zone-prover-eif-builder:local
+          EIF_OUTPUT_DIR: target/tempo-zone-prover-eif
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p "$EIF_OUTPUT_DIR"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$PWD/$EIF_OUTPUT_DIR:/output" \
+            "$EIF_BUILDER_IMAGE" \
+            build-enclave \
+            --docker-uri "$PROVER_IMAGE" \
+            --output-file /output/tempo-zone-prover.eif \
+            | tee "$EIF_OUTPUT_DIR/measurements.json"
+
+      - name: Build and push tempo-zone-prover
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        with:
+          files: |
+            docker/docker-bake.hcl
+            ${{ steps.meta-tempo-zone-prover.outputs.bake-file }}
+          targets: tempo-zone-prover
+          project: 0c6tg19qsp
+          push: >-
+            ${{ github.repository == 'tempoxyz/zones' &&
+                github.event_name != 'pull_request' &&
+                github.event_name != 'merge_group' }}
+          no-cache: ${{ github.event_name == 'schedule' }}
+          pull: ${{ github.event_name == 'schedule' }}
+
+      - name: Upload tempo-zone-prover PCR measurements
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tempo-zone-prover-measurements-${{ steps.shortsha.outputs.shortsha }}
+          path: target/tempo-zone-prover-eif/measurements.json
+          if-no-files-found: error
 
       - name: Publish Zones CI event
         if: >-

@@ -35,7 +35,7 @@ pub(crate) struct ProverMetrics {
     /// Time spent fetching and combining Tempo state proofs.
     pub(crate) tempo_witness_duration_seconds: Histogram,
 
-    /// Time spent executing the SPF over a generated batch witness.
+    /// Time spent verifying a generated batch witness locally or remotely.
     pub(crate) spf_execution_duration_seconds: Histogram,
 
     /// Time spent comparing SPF output with the finalized batch candidate.

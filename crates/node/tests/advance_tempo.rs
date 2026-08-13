@@ -15,7 +15,7 @@ use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
 use zone_primitives::constants::{
     PORTAL_ADMIN_SLOT, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     zone_chain_id,
 };
 
@@ -533,9 +533,9 @@ fn zone_portal_storage_slot_constants_match_solidity() {
         "_encryptionKeys is slot 5"
     );
     assert_eq!(
-        PORTAL_IS_SEQUENCER_SLOT,
-        B256::from(U256::from(19)),
-        "isSequencer is slot 19"
+        PORTAL_ROLE_SLOT,
+        B256::from(U256::from(20)),
+        "role is slot 20"
     );
     assert_eq!(
         PORTAL_MAX_TEMPO_GAS_RATE_SLOT,

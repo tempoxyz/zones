@@ -13,7 +13,6 @@ use alloy_evm::{
     eth::EthBlockExecutionCtx,
 };
 use alloy_primitives::{B256, Bytes, U256};
-use alloy_rlp::Decodable as _;
 use alloy_sol_types::{ContractError, SolCall as _, SolInterface as _};
 use reth_chainspec::EthereumHardforks as _;
 use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
@@ -106,6 +105,7 @@ pub(crate) fn execute_zone_block(
         .map_err(|_| Error::EvmEnvironment)?;
     // The parent and Zone IDs are verifier-bound independently of the local chain specification.
     env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
+    let chain_id = env.cfg_env.chain_id;
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;
     let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm(&mut *zone_state, env);
@@ -129,6 +129,7 @@ pub(crate) fn execute_zone_block(
         &block.tempo_header_rlp,
         block,
         zone_block_index,
+        chain_id,
     )?);
     transactions.extend(execute_user_transactions(
         &mut executor,
@@ -142,6 +143,7 @@ pub(crate) fn execute_zone_block(
             block.number,
             block.finalize_withdrawal_batch_encrypted_senders.clone(),
             zone_block_index,
+            chain_id,
         )?);
     }
 
@@ -171,13 +173,6 @@ pub(crate) fn next_block_env_attributes(
 ) -> Result<TempoNextBlockEnvAttributes, Error> {
     let block_gas_limit = parent.inner.gas_limit;
 
-    let mut encoded = block.tempo_header_rlp.as_ref();
-    let header = TempoHeader::decode(&mut encoded)
-        .map_err(|_| crate::WitnessDatabaseError::InvalidTempoHeader)?;
-    if !encoded.is_empty() {
-        return Err(crate::WitnessDatabaseError::InvalidTempoHeader.into());
-    }
-
     Ok(TempoNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
             timestamp: block.timestamp,
@@ -194,8 +189,8 @@ pub(crate) fn next_block_env_attributes(
             slot_number: None,
         },
         general_gas_limit: 0,
-        shared_gas_limit: block_gas_limit,
-        timestamp_millis_part: header.timestamp_millis_part,
+        shared_gas_limit: 0,
+        timestamp_millis_part: block.timestamp_millis_part,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
     })
@@ -204,7 +199,7 @@ pub(crate) fn next_block_env_attributes(
 pub(crate) fn next_block_execution_context(
     chain_spec: &zone_chainspec::ZoneChainSpec,
     block: &ZoneBlock,
-    gas_limit: u64,
+    _gas_limit: u64,
 ) -> TempoBlockExecutionCtx<'static> {
     TempoBlockExecutionCtx {
         inner: EthBlockExecutionCtx {
@@ -221,7 +216,7 @@ pub(crate) fn next_block_execution_context(
             slot_number: None,
         },
         general_gas_limit: 0,
-        shared_gas_limit: gas_limit,
+        shared_gas_limit: 0,
         validator_set: None,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
@@ -233,6 +228,7 @@ fn execute_advance_tempo<'a, 'db, I>(
     header: &Bytes,
     block: &ZoneBlock,
     block_index: usize,
+    chain_id: u64,
 ) -> Result<TempoTxEnvelope, Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
@@ -245,7 +241,7 @@ where
     }
     .abi_encode();
     let transaction = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -272,6 +268,7 @@ fn execute_finalize_withdrawal_batch<'a, 'db, I>(
     block_number: u64,
     encrypted_senders: Vec<Bytes>,
     block_index: usize,
+    chain_id: u64,
 ) -> Result<TempoTxEnvelope, Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
@@ -283,7 +280,7 @@ where
     }
     .abi_encode();
     let transaction = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,

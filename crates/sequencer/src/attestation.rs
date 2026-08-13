@@ -305,7 +305,6 @@ impl AttestationStore {
 mod tests {
     use alloy_primitives::{Address, B256, U256, keccak256, uint};
     use alloy_signer_local::PrivateKeySigner;
-    use alloy_sol_types::{SolStruct as _, SolValue as _};
 
     use super::*;
 

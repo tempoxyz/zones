@@ -54,6 +54,16 @@ impl Harness {
         ctx.cfg.spec = TempoHardfork::T9;
         let genesis_rlp = encode_header(&TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
+        let child_header = TempoHeader {
+            inner: alloy_consensus::Header {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ctx.block.inner.timestamp = U256::from(child_header.inner.timestamp);
+        ctx.block.timestamp_millis_part = child_header.timestamp_millis_part;
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {

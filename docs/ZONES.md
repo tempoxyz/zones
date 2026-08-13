@@ -27,7 +27,7 @@ This single command will:
 5. Generate the zone's `genesis.json` and `zone.json`
 6. Build and start the zone node
 
-> `deploy-zone` uses the generated sequencer key as the portal admin too. It saves `sequencerKey`, `sequencerAddress`, `adminKey`, and `adminAddress` in `generated/<name>/zone.json`; `zone-up` reads the sequencer key automatically.
+> `deploy-zone` creates distinct admin and sequencer keys unless `ADMIN_KEY` or `ADMIN_ADDR` supplies the admin. It saves the available keys and both addresses in `generated/<name>/zone.json`; `zone-up` reads the sequencer key automatically.
 > `zone.json` also stores `zoneFactory`, and `just deploy-router` appends `swapAndDepositRouter`.
 
 Once running, generate a user wallet and deposit some tokens:
@@ -115,7 +115,7 @@ export L1_RPC_URL="wss://rpc.devnet.tempoxyz.dev"
 
 ### 2. Generate Admin and Sequencer Keys
 
-The admin controls portal governance such as token enablement and deposit pause/resume. The sequencer is the operator that builds zone blocks, processes deposits, and submits batch proofs back to L1. The same key may be used for both roles, but load it into both `ADMIN_KEY` and `SEQUENCER_KEY` when that is intentional.
+The admin controls portal governance such as token enablement, per-token deposit pause/resume, and capability abdication. The sequencer is the operator that builds zone blocks, processes deposits, submits batch proofs back to L1, and may pause the portal. The same key may be used for both authorities, but load it into both `ADMIN_KEY` and `SEQUENCER_KEY` when that is intentional.
 
 ```bash
 cast wallet new

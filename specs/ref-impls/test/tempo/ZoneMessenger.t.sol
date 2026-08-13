@@ -135,8 +135,8 @@ contract ZoneMessengerTest is BaseTest {
     function _allowGateway(address target) internal {
         vm.mockCall(
             portal,
-            abi.encodeWithSelector(IZonePortal.role.selector, target),
-            abi.encode(Role.CallbackGateway)
+            abi.encodeWithSelector(IZonePortal.hasRole.selector, target, Role.CallbackGateway),
+            abi.encode(true)
         );
     }
 
@@ -297,8 +297,10 @@ contract ZoneMessengerTest is BaseTest {
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         vm.mockCall(
             portal,
-            abi.encodeWithSelector(IZonePortal.role.selector, address(receiver)),
-            abi.encode(Role.None)
+            abi.encodeWithSelector(
+                IZonePortal.hasRole.selector, address(receiver), Role.CallbackGateway
+            ),
+            abi.encode(false)
         );
 
         vm.prank(portal);

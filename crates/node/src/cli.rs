@@ -5,18 +5,20 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
-use reth_consensus::noop::NoopConsensus;
+use reth_chainspec::EthChainSpec;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
+use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
+use zone_primitives::constants::decode_l1_chain_id;
 
 use crate::{
     ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    node::tempo_chain_spec_for_l1, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
@@ -95,9 +97,18 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
     let components = |spec: Arc<ZoneChainSpec>| {
+        let l1_chain_id = decode_l1_chain_id(spec.chain().id())
+            .expect("CLI components require a valid Zone chain ID");
+        let l1_spec = tempo_chain_spec_for_l1(l1_chain_id)
+            .expect("CLI components require a supported parent Tempo chain ID");
+        let spec = Arc::new(
+            spec.as_ref()
+                .clone()
+                .with_tempo_hardforks_from(l1_spec.as_ref()),
+        );
         (
-            ZoneEvmConfig::new_without_l1(spec),
-            NoopConsensus::default(),
+            ZoneEvmConfig::new_without_l1(spec.clone()),
+            TempoConsensus::new(spec),
         )
     };
 
@@ -216,6 +227,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     max_in_flight_batches: args.withdrawal_max_in_flight_batches,
                 },
                 enable_prover: args.enable_prover,
+                prover_address: args.prover_address,
             });
         }
         if let Some(config) = p2p_config {
@@ -475,6 +487,15 @@ pub struct ZoneArgs {
     /// Validate finalized batch candidates with the SPF without changing settlement.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
+
+    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    #[arg(
+        long = "sequencer.prover-address",
+        env = "SEQUENCER_PROVER_ADDRESS",
+        value_name = "HOST:PORT",
+        requires = "enable_prover"
+    )]
+    pub prover_address: Option<String>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {

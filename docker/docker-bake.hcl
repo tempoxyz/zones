@@ -6,8 +6,12 @@ variable "VERGEN_GIT_SHA_SHORT" {
   default = ""
 }
 
+variable "PROVER_EIF_CONTEXT" {
+  default = "./target/tempo-zone-prover-eif"
+}
+
 group "default" {
-  targets = ["tempo-zone", "tempo-zone-prover", "tempo-zone-xtask"]
+  targets = ["tempo-zone", "tempo-zone-xtask"]
 }
 
 target "docker-metadata" {}
@@ -53,8 +57,7 @@ target "tempo-zone" {
   target = "tempo-zone"
 }
 
-target "tempo-zone-prover" {
-  inherits = ["docker-metadata"]
+target "tempo-zone-prover-enclave" {
   dockerfile = "docker/Dockerfile.prover-enclave"
   context = "."
   contexts = {
@@ -63,6 +66,24 @@ target "tempo-zone-prover" {
   args = {
     CHEF_IMAGE = "chef"
     RUST_PROFILE = "release"
+  }
+  platforms = ["linux/amd64"]
+}
+
+target "tempo-zone-prover-eif-builder" {
+  dockerfile = "docker/Dockerfile.prover-eif-builder"
+  context = "."
+  platforms = ["linux/amd64"]
+}
+
+# The EIF is generated from tempo-zone-prover-enclave before this target is
+# built because Nitro CLI requires access to a local Docker image store.
+target "tempo-zone-prover" {
+  inherits = ["docker-metadata"]
+  dockerfile = "docker/Dockerfile.prover-host"
+  context = "."
+  contexts = {
+    prover-eif = "${PROVER_EIF_CONTEXT}"
   }
   platforms = ["linux/amd64"]
 }
