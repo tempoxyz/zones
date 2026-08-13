@@ -433,6 +433,36 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Native factory creation permits one operator to hold both independent admin authority and the
+/// stored sequencer role.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_native_factory_allows_admin_as_sequencer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let factory = l1.native_zone_factory().await?;
+    let operator = l1.dev_address();
+    let portal_address = l1
+        .create_zone_with_admin_sequencer_and_config(
+            factory,
+            operator,
+            operator,
+            ZoneCreationConfig::open(),
+        )
+        .await?;
+    let portal = ZonePortal::new(portal_address, l1.provider());
+
+    assert_eq!(portal.admin().call().await?, operator);
+    assert!(portal.isSequencer(operator).call().await?);
+    assert!(
+        portal
+            .hasRole(operator, PortalRole::Sequencer)
+            .call()
+            .await?
+    );
+    Ok(())
+}
+
 /// The dev provisioner anchors immediately before `createZone`, so the zone
 /// replays the creation block and initializes a custom initial token from the
 /// portal constructor's `TokenEnabled` event.
