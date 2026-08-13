@@ -295,7 +295,7 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
     TX_OUTPUT=$(cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 150000 --json)
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
     STATUS=$(echo "$TX_OUTPUT" | jq -r '.status')
     if [[ "$STATUS" == "0x1" ]]; then
         echo "Approved!"
@@ -324,7 +324,13 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     L2_OUTPUT=$(cast send "$OUTBOX" \
         "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)" \
         "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" "{{reveal-to}}" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 10000000 --json)
+    L2_STATUS=$(echo "$L2_OUTPUT" | jq -r '.status')
+    if [[ "$L2_STATUS" != "0x1" ]]; then
+        echo "Withdrawal request failed on L2!"
+        echo "$L2_OUTPUT" | jq .
+        exit 1
+    fi
     L2_TX=$(echo "$L2_OUTPUT" | jq -r '.transactionHash')
     L2_BLOCK=$(echo "$L2_OUTPUT" | jq -r '.blockNumber')
     echo "Withdrawal requested on L2! tx: $L2_TX (block $(printf '%d' "$L2_BLOCK"))"
