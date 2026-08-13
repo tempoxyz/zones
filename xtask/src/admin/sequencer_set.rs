@@ -3,8 +3,7 @@
 use std::{collections::BTreeSet, fmt, path::PathBuf, time::Duration};
 
 use alloy::{
-    network::EthereumWallet,
-    network::primitives::ReceiptResponse as _,
+    network::{EthereumWallet, primitives::ReceiptResponse as _},
     primitives::{Address, B256},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
