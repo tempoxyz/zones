@@ -608,8 +608,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Pause deposits and withdrawal processing for 30 days.
-    function pause() external {
-        if (paused()) revert PortalIsPaused();
+    function pause() external whenNotPaused {
         _requireCapabilityActive(Capability.PausePortal);
         if (
             msg.sender != admin && !isSequencer(msg.sender)
@@ -629,8 +628,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Schedule permanent abdication of a Portal configuration surface.
-    function abdicate(Capability capability) external onlyAdmin {
-        if (paused()) revert PortalIsPaused();
+    function abdicate(Capability capability) external onlyAdmin whenNotPaused {
         if (abdicationEffectiveAt[capability] != 0) revert AbdicationAlreadyScheduled(capability);
         uint64 effectiveAt = uint64(block.timestamp) + ABDICATION_DELAY;
         abdicationEffectiveAt[capability] = effectiveAt;
@@ -887,7 +885,6 @@ contract ZonePortal is IZonePortal {
     }
 
     function _validateDepositsActive(address _token) internal view {
-        if (paused()) revert PortalIsPaused();
         TokenConfig storage cfg = _tokenConfigs[_token];
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
@@ -960,9 +957,10 @@ contract ZonePortal is IZonePortal {
         address tempoRefundRecipient
     )
         external
+        whenNotPaused
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        return depositEncrypted(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
+        return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
     /// @notice Deposit with encrypted recipient and memo
@@ -983,6 +981,7 @@ contract ZonePortal is IZonePortal {
         address tempoRefundRecipient
     )
         public
+        whenNotPaused
         returns (bytes32 newCurrentDepositQueueHash)
     {
         return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
