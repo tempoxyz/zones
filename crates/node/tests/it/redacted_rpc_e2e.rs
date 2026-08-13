@@ -763,8 +763,8 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf`
-/// and `allowance`, while the configured sequencer retains access.
+/// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf` and `allowance`
+/// without a sequencer bypass.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
