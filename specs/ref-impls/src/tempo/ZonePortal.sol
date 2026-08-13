@@ -544,8 +544,9 @@ contract ZonePortal is IZonePortal {
     function setPauseGuardian(address account, bool allowed) external onlyAdmin {
         _requireCapabilityActive(Capability.PausePortal);
         Role previous = role[account];
-        require(previous == (allowed ? Role.None : Role.PauseGuardian));
         Role next = allowed ? Role.PauseGuardian : Role.None;
+        if (previous == next) return;
+        require(previous == (allowed ? Role.None : Role.PauseGuardian));
         role[account] = next;
         emit RoleUpdated(account, previous, next);
     }

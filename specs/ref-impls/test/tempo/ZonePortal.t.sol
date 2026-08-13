@@ -1544,6 +1544,21 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.paused());
     }
 
+    function test_setPauseGuardian_isIdempotent() public {
+        address guardian = makeAddr("pause guardian");
+        vm.startPrank(admin);
+
+        portal.setPauseGuardian(guardian, true);
+        portal.setPauseGuardian(guardian, true);
+        assertTrue(portal.hasRole(guardian, Role.PauseGuardian));
+
+        portal.setPauseGuardian(guardian, false);
+        portal.setPauseGuardian(guardian, false);
+        assertTrue(portal.hasRole(guardian, Role.None));
+
+        vm.stopPrank();
+    }
+
     function test_setPauseGuardian_cannotBeRemovedAfterCapabilityAbdication() public {
         address guardian = makeAddr("pause guardian");
         vm.startPrank(admin);
