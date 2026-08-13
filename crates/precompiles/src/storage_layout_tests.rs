@@ -2,9 +2,11 @@
 
 use std::path::PathBuf;
 
-use tempo_precompiles::test_util::conformance::{
-    RustStorageField, RustStorageSlot, SolidityStorageLayout, compare_storage_layout,
-    compare_storage_slots, load_foundry_storage_layout,
+use tempo_precompiles::test_util::{
+    foundry_artifact_path,
+    storage_conformance::{
+        RustStorageField, RustStorageSlot, assert_foundry_layout, assert_foundry_slots,
+    },
 };
 use tempo_precompiles_macros::gen_test_fields_layout as layout_fields;
 use zone_primitives::constants::{
@@ -13,28 +15,20 @@ use zone_primitives::constants::{
     PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
 };
 
-fn artifact(contract: &str) -> SolidityStorageLayout {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../specs/ref-impls/out")
-        .join(format!("{contract}.sol/{contract}.json"));
-    load_foundry_storage_layout(&path).unwrap_or_else(|error| {
-        panic!(
-            "failed to read {}: {error}; run `forge build --root specs/ref-impls` first",
-            path.display()
-        )
-    })
+fn artifact(contract: &str) -> PathBuf {
+    foundry_artifact_path(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out"),
+        &format!("{contract}.sol"),
+        contract,
+    )
 }
 
 fn assert_layout(contract: &str, rust: Vec<RustStorageField>) {
-    let solidity = artifact(contract);
-    compare_storage_layout(&solidity, &rust).unwrap_or_else(|errors| {
-        panic!("{contract} storage layout differs:\n{}", errors.join("\n"))
-    });
+    assert_foundry_layout(&artifact(contract), &rust);
 }
 
 #[test]
 fn zone_portal_slot_constants_match_solidity() {
-    let solidity = artifact("ZonePortal");
     let fields = [
         ("admin", PORTAL_ADMIN_SLOT),
         (
@@ -50,8 +44,7 @@ fn zone_portal_slot_constants_match_solidity() {
         ("tokenEnablementHash", PORTAL_TOKEN_ENABLEMENT_HASH_SLOT),
     ]
     .map(|(name, slot)| RustStorageSlot::new(name, slot.into()));
-    compare_storage_slots(&solidity, &fields)
-        .unwrap_or_else(|errors| panic!("ZonePortal storage slots differ:\n{}", errors.join("\n")));
+    assert_foundry_slots(&artifact("ZonePortal"), &fields);
 }
 
 #[test]

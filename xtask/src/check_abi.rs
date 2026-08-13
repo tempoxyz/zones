@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 
 use eyre::bail;
-use tempo_precompiles::test_util::conformance::{AbiSurface, load_foundry_abi};
+use tempo_precompiles::test_util::{
+    abi_conformance::{AbiSurface, compare_abi},
+    foundry_artifact_path,
+};
 
 struct InterfaceSpec {
     name: &'static str,
@@ -42,26 +45,17 @@ impl CheckAbi {
     pub(crate) fn run(self) -> eyre::Result<()> {
         let mut failed = false;
         for spec in INTERFACES {
-            let path = self
-                .artifacts
-                .join(spec.source)
-                .join(format!("{}.json", spec.artifact_name));
-            let solidity =
-                AbiSurface::from_abi(&load_foundry_abi(&path).map_err(|error| eyre::eyre!(error))?);
+            let path = foundry_artifact_path(&self.artifacts, spec.source, spec.artifact_name);
             let rust = (spec.rust)();
-
-            let (rust_only, solidity_only) = rust.diff(&solidity);
-            if rust_only.is_empty() && solidity_only.is_empty() {
+            let errors = compare_abi(&path, &rust).err().unwrap_or_default();
+            if errors.is_empty() {
                 eprintln!("  ✓  {}", spec.name);
                 continue;
             }
             failed = true;
             eprintln!("  ✗  {}", spec.name);
-            for signature in rust_only {
-                eprintln!("    only in Rust: {signature}");
-            }
-            for signature in solidity_only {
-                eprintln!("    only in Solidity: {signature}");
+            for error in errors {
+                eprintln!("    {error}");
             }
         }
         if failed {
