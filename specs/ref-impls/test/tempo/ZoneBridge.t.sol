@@ -18,6 +18,7 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneInbox,
+    IZoneOutbox,
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -820,7 +821,7 @@ contract ZoneBridgeTest is BaseTest {
         // Try callback without fallback recipient
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 500e6);
-        vm.expectRevert(ZoneOutbox.InvalidFallbackRecipient.selector);
+        vm.expectRevert(IZoneOutbox.InvalidFallbackRecipient.selector);
         l2Outbox.requestWithdrawal(
             address(l2ZoneToken),
             address(withdrawalReceiver),

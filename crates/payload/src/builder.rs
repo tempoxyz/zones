@@ -878,6 +878,7 @@ mod tests {
             queued_deposits: vec![
                 abi::QueuedDeposit {
                     depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: alloy_primitives::Bytes::from(
                         alloy_sol_types::SolValue::abi_encode(&abi::WithdrawalBounceBackDeposit {
                             token,
@@ -888,6 +889,7 @@ mod tests {
                 },
                 abi::QueuedDeposit {
                     depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: alloy_primitives::Bytes::from(
                         alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
                             token,

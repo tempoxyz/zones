@@ -731,6 +731,10 @@ interface IZonePortal {
 
     function currentDepositQueueHash() external view returns (bytes32);
 
+    function depositCount() external view returns (uint64);
+
+    function lastProcessedDepositNumber() external view returns (uint64);
+
     function lastSyncedTempoBlockNumber() external view returns (uint64);
 
     function withdrawalQueueHead() external view returns (uint256);
@@ -1164,6 +1168,23 @@ interface IZoneInbox {
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
 
+    error OnlySequencer();
+    error GasLimitTooHigh();
+    error OnlyZoneInbox();
+    error InvalidWithdrawalCount(uint256 actual, uint256 expected);
+    error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
+    error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
+    error InvalidFallbackRecipient();
+    error CallbackDataTooLarge();
+    error GasFeeRateTooHigh();
+    error TransferFailed();
+    error InvalidBlockNumber();
+    error TooManyWithdrawalsThisBlock();
+    error InvalidRevealTo();
+    error InvalidCurrentTxHash();
+    error ZeroAmountWithdrawal();
+    error StaticCallNotAllowed();
+
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
 
@@ -1172,6 +1193,10 @@ interface IZoneOutbox {
 
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     function WITHDRAWAL_BASE_GAS() external view returns (uint64);
+
+    function REVEAL_TO_KEY_LENGTH() external view returns (uint256);
+
+    function AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH() external view returns (uint256);
 
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,

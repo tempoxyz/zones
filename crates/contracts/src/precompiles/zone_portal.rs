@@ -64,6 +64,11 @@ crate::sol! {
             uint64 activationBlock;
         }
 
+        struct TokenConfig {
+            bool enabled;
+            bool depositsActive;
+        }
+
         struct BlockTransition {
             bytes32 prevBlockHash;
             bytes32 nextBlockHash;
@@ -187,7 +192,33 @@ crate::sol! {
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
-        error PolicyForbids();
+        error NotFactory();
+        error NotSelf();
+        error AlreadyInitialized();
+        error MustDelegateCall();
+        error CallbackRejected();
+        error TransferFailed();
+        error ReentrantWithdrawal();
+        error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+        error InvalidEncryptionKeyIndex(uint256 keyIndex);
+        error NoEncryptionKeySet();
+        error NoEncryptionKeyAtBlock(uint64 blockNumber);
+        error InvalidEphemeralPubkey();
+        error InvalidCiphertextLength(uint256 actual, uint256 expected);
+        error InvalidProofOfPossession();
+        error DepositTooSmall();
+        error TokenEnablementBlockCapacityExceeded(uint64 maximum);
+        error TokenMetadataTooLong();
+        error GasFeeRateTooHigh();
+        error DepositsNotActive();
+        error TokenAlreadyEnabled();
+        error TokenTransferPolicyNotSet();
+        error InvalidDepositTransition();
+        error InvalidSequencerSet();
+        error SequencerConfigurationUnchanged();
+        error InvalidQuorumCertificate();
+        error CallbackDidNotReturnToZone();
+        error InvalidAllowedAccount();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
         error DepositBlockCapacityExceeded(uint64 maximum);
@@ -234,6 +265,14 @@ crate::sol! {
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
         function lastProcessedDepositNumber() external view returns (uint64);
+        function FIXED_DEPOSIT_GAS() external view returns (uint64);
+        function MAX_GAS_FEE_RATE() external view returns (uint128);
+        function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+        function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
+        function areDepositsActive(address token) external view returns (bool);
+        function tokenConfig(address token) external view returns (TokenConfig memory);
+        function initialize(uint32 zoneId, address initialToken, bool accessMode, bool gatewayMode, address[] calldata allowedAccounts, address[] calldata zoneGateways, address admin, address messenger, address[] calldata sequencers, uint8 threshold, address verifier, string calldata rpcUrl) external;
+        function deliverWithdrawal(address to, address token, uint128 amount, bytes32 memo, uint64 gasLimit, bytes calldata callbackData) external;
         function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
@@ -561,7 +600,6 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
-            Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
             Self::DepositBlockCapacityExceeded(_) => f.write_str("DepositBlockCapacityExceeded"),
@@ -571,6 +609,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::ActiveLeaderRemoved(_) => f.write_str("ActiveLeaderRemoved"),
             Self::LeaderAlreadyUpdatedThisBlock(_) => f.write_str("LeaderAlreadyUpdatedThisBlock"),
             Self::StaleLeadershipEpoch(_) => f.write_str("StaleLeadershipEpoch"),
+            _ => f.write_str("ZonePortalError"),
         }
     }
 }

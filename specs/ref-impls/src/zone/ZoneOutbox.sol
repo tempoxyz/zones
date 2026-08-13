@@ -99,26 +99,6 @@ contract ZoneOutbox is IZoneOutbox {
     mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    error InvalidFallbackRecipient();
-    error CallbackDataTooLarge();
-    error GasFeeRateTooHigh();
-    error TransferFailed();
-    error OnlySequencer();
-    error InvalidBlockNumber();
-    error TooManyWithdrawalsThisBlock();
-    error InvalidRevealTo();
-    error InvalidCurrentTxHash();
-    error ZeroAmountWithdrawal();
-    error InvalidWithdrawalCount(uint256 actual, uint256 expected);
-    error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
-    error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
-    error GasLimitTooHigh();
-    error OnlyZoneInbox();
-
-    /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 

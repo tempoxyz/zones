@@ -213,7 +213,7 @@ contract ZoneOutboxTest is Test {
     }
 
     function test_enqueueDepositBounceBack_revertsUnlessInbox() public {
-        vm.expectRevert(ZoneOutbox.OnlyZoneInbox.selector);
+        vm.expectRevert(IZoneOutbox.OnlyZoneInbox.selector);
         outbox.enqueueDepositBounceBack(address(zoneToken), 1000e6, bob);
     }
 
@@ -271,13 +271,13 @@ contract ZoneOutboxTest is Test {
         vm.prank(ZONE_INBOX);
         assertEq(outbox.consumeFallbackRecipient(1), charlie);
 
-        vm.expectRevert(ZoneOutbox.InvalidFallbackRecipient.selector);
+        vm.expectRevert(IZoneOutbox.InvalidFallbackRecipient.selector);
         vm.prank(ZONE_INBOX);
         outbox.consumeFallbackRecipient(1);
     }
 
     function test_consumeFallbackRecipient_revertsUnlessInbox() public {
-        vm.expectRevert(ZoneOutbox.OnlyZoneInbox.selector);
+        vm.expectRevert(IZoneOutbox.OnlyZoneInbox.selector);
         outbox.consumeFallbackRecipient(1);
     }
 
@@ -303,11 +303,11 @@ contract ZoneOutboxTest is Test {
     }
 
     function test_pendingWithdrawalGetters_revertUnlessSequencerOrSystem() public {
-        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneOutbox.OnlySequencer.selector);
         vm.prank(alice);
         outbox.pendingWithdrawalsCount();
 
-        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneOutbox.OnlySequencer.selector);
         vm.prank(alice);
         outbox.getPendingWithdrawals();
 
@@ -368,7 +368,7 @@ contract ZoneOutboxTest is Test {
 
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
-        vm.expectRevert(ZoneOutbox.InvalidCurrentTxHash.selector);
+        vm.expectRevert(IZoneOutbox.InvalidCurrentTxHash.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
@@ -398,7 +398,7 @@ contract ZoneOutboxTest is Test {
         bytes[] memory encryptedSenders = new bytes[](0);
 
         vm.prank(sequencer);
-        vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
+        vm.expectRevert(abi.encodeWithSelector(IZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
         outbox.finalizeWithdrawalBatch(0, uint64(block.number), encryptedSenders);
         assertEq(_pendingWithdrawalsCount(), 1);
     }
@@ -475,7 +475,7 @@ contract ZoneOutboxTest is Test {
 
         bytes[] memory encryptedSenders = new bytes[](2);
         vm.prank(sequencer);
-        vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 2, 3));
+        vm.expectRevert(abi.encodeWithSelector(IZoneOutbox.InvalidWithdrawalCount.selector, 2, 3));
         outbox.finalizeWithdrawalBatch(2, uint64(block.number), encryptedSenders);
         assertEq(_pendingWithdrawalsCount(), 3);
     }
@@ -572,7 +572,7 @@ contract ZoneOutboxTest is Test {
         // Non-sequencer should revert
         bytes[] memory encryptedSenders = _emptyEncryptedSenders(1);
         vm.startPrank(alice);
-        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneOutbox.OnlySequencer.selector);
         outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);
         vm.stopPrank();
 
@@ -589,7 +589,7 @@ contract ZoneOutboxTest is Test {
         bytes[] memory encryptedSenders = new bytes[](0);
 
         vm.prank(sequencer);
-        vm.expectRevert(ZoneOutbox.InvalidBlockNumber.selector);
+        vm.expectRevert(IZoneOutbox.InvalidBlockNumber.selector);
         outbox.finalizeWithdrawalBatch(0, uint64(block.number + 1), encryptedSenders);
     }
 
@@ -787,7 +787,7 @@ contract ZoneOutboxTest is Test {
 
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
-        vm.expectRevert(ZoneOutbox.CallbackDataTooLarge.selector);
+        vm.expectRevert(IZoneOutbox.CallbackDataTooLarge.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, data);
         vm.stopPrank();
     }
@@ -803,7 +803,7 @@ contract ZoneOutboxTest is Test {
 
         bytes[] memory senders = _emptyEncryptedSenders(5);
         vm.prank(sequencer);
-        vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 5, 4));
+        vm.expectRevert(abi.encodeWithSelector(IZoneOutbox.InvalidWithdrawalCount.selector, 5, 4));
         outbox.finalizeWithdrawalBatch(5, uint64(block.number), senders);
         assertEq(_pendingWithdrawalsCount(), 4);
     }
@@ -868,7 +868,7 @@ contract ZoneOutboxTest is Test {
         zoneToken.approve(address(outbox), 500e6);
 
         // zoneFallbackRecipient = address(0) reverts
-        vm.expectRevert(ZoneOutbox.InvalidFallbackRecipient.selector);
+        vm.expectRevert(IZoneOutbox.InvalidFallbackRecipient.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, address(0), "");
         vm.stopPrank();
     }
@@ -894,7 +894,7 @@ contract ZoneOutboxTest is Test {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
 
-        vm.expectRevert(ZoneOutbox.GasLimitTooHigh.selector);
+        vm.expectRevert(IZoneOutbox.GasLimitTooHigh.selector);
         outbox.requestWithdrawal(
             address(zoneToken), bob, 500e6, bytes32(0), highGasLimit, alice, "callback"
         );
@@ -905,7 +905,7 @@ contract ZoneOutboxTest is Test {
         uint64 highGasLimit = outbox.MAX_WITHDRAWAL_GAS_LIMIT() + 1;
         assertEq(outbox.MAX_WITHDRAWAL_GAS_LIMIT(), 10_000_000);
 
-        vm.expectRevert(ZoneOutbox.GasLimitTooHigh.selector);
+        vm.expectRevert(IZoneOutbox.GasLimitTooHigh.selector);
         outbox.calculateWithdrawalFee(highGasLimit);
     }
 
@@ -929,7 +929,7 @@ contract ZoneOutboxTest is Test {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
 
-        vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
+        vm.expectRevert(IZoneOutbox.InvalidRevealTo.selector);
         outbox.requestWithdrawal(
             address(zoneToken),
             bob,
@@ -947,7 +947,7 @@ contract ZoneOutboxTest is Test {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
 
-        vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
+        vm.expectRevert(IZoneOutbox.InvalidRevealTo.selector);
         outbox.requestWithdrawal(
             address(zoneToken),
             bob,
@@ -965,7 +965,7 @@ contract ZoneOutboxTest is Test {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
 
-        vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
+        vm.expectRevert(IZoneOutbox.InvalidRevealTo.selector);
         outbox.requestWithdrawal(
             address(zoneToken),
             bob,
@@ -989,7 +989,7 @@ contract ZoneOutboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(
-            abi.encodeWithSelector(ZoneOutbox.InvalidEncryptedSenderCount.selector, 0, 1)
+            abi.encodeWithSelector(IZoneOutbox.InvalidEncryptedSenderCount.selector, 0, 1)
         );
         outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);
     }
@@ -1007,7 +1007,7 @@ contract ZoneOutboxTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                ZoneOutbox.InvalidEncryptedSenderLength.selector,
+                IZoneOutbox.InvalidEncryptedSenderLength.selector,
                 uint256(2),
                 outbox.AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH()
             )
@@ -1066,7 +1066,7 @@ contract ZoneOutboxTest is Test {
 
         bytes[] memory encryptedSenders = new bytes[](2);
         vm.prank(sequencer);
-        vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 2, 5));
+        vm.expectRevert(abi.encodeWithSelector(IZoneOutbox.InvalidWithdrawalCount.selector, 2, 5));
         outbox.finalizeWithdrawalBatch(2, uint64(block.number), encryptedSenders);
         assertEq(_pendingWithdrawalsCount(), 5);
     }
@@ -1080,7 +1080,9 @@ contract ZoneOutboxTest is Test {
 
         bytes[] memory encryptedSenders = new bytes[](1000);
         vm.prank(sequencer);
-        vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 1000, 2));
+        vm.expectRevert(
+            abi.encodeWithSelector(IZoneOutbox.InvalidWithdrawalCount.selector, 1000, 2)
+        );
         outbox.finalizeWithdrawalBatch(1000, uint64(block.number), encryptedSenders);
 
         assertEq(_pendingWithdrawalsCount(), 2);
@@ -1146,7 +1148,7 @@ contract ZoneOutboxTest is Test {
     function test_requestWithdrawal_zeroAmount_reverts() public {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 0);
-        vm.expectRevert(ZoneOutbox.ZeroAmountWithdrawal.selector);
+        vm.expectRevert(IZoneOutbox.ZeroAmountWithdrawal.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
@@ -1229,7 +1231,7 @@ contract ZoneOutboxTest is Test {
 
     function test_setMaxWithdrawalsPerBlock_onlySequencer() public {
         vm.prank(alice);
-        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneOutbox.OnlySequencer.selector);
         outbox.setMaxWithdrawalsPerBlock(10);
     }
 
@@ -1264,7 +1266,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(ZoneOutbox.TooManyWithdrawalsThisBlock.selector);
+        vm.expectRevert(IZoneOutbox.TooManyWithdrawalsThisBlock.selector);
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
     }
@@ -1279,7 +1281,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(ZoneOutbox.TooManyWithdrawalsThisBlock.selector);
+        vm.expectRevert(IZoneOutbox.TooManyWithdrawalsThisBlock.selector);
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
 
         vm.roll(block.number + 1);
@@ -1287,7 +1289,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
 
-        vm.expectRevert(ZoneOutbox.TooManyWithdrawalsThisBlock.selector);
+        vm.expectRevert(IZoneOutbox.TooManyWithdrawalsThisBlock.selector);
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
@@ -1322,7 +1324,7 @@ contract ZoneOutboxTest is Test {
     /// @notice Only the sequencer can update the Tempo gas rate.
     function test_setTempoGasRate_onlySequencer() public {
         vm.prank(alice);
-        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneOutbox.OnlySequencer.selector);
         outbox.setTempoGasRate(1);
     }
 
@@ -1330,7 +1332,7 @@ contract ZoneOutboxTest is Test {
         _setMaxTempoGasRate(6);
 
         vm.prank(sequencer);
-        vm.expectRevert(ZoneOutbox.GasFeeRateTooHigh.selector);
+        vm.expectRevert(IZoneOutbox.GasFeeRateTooHigh.selector);
         outbox.setTempoGasRate(7);
     }
 
@@ -1346,7 +1348,7 @@ contract ZoneOutboxTest is Test {
         _setMaxTempoGasRate(0);
 
         vm.startPrank(sequencer);
-        vm.expectRevert(ZoneOutbox.GasFeeRateTooHigh.selector);
+        vm.expectRevert(IZoneOutbox.GasFeeRateTooHigh.selector);
         outbox.setTempoGasRate(1);
         outbox.setTempoGasRate(0);
         vm.stopPrank();
@@ -1363,7 +1365,7 @@ contract ZoneOutboxTest is Test {
         outbox.setTempoGasRate(tempoGasRate);
 
         if (gasLimit > maxGasLimit) {
-            vm.expectRevert(ZoneOutbox.GasLimitTooHigh.selector);
+            vm.expectRevert(IZoneOutbox.GasLimitTooHigh.selector);
             outbox.calculateWithdrawalFee(gasLimit);
         } else {
             uint128 expected = uint128(outbox.WITHDRAWAL_BASE_GAS() + gasLimit) * tempoGasRate;
@@ -1380,7 +1382,7 @@ contract ZoneOutboxTest is Test {
 
         bytes[] memory encryptedSenders = new bytes[](0);
         vm.prank(sequencer);
-        vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
+        vm.expectRevert(abi.encodeWithSelector(IZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
         outbox.finalizeWithdrawalBatch(0, uint64(block.number), encryptedSenders);
         assertEq(_pendingWithdrawalsCount(), 1);
         assertEq(outbox.lastBatch().withdrawalBatchIndex, 0);

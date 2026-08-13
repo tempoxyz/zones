@@ -89,6 +89,7 @@ mod tests {
 
         let qd = QueuedDeposit {
             depositType: DepositType::WithdrawalBounceBack,
+            rejected: false,
             depositData: deposit_data,
         };
 

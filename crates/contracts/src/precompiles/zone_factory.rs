@@ -57,6 +57,9 @@ crate::sol! {
         error NotOwner();
         error InvalidAdmin();
         error InvalidSequencerSet();
+        error InvalidClosedLoopConfig();
+        error DuplicateAllowedAccount();
+        error DuplicateZoneGateway();
         function owner() external view returns (address);
         function transferOwnership(address newOwner) external;
         function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);

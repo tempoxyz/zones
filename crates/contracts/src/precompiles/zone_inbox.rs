@@ -41,6 +41,7 @@ crate::sol! {
         struct QueuedDeposit {
             DepositType depositType;
             bytes depositData;
+            bool rejected;
         }
 
         /// Chaum-Pedersen proof for ECDH shared secret derivation.
