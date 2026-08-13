@@ -11821,19 +11821,16 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "clap",
- "futures",
  "reth-trie-common",
- "serde",
  "serde_json",
  "tempo-chainspec",
  "tempo-primitives",
- "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "tokio-vsock",
  "tracing",
  "tracing-subscriber",
  "zone-chainspec",
+ "zone-prover",
  "zone-spf",
 ]
 
@@ -11862,7 +11859,6 @@ dependencies = [
  "tempo-chainspec",
  "tempo-primitives",
  "tempo-zone-contracts",
- "tempo-zone-prover-enclave",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -11870,6 +11866,7 @@ dependencies = [
  "zone-evm",
  "zone-precompiles",
  "zone-primitives",
+ "zone-prover",
  "zone-rpc",
  "zone-spf",
 ]
@@ -13975,6 +13972,25 @@ dependencies = [
  "alloy-primitives",
  "tempo-hardfork",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "zone-prover"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "futures",
+ "reth-trie-common",
+ "serde",
+ "serde_json",
+ "tempo-chainspec",
+ "tempo-primitives",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "zone-spf",
 ]
 
 [[package]]

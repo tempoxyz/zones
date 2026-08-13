@@ -16,7 +16,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
-use futures::{SinkExt, StreamExt, TryStreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -24,15 +24,15 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tempo_zone_prover_enclave::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, VerifyRequest, VerifyResponse, framed,
-};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
 use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
+use zone_prover::{
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+};
 use zone_rpc::{
     ZoneProvider, ZoneProviderConfig,
     types::{TempoStorageRead, ZoneExecutionWitness},
@@ -411,24 +411,19 @@ async fn send_to_prover(
     request: &VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
-    let payload = serde_json::to_vec(request).context("serialize prover request")?;
-    let request_bytes = payload.len();
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
-    let mut stream = framed(stream, DEFAULT_MAX_REQUEST_BYTES);
-    stream
-        .send(payload.into())
+    let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+    let request_bytes = connection
+        .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
-    let response_payload = stream
-        .next()
+    let response: VerifyResponse = connection
+        .receive()
         .await
-        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?
-        .map_err(|error| eyre!(error))
-        .wrap_err_with(|| format!("read response from target prover at {target}"))?;
-    let response = serde_json::from_slice::<VerifyResponse>(&response_payload)
-        .wrap_err_with(|| format!("decode response from target prover at {target}"))?;
+        .wrap_err_with(|| format!("read response from target prover at {target}"))?
+        .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
 
     match response {
         VerifyResponse::Ok {
