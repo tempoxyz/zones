@@ -1849,9 +1849,8 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.isTokenEnabled(overflowToken));
     }
 
-    function test_sequencerGovernance_revertsIfAdmin() public {
-        // Admin may rotate the deposit-encryption key, but must not perform the other
-        // sequencer-only actions below.
+    function test_sequencerGovernance_revertsIfAdminLacksSequencerRole() public {
+        // Admin authority alone does not grant sequencer-only powers.
         Withdrawal memory w =
             _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         // Read state used as call args up front so the staticcall isn't mistaken

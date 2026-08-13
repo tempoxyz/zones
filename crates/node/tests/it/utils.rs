@@ -1996,7 +1996,7 @@ impl L1TestNode {
     /// Captures the current L1 header as the genesis anchor, then calls
     /// `createZone()` with pathUSD as the token, a distinct [`admin_address`] as
     /// the portal admin, and the dev account as the sequencer. This exercises the
-    /// admin/sequencer role separation. The admin account is funded with pathUSD
+    /// common deployment pattern of distinct admin and sequencer keys. The admin account is funded with pathUSD
     /// for gas so admin-only portal calls (e.g. `enableToken`) can be made, and the dev
     /// sequencer's encryption key is registered so the portal can accept deposits immediately.
     ///

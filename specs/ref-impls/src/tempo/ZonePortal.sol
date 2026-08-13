@@ -250,7 +250,7 @@ contract ZonePortal is IZonePortal {
         _initialized = true;
         zoneId = _zoneId;
         messenger = _messenger;
-        _setAdmin(_admin);
+        admin = _admin;
         verifier = _verifier;
         _isAccessEnforced = accessEnforced;
         _isGatewayEnforced = gatewayEnforced;
@@ -371,13 +371,16 @@ contract ZonePortal is IZonePortal {
         }
 
         for (uint256 i = 0; i < _sequencers.length; ++i) {
-            _setSequencer(_sequencers[i], false);
+            address signer = _sequencers[i];
+            role[signer] = Role.None;
+            emit RoleUpdated(signer, Role.Sequencer, Role.None);
         }
         delete _sequencers;
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             _sequencers.push(signer);
-            _setSequencer(signer, true);
+            role[signer] = Role.Sequencer;
+            emit RoleUpdated(signer, Role.None, Role.Sequencer);
         }
         // Rotating out the active leader would strand block production: transfer leadership
         // first (add the replacement, setLeader, then remove the old member).
@@ -482,7 +485,7 @@ contract ZonePortal is IZonePortal {
     function acceptAdmin() external {
         if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotPendingAdmin();
         address previousAdmin = admin;
-        _setAdmin(pendingAdmin);
+        admin = pendingAdmin;
         pendingAdmin = address(0);
         emit AdminTransferred(previousAdmin, admin);
     }
@@ -542,17 +545,6 @@ contract ZonePortal is IZonePortal {
         Role previous = role[account];
         require(previous != Role.Sequencer);
         Role next = allowed ? Role.PauseGuardian : Role.None;
-        role[account] = next;
-        emit RoleUpdated(account, previous, next);
-    }
-
-    function _setAdmin(address next) internal {
-        admin = next;
-    }
-
-    function _setSequencer(address account, bool enabled) internal {
-        Role previous = role[account];
-        Role next = enabled ? Role.Sequencer : Role.None;
         role[account] = next;
         emit RoleUpdated(account, previous, next);
     }
