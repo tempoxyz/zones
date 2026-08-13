@@ -1,15 +1,15 @@
 //! ABI compatibility checker between Zone Rust bindings and Solidity interfaces.
 
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::path::PathBuf;
 
-use alloy_json_abi::{ContractObject, JsonAbi};
-use eyre::{Context, ContextCompat, bail};
+use eyre::bail;
+use tempo_precompiles::test_util::conformance::{AbiSurface, load_foundry_abi};
 
 struct InterfaceSpec {
     name: &'static str,
     artifact_name: &'static str,
     source: &'static str,
-    rust: fn() -> JsonAbi,
+    rust: fn() -> AbiSurface,
 }
 
 macro_rules! interface {
@@ -18,7 +18,7 @@ macro_rules! interface {
             name: stringify!($name),
             artifact_name: $artifact,
             source: $source,
-            rust: tempo_zone_contracts::$name::abi::contract,
+            rust: || AbiSurface::from_abi(&tempo_zone_contracts::$name::abi::contract()),
         }
     };
 }
@@ -46,17 +46,11 @@ impl CheckAbi {
                 .artifacts
                 .join(spec.source)
                 .join(format!("{}.json", spec.artifact_name));
-            let artifact: ContractObject = serde_json::from_str(
-                &fs::read_to_string(&path)
-                    .with_context(|| format!("reading {}", path.display()))?,
-            )?;
-            let solidity = artifact.abi.context("Foundry artifact has no ABI")?;
+            let solidity =
+                AbiSurface::from_abi(&load_foundry_abi(&path).map_err(|error| eyre::eyre!(error))?);
             let rust = (spec.rust)();
 
-            let rust = surface(&rust);
-            let solidity = surface(&solidity);
-            let rust_only: Vec<_> = rust.difference(&solidity).collect();
-            let solidity_only: Vec<_> = solidity.difference(&rust).collect();
+            let (rust_only, solidity_only) = rust.diff(&solidity);
             if rust_only.is_empty() && solidity_only.is_empty() {
                 eprintln!("  ✓  {}", spec.name);
                 continue;
@@ -75,21 +69,4 @@ impl CheckAbi {
         }
         Ok(())
     }
-}
-
-fn surface(abi: &JsonAbi) -> BTreeSet<String> {
-    let mut result = BTreeSet::new();
-    result.extend(
-        abi.functions()
-            .map(|item| format!("function {}", item.signature())),
-    );
-    result.extend(
-        abi.errors()
-            .map(|item| format!("error {}", item.signature())),
-    );
-    result.extend(
-        abi.events()
-            .map(|item| format!("event {}", item.signature())),
-    );
-    result
 }
