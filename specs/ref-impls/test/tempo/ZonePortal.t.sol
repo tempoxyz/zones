@@ -1581,6 +1581,20 @@ contract ZonePortalTest is BaseTest {
             )
         );
         portal.setGateway(address(zoneGateway), false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.CapabilityAbdicated.selector, Capability.AccessPolicy
+            )
+        );
+        portal.setPauseGuardian(alice, false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.CapabilityAbdicated.selector, Capability.AccessPolicy
+            )
+        );
+        portal.setPauseGuardian(address(zoneGateway), true);
         vm.stopPrank();
 
         assertTrue(portal.hasRole(alice, Role.Account));

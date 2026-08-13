@@ -540,10 +540,14 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Add or remove a pause guardian.
-    /// @dev Only additions require an active pause capability; removal remains possible after abdication.
+    /// @dev Replacing an access role still requires an active access policy. Only additions require
+    ///      an active pause capability, so removing a pause guardian remains possible after abdication.
     function setPauseGuardian(address account, bool allowed) external onlyAdmin {
-        if (allowed) _requireCapabilityActive(Capability.PausePortal);
         Role previous = role[account];
+        if (previous == Role.Account || previous == Role.CallbackGateway) {
+            _requireCapabilityActive(Capability.AccessPolicy);
+        }
+        if (allowed) _requireCapabilityActive(Capability.PausePortal);
         require(previous != Role.Sequencer);
         Role next = allowed ? Role.PauseGuardian : Role.None;
         role[account] = next;
