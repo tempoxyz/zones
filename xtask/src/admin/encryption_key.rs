@@ -1,6 +1,6 @@
 //! Shared sequencer encryption-key preparation and registration.
 
-use std::{fmt, path::PathBuf, time::Duration};
+use std::{collections::HashSet, fmt, path::PathBuf, time::Duration};
 
 use alloy::{
     network::EthereumWallet,
@@ -12,6 +12,7 @@ use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
+use zeroize::Zeroizing;
 use zone_sequencer::{encryption_key_identity, prove_encryption_key_possession};
 
 use super::{
@@ -21,7 +22,8 @@ use super::{
         required_decryption_keys_invariant,
     },
     secret_file::{
-        WriteSecretOptions, encode_private_key, read_private_key_file, write_secret_file,
+        WriteSecretOptions, encode_private_key, read_private_key_file, read_private_keyring_file,
+        write_secret_file,
     },
     snapshot::{ClusterView, EncryptionKey as PortalEncryptionKey},
 };
@@ -39,7 +41,7 @@ pub(crate) struct EncryptionKey {
 
 #[derive(Debug, clap::Subcommand)]
 enum EncryptionKeyCommand {
-    /// Generate a replacement shared key and a two-key decryption file.
+    /// Generate a replacement shared key and merged decryption keyring.
     Prepare(Prepare),
     /// Verify preloading, then register the replacement key on ZonePortal.
     Register(Register),
@@ -63,6 +65,10 @@ struct Prepare {
     #[arg(long)]
     current_key_file: PathBuf,
 
+    /// Currently deployed deposit-decryption-keys file; its nonblank keys are retained.
+    #[arg(long)]
+    existing_decryption_keys_file: PathBuf,
+
     /// Directory that receives new-shared.key and deposit-decryption-keys.
     #[arg(long)]
     rotation_dir: PathBuf,
@@ -72,7 +78,7 @@ struct Prepare {
     force: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KeyIdentity {
     address: Address,
@@ -119,6 +125,16 @@ impl Prepare {
             "current key file does not derive the active Portal encryption key {}",
             display_portal_key(active)
         );
+        let existing_keyring = read_private_keyring_file(&self.existing_decryption_keys_file)?;
+        let existing_identities = existing_keyring
+            .iter()
+            .map(identity_from_signer)
+            .collect::<eyre::Result<HashSet<_>>>()?;
+        ensure!(
+            existing_identities.contains(&old_key),
+            "existing decryption keyring `{}` does not include the current active key",
+            self.existing_decryption_keys_file.display()
+        );
 
         let new_signer = distinct_random_key(&current)?;
         let new_key = identity_from_signer(&new_signer)?;
@@ -146,8 +162,7 @@ impl Prepare {
             encode_private_key(&new_signer).as_bytes(),
             options,
         )?;
-        let mut keyring = encode_private_key(&current);
-        keyring.push_str(&encode_private_key(&new_signer));
+        let keyring = merge_decryption_keyring(existing_keyring, &new_signer)?;
         write_secret_file(&keyring_path, keyring.as_bytes(), options)?;
 
         let report = PrepareReport {
@@ -484,6 +499,20 @@ fn distinct_random_key(current: &PrivateKeySigner) -> eyre::Result<PrivateKeySig
     Err(eyre!("failed to generate a distinct replacement key"))
 }
 
+fn merge_decryption_keyring(
+    existing: Vec<PrivateKeySigner>,
+    new_key: &PrivateKeySigner,
+) -> eyre::Result<Zeroizing<String>> {
+    let mut identities = HashSet::new();
+    let mut keyring = Zeroizing::new(String::new());
+    for key in existing.iter().chain(std::iter::once(new_key)) {
+        if identities.insert(identity_from_signer(key)?) {
+            keyring.push_str(&encode_private_key(key));
+        }
+    }
+    Ok(keyring)
+}
+
 fn key_matches(portal: PortalEncryptionKey, identity: KeyIdentity) -> bool {
     portal.x == identity.x && portal.y_parity == identity.y_parity
 }
@@ -507,7 +536,7 @@ fn progress(message: impl fmt::Display) {
 mod tests {
     use alloy::signers::local::PrivateKeySigner;
 
-    use super::identity_from_signer;
+    use super::{identity_from_signer, merge_decryption_keyring};
 
     #[test]
     fn identity_contains_canonical_parity() {
@@ -515,5 +544,15 @@ mod tests {
         let identity = identity_from_signer(&signer).unwrap();
         assert!(identity.y_parity == 2 || identity.y_parity == 3);
         assert_eq!(identity.address, signer.address());
+    }
+
+    #[test]
+    fn merged_keyring_preserves_existing_keys_and_deduplicates_by_identity() {
+        let old = PrivateKeySigner::from_slice(&[0x11; 32]).unwrap();
+        let historical = PrivateKeySigner::from_slice(&[0x22; 32]).unwrap();
+        let new = PrivateKeySigner::from_slice(&[0x33; 32]).unwrap();
+        let keyring = merge_decryption_keyring(vec![old.clone(), historical, old], &new).unwrap();
+        assert_eq!(keyring.lines().count(), 3);
+        assert!(keyring.contains(&super::encode_private_key(&new)));
     }
 }
