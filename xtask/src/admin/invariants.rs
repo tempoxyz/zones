@@ -423,6 +423,78 @@ pub(crate) fn required_decryption_keys_invariant(
     }
 }
 
+/// Require the configured operator endpoints to cover every finalized Portal
+/// sequencer exactly once. RPC-only nodes are intentionally excluded because
+/// they are not registered with the Portal and hold no shared key.
+pub(crate) fn portal_sequencer_coverage_invariant(
+    portal: &PortalSnapshot,
+    nodes: &[NodeSnapshot],
+) -> InvariantResult {
+    let queried = nodes
+        .iter()
+        .filter_map(|node| {
+            let info = node.sequencer.as_ref()?;
+            if is_rpc_only(info) == Some(true) {
+                return None;
+            }
+            info.local
+                .as_ref()?
+                .sequencer_address
+                .map(|address| (node.name.as_str(), address))
+        })
+        .collect::<Vec<_>>();
+    let queried_addresses = queried
+        .iter()
+        .map(|(_, address)| *address)
+        .collect::<Vec<_>>();
+    let queried_members = address_set(&queried_addresses);
+    let portal_members = address_set(&portal.sequencers);
+    let missing = portal_members
+        .difference(&queried_members)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let unexpected = queried_members
+        .difference(&portal_members)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let duplicates = queried
+        .iter()
+        .filter(|(_, address)| {
+            queried_addresses
+                .iter()
+                .filter(|candidate| *candidate == address)
+                .count()
+                > 1
+        })
+        .map(|(name, address)| format!("{name}={address}"))
+        .collect::<Vec<_>>();
+    let ok = missing.is_empty()
+        && unexpected.is_empty()
+        && duplicates.is_empty()
+        && queried.len() == portal.sequencers.len();
+    InvariantResult {
+        name: "portal_sequencer_coverage",
+        status: if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: if ok {
+            format!(
+                "all {} finalized Portal sequencers were queried exactly once",
+                portal.sequencers.len()
+            )
+        } else {
+            format!(
+                "configured endpoints do not cover finalized Portal sequencers exactly once; missing: {}; unexpected: {}; duplicates: {}",
+                missing.join(", "),
+                unexpected.join(", "),
+                duplicates.join(", ")
+            )
+        },
+    }
+}
+
 pub(crate) fn evaluate_node_ready(
     node_name: &str,
     portal: &PortalSnapshot,
@@ -454,42 +526,53 @@ pub(crate) fn evaluate_node_ready(
     let Some(info) = node.sequencer.as_ref() else {
         return results;
     };
-    if is_rpc_only(info) == Some(true) {
-        results.push(InvariantResult {
-            name: "wait_node_ready",
-            status: CheckStatus::Skipped,
-            detail: format!("{node_name} is rpc-only; reachability is sufficient"),
-        });
-        return results;
-    }
-    let ready = info
-        .readiness
-        .as_ref()
-        .zip(info.progress.as_ref())
-        .is_some_and(|(readiness, progress)| {
-            readiness.ready_for_promotion && progress.pending_transitions.to::<u64>() == 0
-        });
+    let identity_matches = node.zone.as_ref().is_some_and(|zone| {
+        zone.zone_id.to::<u32>() == portal.zone_id && info.portal == portal.portal
+    });
     add_check(
         &mut results,
-        "wait_node_promotion_ready",
-        ready,
-        format!("{node_name} is promotion-ready with no pending transitions"),
+        "wait_node_identity",
+        identity_matches,
         format!(
-            "{node_name} is not promotion-ready: ready={:?} pending={:?}",
-            info.readiness
-                .as_ref()
-                .map(|readiness| readiness.ready_for_promotion),
-            info.progress
-                .as_ref()
-                .map(|progress| progress.pending_transitions)
+            "{node_name} reports Zone {} and Portal {}",
+            portal.zone_id, portal.portal
+        ),
+        format!(
+            "{node_name} does not report expected Zone {} and Portal {}",
+            portal.zone_id, portal.portal
         ),
     );
-    let canonical = node.common_block.as_ref().is_some_and(|block| {
-        nodes
-            .iter()
-            .filter_map(|other| other.common_block.as_ref())
-            .all(|other| other.hash == block.hash && other.state_root == block.state_root)
-    }) || node.latest_block.is_some();
+    if is_rpc_only(info) == Some(true) {
+        results.push(InvariantResult {
+            name: "wait_node_promotion_ready",
+            status: CheckStatus::Skipped,
+            detail: format!("{node_name} is rpc-only; promotion readiness does not apply"),
+        });
+    } else {
+        let ready = info
+            .readiness
+            .as_ref()
+            .zip(info.progress.as_ref())
+            .is_some_and(|(readiness, progress)| {
+                readiness.ready_for_promotion && progress.pending_transitions.to::<u64>() == 0
+            });
+        add_check(
+            &mut results,
+            "wait_node_promotion_ready",
+            ready,
+            format!("{node_name} is promotion-ready with no pending transitions"),
+            format!(
+                "{node_name} is not promotion-ready: ready={:?} pending={:?}",
+                info.readiness
+                    .as_ref()
+                    .map(|readiness| readiness.ready_for_promotion),
+                info.progress
+                    .as_ref()
+                    .map(|progress| progress.pending_transitions)
+            ),
+        );
+    }
+    let canonical = canonical_state_invariant(nodes).status == CheckStatus::Pass;
     add_check(
         &mut results,
         "wait_node_canonical",
@@ -497,7 +580,6 @@ pub(crate) fn evaluate_node_ready(
         format!("{node_name} reports canonical Zone state"),
         format!("{node_name} has no canonical block at the cluster common height"),
     );
-    let _ = portal;
     results
 }
 
@@ -1219,10 +1301,53 @@ pub(crate) fn resolve_node<'a>(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address, B256, U64};
+    use alloy::primitives::{Address, B256, U64, U256};
 
     use super::*;
-    use crate::admin::snapshot::{test_node_snapshot, test_sequencer_info};
+    use crate::admin::snapshot::{
+        EncryptionKey, RpcBlock, test_node_snapshot, test_sequencer_info,
+    };
+
+    fn test_portal_snapshot(sequencers: Vec<Address>) -> PortalSnapshot {
+        PortalSnapshot {
+            finalized_block_number: 100,
+            finalized_block_hash: B256::ZERO,
+            zone_id: 1,
+            portal: Address::repeat_byte(0x44),
+            admin: Address::ZERO,
+            sequencers,
+            threshold: 1,
+            sequencer_set_version: 0,
+            leader: Address::ZERO,
+            leader_epoch: 0,
+            leader_activation_tempo_block: 0,
+            zone_height: U256::ZERO,
+            last_synced_tempo_block: 0,
+            block_hash: B256::ZERO,
+            zone_gas_rate: 0,
+            paused: false,
+            pause_expiry: 0,
+            pause_abdication_effective_at: 0,
+            access_abdication_effective_at: 0,
+            withdrawal_batch_index: 0,
+            current_deposit_queue_hash: B256::ZERO,
+            enabled_tokens: Vec::new(),
+            encryption_key: Some(EncryptionKey {
+                x: B256::repeat_byte(0x11),
+                y_parity: 2,
+            }),
+        }
+    }
+
+    fn with_common_block(mut node: NodeSnapshot, hash: B256) -> NodeSnapshot {
+        node.common_block = Some(RpcBlock {
+            number: U64::from(1),
+            hash,
+            state_root: B256::repeat_byte(0x55),
+            miner: None,
+        });
+        node
+    }
 
     fn with_local_tip(info: SequencerInfoResponse, height: u64) -> SequencerInfoResponse {
         with_local_tip_at(info, height, height)
@@ -1314,6 +1439,77 @@ mod tests {
         assert_eq!(readiness.sequencer_nodes, 1);
         assert_eq!(readiness.rpc_only_nodes, ["rpc"]);
         assert!(readiness.failures.is_empty());
+    }
+
+    #[test]
+    fn registration_coverage_rejects_omitted_portal_sequencer() {
+        let portal = test_portal_snapshot(vec![Address::ZERO, Address::repeat_byte(0x22)]);
+        let only_a = test_node_snapshot("node-a", test_sequencer_info(false, true));
+
+        let result = portal_sequencer_coverage_invariant(&portal, &[only_a]);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(
+            result
+                .detail
+                .contains(&Address::repeat_byte(0x22).to_string())
+        );
+
+        let portal = test_portal_snapshot(vec![Address::ZERO]);
+        let node_a = test_node_snapshot("node-a", test_sequencer_info(false, true));
+        let rpc = test_node_snapshot("rpc", test_sequencer_info(true, false));
+        assert_eq!(
+            portal_sequencer_coverage_invariant(&portal, &[node_a, rpc]).status,
+            CheckStatus::Pass
+        );
+    }
+
+    #[test]
+    fn wait_ready_rejects_node_with_wrong_portal_identity() {
+        let portal = test_portal_snapshot(vec![Address::ZERO]);
+        let node = with_common_block(
+            test_node_snapshot("node-a", test_sequencer_info(false, true)),
+            B256::repeat_byte(0x33),
+        );
+
+        let results = evaluate_node_ready("node-a", &portal, &[node]);
+        assert!(results.iter().any(|result| {
+            result.name == "wait_node_identity" && result.status == CheckStatus::Fail
+        }));
+    }
+
+    #[test]
+    fn wait_ready_does_not_treat_latest_block_as_canonical() {
+        let portal = test_portal_snapshot(vec![Address::ZERO]);
+        let mut info = test_sequencer_info(false, true);
+        info.portal = portal.portal;
+        let mut node = test_node_snapshot("node-a", info);
+        node.latest_block = Some(RpcBlock {
+            number: U64::from(10),
+            hash: B256::repeat_byte(0x77),
+            state_root: B256::repeat_byte(0x88),
+            miner: None,
+        });
+
+        let results = evaluate_node_ready("node-a", &portal, &[node]);
+        assert!(results.iter().any(|result| {
+            result.name == "wait_node_canonical" && result.status == CheckStatus::Fail
+        }));
+    }
+
+    #[test]
+    fn wait_ready_requires_canonical_state_for_rpc_only_node() {
+        let portal = test_portal_snapshot(vec![Address::ZERO]);
+        let mut info = test_sequencer_info(true, false);
+        info.portal = portal.portal;
+        let node = test_node_snapshot("rpc", info);
+
+        let results = evaluate_node_ready("rpc", &portal, &[node]);
+        assert!(results.iter().any(|result| {
+            result.name == "wait_node_promotion_ready" && result.status == CheckStatus::Skipped
+        }));
+        assert!(results.iter().any(|result| {
+            result.name == "wait_node_canonical" && result.status == CheckStatus::Fail
+        }));
     }
 
     #[test]

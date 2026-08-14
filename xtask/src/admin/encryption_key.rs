@@ -17,7 +17,8 @@ use zone_sequencer::{encryption_key_identity, prove_encryption_key_possession};
 use super::{
     config::{ExpectedEncryptionKey, SharedAdminArgs, format_duration, parse_nonzero_duration},
     invariants::{
-        evaluate_base_invariants, l1_batch_invariant, required_decryption_keys_invariant,
+        evaluate_base_invariants, l1_batch_invariant, portal_sequencer_coverage_invariant,
+        required_decryption_keys_invariant,
     },
     secret_file::{
         WriteSecretOptions, encode_private_key, read_private_key_file, write_secret_file,
@@ -222,6 +223,8 @@ impl Register {
             .encryption_key
             .is_some_and(|key| key_matches(key, new_key))
         {
+            ensure_healthy(&view)?;
+            ensure_registration_coverage(&view)?;
             return self.print_report(RegisterReport {
                 ok: true,
                 dry_run: false,
@@ -297,6 +300,8 @@ impl Register {
             .encryption_key
             .is_some_and(|key| key_matches(key, new_key))
         {
+            ensure_healthy(&latest)?;
+            ensure_registration_coverage(&latest)?;
             return self.print_report(RegisterReport {
                 ok: true,
                 dry_run: false,
@@ -431,7 +436,21 @@ fn ensure_registration_preconditions(
         &view.nodes,
         &[old_key, new_key],
     ));
+    invariants.push(portal_sequencer_coverage_invariant(
+        &view.portal,
+        &view.nodes,
+    ));
     ensure_invariants("registration preflight failed", &invariants)
+}
+
+fn ensure_registration_coverage(view: &ClusterView) -> eyre::Result<()> {
+    ensure_invariants(
+        "registration preflight failed",
+        &[portal_sequencer_coverage_invariant(
+            &view.portal,
+            &view.nodes,
+        )],
+    )
 }
 
 fn ensure_invariants(
