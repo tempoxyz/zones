@@ -15,11 +15,13 @@ readonly L1_AUTH_PORT="${L1_AUTH_PORT:-8551}"
 readonly L1_P2P_PORT="${L1_P2P_PORT:-30303}"
 readonly ZONE_HTTP_PORT="${ZONE_HTTP_PORT:-9545}"
 readonly ZONE_REDACTED_PORT="${ZONE_REDACTED_PORT:-9555}"
+readonly ZONE_METRICS_PORT="${ZONE_METRICS_PORT:-9001}"
 readonly L1_BLOCK_TIME="${L1_BLOCK_TIME:-500ms}"
 
 readonly L1_HTTP_URL="http://127.0.0.1:$L1_HTTP_PORT"
 readonly L1_WS_URL="ws://127.0.0.1:$L1_WS_PORT"
 readonly ZONE_HTTP_URL="http://127.0.0.1:$ZONE_HTTP_PORT"
+readonly ZONE_METRICS_URL="http://127.0.0.1:$ZONE_METRICS_PORT/metrics"
 
 # Standard first Anvil development account. Never use this lab configuration on a public network.
 readonly DEV_KEY="${DEV_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"

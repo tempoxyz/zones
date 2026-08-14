@@ -12,8 +12,8 @@ status() {
     fi
     if pid_is_running "$ZONE_PID_FILE"; then
         zone_running=true
-        printf 'Zone:     running (PID %s, HTTP %s)\n' \
-            "$(cat "$ZONE_PID_FILE")" "$ZONE_HTTP_URL"
+        printf 'Zone:     running (PID %s, HTTP %s, metrics %s)\n' \
+            "$(cat "$ZONE_PID_FILE")" "$ZONE_HTTP_URL" "$ZONE_METRICS_URL"
     else
         printf 'Zone:     stopped\n'
     fi

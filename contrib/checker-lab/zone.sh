@@ -60,6 +60,7 @@ start_zone() {
             --l1.portal-address "$portal" \
             --zone.id "$zone_id" \
             --http --http.addr 127.0.0.1 --http.port "$ZONE_HTTP_PORT" --http.api all \
+            --metrics "127.0.0.1:$ZONE_METRICS_PORT" \
             --redacted-rpc.port "$ZONE_REDACTED_PORT" \
             --log.file.directory "$ZONE_DIR/logs" \
             --sequencer \

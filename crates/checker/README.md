@@ -219,34 +219,36 @@ the descendants left unchecked by an authenticated divergence.
 
 ### Metrics
 
-The checker publishes alert-oriented metrics through the node's existing metrics endpoint:
+The checker publishes alert-oriented metrics through the node's existing metrics endpoint. Reth
+prefixes each metric with `reth_` in Prometheus output:
 
-- `tempo_zone_checker_divergences_total{category="..."}` increments after a divergence is
+- `reth_tempo_zone_checker_divergences_total{category="..."}` increments after a divergence is
   durably recorded. The bounded `category` label identifies the finding family; inspect
   the corresponding checker log for block hashes, code, location, and summary.
-- `tempo_zone_checker_state{state="..."}` is a one-hot lifecycle gauge. The bounded states
+- `reth_tempo_zone_checker_state{state="..."}` is a one-hot lifecycle gauge. The bounded states
   distinguish checkpoint bootstrap and opening, Tempo connection and retries, normal
   recovery, complete coverage, divergence, durable blocking, and an unavailable database.
-- `tempo_zone_checker_verified_zone_height`, `tempo_zone_checker_observed_zone_height`, and
-  `tempo_zone_checker_verification_lag_blocks` expose checker progress. The imported Tempo tip
-  and reorg recovery checkpoint are exported as `tempo_zone_checker_imported_tempo_height` and
-  `tempo_zone_checker_recovery_checkpoint_height`.
-- `tempo_zone_checker_divergence_active`, `tempo_zone_checker_coverage_gap`,
-  `tempo_zone_checker_recovering`, and `tempo_zone_checker_blocked` expose durable coverage
+- `reth_tempo_zone_checker_verified_zone_height`, `reth_tempo_zone_checker_observed_zone_height`,
+  and `reth_tempo_zone_checker_verification_lag_blocks` expose checker progress. The imported
+  Tempo tip and reorg recovery checkpoint are exported as
+  `reth_tempo_zone_checker_imported_tempo_height` and
+  `reth_tempo_zone_checker_recovery_checkpoint_height`.
+- `reth_tempo_zone_checker_divergence_active`, `reth_tempo_zone_checker_coverage_gap`,
+  `reth_tempo_zone_checker_recovering`, and `reth_tempo_zone_checker_blocked` expose durable coverage
   state. Inspect the checker database or its structured logs for the terminal reason.
-- `tempo_zone_checker_authentication_duration_seconds` measures complete block authentication
-  attempts, including attempts that time out. `tempo_zone_checker_acquisition_retries_total`
+- `reth_tempo_zone_checker_authentication_duration_seconds` measures complete block authentication
+  attempts, including attempts that time out. `reth_tempo_zone_checker_acquisition_retries_total`
   counts attempts retried for unavailable local or Tempo data.
-- `tempo_zone_checker_verified_zone_blocks_total` increments only after a Zone transition is
+- `reth_tempo_zone_checker_verified_zone_blocks_total` increments only after a Zone transition is
   committed.
 
 Snapshot-derived gauges are restored from durable checker metadata on startup, so a restart
 does not clear an unresolved divergence or blocked condition.
 
-For checker-enabled nodes, alert on any increase in `tempo_zone_checker_divergences_total`,
-while `tempo_zone_checker_divergence_active == 1`,
-`tempo_zone_checker_coverage_gap == 1`, or `tempo_zone_checker_blocked == 1`, and if the
-`tempo_zone_checker_state` series is absent. Alert separately when lag remains non-zero without
+For checker-enabled nodes, alert on any increase in `reth_tempo_zone_checker_divergences_total`,
+while `reth_tempo_zone_checker_divergence_active == 1`,
+`reth_tempo_zone_checker_coverage_gap == 1`, or `reth_tempo_zone_checker_blocked == 1`, and if the
+`reth_tempo_zone_checker_state` series is absent. Alert separately when lag remains non-zero without
 verified-height progress; recovering history is expected only while that lag is shrinking.
 
 ## Trust assumptions and non-claims
