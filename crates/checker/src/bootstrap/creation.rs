@@ -21,39 +21,43 @@ const LOG_QUERY_BLOCKS: u64 = 10_000;
 pub(super) struct Creation {
     pub(super) header: ImportedTempoHeader,
     pub(super) observation: L1BlockObservation,
+    pub(super) identity: PortalIdentity,
 }
 
 /// Locate the unique ZoneFactory event matching Zone genesis and authenticate its block.
 pub(super) async fn discover_creation(
     provider: &DynProvider<TempoNetwork>,
-    expected: PortalIdentity,
+    portal: alloy_primitives::Address,
+    zone_id: u32,
 ) -> eyre::Result<Creation> {
     let head = provider.get_block_number().await?;
-    let candidates = creation_candidates(provider, expected, 0, head).await?;
+    let candidates = creation_candidates(provider, portal, zone_id, 0, head).await?;
     let [candidate] = candidates.as_slice() else {
         return Err(BootstrapError::CreationCandidates {
-            portal: expected.portal,
-            zone_id: expected.zone_id,
+            portal,
+            zone_id,
             count: candidates.len(),
         }
         .into());
     };
     let header = acquire_l1_header(provider, *candidate).await?;
-    let observation = observe_l1(provider, &header, expected.portal).await?;
-    let facts = adapt_imported(&observation, &header, header.hash(), expected.zone_id)
+    let observation = observe_l1(provider, &header, portal).await?;
+    let facts = adapt_imported(&observation, &header, header.hash(), zone_id)
         .map_err(|failure| eyre::eyre!(failure.message))?
         .facts;
-    validate_creation(&facts.operations, expected)?;
+    let identity = validate_creation(&facts.operations, portal, zone_id)?;
     Ok(Creation {
         header,
         observation,
+        identity,
     })
 }
 
 /// Find canonical factory-log candidates in one inclusive Tempo block range.
 async fn creation_candidates(
     provider: &DynProvider<TempoNetwork>,
-    expected: PortalIdentity,
+    portal: alloy_primitives::Address,
+    zone_id: u32,
     from: u64,
     to: u64,
 ) -> eyre::Result<Vec<B256>> {
@@ -64,8 +68,8 @@ async fn creation_candidates(
         let filter = Filter::new()
             .address(ZONE_FACTORY_ADDRESS)
             .event_signature(ZoneFactory::ZoneCreated::SIGNATURE_HASH)
-            .topic1(B256::from(U256::from(expected.zone_id)))
-            .topic2(expected.portal.into_word())
+            .topic1(B256::from(U256::from(zone_id)))
+            .topic2(portal.into_word())
             .from_block(start)
             .to_block(end);
         hashes.extend(
@@ -92,8 +96,9 @@ async fn creation_candidates(
 /// Validate the authenticated Portal creation operation against Zone genesis.
 fn validate_creation(
     operations: &[ImportedOperation],
-    expected: PortalIdentity,
-) -> eyre::Result<()> {
+    portal: alloy_primitives::Address,
+    zone_id: u32,
+) -> eyre::Result<PortalIdentity> {
     let mut creations = operations.iter().filter_map(|operation| match operation {
         ImportedOperation::Create {
             identity,
@@ -107,10 +112,13 @@ fn validate_creation(
     if creations.next().is_some() {
         eyre::bail!("creation block contains multiple portal creation operations");
     }
-    if *identity != expected || initial_token.token != expected.initial_token {
+    if identity.portal != portal
+        || identity.zone_id != zone_id
+        || initial_token.token != identity.initial_token
+    {
         eyre::bail!("creation identity does not match Zone genesis");
     }
-    Ok(())
+    Ok(*identity)
 }
 
 #[cfg(test)]
@@ -143,14 +151,25 @@ mod tests {
     #[test]
     fn creation_requires_one_matching_operation() {
         let expected = identity();
-        assert!(validate_creation(&[creation(expected)], expected).is_ok());
-        assert!(validate_creation(&[], expected).is_err());
+        assert!(
+            validate_creation(&[creation(expected)], expected.portal, expected.zone_id).is_ok()
+        );
+        assert!(validate_creation(&[], expected.portal, expected.zone_id).is_err());
 
         let mut mismatched = expected;
         mismatched.zone_id += 1;
-        assert!(validate_creation(&[creation(mismatched)], expected).is_err());
+        assert!(
+            validate_creation(&[creation(mismatched)], expected.portal, expected.zone_id).is_err()
+        );
 
-        assert!(validate_creation(&[creation(expected), creation(expected)], expected).is_err());
+        assert!(
+            validate_creation(
+                &[creation(expected), creation(expected)],
+                expected.portal,
+                expected.zone_id
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -168,6 +187,6 @@ mod tests {
             ImportedOperation::UpdateBouncebackGas(42),
         ];
 
-        assert!(validate_creation(&operations, expected).is_ok());
+        assert!(validate_creation(&operations, expected.portal, expected.zone_id).is_ok());
     }
 }

@@ -14,7 +14,7 @@ const GENESIS_BLOCK: u64 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LocalZoneIdentity {
     pub(super) genesis: BlockNumHash,
-    pub(super) initial_token: Address,
+    pub(super) default_fee_token: Address,
 }
 
 impl LocalZoneIdentity {
@@ -49,13 +49,13 @@ impl LocalZoneIdentity {
             .ok_or(BootstrapError::MissingLocalCanonical {
                 number: GENESIS_BLOCK,
             })?;
-        let initial_token = acquire_zone_post_state(provider, hash, &[])?.default_fee_token;
-        if initial_token.is_zero() {
+        let default_fee_token = acquire_zone_post_state(provider, hash, &[])?.default_fee_token;
+        if default_fee_token.is_zero() {
             return Err(BootstrapError::MissingZoneGenesisInitialToken.into());
         }
         Ok(Self {
             genesis: BlockNumHash::new(GENESIS_BLOCK, hash),
-            initial_token,
+            default_fee_token,
         })
     }
 }

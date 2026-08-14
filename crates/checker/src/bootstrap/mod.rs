@@ -5,7 +5,7 @@ mod creation;
 mod error;
 mod zone_genesis;
 
-use crate::kernel::{PortalIdentity, State, apply_genesis_handoff};
+use crate::kernel::{State, apply_genesis_handoff};
 use alloy_eips::BlockNumHash;
 use alloy_provider::{Provider as _, ProviderBuilder};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
@@ -39,16 +39,12 @@ where
     let l1_chain_id = l1_provider.get_chain_id().await?;
     let LocalZoneIdentity {
         genesis,
-        initial_token,
+        default_fee_token,
     } = LocalZoneIdentity::load(&config, l1_chain_id, zone_chain_id, zone_provider)?;
     let anchor = genesis_anchor(zone_provider, genesis)?;
     let anchor_header = anchor_header(&l1_provider, anchor).await?;
-    let expected_identity = PortalIdentity {
-        portal: config.portal_address,
-        zone_id: config.zone_id,
-        initial_token,
-    };
-    let creation = discover_creation(&l1_provider, expected_identity).await?;
+    let creation = discover_creation(&l1_provider, config.portal_address, config.zone_id).await?;
+    let expected_identity = creation.identity;
     let creation_tip = BlockNumHash::new(creation.header.number(), creation.header.hash());
 
     // Authenticate and replay Tempo history into the Zone genesis state.
@@ -82,7 +78,7 @@ where
         state.apply(&apply_genesis_handoff(&state)?)?;
     } else {
         authenticated_path(&l1_provider, &anchor_header, creation.header.clone()).await?;
-        validate_zero_supply(zone_provider, genesis.hash, [initial_token])?;
+        validate_zero_supply(zone_provider, genesis.hash, [default_fee_token])?;
     }
 
     let identity = Identity {
