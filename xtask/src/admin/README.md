@@ -107,8 +107,9 @@ The command:
 4. Verifies the active shared decryption key on non-RPC-only sequencer nodes.
    RPC-only nodes do not hold that key and are reported as `N/A`.
 5. Fails when any node's local Zone height is more than 240 blocks (about two
-   minutes) behind the newest node, then compares block hash and state root
-   across all nodes at their lowest common available Zone height.
+   minutes) behind the newest node, or its Tempo anchor is more than 240 blocks
+   behind finalized L1. It then compares block hash and state root across all
+   nodes at their lowest common available Zone height.
 6. Reports the finalized L1 batch index and settled Zone height. A new L1 batch
    is not required during the short observation window.
 7. Samples the operator nodes again after `--observe-for` and verifies that each

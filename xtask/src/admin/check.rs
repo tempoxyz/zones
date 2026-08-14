@@ -1154,7 +1154,10 @@ fn evaluate_invariants(
         ),
         canonical_failure,
     );
-    results.push(zone_height_lag_invariant(nodes));
+    results.push(zone_height_lag_invariant(
+        nodes,
+        portal.finalized_block_number,
+    ));
 
     if let Some(manifest) = manifest {
         let node_manifest_zones = live_nodes
@@ -1245,38 +1248,7 @@ fn evaluate_invariants(
                 portal_members
             ),
         );
-        let manifest_nodes_ok = live_nodes.iter().all(|(_, _, info)| {
-            info.local.as_ref().is_some_and(|local| {
-                manifest.nodes().iter().any(|node| {
-                    node.name() == local.name
-                        && node.ed25519_public_key().to_string() == local.p2p_public_key
-                        && node.secp256k1_address() == local.sequencer_address
-                })
-            })
-        });
-        add_check(
-            &mut results,
-            "manifest_node_identity",
-            manifest_nodes_ok,
-            "each queried node's local identity matches the expected manifest".to_owned(),
-            format!(
-                "one or more local identities do not match the expected manifest: {}",
-                live_nodes
-                    .iter()
-                    .filter_map(|(node, _, info)| {
-                        let local = info.local.as_ref()?;
-                        let matches = manifest.nodes().iter().any(|manifest_node| {
-                            manifest_node.name() == local.name
-                                && manifest_node.ed25519_public_key().to_string()
-                                    == local.p2p_public_key
-                                && manifest_node.secp256k1_address() == local.sequencer_address
-                        });
-                        (!matches).then(|| format!("{}={local:?}", node.name))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-        );
+        results.push(manifest_node_identity_invariant(manifest, nodes));
     }
 
     if let Some(version) = required_version {
@@ -1455,15 +1427,65 @@ fn loaded_manifest_agreement_invariant(
     }
 }
 
-fn zone_height_lag_invariant(nodes: &[NodeSnapshot]) -> InvariantResult {
+fn manifest_node_identity_invariant(
+    manifest: &ZoneManifest,
+    nodes: &[NodeSnapshot],
+) -> InvariantResult {
+    let mut unmatched_manifest_nodes = manifest.nodes().iter().collect::<Vec<_>>();
+    let mut unexpected = Vec::new();
+    for node in nodes {
+        let Some(local) = node.sequencer.as_ref().and_then(|info| info.local.as_ref()) else {
+            unexpected.push(format!("{}=<local identity unavailable>", node.name));
+            continue;
+        };
+        let matching_index = unmatched_manifest_nodes.iter().position(|manifest_node| {
+            manifest_node.name() == local.name
+                && manifest_node.ed25519_public_key().to_string() == local.p2p_public_key
+                && manifest_node.secp256k1_address() == local.sequencer_address
+        });
+        if let Some(index) = matching_index {
+            unmatched_manifest_nodes.remove(index);
+        } else {
+            unexpected.push(format!("{}={local:?}", node.name));
+        }
+    }
+
+    let missing = unmatched_manifest_nodes
+        .iter()
+        .map(|node| node.name())
+        .collect::<Vec<_>>();
+    let ok = unexpected.is_empty() && missing.is_empty();
+    InvariantResult {
+        name: "manifest_node_identity",
+        status: if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        detail: if ok {
+            "every manifest node was queried exactly once with the expected local identity"
+                .to_owned()
+        } else {
+            format!(
+                "queried identities do not match the manifest exactly once; missing: {}; unexpected or duplicate: {}",
+                missing.join(", "),
+                unexpected.join("; ")
+            )
+        },
+    }
+}
+
+fn zone_height_lag_invariant(nodes: &[NodeSnapshot], finalized_l1_block: u64) -> InvariantResult {
     let heights = nodes
         .iter()
         .filter_map(|node| {
-            node.sequencer
-                .as_ref()?
-                .local_tip
-                .as_ref()
-                .map(|tip| (node, tip.zone_height.to::<u64>()))
+            node.sequencer.as_ref()?.local_tip.as_ref().map(|tip| {
+                (
+                    node,
+                    tip.zone_height.to::<u64>(),
+                    tip.tempo_block_number.to::<u64>(),
+                )
+            })
         })
         .collect::<Vec<_>>();
     if heights.len() != nodes.len() {
@@ -1486,32 +1508,46 @@ fn zone_height_lag_invariant(nodes: &[NodeSnapshot]) -> InvariantResult {
 
     let newest_height = heights
         .iter()
-        .map(|(_, height)| *height)
+        .map(|(_, height, _)| *height)
         .max()
         .expect("heights includes every configured node");
     let lagging = heights
         .iter()
-        .filter_map(|(node, height)| {
+        .filter_map(|(node, height, _)| {
             let lag = newest_height - *height;
             (lag > MAX_ZONE_HEIGHT_LAG_BLOCKS)
                 .then(|| format!("{} at {} ({lag} blocks behind)", node.name, height))
         })
         .collect::<Vec<_>>();
+    let stale = heights
+        .iter()
+        .filter_map(|(node, _, tempo_block)| {
+            let lag = finalized_l1_block.saturating_sub(*tempo_block);
+            (lag > MAX_ZONE_HEIGHT_LAG_BLOCKS).then(|| {
+                format!(
+                    "{} at Tempo block {} ({lag} blocks behind finalized L1)",
+                    node.name, tempo_block
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let ok = lagging.is_empty() && stale.is_empty();
     InvariantResult {
         name: "zone_height_lag",
-        status: if lagging.is_empty() {
+        status: if ok {
             CheckStatus::Pass
         } else {
             CheckStatus::Fail
         },
-        detail: if lagging.is_empty() {
+        detail: if ok {
             format!(
-                "all nodes are within {MAX_ZONE_HEIGHT_LAG_BLOCKS} Zone blocks of newest height {newest_height}"
+                "all nodes are within {MAX_ZONE_HEIGHT_LAG_BLOCKS} Zone blocks of newest height {newest_height} and Tempo blocks of finalized L1 block {finalized_l1_block}"
             )
         } else {
             format!(
-                "newest Zone height {newest_height}; allowed lag {MAX_ZONE_HEIGHT_LAG_BLOCKS} blocks; lagging: {}",
-                lagging.join("; ")
+                "newest Zone height {newest_height}; finalized L1 block {finalized_l1_block}; allowed lag {MAX_ZONE_HEIGHT_LAG_BLOCKS} blocks; Zone-lagging: {}; stale versus L1: {}",
+                lagging.join("; "),
+                stale.join("; ")
             )
         },
     }
@@ -2209,12 +2245,35 @@ operator_rpc_url = "https://old.example"
         }
     }
 
-    fn with_local_tip(mut info: SequencerInfoResponse, height: u64) -> SequencerInfoResponse {
+    fn with_local_tip(info: SequencerInfoResponse, height: u64) -> SequencerInfoResponse {
+        with_local_tip_at(info, height, height)
+    }
+
+    fn with_local_tip_at(
+        mut info: SequencerInfoResponse,
+        zone_height: u64,
+        tempo_block_number: u64,
+    ) -> SequencerInfoResponse {
         info.local_tip = Some(zone_rpc::types::PeerTipInfo {
-            zone_height: U64::from(height),
+            zone_height: U64::from(zone_height),
             zone_hash: B256::ZERO,
-            tempo_block_number: U64::from(height),
+            tempo_block_number: U64::from(tempo_block_number),
             tempo_block_hash: B256::ZERO,
+        });
+        info
+    }
+
+    fn with_local_identity(
+        mut info: SequencerInfoResponse,
+        name: &str,
+        p2p_public_key: &str,
+        sequencer_address: Address,
+    ) -> SequencerInfoResponse {
+        info.local = Some(zone_rpc::types::LocalSequencerInfo {
+            name: name.to_owned(),
+            sequencer_address: Some(sequencer_address),
+            p2p_public_key: p2p_public_key.to_owned(),
+            role: "follower".to_owned(),
         });
         info
     }
@@ -2265,7 +2324,7 @@ operator_rpc_url = "https://old.example"
             ),
         );
 
-        let result = zone_height_lag_invariant(&[newest, lagging]);
+        let result = zone_height_lag_invariant(&[newest, lagging], 1_000);
         assert_eq!(result.status, CheckStatus::Pass);
     }
 
@@ -2280,9 +2339,82 @@ operator_rpc_url = "https://old.example"
             ),
         );
 
-        let result = zone_height_lag_invariant(&[newest, lagging]);
+        let result = zone_height_lag_invariant(&[newest, lagging], 1_000);
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(result.detail.contains("lagging at 759 (241 blocks behind)"));
+    }
+
+    #[test]
+    fn zone_height_lag_rejects_cluster_stale_against_finalized_l1() {
+        let first = node_snapshot(
+            "first",
+            with_local_tip_at(sequencer_info(false, true), 1_000, 1_000),
+        );
+        let second = node_snapshot(
+            "second",
+            with_local_tip_at(sequencer_info(false, true), 1_000, 1_000),
+        );
+
+        let result = zone_height_lag_invariant(&[first, second], 1_241);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("241 blocks behind finalized L1"));
+    }
+
+    #[test]
+    fn manifest_node_identity_rejects_duplicate_response_and_missing_node() {
+        const KEY_A: &str = "0xd9231a8b155d9314344dccadf785e8a1a8967a42a0b2fcfdc909ae1567fbfc0d";
+        const KEY_B: &str = "0xecfd7c2a20eb8065b538d9f6d8c478bae6d1a5eecdcc5ad639aa69e369adf8fb";
+        const KEY_C: &str = "0x12966966abce829c60dca65d648788f70a08b58b62a15fc7e41ab890024ebfa3";
+        let manifest = ZoneManifest::parse(&format!(
+            r#"
+zone_id = 1
+leader_ed25519_public_key = "{KEY_A}"
+
+[[nodes]]
+name = "node-a"
+ed25519_public_key = "{KEY_A}"
+secp256k1_address = "0x0000000000000000000000000000000000000001"
+address = "node-a.example:9200"
+
+[[nodes]]
+name = "node-b"
+ed25519_public_key = "{KEY_B}"
+secp256k1_address = "0x0000000000000000000000000000000000000002"
+address = "node-b.example:9200"
+
+[[nodes]]
+name = "node-c"
+ed25519_public_key = "{KEY_C}"
+secp256k1_address = "0x0000000000000000000000000000000000000003"
+address = "node-c.example:9200"
+"#
+        ))
+        .unwrap();
+        let key_a = manifest.nodes()[0].ed25519_public_key().to_string();
+        let address_a = manifest.nodes()[0].secp256k1_address().unwrap();
+        let key_c = manifest.nodes()[2].ed25519_public_key().to_string();
+        let address_c = manifest.nodes()[2].secp256k1_address().unwrap();
+        let first_a = node_snapshot(
+            "endpoint-a",
+            with_local_identity(sequencer_info(false, true), "node-a", &key_a, address_a),
+        );
+        let duplicate_a = node_snapshot(
+            "endpoint-b",
+            with_local_identity(sequencer_info(false, true), "node-a", &key_a, address_a),
+        );
+        let node_c = node_snapshot(
+            "endpoint-c",
+            with_local_identity(sequencer_info(false, true), "node-c", &key_c, address_c),
+        );
+
+        let result = manifest_node_identity_invariant(&manifest, &[first_a, duplicate_a, node_c]);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("missing: node-b"));
+        assert!(
+            result
+                .detail
+                .contains("unexpected or duplicate: endpoint-b=")
+        );
     }
 
     #[test]
