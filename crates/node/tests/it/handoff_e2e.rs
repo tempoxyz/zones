@@ -318,6 +318,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         assert_eq!(
             ITIP20::new(PATH_USD_ADDRESS, node.provider())
                 .allowance(sender, spender)
+                .from(sender)
                 .call()
                 .await?,
             U256::from(approval_amount)
@@ -544,6 +545,7 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
         assert_eq!(
             ITIP20::new(PATH_USD_ADDRESS, node.provider())
                 .allowance(sender, spender)
+                .from(sender)
                 .call()
                 .await?,
             U256::from(approval_amount)
