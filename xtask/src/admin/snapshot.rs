@@ -432,29 +432,31 @@ pub(crate) async fn query_common_blocks(
     height: u64,
     rpc_timeout: Duration,
 ) {
-    let results = join_all(nodes.iter().map(|node| {
-        let url = node.url.clone();
-        async move {
-            timeout(rpc_timeout, async {
-                let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                    .connect(&url)
-                    .await?;
-                let block: Option<RpcBlock> = provider
-                    .raw_request(
-                        "eth_getBlockByNumber".into(),
-                        (format!("0x{height:x}"), false),
-                    )
-                    .await?;
-                block.ok_or_else(|| eyre!("block {height} not found"))
-            })
-            .await
-        }
-    }))
-    .await;
-    for (node, result) in nodes.iter_mut().zip(results) {
-        if node.error.is_some() {
-            continue;
-        }
+    let requests = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.error.is_none())
+        .map(|(index, node)| {
+            let url = node.url.clone();
+            async move {
+                let result = timeout(rpc_timeout, async {
+                    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                        .connect(&url)
+                        .await?;
+                    let block: Option<RpcBlock> = provider
+                        .raw_request(
+                            "eth_getBlockByNumber".into(),
+                            (format!("0x{height:x}"), false),
+                        )
+                        .await?;
+                    block.ok_or_else(|| eyre!("block {height} not found"))
+                })
+                .await;
+                (index, result)
+            }
+        });
+    for (index, result) in join_all(requests).await {
+        let node = &mut nodes[index];
         match result {
             Ok(Ok(block)) => node.common_block = Some(block),
             Ok(Err(error)) => node.error = Some(format!("common block query failed: {error:#}")),

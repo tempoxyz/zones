@@ -12,7 +12,7 @@ use super::{
     },
     invariants::{
         CheckStatus, InvariantInputs, InvariantResult, address_set, evaluate_invariants,
-        evaluate_node_ready, is_rpc_only, l1_batch_invariant, zone_height_invariant,
+        evaluate_node_ready, is_rpc_only, zone_height_invariant,
     },
     snapshot::{ClusterView, NodeSnapshot, PortalSnapshot, query_nodes},
 };
@@ -101,7 +101,7 @@ impl Check {
             .await?;
 
             progress("Evaluating consistency and safety invariants...");
-            let mut invariants = if let Some(node_name) = self.node.as_deref() {
+            let invariants = if let Some(node_name) = self.node.as_deref() {
                 evaluate_node_ready(node_name, &view.portal, &view.nodes)
             } else {
                 evaluate_invariants(InvariantInputs {
@@ -114,10 +114,6 @@ impl Check {
                     required_key: self.require_encryption_key,
                 })
             };
-            if self.node.is_none() {
-                invariants.push(l1_batch_invariant(&view.portal));
-            }
-
             let ok = invariants.iter().all(|result| !result.required_failed());
             if !self.wait_ready || ok {
                 return self.finish(view, invariants, None).await;
@@ -427,6 +423,10 @@ fn render_human(report: &CheckReport) {
     println!(
         "Leader: {}  Epoch: {}",
         report.portal.leader, report.portal.leader_epoch
+    );
+    println!(
+        "Finalized L1 batch: {}  Zone height: {}",
+        report.portal.withdrawal_batch_index, report.portal.zone_height
     );
     match report.portal.encryption_key {
         Some(key) => println!("Encryption key: x={} parity={}", key.x, key.y_parity),

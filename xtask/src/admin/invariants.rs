@@ -583,17 +583,6 @@ pub(crate) fn evaluate_node_ready(
     results
 }
 
-pub(crate) fn l1_batch_invariant(portal: &PortalSnapshot) -> InvariantResult {
-    InvariantResult {
-        name: "l1_batch",
-        status: CheckStatus::Pass,
-        detail: format!(
-            "finalized L1 batch {} settles Zone height {} at Tempo block {}",
-            portal.withdrawal_batch_index, portal.zone_height, portal.finalized_block_number
-        ),
-    }
-}
-
 pub(crate) fn loaded_manifest_agreement_invariant(
     expected_zone_id: u32,
     expected_sequencer_set_version: u64,
