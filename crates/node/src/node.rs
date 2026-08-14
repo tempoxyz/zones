@@ -596,7 +596,7 @@ where
                     .map(|header| header.number())
                     .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
             };
-            let (historical_replay_through, portal_leadership) = tokio::try_join!(
+            let (historical_replay_through, ()) = tokio::try_join!(
                 finalized_replay_boundary,
                 seed_leadership_schedule(
                     &l1_provider,
@@ -614,7 +614,6 @@ where
                 &l1_provider,
                 self.portal_address,
                 snapshot_anchor,
-                portal_leadership,
                 p2p.manifest(),
                 &schedule,
             )
@@ -964,7 +963,6 @@ async fn install_manifest_forced_recovery<P>(
     l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
     portal_address: Address,
     snapshot_anchor: u64,
-    portal_leadership: Option<LeadershipState>,
     manifest: &ZoneManifest,
     schedule: &LeadershipSchedule,
 ) -> eyre::Result<()>
@@ -974,7 +972,7 @@ where
     let Some(recovery) = manifest.forced_recovery() else {
         return Ok(());
     };
-    let portal_leadership = portal_leadership.ok_or_else(|| {
+    let portal_leadership = schedule.latest().ok_or_else(|| {
         eyre::eyre!(
             "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint"
         )
@@ -1075,7 +1073,7 @@ async fn seed_leadership_schedule(
     snapshot_anchor: u64,
     manifest: &Arc<ZoneManifest>,
     schedule: &LeadershipSchedule,
-) -> eyre::Result<Option<LeadershipState>> {
+) -> eyre::Result<()> {
     let block_id = alloy_rpc_types_eth::BlockId::number(snapshot_anchor);
     let portal_code = if snapshot_anchor == 0 {
         Default::default()
@@ -1098,7 +1096,7 @@ async fn seed_leadership_schedule(
             "Portal is not deployed at the local Tempo anchor; leadership stays fenced until \
              the creation block replays"
         );
-        return Ok(None);
+        return Ok(());
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
@@ -1126,7 +1124,7 @@ async fn seed_leadership_schedule(
             )
         })?;
     let leadership = LeadershipState::new(epoch, leader_peer.clone(), activation);
-    schedule.publish(leadership.clone())?;
+    schedule.publish(leadership)?;
     info!(
         target: "reth::cli",
         snapshot_anchor,
@@ -1136,7 +1134,7 @@ async fn seed_leadership_schedule(
         peer = %leader_peer,
         "Bootstrapped leadership from the finalized portal snapshot"
     );
-    Ok(Some(leadership))
+    Ok(())
 }
 
 impl<N> ZoneAddOns<N>
