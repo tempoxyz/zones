@@ -25,7 +25,7 @@ enum AdminCommand {
     Check(Check),
     /// Prepare or register a shared sequencer encryption key.
     EncryptionKey(EncryptionKey),
-    /// Move finalized Zone leadership.
+    /// Move finalized Zone leadership to a different sequencer.
     Leader(Leader),
 }
 

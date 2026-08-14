@@ -160,6 +160,34 @@ pub(crate) fn read_private_key_file(path: &Path) -> eyre::Result<PrivateKeySigne
         .map_err(|_| eyre::eyre!("invalid secp256k1 private key in `{}`", path.display()))
 }
 
+/// Read nonblank secp256k1 private-key lines from a keyring file.
+///
+/// Errors never include key material from the file.
+pub(crate) fn read_private_keyring_file(path: &Path) -> eyre::Result<Vec<PrivateKeySigner>> {
+    let contents = Zeroizing::new(std::fs::read_to_string(path).map_err(|err| {
+        eyre::eyre!(
+            "failed reading decryption keyring file `{}`: {err}",
+            path.display()
+        )
+    })?);
+    let mut keys = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        let key = line.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let signer = key.parse::<PrivateKeySigner>().map_err(|_| {
+            eyre::eyre!(
+                "invalid secp256k1 private key on nonblank line {} in `{}`",
+                index + 1,
+                path.display()
+            )
+        })?;
+        keys.push(signer);
+    }
+    Ok(keys)
+}
+
 /// Encode a private key as `0x`-prefixed hex plus a trailing newline.
 pub(crate) fn encode_private_key(signer: &PrivateKeySigner) -> String {
     format!("{}\n", const_hex::encode_prefixed(signer.to_bytes()))
@@ -174,7 +202,9 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{WriteSecretOptions, read_private_key_file, write_secret_file};
+    use super::{
+        WriteSecretOptions, read_private_key_file, read_private_keyring_file, write_secret_file,
+    };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -283,5 +313,24 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("invalid secp256k1 private key"));
         assert!(!message.contains("not-a-key"));
+    }
+
+    #[test]
+    fn read_private_keyring_file_skips_blank_lines_and_does_not_leak_invalid_contents() {
+        let directory = TestDirectory::new();
+        let output = directory.path().join("keyring");
+        fs::write(
+            &output,
+            "\n  0x1111111111111111111111111111111111111111111111111111111111111111  \n\n",
+        )
+        .unwrap();
+        let keys = read_private_keyring_file(&output).unwrap();
+        assert_eq!(keys.len(), 1);
+
+        fs::write(&output, "\nprivate-material-that-must-not-appear\n").unwrap();
+        let err = read_private_keyring_file(&output).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("nonblank line 2"));
+        assert!(!message.contains("private-material-that-must-not-appear"));
     }
 }

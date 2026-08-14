@@ -75,12 +75,14 @@ sequencer keys or promotion readiness.
 `--wait-ready --node <name>` is the post-restart primitive. It waits for that
 node to become reachable, canonical, and promotion-ready when applicable.
 
-`admin leader set` is a dry run unless `--execute` is supplied. Use `--via`
-when more than one configured sequencer can relay the request.
+`admin leader set` is a dry run unless `--execute` is supplied. Its target must
+differ from the current finalized Portal leader; choose a different,
+promotion-ready follower. Use `--via` when more than one configured sequencer
+can relay the request.
 
 ## Shared-key rotation
 
-Prepare creates only two owner-readable secret files:
+Prepare creates two owner-readable secret files:
 
 ```text
 <rotation-dir>/
@@ -92,15 +94,19 @@ Prepare creates only two owner-readable secret files:
 tempo-xtask admin encryption-key prepare \
   --config zone-admin.toml \
   --current-key-file /secure/current-shared.key \
+  --existing-decryption-keys-file /secure/deployed/deposit-decryption-keys \
   --rotation-dir /secure/rotation
 ```
 
 The command checks the cluster, verifies that the supplied current key matches
-the finalized Portal key, generates a distinct replacement, and refuses to
-overwrite either output unless `--force` is supplied.
+the finalized Portal key, and verifies that the deployed decryption-key file
+contains that active key. It generates a distinct replacement and writes a
+merged `deposit-decryption-keys` file containing every distinct deployed key
+plus the replacement. It refuses to overwrite either output unless `--force`
+is supplied.
 
-After importing `deposit-decryption-keys` and rolling all potential leaders,
-run registration without `--execute`:
+Deploy the merged `deposit-decryption-keys` output, then roll all potential
+leaders before running registration without `--execute`:
 
 ```bash
 tempo-xtask admin encryption-key register \
@@ -130,5 +136,6 @@ if that key is already active.
 
 After registration, use the normal `tempo-xtask deposit` command for the
 decryption test. Then update `--sequencer-key-file`, roll nodes follower-first,
-run `admin check`, and send a second deposit. Keep both decryption keys loaded
-until the Portal grace period has expired and the deposit queue is drained.
+run `admin check`, and send a second deposit. Retain every grace-valid or
+draining decryption key in the deployed keyring. Retire a specific old key only
+after its Portal expiry and the deposit queue have drained.

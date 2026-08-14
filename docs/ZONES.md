@@ -273,11 +273,15 @@ just send-deposit 1000000                       # to your own address
 just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
 
-Before registering a replacement encryption key, add its private key to
-`--deposit-decryption-keys-file`, restart every node that may sequence, and confirm the nodes are
-healthy. Keep each previous key in the file while the Portal still accepts deposits for it during
-the rotation grace period. File order does not matter: finalized Portal registrations bind each
-configured key to its on-chain index. The active sequencer key is included automatically.
+For shared-key rotations, pass the currently deployed
+`--deposit-decryption-keys-file` to `tempo-xtask admin encryption-key prepare`
+with `--existing-decryption-keys-file`. Deploy its merged output before
+registering the replacement encryption key, restart every node that may
+sequence, and confirm the nodes are healthy. Keep every previous key in the
+file while it remains Portal grace-valid or has queued deposits. Retire a
+specific old key only after Portal expiry and deposit-queue drainage. File order
+does not matter: finalized Portal registrations bind each configured key to its
+on-chain index. The active sequencer key is included automatically.
 
 Set `ZONE_RPC_URL` to poll the zone for processing confirmation:
 

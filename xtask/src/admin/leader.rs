@@ -28,7 +28,7 @@ pub(crate) struct Leader {
 
 #[derive(Debug, clap::Subcommand)]
 enum LeaderCommand {
-    /// Move finalized leadership to a promotion-ready sequencer.
+    /// Move finalized leadership to a different promotion-ready sequencer.
     Set(LeaderSet),
 }
 
@@ -45,7 +45,7 @@ struct LeaderSet {
     #[command(flatten)]
     shared: SharedAdminArgs,
 
-    /// Target leader, as a node name or individual sequencer address.
+    /// Target leader, as a node name or individual sequencer address; must differ from the finalized leader.
     #[arg(long)]
     target: String,
 
@@ -158,6 +158,12 @@ impl LeaderSet {
             "target {} is not promotion-ready or has pending transitions",
             target_node.name
         );
+        ensure_target_differs_from_finalized_leader(
+            &target_node.name,
+            target_address,
+            view.portal.leader,
+            view.portal.leader_epoch,
+        )?;
         let via_node = select_via(&view.nodes, self.via.as_deref())?;
         let via_info = via_node.sequencer.as_ref().ok_or_else(|| {
             eyre!(
@@ -181,14 +187,9 @@ impl LeaderSet {
             via_node.name
         );
 
-        let already_active = view.portal.leader == target_address;
-        let expected_epoch = if already_active {
-            view.portal.leader_epoch
-        } else {
-            view.portal.leader_epoch.saturating_add(1)
-        };
+        let expected_epoch = view.portal.leader_epoch.saturating_add(1);
 
-        if !self.execute || already_active {
+        if !self.execute {
             let report = LeaderSetReport {
                 ok: true,
                 dry_run: !self.execute,
@@ -279,7 +280,7 @@ impl LeaderSet {
                 } else if report.submitted {
                     "Leader handoff submitted"
                 } else {
-                    "Leader already active"
+                    "Leader handoff completed"
                 }
             );
             println!("  Target:  {} ({})", report.target_name, report.target);
@@ -295,6 +296,19 @@ impl LeaderSet {
         }
         Ok(())
     }
+}
+
+fn ensure_target_differs_from_finalized_leader(
+    target_name: &str,
+    target: Address,
+    current_leader: Address,
+    current_epoch: u64,
+) -> eyre::Result<()> {
+    ensure!(
+        current_leader != target,
+        "target {target_name} ({target}) is already the finalized Portal leader at epoch {current_epoch}; choose a different, promotion-ready follower"
+    );
+    Ok(())
 }
 
 fn select_via<'a>(nodes: &'a [NodeSnapshot], via: Option<&str>) -> eyre::Result<&'a NodeSnapshot> {
@@ -331,7 +345,9 @@ fn progress(message: impl fmt::Display) {
 
 #[cfg(test)]
 mod tests {
-    use super::select_via;
+    use alloy::primitives::Address;
+
+    use super::{ensure_target_differs_from_finalized_leader, select_via};
     use crate::admin::snapshot::{test_node_snapshot, test_sequencer_info};
 
     #[test]
@@ -349,5 +365,18 @@ mod tests {
         let b = test_node_snapshot("node-b", test_sequencer_info(false, true));
         let err = select_via(&[a, b], None).unwrap_err();
         assert!(err.to_string().contains("pass --via"));
+    }
+
+    #[test]
+    fn refuses_target_that_is_already_the_finalized_leader() {
+        let target = Address::with_last_byte(0x11);
+        let err =
+            ensure_target_differs_from_finalized_leader("node-a", target, target, 42).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("node-a"));
+        assert!(message.contains(&target.to_string()));
+        assert!(message.contains("already the finalized Portal leader"));
+        assert!(message.contains("epoch 42"));
+        assert!(message.contains("different, promotion-ready follower"));
     }
 }
