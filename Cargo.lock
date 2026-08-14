@@ -13721,6 +13721,7 @@ dependencies = [
  "bytes",
  "eyre",
  "futures",
+ "metrics",
  "reth-chainspec",
  "reth-codecs",
  "reth-db",

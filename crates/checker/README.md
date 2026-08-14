@@ -217,6 +217,24 @@ Temporary provider failures never create a coverage gap. The verified tip stays
 at the last authenticated block until recovery succeeds. A coverage gap records
 the descendants left unchecked by an authenticated divergence.
 
+### Metrics
+
+The checker publishes alert-oriented metrics through the node's existing metrics endpoint:
+
+- `zone_checker_divergences_total{category="..."}` increments after a divergence is
+  durably recorded. The bounded `category` label identifies the finding family; inspect
+  the corresponding checker log for block hashes, code, location, and summary.
+- `zone_checker_divergence_active` is `1` while a divergence remains on the canonical
+  branch. It returns to `0` if a reorg removes that finding.
+- `zone_checker_blocked` is `1` while verification is stopped by another terminal
+  condition and `0` otherwise.
+
+Both gauges are restored from the checkpoint on startup, so a restart does not clear an
+alert condition.
+
+Alert on any increase in `zone_checker_divergences_total` and while
+`zone_checker_divergence_active == 1` or `zone_checker_blocked == 1`.
+
 ## Trust assumptions and non-claims
 
 The checker verifies imported transaction and receipt commitments. It relies on

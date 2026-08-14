@@ -37,6 +37,24 @@ pub(crate) enum FindingCategory {
     CollateralMismatch,
 }
 
+impl FindingCategory {
+    /// Stable low-cardinality label used by checker telemetry.
+    pub(crate) const fn as_label(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::EffectMismatch => "effect_mismatch",
+            Self::StateMismatch => "state_mismatch",
+            Self::Invariant => "invariant",
+            Self::Unsupported => "unsupported",
+            Self::Observation => "observation",
+            Self::Continuity => "continuity",
+            Self::CreationAnchor => "creation_anchor",
+            Self::SupplyMismatch => "supply_mismatch",
+            Self::CollateralMismatch => "collateral_mismatch",
+        }
+    }
+}
+
 /// Optional protocol location of a finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FindingLocation {

@@ -9,6 +9,7 @@ use crate::{
     CheckerBlockedReason,
     failure::{Failure, FailureClass},
     kernel::{Effect, ExpectedState, ImportedFacts, ZoneFacts},
+    metrics,
     persistence::{
         BlockNumHash, Coverage, Identity, JournalEntry, Persistence, PersistenceError, Snapshot,
         make_finding,
@@ -106,6 +107,7 @@ pub(crate) struct Runtime {
 impl Runtime {
     /// Start from the latest durable checker snapshot.
     pub(crate) fn new(snapshot: Snapshot) -> Self {
+        metrics::set_snapshot(&snapshot);
         Self {
             snapshot,
             retry: None,
@@ -124,6 +126,7 @@ impl Runtime {
         reason: CheckerBlockedReason,
     ) -> Result<(), PersistenceError> {
         self.snapshot = store.record_blocked_current(reason)?;
+        metrics::set_blocked(Some(reason));
         self.retry = None;
         Ok(())
     }
@@ -142,6 +145,7 @@ impl Runtime {
             }
             Err(error) => return Err(error),
         };
+        metrics::set_snapshot(&self.snapshot);
         self.retry = None;
         Ok(())
     }
@@ -314,6 +318,7 @@ impl Runtime {
             finding,
             self.snapshot.meta.observed_zone_tip,
         )?;
+        metrics::record_divergence(logged_finding.details.category);
         logging::finding(&logged_finding);
         Ok(())
     }

@@ -7,6 +7,7 @@ mod bootstrap;
 mod exex;
 mod failure;
 mod kernel;
+mod metrics;
 mod observe;
 pub(crate) mod persistence;
 mod runtime;
