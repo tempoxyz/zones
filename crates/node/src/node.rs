@@ -1003,30 +1003,35 @@ where
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
 
-    match forced_recovery_restart_state(recovery_epoch, snapshot_anchor, &portal_leadership)? {
-        ForcedRecoveryRestartState::Completed => {
-            warn!(
-                target: "reth::cli",
-                leader = %recovery.leader(),
-                recovery_epoch,
-                recovery_zone_height,
-                recovery_zone_hash = %recovery.recovery_block_hash(),
-                snapshot_anchor,
-                portal_epoch = portal_leadership.epoch,
-                portal_activation_tempo_block = portal_leadership.activation_tempo_block,
-                "Skipping completed manifest forced recovery; remove the stale directive"
-            );
-            metrics::counter!("zone_forced_recovery_directives_total", "result" => "completed")
-                .increment(1);
-            return Ok(());
-        }
-        ForcedRecoveryRestartState::Install => schedule.install_forced_recovery(
+    eyre::ensure!(
+        portal_leadership.activation_tempo_block <= snapshot_anchor,
+        "portal epoch {} activates at Tempo block {}, after historical snapshot anchor \
+         {snapshot_anchor}",
+        portal_leadership.epoch,
+        portal_leadership.activation_tempo_block,
+    );
+    if portal_leadership.epoch >= recovery_epoch {
+        warn!(
+            target: "reth::cli",
+            leader = %recovery.leader(),
             recovery_epoch,
-            recovery.leader().clone(),
-            recovery.recovery_block_hash(),
-            recovery_start_tempo_block,
-        )?,
-    };
+            recovery_zone_height,
+            recovery_zone_hash = %recovery.recovery_block_hash(),
+            snapshot_anchor,
+            portal_epoch = portal_leadership.epoch,
+            portal_activation_tempo_block = portal_leadership.activation_tempo_block,
+            "Skipping completed manifest forced recovery; remove the stale directive"
+        );
+        metrics::counter!("zone_forced_recovery_directives_total", "result" => "completed")
+            .increment(1);
+        return Ok(());
+    }
+    schedule.install_forced_recovery(
+        recovery_epoch,
+        recovery.leader().clone(),
+        recovery.recovery_block_hash(),
+        recovery_start_tempo_block,
+    )?;
     info!(
         target: "reth::cli",
         leader = %recovery.leader(),
@@ -1038,30 +1043,6 @@ where
         "Installed manifest forced recovery"
     );
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForcedRecoveryRestartState {
-    Install,
-    Completed,
-}
-
-fn forced_recovery_restart_state(
-    recovery_epoch: u64,
-    snapshot_anchor: u64,
-    portal: &LeadershipState,
-) -> eyre::Result<ForcedRecoveryRestartState> {
-    eyre::ensure!(
-        portal.activation_tempo_block <= snapshot_anchor,
-        "portal epoch {} activates at Tempo block {}, after historical snapshot anchor \
-         {snapshot_anchor}",
-        portal.epoch,
-        portal.activation_tempo_block,
-    );
-    if portal.epoch < recovery_epoch {
-        return Ok(ForcedRecoveryRestartState::Install);
-    }
-    Ok(ForcedRecoveryRestartState::Completed)
 }
 
 /// Seed the leadership schedule from the portal snapshot at the local Tempo anchor.
@@ -1997,18 +1978,6 @@ mod tests {
     }
 
     #[test]
-    fn forced_recovery_installs_before_the_next_portal_epoch() {
-        let state = forced_recovery_restart_state(
-            2,
-            24_284,
-            &LeadershipState::new(1, PrivateKey::from_seed(1).public_key(), 0),
-        )
-        .unwrap();
-
-        assert_eq!(state, ForcedRecoveryRestartState::Install);
-    }
-
-    #[test]
     fn forced_recovery_restart_preserves_one_window_across_different_heads() {
         let recovery_leader = PrivateKey::from_seed(2).public_key();
         let portal_leader = PrivateKey::from_seed(3).public_key();
@@ -2024,17 +1993,14 @@ mod tests {
                 portal.activation_tempo_block,
             ));
             schedule.record_applied_anchor(snapshot_anchor);
-            match forced_recovery_restart_state(recovery_epoch, snapshot_anchor, &portal).unwrap() {
-                ForcedRecoveryRestartState::Install => schedule
-                    .install_forced_recovery(
-                        recovery_epoch,
-                        recovery_leader.clone(),
-                        recovery_hash,
-                        recovery_start,
-                    )
-                    .unwrap(),
-                ForcedRecoveryRestartState::Completed => unreachable!(),
-            };
+            schedule
+                .install_forced_recovery(
+                    recovery_epoch,
+                    recovery_leader.clone(),
+                    recovery_hash,
+                    recovery_start,
+                )
+                .unwrap();
             schedule
         };
 
@@ -2051,18 +2017,6 @@ mod tests {
                 recovery_leader
             );
         }
-    }
-
-    #[test]
-    fn forced_recovery_is_complete_after_the_portal_activation() {
-        let state = forced_recovery_restart_state(
-            2,
-            29_123,
-            &LeadershipState::new(2, PrivateKey::from_seed(3).public_key(), 27_599),
-        )
-        .unwrap();
-
-        assert_eq!(state, ForcedRecoveryRestartState::Completed);
     }
 
     #[test]
