@@ -14180,6 +14180,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zones-load"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "clap",
+ "eyre",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempo-alloy",
+ "tempo-zone-contracts",
+ "tokio",
+]
+
+[[package]]
 name = "zstd"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

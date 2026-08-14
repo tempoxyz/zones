@@ -1,5 +1,11 @@
 **/.git
-contrib/
+contrib/*
+!contrib/loadtest/
+!contrib/loadtest/**
+!contrib/bench/
+contrib/bench/*
+!contrib/bench/neobank/
+!contrib/bench/neobank/**
 docs/
 localnet/
 scripts/*

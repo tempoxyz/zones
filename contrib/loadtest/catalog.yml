@@ -1,0 +1,290 @@
+version: 1
+
+profiles:
+  smoke:
+    description: One encrypted L1-to-Zone deposit with cross-chain event verification.
+    execution: sequential
+    default_count: 1
+    cases: [encrypted-deposit]
+
+  core:
+    description: Self-contained deposit and plain-withdrawal coverage without Neobank callbacks.
+    execution: sequential
+    default_count: 2
+    cases: [encrypted-deposit, plain-withdrawal]
+
+  branch-sweep:
+    description: Deterministic pass over every currently executable Zones scenario family.
+    execution: sequential
+    default_count: 8
+    cases:
+      - encrypted-deposit
+      - plain-withdrawal
+      - direct-lifecycle
+      - private-withdrawal
+      - slippage-bounce
+      - swapped-lifecycle
+      - swapped-redemption
+      - third-party-recipient
+
+  steady:
+    description: Weighted, parallel production-like deposits, withdrawals, callbacks, and swaps.
+    execution: parallel
+    default_count: 100
+    cases:
+      - encrypted-deposit
+      - plain-withdrawal
+      - direct-lifecycle
+      - private-withdrawal
+      - swapped-lifecycle
+      - third-party-recipient
+
+  chaos:
+    description: The steady transaction mix with durable markers for an external fault controller.
+    execution: parallel
+    default_count: 100
+    cases:
+      - encrypted-deposit
+      - plain-withdrawal
+      - direct-lifecycle
+      - private-withdrawal
+      - swapped-lifecycle
+      - third-party-recipient
+
+cases:
+  encrypted-deposit:
+    description: Encrypted Portal deposit accepted on L1 and minted by the Zone inbox.
+    scenario: contrib/loadtest/scenarios/encrypted-deposit.yml
+    weight: 30
+    covers:
+      - portal.deposit.encrypted.accepted
+      - sequencer.advance_tempo.deposit
+      - inbox.deposit.processed
+    requires: []
+
+  plain-withdrawal:
+    description: Self-contained deposit, Zone approval, plain withdrawal, and L1 processing.
+    scenario: contrib/loadtest/scenarios/plain-withdrawal.yml
+    weight: 30
+    covers:
+      - portal.deposit.encrypted.accepted
+      - inbox.deposit.processed
+      - ztip20.approve.outbox
+      - outbox.withdrawal.plain.requested
+      - outbox.withdrawal.self_paid
+      - sequencer.finalize_withdrawal_batch
+      - portal.withdrawal.plain.processed
+    requires: []
+
+  direct-lifecycle:
+    description: Deposit, callback withdrawal, and return deposit lifecycle.
+    scenario: contrib/bench/neobank/direct-lifecycle-scenario.yml
+    weight: 35
+    covers:
+      - portal.deposit.encrypted.accepted
+      - outbox.withdrawal.callback.requested
+      - portal.withdrawal.callback.processed
+      - messenger.callback.success
+      - inbox.deposit.processed
+    requires:
+      - L1_WS_RPC_URL
+      - ZONE_WS_RPC_URL
+      - ZONE_REDACTED_RPC_URL
+      - ZONES_BENCH_ZONE_AUTH_MAP
+      - ZONES_BENCH_MNEMONIC
+      - ZONES_BENCH_ACCOUNT_START
+      - ZONES_BENCH_ACCOUNT_END
+      - ZONES_BENCH_PATHUSD
+      - ZONES_BENCH_EARN_TOKEN
+      - ZONES_BENCH_EARN_ROUTER
+      - ZONES_BENCH_DEPOSIT_AMOUNT
+      - ZONES_BENCH_WITHDRAWAL_AMOUNT
+      - ZONES_BENCH_CALLBACK_GAS_LIMIT
+      - ZONES_BENCH_L1_MAX_FEE_PER_GAS
+      - ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
+
+  private-withdrawal:
+    description: Callback withdrawal, routed redemption, and encrypted return deposit.
+    scenario: contrib/bench/neobank/private-withdrawal-scenario.yml
+    weight: 15
+    covers:
+      - outbox.withdrawal.callback.requested
+      - portal.withdrawal.callback.processed
+      - router.redeem.success
+      - inbox.deposit.processed
+    requires:
+      - L1_WS_RPC_URL
+      - ZONE_WS_RPC_URL
+      - ZONE_REDACTED_RPC_URL
+      - ZONES_BENCH_ZONE_AUTH_MAP
+      - ZONES_BENCH_MNEMONIC
+      - ZONES_BENCH_ACCOUNT_START
+      - ZONES_BENCH_ACCOUNT_END
+      - ZONES_BENCH_DLUSD
+      - ZONES_BENCH_EARN_TOKEN
+      - ZONES_BENCH_EARN_ROUTER
+      - ZONES_BENCH_WITHDRAWAL_AMOUNT
+      - ZONES_BENCH_CALLBACK_GAS_LIMIT
+      - ZONES_BENCH_L1_MAX_FEE_PER_GAS
+      - ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
+
+  slippage-bounce:
+    description: Callback swap failure followed by L1 and Zone withdrawal bounceback processing.
+    scenario: contrib/bench/neobank/slippage-bounce-scenario.yml
+    weight: 1
+    covers:
+      - outbox.withdrawal.callback.requested
+      - router.swap.slippage
+      - portal.withdrawal.callback.failed
+      - portal.withdrawal.bounceback.enqueued
+      - inbox.withdrawal_bounceback.processed
+    requires:
+      - L1_WS_RPC_URL
+      - ZONE_WS_RPC_URL
+      - ZONE_REDACTED_RPC_URL
+      - ZONES_BENCH_ZONE_AUTH_MAP
+      - ZONES_BENCH_MNEMONIC
+      - ZONES_BENCH_ACCOUNT_START
+      - ZONES_BENCH_ACCOUNT_END
+      - ZONES_BENCH_DLUSD
+      - ZONES_BENCH_EARN_TOKEN
+      - ZONES_BENCH_EARN_ROUTER
+      - ZONES_BENCH_DEPOSIT_AMOUNT
+      - ZONES_BENCH_WITHDRAWAL_AMOUNT
+      - ZONES_BENCH_CALLBACK_GAS_LIMIT
+      - ZONES_BENCH_L1_MAX_FEE_PER_GAS
+      - ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
+
+  swapped-lifecycle:
+    description: Callback router swaps the withdrawn token and deposits the output into the Zone.
+    scenario: contrib/bench/neobank/swapped-lifecycle-scenario.yml
+    weight: 15
+    covers:
+      - outbox.withdrawal.callback.requested
+      - router.swap.success
+      - portal.withdrawal.callback.processed
+      - inbox.deposit.processed
+    requires:
+      - L1_WS_RPC_URL
+      - ZONE_WS_RPC_URL
+      - ZONE_REDACTED_RPC_URL
+      - ZONES_BENCH_ZONE_AUTH_MAP
+      - ZONES_BENCH_MNEMONIC
+      - ZONES_BENCH_ACCOUNT_START
+      - ZONES_BENCH_ACCOUNT_END
+      - ZONES_BENCH_DLUSD
+      - ZONES_BENCH_PATHUSD
+      - ZONES_BENCH_EARN_TOKEN
+      - ZONES_BENCH_EARN_ROUTER
+      - ZONES_BENCH_DEPOSIT_AMOUNT
+      - ZONES_BENCH_WITHDRAWAL_AMOUNT
+      - ZONES_BENCH_CALLBACK_GAS_LIMIT
+      - ZONES_BENCH_L1_MAX_FEE_PER_GAS
+      - ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
+
+  swapped-redemption:
+    description: Routed redemption swaps its output before returning it to the Zone.
+    scenario: contrib/bench/neobank/swapped-redemption-scenario.yml
+    weight: 1
+    covers:
+      - outbox.withdrawal.callback.requested
+      - router.redeem.success
+      - router.swap.success
+      - portal.withdrawal.callback.processed
+      - inbox.deposit.processed
+    requires:
+      - L1_WS_RPC_URL
+      - ZONE_WS_RPC_URL
+      - ZONE_REDACTED_RPC_URL
+      - ZONES_BENCH_ZONE_AUTH_MAP
+      - ZONES_BENCH_MNEMONIC
+      - ZONES_BENCH_ACCOUNT_START
+      - ZONES_BENCH_ACCOUNT_END
+      - ZONES_BENCH_DLUSD
+      - ZONES_BENCH_PATHUSD
+      - ZONES_BENCH_EARN_TOKEN
+      - ZONES_BENCH_EARN_ROUTER
+      - ZONES_BENCH_WITHDRAWAL_AMOUNT
+      - ZONES_BENCH_CALLBACK_GAS_LIMIT
+      - ZONES_BENCH_L1_MAX_FEE_PER_GAS
+      - ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
+
+  third-party-recipient:
+    description: A callback deposits its output to a recipient different from the withdrawal sender.
+    scenario: contrib/bench/neobank/third-party-recipient-scenario.yml
+    weight: 5
+    covers:
+      - outbox.withdrawal.callback.requested
+      - messenger.callback.success
+      - inbox.deposit.third_party_recipient
+    requires:
+      - L1_WS_RPC_URL
+      - ZONE_WS_RPC_URL
+      - ZONE_REDACTED_RPC_URL
+      - ZONES_BENCH_ZONE_AUTH_MAP
+      - ZONES_BENCH_MNEMONIC
+      - ZONES_BENCH_ACCOUNT_START
+      - ZONES_BENCH_ACCOUNT_END
+      - ZONES_BENCH_RECIPIENT_ACCOUNT_START
+      - ZONES_BENCH_RECIPIENT_ACCOUNT_END
+      - ZONES_BENCH_DLUSD
+      - ZONES_BENCH_EARN_TOKEN
+      - ZONES_BENCH_EARN_ROUTER
+      - ZONES_BENCH_DEPOSIT_AMOUNT
+      - ZONES_BENCH_WITHDRAWAL_AMOUNT
+      - ZONES_BENCH_CALLBACK_GAS_LIMIT
+      - ZONES_BENCH_L1_MAX_FEE_PER_GAS
+      - ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
+
+  malformed-deposit-bounceback:
+    description: Accepted encrypted deposit that fails Zone decryption and completes its bounceback.
+    implemented: false
+    weight: 0
+    covers:
+      - inbox.deposit.decrypt_failed
+      - outbox.deposit_bounceback.enqueued
+      - portal.deposit_bounceback.refunded
+
+  parked-refund:
+    description: Failed bounceback transfer followed by a successful claimRefund.
+    implemented: false
+    weight: 0
+    covers:
+      - portal.refund.parked
+      - portal.refund.claimed
+      - inbox.refund.parked
+      - inbox.refund.claimed
+
+  envelope-rejections:
+    description: Invalid transaction types, nonce states, validity windows, sponsorship, and admission checks.
+    implemented: false
+    weight: 0
+    covers:
+      - txpool.reject.blob
+      - txpool.reject.authorization_list
+      - txpool.reject.contract_creation
+      - txpool.reject.no_enabled_token_balance
+      - txpool.reject.validity_window
+
+  settlement-boundaries:
+    description: Empty, split, and ancestry-anchored settlement batches.
+    implemented: false
+    weight: 0
+    covers:
+      - settlement.empty_batch
+      - settlement.withdrawal_split
+      - settlement.ancestry_anchor
+
+  governance-transitions:
+    description: Admin, leader, sequencer-set, policy, mode, and encryption-key transitions.
+    implemented: false
+    dangerous: true
+    mutation_group: portal-governance
+    weight: 0
+    covers:
+      - portal.admin.transfer
+      - portal.leader.rotate
+      - portal.sequencer_set.update
+      - portal.access_mode.update
+      - portal.gateway_mode.update
+      - portal.encryption_key.rotate

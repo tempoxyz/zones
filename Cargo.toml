@@ -11,6 +11,7 @@ members = [
   "bin/prover/vsock-proxy",
   "bin/prover/enclave",
   "bin/tempo-zone",
+  "bin/zones-load",
   "crates/chainspec",
   "crates/contracts",
   "crates/evm",

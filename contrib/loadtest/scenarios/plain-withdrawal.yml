@@ -1,0 +1,183 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${L1_RPC_URL}"
+    observation:
+      mode: poll
+      poll_interval: 50ms
+    chain_id: ${ZONES_LOAD_EXPECTED_L1_CHAIN_ID}
+    workload: ./l1.yml
+
+  zone:
+    network: tempo
+    rpc_url: "${ZONE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    observation:
+      mode: poll
+      poll_interval: 50ms
+    chain_id: ${ZONES_LOAD_EXPECTED_ZONE_CHAIN_ID}
+    workload: ./zone.yml
+
+scenario:
+  name: zones-load-plain-withdrawal
+  execution: dag
+  timeout: 5m
+
+  bindings:
+    account:
+      account: { pool: users, select: lease }
+    action_id:
+      bytes32: { random_bytes: 32 }
+
+  steps:
+    - id: zone_before
+      checkpoint: { chain: zone }
+      save: zone_before
+
+    - id: approve_portal
+      submit:
+        chain: l1
+        template: approve_portal
+        with:
+          from: { var: account.ref }
+        await: receipt
+      save: approve_portal
+
+    - id: encryption
+      invoke:
+        chain: l1
+        action: prepare_encrypted_deposit
+        with:
+          sender: { var: account.address }
+          recipient: { var: account.address }
+          zoneId: ${ZONES_LOAD_ZONE_ID}
+          portalAddress: "${L1_PORTAL_ADDRESS}"
+          memo: { var: action_id }
+      save: encryption
+
+    - id: deposit
+      depends_on: [approve_portal, encryption]
+      submit:
+        chain: l1
+        template: encrypted_deposit
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "${ZONES_LOAD_TOKEN}"
+              - ${ZONES_LOAD_DEPOSIT_AMOUNT}
+              - { var: encryption.keyIndex }
+              - { var: encryption.encrypted }
+              - { var: account.address }
+      save: deposit
+
+    - id: deposit_enqueued
+      depends_on: [deposit]
+      wait_log:
+        chain: l1
+        transaction_hash: { var: deposit.tx_hash }
+        sender: { var: deposit.sender }
+        address: "${L1_PORTAL_ADDRESS}"
+        abi: ZonePortal
+        event: DepositMade
+        where:
+          sender: { var: account.address }
+          token: "${ZONES_LOAD_TOKEN}"
+      save: deposit_enqueued
+
+    - id: deposit_processed
+      depends_on: [zone_before, deposit_enqueued]
+      wait_log:
+        chain: zone
+        from_block: { var: zone_before.block_number }
+        address: "${ZONES_LOAD_INBOX}"
+        abi: ZoneInbox
+        event: DepositProcessed
+        where:
+          depositHash: { var: deposit_enqueued.args.newCurrentDepositQueueHash }
+          sender: { var: account.address }
+          to: { var: account.address }
+          token: "${ZONES_LOAD_TOKEN}"
+          amount: { var: deposit_enqueued.args.netAmount }
+          memo: { var: action_id }
+        max_block_range: 1000
+      save: deposit_processed
+
+    - id: l1_before_withdrawal
+      depends_on: [deposit_processed]
+      checkpoint: { chain: l1 }
+      save: l1_before_withdrawal
+
+    - id: approve_outbox
+      depends_on: [deposit_processed]
+      submit:
+        chain: zone
+        template: approve_outbox
+        with:
+          from: { var: account.ref }
+        await: receipt
+      save: approve_outbox
+
+    - id: withdrawal
+      depends_on: [l1_before_withdrawal, approve_outbox]
+      submit:
+        chain: zone
+        template: plain_withdrawal
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "${ZONES_LOAD_TOKEN}"
+              - { var: account.address }
+              - ${ZONES_LOAD_WITHDRAWAL_AMOUNT}
+              - { var: action_id }
+              - 0
+              - { var: account.address }
+              - "0x"
+              - "0x"
+      save: withdrawal
+
+    - id: withdrawal_requested
+      depends_on: [withdrawal]
+      wait_log:
+        chain: zone
+        transaction_hash: { var: withdrawal.tx_hash }
+        sender: { var: withdrawal.sender }
+        address: "${ZONES_LOAD_OUTBOX}"
+        abi: ZoneOutbox
+        event: WithdrawalRequested
+        where:
+          sender: { var: account.address }
+          token: "${ZONES_LOAD_TOKEN}"
+          to: { var: account.address }
+          amount: ${ZONES_LOAD_WITHDRAWAL_AMOUNT}
+          gasLimit: 0
+          data: "0x"
+          revealTo: "0x"
+      save: withdrawal_requested
+
+    - id: withdrawal_processed
+      depends_on: [l1_before_withdrawal, withdrawal, withdrawal_requested]
+      wait_log:
+        chain: l1
+        from_block: { var: l1_before_withdrawal.block_number }
+        address: "${L1_PORTAL_ADDRESS}"
+        abi: ZonePortal
+        event: WithdrawalProcessed
+        where:
+          to: { var: account.address }
+          senderTag:
+            keccak256_packed:
+              types: [address, bytes32, uint64]
+              values:
+                - { var: account.address }
+                - { var: withdrawal.tx_hash }
+                - { var: withdrawal_requested.args.fallbackNonce }
+          token: "${ZONES_LOAD_TOKEN}"
+          amount: ${ZONES_LOAD_WITHDRAWAL_AMOUNT}
+          callbackSuccess: true
+        max_block_range: 1000
+      save: withdrawal_processed

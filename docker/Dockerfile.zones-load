@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_IMAGE=rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc
+
+FROM ${RUST_IMAGE} AS builder
+
+ARG TXGEN_REPOSITORY=https://github.com/tempoxyz/txgen
+ARG TXGEN_REVISION=20414d500847ec2b58882a08fc146726cdfd41a7
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        clang \
+        cmake \
+        git \
+        libclang-dev \
+        libssl-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=zones-load-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=zones-load-cargo-git \
+    --mount=type=cache,target=/app/target,sharing=locked,id=zones-load-target \
+    cargo build --locked --release -p zones-load \
+    && install -Dm755 /app/target/release/zones-load /out/zones-load
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=zones-load-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=zones-load-cargo-git \
+    --mount=type=cache,target=/tmp/txgen-target,sharing=locked,id=txgen-tempo-target \
+    CARGO_TARGET_DIR=/tmp/txgen-target \
+    cargo install \
+        --locked \
+        --git "${TXGEN_REPOSITORY}" \
+        --rev "${TXGEN_REVISION}" \
+        --root /out/txgen \
+        txgen-tempo
+
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS runtime
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/zones/contrib/bench /opt/zones/contrib/loadtest /reports \
+    && chown 65532:65532 /reports
+
+COPY --from=builder /out/zones-load /usr/local/bin/zones-load
+COPY --from=builder /out/txgen/bin/txgen-tempo /usr/local/bin/txgen-tempo
+COPY --chown=65532:65532 contrib/loadtest /opt/zones/contrib/loadtest
+COPY --chown=65532:65532 contrib/bench/neobank /opt/zones/contrib/bench/neobank
+
+ENV HOME=/tmp \
+    RUST_BACKTRACE=1 \
+    TXGEN_TEMPO_BIN=/usr/local/bin/txgen-tempo
+
+WORKDIR /opt/zones
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/zones-load"]
+CMD ["catalog"]

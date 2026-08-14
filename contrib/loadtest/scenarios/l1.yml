@@ -1,0 +1,52 @@
+chain_id: ${ZONES_LOAD_EXPECTED_L1_CHAIN_ID}
+
+gas:
+  max_fee_per_gas: ${ZONES_LOAD_L1_MAX_FEE_PER_GAS}
+  max_priority_fee_per_gas: 0
+
+accounts:
+  users:
+    mnemonic: "${ZONES_LOAD_MNEMONIC}"
+    range: [${ZONES_LOAD_ACCOUNT_START}, ${ZONES_LOAD_ACCOUNT_END}]
+
+artifacts:
+  TIP20: ../../bench/neobank/abis/tip20.json
+  ZonePortal: ../../bench/neobank/abis/neobank-zone-portal.json
+
+setup: { steps: [] }
+
+templates:
+  approve_portal:
+    type: tempo
+    from: { var: account.ref }
+    gas_limit: 2000000
+    fee_token: "${ZONES_LOAD_TOKEN}"
+    expiring_nonce: true
+    valid_for_secs: 25
+    call:
+      to: "${ZONES_LOAD_TOKEN}"
+      abi: TIP20
+      function: "approve(address,uint256)"
+      args:
+        - "${L1_PORTAL_ADDRESS}"
+        - "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+
+  encrypted_deposit:
+    type: tempo
+    from: { var: account.ref }
+    gas_limit: 2000000
+    fee_token: "${ZONES_LOAD_TOKEN}"
+    expiring_nonce: true
+    valid_for_secs: 25
+    call:
+      to: "${L1_PORTAL_ADDRESS}"
+      abi: ZonePortal
+      function: "deposit(address,uint128,uint256,(bytes32,uint8,bytes,bytes12,bytes16),address)"
+      args:
+        - "${ZONES_LOAD_TOKEN}"
+        - ${ZONES_LOAD_DEPOSIT_AMOUNT}
+        - { var: encrypted.keyIndex }
+        - { var: encrypted.encrypted }
+        - { var: account.address }
+
+mix: []
