@@ -265,8 +265,7 @@ impl Default for EarnLimits {
 
 #[derive(Clone, Copy)]
 struct EarnAccessPolicy {
-    compound_id: u64,
-    whitelist_id: u64,
+    policy_id: u64,
 }
 
 struct EarnZoneFixture {
@@ -373,13 +372,8 @@ impl EarnZoneFixture {
             },
         };
         let access_policy = if protected {
-            let whitelist_id = l1.create_whitelist_policy().await?;
-            let compound_id = l1
-                .create_compound_policy(1, whitelist_id, whitelist_id)
-                .await?;
             Some(EarnAccessPolicy {
-                compound_id,
-                whitelist_id,
+                policy_id: l1.create_whitelist_policy().await?,
             })
         } else {
             None
@@ -399,7 +393,7 @@ impl EarnZoneFixture {
                 updateDelay: Default::default(),
             },
             fees,
-            transferPolicyId: access_policy.map_or(0, |policy| policy.compound_id),
+            transferPolicyId: access_policy.map_or(0, |policy| policy.policy_id),
         };
 
         let provider = l1.dev_provider();
@@ -539,7 +533,7 @@ impl EarnZoneFixture {
                 user_address,
                 outsider,
             ] {
-                l1.whitelist_address(policy.whitelist_id, account).await?;
+                l1.whitelist_address(policy.policy_id, account).await?;
             }
         }
 
@@ -587,7 +581,7 @@ impl EarnZoneFixture {
             .ok_or_else(|| eyre::eyre!("Earn access policy is not configured"))?;
         let provider = self.l1.dev_provider();
         let receipt = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider)
-            .modifyPolicyWhitelist(policy.whitelist_id, account, eligible)
+            .modifyPolicyWhitelist(policy.policy_id, account, eligible)
             .send()
             .await?
             .get_receipt()
@@ -607,7 +601,7 @@ impl EarnZoneFixture {
         eyre::ensure!(
             recipient_authorized == eligible,
             "Zone did not mirror Earn recipient eligibility for policy {} and {account}: actual={recipient_authorized}, expected={eligible}",
-            policy.compound_id
+            policy.policy_id
         );
         Ok(())
     }
