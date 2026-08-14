@@ -33,6 +33,10 @@ pub(super) fn facts(
         let events: Vec<_> = tx.outcomes().iter().map(|x| x.event()).collect();
         let direct_call = tx.direct_call();
         let is_creation_block = observation.block_hash() == portal_creation_block_hash;
+        let creation_event_index = events
+            .iter()
+            .position(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)));
+        let is_creation_transaction = creation_event_index.is_some();
         if let Some(call) = direct_call {
             if let Some(call) = call.as_submit_batch() {
                 if !matches!(
@@ -114,43 +118,36 @@ pub(super) fn facts(
             return Err(AdapterFindingCode::Grammar
                 .failure("direct-call event occurred outside its transaction envelope"));
         }
-        if events
-            .iter()
-            .any(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)))
-            && !matches!(
-                events.as_slice(),
-                [
-                    L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(_)),
-                    L1ProtocolEvent::FactoryZoneCreated(_)
-                ]
-            )
-        {
-            return Err(AdapterFindingCode::Grammar
-                .failure("creation requires TokenEnabled followed by ZoneCreated"));
-        }
-        if is_creation_block
-            && events.iter().any(|event| {
-                matches!(
-                    event,
-                    L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(_))
-                )
+        let creation_token = if let Some(index) = creation_event_index {
+            if index != 1
+                || events
+                    .iter()
+                    .filter(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)))
+                    .count()
+                    != 1
+            {
+                return Err(AdapterFindingCode::Grammar
+                    .failure("creation requires TokenEnabled followed by one ZoneCreated"));
+            }
+            let L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(event)) = events[0]
+            else {
+                return Err(AdapterFindingCode::Grammar
+                    .failure("creation requires TokenEnabled followed by one ZoneCreated"));
+            };
+            Some(TokenEnable {
+                token: event.token,
+                name: event.name.clone(),
+                symbol: event.symbol.clone(),
+                currency: event.currency.clone(),
             })
-            && !events
-                .iter()
-                .any(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)))
-        {
-            return Err(AdapterFindingCode::Grammar
-                .failure("creation-block TokenEnabled must belong to the creation pair"));
-        }
-        if !is_creation_block
-            && events
-                .iter()
-                .any(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)))
-        {
+        } else {
+            None
+        };
+        if !is_creation_block && is_creation_transaction {
             return Err(AdapterFindingCode::Grammar
                 .failure("ZoneCreated occurred outside the configured creation block"));
         }
-        for event in events {
+        for (event_index, event) in events.into_iter().enumerate() {
             match event {
                 L1ProtocolEvent::FactoryZoneCreated(Factory::ZoneCreated {
                     portal,
@@ -158,34 +155,19 @@ pub(super) fn facts(
                     initialToken,
                     ..
                 }) if is_creation_block => {
-                    let enabled = tx
-                        .outcomes()
-                        .iter()
-                        .find_map(|x| match x.event() {
-                            L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(e)) => {
-                                Some(TokenEnable {
-                                    token: e.token,
-                                    name: e.name.clone(),
-                                    symbol: e.symbol.clone(),
-                                    currency: e.currency.clone(),
-                                })
-                            }
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            AdapterFindingCode::Grammar.failure("creation missing TokenEnabled")
-                        })?;
                     operations.push(ImportedOperation::Create {
                         identity: PortalIdentity {
                             portal: *portal,
                             zone_id: *zoneId,
                             initial_token: *initialToken,
                         },
-                        initial_token: enabled,
+                        initial_token: creation_token.clone().ok_or_else(|| {
+                            AdapterFindingCode::Grammar.failure("creation missing TokenEnabled")
+                        })?,
                     });
                 }
                 L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(e))
-                    if !is_creation_block =>
+                    if creation_event_index != Some(event_index + 1) =>
                 {
                     operations.push(ImportedOperation::EnableToken(TokenEnable {
                         token: e.token,
@@ -237,8 +219,7 @@ pub(super) fn facts(
                         queue_hash: e.withdrawalQueueHash,
                         processed_deposit_number: e.lastProcessedDepositNumber,
                     }),
-                L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(_))
-                    if is_creation_block => {}
+                L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(_)) => {}
                 L1ProtocolEvent::FactoryZoneCreated(_) => {}
                 L1ProtocolEvent::KnownIgnored | L1ProtocolEvent::Portal(_) => {
                     return Err(AdapterFindingCode::Grammar

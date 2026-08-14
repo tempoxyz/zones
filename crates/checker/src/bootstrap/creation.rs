@@ -94,15 +94,19 @@ fn validate_creation(
     operations: &[ImportedOperation],
     expected: PortalIdentity,
 ) -> eyre::Result<()> {
-    let [
+    let mut creations = operations.iter().filter_map(|operation| match operation {
         ImportedOperation::Create {
             identity,
             initial_token,
-        },
-    ] = operations
-    else {
-        eyre::bail!("creation block must contain one portal creation operation");
+        } => Some((identity, initial_token)),
+        _ => None,
+    });
+    let Some((identity, initial_token)) = creations.next() else {
+        eyre::bail!("creation block is missing the portal creation operation");
     };
+    if creations.next().is_some() {
+        eyre::bail!("creation block contains multiple portal creation operations");
+    }
     if *identity != expected || initial_token.token != expected.initial_token {
         eyre::bail!("creation identity does not match Zone genesis");
     }
@@ -147,5 +151,23 @@ mod tests {
         assert!(validate_creation(&[creation(mismatched)], expected).is_err());
 
         assert!(validate_creation(&[creation(expected), creation(expected)], expected).is_err());
+    }
+
+    #[test]
+    fn creation_allows_later_canonical_portal_operations() {
+        let expected = identity();
+        let additional_token = TokenEnable {
+            token: Address::repeat_byte(3),
+            name: String::new(),
+            symbol: String::new(),
+            currency: String::new(),
+        };
+        let operations = [
+            creation(expected),
+            ImportedOperation::EnableToken(additional_token),
+            ImportedOperation::UpdateBouncebackGas(42),
+        ];
+
+        assert!(validate_creation(&operations, expected).is_ok());
     }
 }
