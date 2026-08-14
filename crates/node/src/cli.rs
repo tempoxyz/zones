@@ -248,7 +248,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>, action: NodeAction) -> 
         if matches!(action, NodeAction::BuildCheckpoint { .. }) {
             // Checkpoint construction only needs the launched provider and exits without
             // advancing the Zone chain.
-            node = node.with_external_deposit_consumer();
+            node = node.for_checkpoint_build();
         }
         if !additional_decryption_keys.is_empty() {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);

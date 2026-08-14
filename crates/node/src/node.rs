@@ -250,6 +250,8 @@ pub struct ZoneNode {
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
+    /// Whether the node is launched only to expose a read-only provider for checkpoint building.
+    checkpoint_only: bool,
 }
 
 impl ZoneNode {
@@ -298,6 +300,7 @@ impl ZoneNode {
             sequencer_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
+            checkpoint_only: false,
         }
     }
 
@@ -341,6 +344,12 @@ impl ZoneNode {
     /// harnesses — must opt in so node startup knows the Zone chain can advance.
     pub fn with_external_deposit_consumer(mut self) -> Self {
         self.external_deposit_consumer = true;
+        self
+    }
+
+    /// Launch without a chain-advancement mechanism or L1 subscriber.
+    pub fn for_checkpoint_build(mut self) -> Self {
+        self.checkpoint_only = true;
         self
     }
 
@@ -444,6 +453,7 @@ where
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
+    checkpoint_only: bool,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -469,6 +479,7 @@ where
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
+        checkpoint_only: bool,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -486,6 +497,7 @@ where
             sequencer_config,
             p2p_config,
             external_deposit_consumer,
+            checkpoint_only,
         }
     }
 }
@@ -518,7 +530,8 @@ where
         eyre::ensure!(
             self.sequencer_config.is_some()
                 || self.p2p_config.is_some()
-                || self.external_deposit_consumer,
+                || self.external_deposit_consumer
+                || self.checkpoint_only,
             "no Zone chain advancement mechanism configured: enable a sequencer, configure P2P, or register an external deposit consumer"
         );
 
@@ -622,13 +635,15 @@ where
             }));
         }
 
-        L1Subscriber::spawn(
-            self.l1_config.clone(),
-            ctx.node.provider().clone(),
-            self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
-        );
-        info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        if !self.checkpoint_only {
+            L1Subscriber::spawn(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                self.deposit_queue.clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        }
 
         let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
@@ -1526,6 +1541,7 @@ where
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
+            self.checkpoint_only,
         )
     }
 }
