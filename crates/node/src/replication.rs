@@ -1,7 +1,6 @@
 //! Node-side leader block replication and follower import.
 
 use alloy_consensus::BlockHeader as _;
-use alloy_eips::NumHash;
 use alloy_primitives::B256;
 use alloy_provider::DynProvider;
 use alloy_rlp::Decodable as _;
@@ -21,8 +20,8 @@ use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
-use zone_l1::{DepositQueue, L1BlockTracker, L1PortalEvents, TempoStateExt as _};
+use tracing::{debug, info};
+use zone_l1::{DepositQueue, L1BlockTracker, L1PortalEvents, TempoStateExt};
 use zone_p2p::{
     BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
     P2pPeerId, PeerTip,
@@ -1109,56 +1108,53 @@ where
         );
     }
 
-    // 3. Require the block to advance the local Tempo checkpoint by exactly
-    // one independently observed L1 block.
+    // 3. Decode the `advanceTempo` call and compare it against an independently observed L1 anchor.
     let (l1_header, portal_inputs) = decode_advance_tempo(&block)?;
-    let local = provider
-        .state_by_block_hash(parent.hash())?
-        .tempo_num_hash()?;
-    validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
     let anchor = l1_header.num_hash();
 
-    // Anchor-aware fence for live blocks: the sender must
-    // be the scheduled leader of the block's anchor. This stops an honest stale
-    // leader's broadcast from splitting followers.
-    // Backfilled blocks carry no producer claim and are judged by parent/anchor/execution/conflict
-    // validation only.
+    // Await the anchor and its portal events.
+    let observed = l1_block_tracker
+        .wait_for_portal_events_with_timeout(anchor, Duration::from_secs(30))
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "peer block {block_number} is not anchored to a locally observed L1 block {} ({})",
+                anchor.number, anchor.hash
+            )
+        })?;
+
+    // Validate the `advanceTempo` inputs against the portal events.
+    portal_inputs.validate(&observed)?;
+
+    // Validate the live block sender against the leadership schedule.
     //
-    // Check once before waiting to reject an already-known invalid sender without blocking the
-    // import loop. `wait_for_validated_peer_anchor` checks again after observing the anchor:
-    // the anchor itself may finalize a leadership transition that changes its assigned producer.
-    validate_live_block_sender(
-        schedule,
-        peer_block.live_sender.as_ref(),
-        anchor.number,
-        block_number,
-    )?;
-    let observed = wait_for_validated_peer_anchor(
-        l1_block_tracker,
-        schedule,
-        &portal_inputs,
-        peer_block.live_sender.as_ref(),
-        anchor,
-        block_number,
-    )
-    .await?;
+    // This is only safe to do after the anchor has been awaited to avoid a race condition.
+    if let Some(sender) = peer_block.live_sender.as_ref() {
+        match schedule.leader_for(anchor.number) {
+            Some(record) if &record.leader == sender => {}
+            Some(record) => eyre::bail!(
+                "live block {block_number} for anchor {} was broadcast by {sender}, but the \
+                 schedule assigns that anchor to {} (epoch {})",
+                anchor.number,
+                record.leader,
+                record.epoch,
+            ),
+            None => eyre::bail!(
+                "live block {block_number} embeds anchor {} which no retained leadership record \
+                 governs",
+                anchor.number,
+            ),
+        }
+    }
 
-    // The subscriber normally enqueues immediately after recording this observation. Enqueueing
-    // here as well closes that small scheduling window and makes follower import self-contained;
-    // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
-    // gap must surface as a rejected block rather than aborting the node.
-    deposit_queue
-        .try_enqueue_sealed(l1_header, observed)
-        .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
-
-    // 4. All txns in the block execute properly
+    // 4. Execute the block.
     let payload = ZonePayloadTypes::block_to_payload(block, None);
     let status = engine.new_payload(payload).await?;
     if !status.is_valid() {
         eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
     }
 
-    // 5. Forkchoice
+    // 5. Commit and finalize the block.
     let forkchoice = ForkchoiceState::same_hash(hash);
     let result = engine.fork_choice_updated(forkchoice, None).await?;
     if !result.is_valid() {
@@ -1181,67 +1177,6 @@ where
     Ok(())
 }
 
-fn validate_live_block_sender(
-    schedule: &LeadershipSchedule,
-    live_sender: Option<&P2pPeerId>,
-    anchor_number: u64,
-    block_number: u64,
-) -> eyre::Result<()> {
-    let Some(sender) = live_sender else {
-        return Ok(());
-    };
-    match schedule.leader_for(anchor_number) {
-        Some(record) if &record.leader == sender => Ok(()),
-        Some(record) => eyre::bail!(
-            "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
-             the schedule assigns that anchor to {} (epoch {})",
-            record.leader,
-            record.epoch,
-        ),
-        None => eyre::bail!(
-            "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
-             record governs",
-        ),
-    }
-}
-
-async fn wait_for_validated_peer_anchor(
-    l1_block_tracker: &L1BlockTracker,
-    schedule: &LeadershipSchedule,
-    portal_inputs: &AdvanceTempoPortalInputs,
-    live_sender: Option<&P2pPeerId>,
-    anchor: NumHash,
-    block_number: u64,
-) -> eyre::Result<L1PortalEvents> {
-    let observed = loop {
-        match tokio::time::timeout(
-            Duration::from_secs(30),
-            l1_block_tracker.wait_for_portal_events(anchor),
-        )
-        .await
-        {
-            Ok(observed) => {
-                let observed = observed?;
-                portal_inputs.validate(&observed)?;
-                break observed;
-            }
-            Err(_) => warn!(
-                target: "zone::p2p",
-                block_number,
-                l1_block = anchor.number,
-                l1_hash = ?anchor.hash,
-                "Peer block import is waiting for local L1 observation of its anchor"
-            ),
-        }
-    };
-
-    // The L1 subscriber publishes any transition finalized by this anchor before recording the
-    // anchor in the tracker. Re-read the schedule now so the pre-wait decision cannot authorize a
-    // sender that this anchor demoted.
-    validate_live_block_sender(schedule, live_sender, anchor.number, block_number)?;
-    Ok(observed)
-}
-
 struct AdvanceTempoPortalInputs {
     deposits: Vec<zone_payload::abi::QueuedDeposit>,
     enabled_tokens: Vec<zone_payload::abi::EnabledToken>,
@@ -1251,31 +1186,6 @@ impl AdvanceTempoPortalInputs {
     fn validate(&self, observed: &L1PortalEvents) -> eyre::Result<()> {
         observed.validate_advance_tempo_inputs(&self.deposits, &self.enabled_tokens)
     }
-}
-
-fn validate_l1_checkpoint_transition(
-    l1_header: &SealedHeader<TempoHeader>,
-    local_number: u64,
-    local_hash: B256,
-    zone_block_number: u64,
-) -> eyre::Result<()> {
-    if l1_header.number() != local_number.saturating_add(1) {
-        eyre::bail!(
-            "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
-            l1_header.number(),
-            local_number,
-            local_number.saturating_add(1)
-        );
-    }
-    if l1_header.parent_hash() != local_hash {
-        eyre::bail!(
-            "advanceTempo L1 header {} does not extend the local Tempo checkpoint: embedded parent {}, local hash {}",
-            l1_header.number(),
-            l1_header.parent_hash(),
-            local_hash
-        );
-    }
-    Ok(())
 }
 
 /// Decode the L1 header embedded in the first `IZoneInbox.advanceTempo` system transaction.
@@ -1342,7 +1252,7 @@ mod tests {
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
         MAX_PENDING_BLOCKS, PersistedBlockSource, PersistedTip, broadcast_persisted_blocks,
-        buffer_pending_block, validate_live_block_sender, wait_for_validated_peer_anchor,
+        buffer_pending_block,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
@@ -1647,38 +1557,11 @@ mod tests {
         assert!(error.to_string().contains("trailing bytes"));
     }
 
-    #[test]
-    fn validates_embedded_l1_checkpoint_continuity() {
-        use reth_primitives_traits::SealedHeader;
-        use tempo_primitives::TempoHeader;
-
-        let local_hash = B256::repeat_byte(0x42);
-        let header = SealedHeader::seal_slow(TempoHeader {
-            inner: alloy_consensus::Header {
-                number: 11,
-                parent_hash: local_hash,
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-        super::validate_l1_checkpoint_transition(&header, 10, local_hash, 7).unwrap();
-
-        let skipped =
-            super::validate_l1_checkpoint_transition(&header, 9, local_hash, 7).unwrap_err();
-        assert!(skipped.to_string().contains("expected 10"));
-
-        let wrong_parent =
-            super::validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7)
-                .unwrap_err();
-        assert!(wrong_parent.to_string().contains("does not extend"));
-    }
-
     #[tokio::test]
     async fn revalidates_live_sender_after_anchor_observation() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
         const ANCHOR_NUMBER: u64 = 10;
-        const ZONE_BLOCK_NUMBER: u64 = 7;
 
         let outgoing = PrivateKey::from_seed(1).public_key();
         let incoming = PrivateKey::from_seed(2).public_key();
@@ -1687,27 +1570,26 @@ mod tests {
         let anchor = NumHash::new(ANCHOR_NUMBER, B256::repeat_byte(0x10));
 
         // The sender is valid under the pre-observation schedule.
-        validate_live_block_sender(&schedule, Some(&outgoing), ANCHOR_NUMBER, ZONE_BLOCK_NUMBER)
-            .unwrap();
+        assert_eq!(schedule.leader_for(ANCHOR_NUMBER).unwrap().leader, outgoing);
 
         let waiter = {
             let schedule = schedule.clone();
             let tracker = tracker.clone();
-            let outgoing = outgoing.clone();
             tokio::spawn(async move {
                 let portal_inputs = AdvanceTempoPortalInputs {
                     deposits: vec![],
                     enabled_tokens: vec![],
                 };
-                wait_for_validated_peer_anchor(
-                    &tracker,
-                    &schedule,
-                    &portal_inputs,
-                    Some(&outgoing),
-                    anchor,
-                    ZONE_BLOCK_NUMBER,
+                let observed = tracker
+                    .wait_for_portal_events_with_timeout(anchor, std::time::Duration::from_secs(1))
+                    .await?;
+                portal_inputs.validate(&observed)?;
+                Ok::<_, eyre::Report>(
+                    schedule
+                        .leader_for(ANCHOR_NUMBER)
+                        .expect("anchor must have a leader")
+                        .leader,
                 )
-                .await
             })
         };
 
@@ -1720,23 +1602,23 @@ mod tests {
             .record_with_portal_events(anchor, L1PortalEvents::default())
             .unwrap();
 
-        let error = waiter
+        let leader = waiter
             .await
             .expect("anchor waiter must not panic")
-            .expect_err("the post-observation sender check must reject the outgoing leader");
-        let message = error.to_string();
-        assert!(message.contains(&outgoing.to_string()));
-        assert!(message.contains(&incoming.to_string()));
-        assert!(message.contains("schedule assigns that anchor"));
+            .expect("anchor waiter must succeed");
+        assert_eq!(leader, incoming);
     }
 
     #[test]
     fn forced_recovery_reassigns_live_sender_for_missing_anchors() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
-        let outgoing = PrivateKey::from_seed(1).public_key();
         let incoming = PrivateKey::from_seed(2).public_key();
-        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, outgoing.clone(), 0));
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(
+            7,
+            PrivateKey::from_seed(1).public_key(),
+            0,
+        ));
         schedule
             .install_forced_recovery(8, incoming.clone(), B256::repeat_byte(0x11), 51)
             .unwrap();
@@ -1744,10 +1626,7 @@ mod tests {
             .publish(LeadershipState::new(8, incoming.clone(), 60))
             .unwrap();
 
-        validate_live_block_sender(&schedule, Some(&incoming), 51, 11).unwrap();
-        let error = validate_live_block_sender(&schedule, Some(&outgoing), 51, 11)
-            .expect_err("the crashed leader must not remain authoritative in the recovery window");
-        assert!(error.to_string().contains(&incoming.to_string()));
+        assert_eq!(schedule.leader_for(51).unwrap().leader, incoming);
     }
 
     #[tokio::test]

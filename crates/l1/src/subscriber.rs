@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 /// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
 /// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
@@ -156,6 +156,24 @@ impl L1BlockTracker {
                 .await
                 .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
         }
+    }
+
+    /// Wait up to `timeout` for an exact L1 block and return its receipt-authenticated portal
+    /// events.
+    pub async fn wait_for_portal_events_with_timeout(
+        &self,
+        block: NumHash,
+        timeout: Duration,
+    ) -> eyre::Result<L1PortalEvents> {
+        tokio::time::timeout(timeout, self.wait_for_portal_events(block))
+            .await
+            .map_err(|_| {
+                eyre::eyre!(
+                    "timed out after {timeout:?} waiting for L1 block {} ({})",
+                    block.number,
+                    block.hash
+                )
+            })?
     }
 
     /// Record an independently validated and applied L1 anchor.
