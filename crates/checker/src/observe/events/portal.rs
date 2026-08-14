@@ -52,6 +52,12 @@ pub(super) const DEPOSITS_PAUSED_TOPIC: B256 =
     b256!("eb225a736fbfee3f85ccb72bdf84ff0396ab358b7970e2cc351ab3e3fd92358d");
 pub(super) const DEPOSITS_RESUMED_TOPIC: B256 =
     b256!("22ab73af03f04a21e91c7923327f99279b7f5d07d9551762c39bccdf051f1fe9");
+pub(super) const PORTAL_PAUSED_TOPIC: B256 =
+    b256!("477a1104043ff48a8d2126e5d02d0d4977cb0b2ee7cd4030cb8823007db90f36");
+pub(super) const PORTAL_RESUMED_TOPIC: B256 =
+    b256!("d2c62538708a93d7454226ca65a098ec07211b126fc22bf2accdcae6561fc2aa");
+pub(super) const ABDICATION_SCHEDULED_TOPIC: B256 =
+    b256!("839069134f9aac5b7c48da0389dd17d6579bb89ebdddc7fbd83bf64af2dd2ef2");
 pub(super) const RPC_URL_UPDATED_TOPIC: B256 =
     b256!("f4e00967b25e707df96d88676243b33be84847ef27615af8ef91290b52294fc6");
 
@@ -78,6 +84,9 @@ pub(super) fn decode(log: &Log) -> Result<Option<Portal::ZonePortalEvents>, Prot
         | LEADER_UPDATED_TOPIC
         | DEPOSITS_PAUSED_TOPIC
         | DEPOSITS_RESUMED_TOPIC
+        | PORTAL_PAUSED_TOPIC
+        | PORTAL_RESUMED_TOPIC
+        | ABDICATION_SCHEDULED_TOPIC
         | RPC_URL_UPDATED_TOPIC => {}
         _ => return Err(unsupported(log)),
     }
@@ -91,18 +100,32 @@ pub(super) fn decode(log: &Log) -> Result<Option<Portal::ZonePortalEvents>, Prot
     let decoded = strict_decode_interface::<Portal::ZonePortalEvents>(log, "Portal event")?;
     validate_dynamic_bounds(log, &decoded)?;
 
-    let changes_checker_state = matches!(
-        decoded,
+    let changes_checker_state = match &decoded {
         Portal::ZonePortalEvents::DepositMade(_)
-            | Portal::ZonePortalEvents::TokenEnabled(_)
-            | Portal::ZonePortalEvents::BatchSubmitted(_)
-            | Portal::ZonePortalEvents::WithdrawalProcessed(_)
-            | Portal::ZonePortalEvents::WithdrawalBounceBack(_)
-            | Portal::ZonePortalEvents::DepositBounceBack(_)
-            | Portal::ZonePortalEvents::DepositBounceBackPending(_)
-            | Portal::ZonePortalEvents::RefundClaimed(_)
-            | Portal::ZonePortalEvents::BouncebackGasUpdated(_)
-    );
+        | Portal::ZonePortalEvents::TokenEnabled(_)
+        | Portal::ZonePortalEvents::BatchSubmitted(_)
+        | Portal::ZonePortalEvents::WithdrawalProcessed(_)
+        | Portal::ZonePortalEvents::WithdrawalBounceBack(_)
+        | Portal::ZonePortalEvents::DepositBounceBack(_)
+        | Portal::ZonePortalEvents::DepositBounceBackPending(_)
+        | Portal::ZonePortalEvents::RefundClaimed(_)
+        | Portal::ZonePortalEvents::BouncebackGasUpdated(_) => true,
+        Portal::ZonePortalEvents::DepositsPaused(_)
+        | Portal::ZonePortalEvents::DepositsResumed(_)
+        | Portal::ZonePortalEvents::PortalPaused(_)
+        | Portal::ZonePortalEvents::PortalResumed(_)
+        | Portal::ZonePortalEvents::AbdicationScheduled(_)
+        | Portal::ZonePortalEvents::RpcUrlUpdated(_)
+        | Portal::ZonePortalEvents::SequencerEncryptionKeyUpdated(_)
+        | Portal::ZonePortalEvents::ZoneGasRateUpdated(_)
+        | Portal::ZonePortalEvents::MaxTempoGasRateUpdated(_)
+        | Portal::ZonePortalEvents::AdminTransferStarted(_)
+        | Portal::ZonePortalEvents::AdminTransferred(_)
+        | Portal::ZonePortalEvents::RoleUpdated(_)
+        | Portal::ZonePortalEvents::EnforcementModesUpdated(_)
+        | Portal::ZonePortalEvents::SequencerSetUpdated(_)
+        | Portal::ZonePortalEvents::LeaderUpdated(_) => false,
+    };
     Ok(changes_checker_state.then_some(decoded))
 }
 

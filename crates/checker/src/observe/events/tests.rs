@@ -87,6 +87,18 @@ fn independent_topics_match_shared_wire_types() {
             ZonePortal::DepositsResumed::SIGNATURE_HASH,
         ),
         (
+            portal::PORTAL_PAUSED_TOPIC,
+            ZonePortal::PortalPaused::SIGNATURE_HASH,
+        ),
+        (
+            portal::PORTAL_RESUMED_TOPIC,
+            ZonePortal::PortalResumed::SIGNATURE_HASH,
+        ),
+        (
+            portal::ABDICATION_SCHEDULED_TOPIC,
+            ZonePortal::AbdicationScheduled::SIGNATURE_HASH,
+        ),
+        (
             portal::RPC_URL_UPDATED_TOPIC,
             ZonePortal::RpcUrlUpdated::SIGNATURE_HASH,
         ),
