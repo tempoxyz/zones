@@ -1640,7 +1640,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
+async fn zone_removed_private_holder_is_blocked_until_reauthorized() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start_protected().await?;
     let outsider_signer = fixture.l1.signer_at(3);
     let outsider = outsider_signer.address();
@@ -1660,6 +1660,28 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         "eligible private outsider received no EarnShare"
     );
     fixture.set_access_eligibility(outsider, false).await?;
+    let redeem = fixture
+        .zone_redeem_as(
+            &mut outsider_account,
+            outsider_shares,
+            fixture.alternate_asset,
+            outsider,
+        )
+        .await;
+    eyre::ensure!(
+        redeem.is_err(),
+        "removed private holder unexpectedly exited while ineligible"
+    );
+    assert_eq!(
+        fixture
+            .zone
+            .balance_of(fixture.earn_share, outsider)
+            .await?,
+        U256::from(outsider_shares),
+        "rejected exit changed the removed holder's EarnShare balance"
+    );
+
+    fixture.set_access_eligibility(outsider, true).await?;
     let outsider_output = fixture
         .zone_redeem_as(
             &mut outsider_account,
@@ -1670,7 +1692,7 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         .await?;
     assert_eq!(
         outsider_output, AMOUNT,
-        "removed private holder did not exit 1:1"
+        "re-authorized private holder did not exit 1:1"
     );
     assert_eq!(
         fixture
