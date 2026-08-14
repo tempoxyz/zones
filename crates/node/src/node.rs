@@ -1003,13 +1003,6 @@ where
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
 
-    eyre::ensure!(
-        portal_leadership.activation_tempo_block <= snapshot_anchor,
-        "portal epoch {} activates at Tempo block {}, after historical snapshot anchor \
-         {snapshot_anchor}",
-        portal_leadership.epoch,
-        portal_leadership.activation_tempo_block,
-    );
     if portal_leadership.epoch >= recovery_epoch {
         warn!(
             target: "reth::cli",
