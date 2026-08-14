@@ -470,6 +470,7 @@ where
     Node::Types: NodeTypes<Primitives = TempoPrimitives>,
     P: Provider<TempoNetwork>,
 {
+    let started_at = Instant::now();
     let provider = ctx.provider().clone();
     let parent = runtime.snapshot().meta.verified_zone_tip;
     let authentication = tokio::time::timeout(
@@ -486,6 +487,7 @@ where
     let Some(result) = await_with_notifications(ctx, store, runtime, authentication).await? else {
         return Ok(None);
     };
+    runtime.record_authentication(started_at.elapsed());
     let result = result.unwrap_or_else(|_| {
         Err(AuthenticationFailure::unlocated(Failure::retry(
             "checker acquisition timed out",

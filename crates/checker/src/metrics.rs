@@ -2,8 +2,9 @@
 
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge},
+    metrics::{Counter, Gauge, Histogram},
 };
+use std::time::Duration;
 
 use crate::{
     kernel::FindingCategory,
@@ -14,6 +15,12 @@ use crate::{
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_checker")]
 pub(crate) struct CheckerMetrics {
+    /// Duration of one complete block authentication attempt.
+    authentication_duration_seconds: Histogram,
+    /// Authentication attempts retried because local or Tempo data was unavailable.
+    acquisition_retries_total: Counter,
+    /// Zone blocks whose checker transitions committed durably.
+    verified_zone_blocks_total: Counter,
     /// Last Zone height whose checker transition committed durably.
     verified_zone_height: Gauge,
     /// Latest canonical Zone height observed from the local node.
@@ -78,6 +85,22 @@ impl CheckerMetrics {
         )])
         .divergences_total
         .increment(1);
+    }
+
+    /// Record one complete block authentication attempt.
+    pub(crate) fn record_authentication(&self, duration: Duration) {
+        self.authentication_duration_seconds
+            .record(duration.as_secs_f64());
+    }
+
+    /// Record an authentication attempt that will be retried.
+    pub(crate) fn record_acquisition_retry(&self) {
+        self.acquisition_retries_total.increment(1);
+    }
+
+    /// Record a Zone block whose checker transition committed durably.
+    pub(crate) fn record_verified_block(&self) {
+        self.verified_zone_blocks_total.increment(1);
     }
 }
 

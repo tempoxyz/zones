@@ -234,6 +234,11 @@ The checker publishes alert-oriented metrics through the node's existing metrics
 - `tempo_zone_checker_divergence_active`, `tempo_zone_checker_coverage_gap`,
   `tempo_zone_checker_recovering`, and `tempo_zone_checker_blocked` expose durable coverage
   state. Inspect the checker database or its structured logs for the terminal reason.
+- `tempo_zone_checker_authentication_duration_seconds` measures complete block authentication
+  attempts, including attempts that time out. `tempo_zone_checker_acquisition_retries_total`
+  counts attempts retried for unavailable local or Tempo data.
+- `tempo_zone_checker_verified_zone_blocks_total` increments only after a Zone transition is
+  committed.
 
 Snapshot-derived gauges are restored from durable checker metadata on startup, so a restart
 does not clear an unresolved divergence or blocked condition.

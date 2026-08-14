@@ -127,6 +127,11 @@ impl Runtime {
         self.metrics.publish_snapshot(&self.snapshot);
     }
 
+    /// Record the duration of one complete block authentication attempt.
+    pub(crate) fn record_authentication(&self, duration: Duration) {
+        self.metrics.record_authentication(duration);
+    }
+
     /// Persist a blocked state without advancing verified progress.
     pub(crate) fn block(
         &mut self,
@@ -229,6 +234,7 @@ impl Runtime {
         } = failed;
         match failure.class {
             FailureClass::Retry => {
+                self.metrics.record_acquisition_retry();
                 let retry = self.retry.get_or_insert(RetryState {
                     attempts: 0,
                     next_attempt: now,
@@ -303,6 +309,7 @@ impl Runtime {
             observed,
             coverage,
         )?);
+        self.metrics.record_verified_block();
         logging::verified(block);
         Ok(())
     }
