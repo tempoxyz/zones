@@ -212,18 +212,48 @@ fn checkpoint_is_missing(path: &std::path::Path) -> eyre::Result<bool> {
 async fn drain_notifications<Node>(ctx: &mut ExExContext<Node>) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
+    Node::Provider: BlockHashReader + BlockNumReader,
     Node::Types: NodeTypes<Primitives = TempoPrimitives>,
 {
+    let provider = ctx.provider().clone();
+    publish_canonical_finished_height(ctx, &provider)?;
     loop {
         match ctx.notifications.try_next().await {
-            Ok(Some(_)) => {}
+            Ok(Some(_)) => publish_canonical_finished_height(ctx, &provider)?,
             Ok(None) => eyre::bail!("checker notification stream closed"),
             Err(error) => {
                 tracing::error!(target: "zone::checker", %error, "checker notification stream failed; resuming direct delivery");
                 ctx.set_notifications_without_head();
+                publish_canonical_finished_height(ctx, &provider)?;
             }
         }
     }
+}
+
+/// Publish the current canonical head after the checker has stopped semantic processing.
+fn publish_canonical_finished_height<Node, P>(
+    ctx: &ExExContext<Node>,
+    provider: &P,
+) -> eyre::Result<()>
+where
+    Node: FullNodeComponents,
+    Node::Types: NodeTypes<Primitives = TempoPrimitives>,
+    P: BlockHashReader + BlockNumReader + ?Sized,
+{
+    ctx.send_finished_height(canonical_head(provider)?.into())?;
+    Ok(())
+}
+
+/// Read the node's current canonical tip as one coherent ExEx coordinate.
+fn canonical_head<P>(provider: &P) -> eyre::Result<BlockNumHash>
+where
+    P: BlockHashReader + BlockNumReader + ?Sized,
+{
+    let number = provider.best_block_number()?;
+    let hash = provider
+        .block_hash(number)?
+        .ok_or_else(|| eyre::eyre!("canonical Zone block {number} is unavailable"))?;
+    Ok(BlockNumHash { number, hash })
 }
 
 /// Await checker work while consuming notification wakeups from the node.
@@ -832,7 +862,7 @@ mod tests {
     use reth_provider::test_utils::MockEthProvider;
     use tempo_primitives::{TempoHeader, TempoPrimitives};
 
-    use super::{checkpoint_is_missing, refresh_canonical_head, retry_delay};
+    use super::{canonical_head, checkpoint_is_missing, refresh_canonical_head, retry_delay};
     use crate::{
         kernel::{PortalIdentity, State, StateDelta},
         metrics::CheckerMetrics,
@@ -869,6 +899,15 @@ mod tests {
         assert_eq!(retry_delay(4), Duration::from_secs(16));
         assert_eq!(retry_delay(5), Duration::from_secs(30));
         assert_eq!(retry_delay(u32::MAX), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn canonical_head_uses_the_provider_tip() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        add_header(&provider, block(1, 0x11));
+        add_header(&provider, block(2, 0x12));
+
+        assert_eq!(canonical_head(&provider).unwrap(), block(2, 0x12));
     }
 
     #[test]
