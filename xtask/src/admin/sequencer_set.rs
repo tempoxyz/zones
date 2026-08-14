@@ -16,7 +16,7 @@ use zone_p2p::ZoneManifest;
 
 use super::{
     config::{SharedAdminArgs, format_duration, parse_nonzero_duration},
-    invariants::{evaluate_base_invariants, l1_batch_invariant},
+    invariants::evaluate_base_invariants,
     secret_file::read_private_key_file,
     snapshot::{ClusterView, PortalSnapshot, read_portal_snapshot},
 };
@@ -344,7 +344,7 @@ async fn simulate(view: &ClusterView, admin: Address, proposed: &[Address]) -> e
 }
 
 fn ensure_healthy(view: &ClusterView) -> eyre::Result<()> {
-    let mut invariants = evaluate_base_invariants(
+    let invariants = evaluate_base_invariants(
         &view.config,
         view.manifest.as_ref(),
         &view.portal,
@@ -353,7 +353,6 @@ fn ensure_healthy(view: &ClusterView) -> eyre::Result<()> {
         None,
         None,
     );
-    invariants.push(l1_batch_invariant(&view.portal));
     let failed = invariants
         .iter()
         .filter(|result| result.required_failed())

@@ -15,8 +15,7 @@ use zone_rpc::types::SetLeaderResponse;
 use super::{
     config::{SharedAdminArgs, format_duration, parse_nonzero_duration},
     invariants::{
-        address_set, eligible_relayers, evaluate_base_invariants, is_rpc_only, l1_batch_invariant,
-        resolve_node,
+        address_set, eligible_relayers, evaluate_base_invariants, is_rpc_only, resolve_node,
     },
     snapshot::{ClusterView, NodeSnapshot},
 };
