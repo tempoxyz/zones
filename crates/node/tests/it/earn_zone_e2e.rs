@@ -1244,6 +1244,39 @@ impl EarnZoneFixture {
         u256_to_u128(returned, "assets returned by Zone redemption")
     }
 
+    async fn simulate_zone_redeem_as(
+        &self,
+        account: &mut ZoneAccount,
+        shares: u128,
+        output_token: Address,
+        recipient: Address,
+    ) -> eyre::Result<()> {
+        let limits = self.redeem_limits(shares, output_token).await?;
+        let data = self
+            .callback_data(
+                EarnFlow::Redeem,
+                output_token,
+                recipient,
+                account.address(),
+                limits,
+            )
+            .await?;
+        account
+            .simulate_withdraw_token_with(
+                self.earn_share,
+                WithdrawalArgs {
+                    amount: shares,
+                    to: Some(self.router),
+                    memo: B256::ZERO,
+                    gas_limit: CALLBACK_GAS_LIMIT,
+                    zone_fallback_recipient: Some(account.address()),
+                    data,
+                    reveal_to: Bytes::new(),
+                },
+            )
+            .await
+    }
+
     async fn migrate_existing_vault_shares(&mut self) -> eyre::Result<u128> {
         let user = self.user.address();
         let provider = self.user.l1_provider();
@@ -1661,7 +1694,7 @@ async fn zone_removed_private_holder_is_blocked_until_reauthorized() -> eyre::Re
     );
     fixture.set_access_eligibility(outsider, false).await?;
     let redeem = fixture
-        .zone_redeem_as(
+        .simulate_zone_redeem_as(
             &mut outsider_account,
             outsider_shares,
             fixture.alternate_asset,
