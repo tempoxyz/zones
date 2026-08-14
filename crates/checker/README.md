@@ -221,19 +221,28 @@ the descendants left unchecked by an authenticated divergence.
 
 The checker publishes alert-oriented metrics through the node's existing metrics endpoint:
 
-- `zone_checker_divergences_total{category="..."}` increments after a divergence is
+- `tempo_zone_checker_divergences_total{category="..."}` increments after a divergence is
   durably recorded. The bounded `category` label identifies the finding family; inspect
   the corresponding checker log for block hashes, code, location, and summary.
-- `zone_checker_divergence_active` is `1` while a divergence remains on the canonical
-  branch. It returns to `0` if a reorg removes that finding.
-- `zone_checker_blocked` is `1` while verification is stopped by another terminal
-  condition and `0` otherwise.
+- `tempo_zone_checker_state{state="..."}` is a one-hot lifecycle gauge. The bounded states
+  distinguish checkpoint bootstrap and opening, Tempo connection and retries, normal
+  recovery, complete coverage, divergence, durable blocking, and an unavailable database.
+- `tempo_zone_checker_verified_zone_height`, `tempo_zone_checker_observed_zone_height`, and
+  `tempo_zone_checker_verification_lag_blocks` expose checker progress. The imported Tempo tip
+  and reorg recovery checkpoint are exported as `tempo_zone_checker_imported_tempo_height` and
+  `tempo_zone_checker_recovery_checkpoint_height`.
+- `tempo_zone_checker_divergence_active`, `tempo_zone_checker_coverage_gap`,
+  `tempo_zone_checker_recovering`, and `tempo_zone_checker_blocked` expose durable coverage
+  state. Inspect the checker database or its structured logs for the terminal reason.
 
-Both gauges are restored from the checkpoint on startup, so a restart does not clear an
-alert condition.
+Snapshot-derived gauges are restored from durable checker metadata on startup, so a restart
+does not clear an unresolved divergence or blocked condition.
 
-Alert on any increase in `zone_checker_divergences_total` and while
-`zone_checker_divergence_active == 1` or `zone_checker_blocked == 1`.
+For checker-enabled nodes, alert on any increase in `tempo_zone_checker_divergences_total`,
+while `tempo_zone_checker_divergence_active == 1`,
+`tempo_zone_checker_coverage_gap == 1`, or `tempo_zone_checker_blocked == 1`, and if the
+`tempo_zone_checker_state` series is absent. Alert separately when lag remains non-zero without
+verified-height progress; recovering history is expected only while that lag is shrinking.
 
 ## Trust assumptions and non-claims
 

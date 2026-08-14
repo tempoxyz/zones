@@ -4,6 +4,7 @@ use crate::{
         ExpectedState, Finding, FindingCategory, FindingLocation, ImportedFacts, PortalIdentity,
         State, TransitionCandidate, ZoneFacts, ZoneOperation, apply_imported, apply_zone,
     },
+    metrics::CheckerMetrics,
     persistence::{BlockNumHash, ChainCut, Coverage, Identity, Persistence},
 };
 use alloy_primitives::{Address, B256};
@@ -44,6 +45,10 @@ fn create() -> (tempfile::TempDir, Persistence, Snapshot) {
     )
     .unwrap();
     (directory, store, snapshot)
+}
+
+fn runtime(snapshot: Snapshot) -> Runtime {
+    Runtime::new(snapshot, CheckerMetrics::default())
 }
 
 fn outputs(candidate: &TransitionCandidate) -> AuthenticatedOutputs {
@@ -90,7 +95,7 @@ fn authenticated_block(state: &State, number: u64) -> AuthenticatedBlock {
 #[test]
 fn recovery_verifies_observed_history_sequentially() {
     let (_directory, store, snapshot) = create();
-    let mut runtime = Runtime::new(snapshot);
+    let mut runtime = runtime(snapshot);
     runtime.observe_tip(&store, coordinate(2, 0x10)).unwrap();
 
     let request = AuthenticationRequest { height: 1 };
@@ -119,7 +124,7 @@ fn recovery_verifies_observed_history_sequentially() {
 #[test]
 fn recovered_block_must_extend_the_verified_parent() {
     let (_directory, store, snapshot) = create();
-    let mut runtime = Runtime::new(snapshot);
+    let mut runtime = runtime(snapshot);
     runtime.observe_tip(&store, coordinate(1, 0x10)).unwrap();
     let mut block = authenticated_block(&runtime.snapshot.state, 1);
     block.parent = coordinate(0, 0x20);
@@ -140,7 +145,7 @@ fn recovered_block_must_extend_the_verified_parent() {
 #[test]
 fn unavailable_data_retries_without_creating_a_gap() {
     let (_directory, store, snapshot) = create();
-    let mut runtime = Runtime::new(snapshot);
+    let mut runtime = runtime(snapshot);
     runtime.observe_tip(&store, coordinate(2, 0x10)).unwrap();
     let now = Instant::now();
 
@@ -165,7 +170,7 @@ fn unavailable_data_retries_without_creating_a_gap() {
 #[test]
 fn authenticated_acquisition_divergence_records_a_finding() {
     let (_directory, store, snapshot) = create();
-    let mut runtime = Runtime::new(snapshot);
+    let mut runtime = runtime(snapshot);
     runtime.observe_tip(&store, coordinate(2, 0x10)).unwrap();
     let zone = coordinate(1, 0x10);
     let parent = coordinate(0, 0x10);
@@ -195,7 +200,7 @@ fn authenticated_acquisition_divergence_records_a_finding() {
 #[test]
 fn malformed_authenticated_data_blocks_without_advancing() {
     let (_directory, store, snapshot) = create();
-    let mut runtime = Runtime::new(snapshot);
+    let mut runtime = runtime(snapshot);
     runtime.observe_tip(&store, coordinate(1, 0x10)).unwrap();
 
     runtime

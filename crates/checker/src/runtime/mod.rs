@@ -9,7 +9,7 @@ use crate::{
     CheckerBlockedReason,
     failure::{Failure, FailureClass},
     kernel::{Effect, ExpectedState, ImportedFacts, ZoneFacts},
-    metrics,
+    metrics::{CheckerMetrics, CheckerState},
     persistence::{
         BlockNumHash, Coverage, Identity, JournalEntry, Persistence, PersistenceError, Snapshot,
         make_finding,
@@ -102,21 +102,29 @@ pub(crate) enum RuntimeAction {
 pub(crate) struct Runtime {
     snapshot: Snapshot,
     retry: Option<RetryState>,
+    metrics: CheckerMetrics,
 }
 
 impl Runtime {
     /// Start from the latest durable checker snapshot.
-    pub(crate) fn new(snapshot: Snapshot) -> Self {
-        metrics::set_snapshot(&snapshot);
-        Self {
+    pub(crate) fn new(snapshot: Snapshot, metrics: CheckerMetrics) -> Self {
+        let runtime = Self {
             snapshot,
             retry: None,
-        }
+            metrics,
+        };
+        runtime.publish_snapshot();
+        runtime
     }
 
     /// Return the latest durable snapshot.
     pub(crate) fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// Republish the current durable snapshot after a transient lifecycle state.
+    pub(crate) fn publish_snapshot(&self) {
+        self.metrics.publish_snapshot(&self.snapshot);
     }
 
     /// Persist a blocked state without advancing verified progress.
@@ -125,8 +133,7 @@ impl Runtime {
         store: &Persistence,
         reason: CheckerBlockedReason,
     ) -> Result<(), PersistenceError> {
-        self.snapshot = store.record_blocked_current(reason)?;
-        metrics::set_blocked(Some(reason));
+        self.replace_snapshot(store.record_blocked_current(reason)?);
         self.retry = None;
         Ok(())
     }
@@ -137,7 +144,7 @@ impl Runtime {
         store: &Persistence,
         ancestor: BlockNumHash,
     ) -> Result<(), PersistenceError> {
-        self.snapshot = match store.reorg(&self.snapshot, ancestor) {
+        let snapshot = match store.reorg(&self.snapshot, ancestor) {
             Ok(snapshot) => snapshot,
             Err(PersistenceError::ReorgBeyondRetention { .. }) => {
                 self.block(store, CheckerBlockedReason::DeepReorgBeyondRetention)?;
@@ -145,7 +152,7 @@ impl Runtime {
             }
             Err(error) => return Err(error),
         };
-        metrics::set_snapshot(&self.snapshot);
+        self.replace_snapshot(snapshot);
         self.retry = None;
         Ok(())
     }
@@ -157,6 +164,7 @@ impl Runtime {
         observed: BlockNumHash,
     ) -> Result<(), PersistenceError> {
         self.snapshot.meta = store.record_observed_tip(&self.snapshot, observed)?;
+        self.publish_snapshot();
         Ok(())
     }
 
@@ -235,6 +243,7 @@ impl Runtime {
                     delay,
                     &failure.message,
                 );
+                self.metrics.set_state(CheckerState::Retrying);
             }
             FailureClass::Divergence => {
                 let Some((zone, parent)) = coordinate else {
@@ -282,7 +291,7 @@ impl Runtime {
         } else {
             Coverage::Recovering
         };
-        self.snapshot = store.apply(
+        self.replace_snapshot(store.apply(
             &self.snapshot,
             JournalEntry {
                 zone: block.zone,
@@ -293,7 +302,7 @@ impl Runtime {
             },
             observed,
             coverage,
-        )?;
+        )?);
         logging::verified(block);
         Ok(())
     }
@@ -312,15 +321,22 @@ impl Runtime {
             .ok_or_else(|| PersistenceError::Invalid("divergence has no finding".into()))?;
         let (key, finding) = make_finding(zone, parent, imported, *finding, failure.message)?;
         let logged_finding = finding.clone();
-        self.snapshot = store.record_divergence(
+        self.replace_snapshot(store.record_divergence(
             &self.snapshot,
             key,
             finding,
             self.snapshot.meta.observed_zone_tip,
-        )?;
-        metrics::record_divergence(logged_finding.details.category);
+        )?);
+        self.metrics
+            .record_divergence(logged_finding.details.category);
         logging::finding(&logged_finding);
         Ok(())
+    }
+
+    /// Replace the durable snapshot and publish its corresponding metrics.
+    fn replace_snapshot(&mut self, snapshot: Snapshot) {
+        self.snapshot = snapshot;
+        self.publish_snapshot();
     }
 }
 

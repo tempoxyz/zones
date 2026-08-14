@@ -27,6 +27,7 @@ use crate::{
     adapter::{AuthenticatedObservation, adapt},
     failure::Failure,
     kernel::{State, TokenPhase, apply_imported},
+    metrics::{CheckerMetrics, CheckerState},
     observe::{
         L2BlockObservation, ZonePostStateOutputs, acquire_portal_token_balance,
         acquire_zone_post_state, observe_l1_range, observe_l2_block_with_context,
@@ -45,13 +46,15 @@ where
         BlockReader<Block = Block, Receipt = TempoReceipt> + BlockNumReader + StateProviderFactory,
     Node::Types: NodeTypes<Primitives = TempoPrimitives>,
 {
+    let metrics = CheckerMetrics::default();
     let mut failures = 0;
     loop {
-        match start_and_run(&config, &mut ctx).await {
+        match start_and_run(&config, &mut ctx, &metrics).await {
             Ok(()) => std::future::pending::<()>().await,
             Err(error) => {
                 let delay = retry_delay(failures);
                 failures = failures.saturating_add(1);
+                metrics.set_state(CheckerState::Retrying);
                 tracing::error!(target: "zone::checker", %error, ?delay, "checker recovery attempt failed");
                 if let Err(error) =
                     await_while_draining_notifications(&mut ctx, tokio::time::sleep(delay)).await
@@ -68,6 +71,7 @@ where
 async fn start_and_run<Node>(
     config: &CheckerConfig,
     ctx: &mut ExExContext<Node>,
+    metrics: &CheckerMetrics,
 ) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
@@ -75,20 +79,22 @@ where
         BlockReader<Block = Block, Receipt = TempoReceipt> + BlockNumReader + StateProviderFactory,
     Node::Types: NodeTypes<Primitives = TempoPrimitives>,
 {
+    metrics.set_state(CheckerState::Opening);
     eyre::ensure!(
         !config.acquisition_timeout.is_zero(),
         "checker acquisition timeout must not be zero"
     );
     let path = config.database_path.as_path();
-    bootstrap_if_missing_while_draining(config, ctx).await?;
+    bootstrap_if_missing_while_draining(config, ctx, metrics).await?;
     let (identity, store, snapshot) = match open_checkpoint(config, ctx.config.chain.chain().id()) {
         Ok(opened) => opened,
         Err(error) => {
+            metrics.set_state(CheckerState::Unavailable);
             tracing::error!(target: "zone::checker", %error, path = %path.display(), "checker database cannot be used");
             return drain_notifications(ctx).await;
         }
     };
-    let mut runtime = Runtime::new(snapshot);
+    let mut runtime = Runtime::new(snapshot, metrics.clone());
 
     // The local node retains the replay journal; ExEx notifications only wake recovery.
     let l2_provider = ctx.provider().clone();
@@ -98,8 +104,10 @@ where
         return drain_notifications(ctx).await;
     }
 
+    metrics.set_state(CheckerState::Connecting);
     let (l1_provider, actual_l1_chain_id) =
-        connect_l1_while_draining(config, ctx, &store, &mut runtime).await?;
+        connect_l1_while_draining(config, ctx, &store, &mut runtime, metrics).await?;
+    runtime.publish_snapshot();
     if actual_l1_chain_id != identity.l1_chain_id {
         runtime.block(&store, CheckerBlockedReason::TempoChainMismatch)?;
         tracing::error!(target: "zone::checker", expected = identity.l1_chain_id, actual = actual_l1_chain_id, "Tempo chain ID does not match the checker checkpoint");
@@ -124,6 +132,7 @@ fn open_checkpoint(
 async fn bootstrap_if_missing_while_draining<Node>(
     config: &CheckerConfig,
     ctx: &mut ExExContext<Node>,
+    metrics: &CheckerMetrics,
 ) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
@@ -139,6 +148,7 @@ where
             return Ok(());
         }
 
+        metrics.set_state(CheckerState::Bootstrapping);
         tracing::info!(target: "zone::checker", path = %config.database_path.display(), "building missing checker checkpoint");
         match await_while_draining_notifications(
             ctx,
@@ -150,6 +160,7 @@ where
             Err(error) => {
                 let delay = retry_delay(failures);
                 failures = failures.saturating_add(1);
+                metrics.set_state(CheckerState::Retrying);
                 tracing::warn!(target: "zone::checker", %error, ?delay, "checker bootstrap failed; retrying");
                 await_while_draining_notifications(ctx, tokio::time::sleep(delay)).await?;
             }
@@ -341,6 +352,7 @@ async fn connect_l1_while_draining<Node>(
     ctx: &mut ExExContext<Node>,
     store: &Persistence,
     runtime: &mut Runtime,
+    metrics: &CheckerMetrics,
 ) -> eyre::Result<(DynProvider<TempoNetwork>, u64)>
 where
     Node: FullNodeComponents,
@@ -349,6 +361,7 @@ where
     Node::Types: NodeTypes<Primitives = TempoPrimitives>,
 {
     loop {
+        metrics.set_state(CheckerState::Connecting);
         let Some(result) =
             await_with_notifications(ctx, store, runtime, connect_l1(config)).await?
         else {
@@ -358,6 +371,7 @@ where
             Ok(connection) => return Ok(connection),
             Err(error) => error,
         };
+        metrics.set_state(CheckerState::Retrying);
         tracing::warn!(target: "zone::checker", %error, "checker could not connect to Tempo; retrying");
         if await_with_notifications(
             ctx,
@@ -819,6 +833,7 @@ mod tests {
     use super::{checkpoint_is_missing, refresh_canonical_head, retry_delay};
     use crate::{
         kernel::{PortalIdentity, State, StateDelta},
+        metrics::CheckerMetrics,
         persistence::{BlockNumHash, ChainCut, Coverage, Identity, JournalEntry, Persistence},
         runtime::Runtime,
     };
@@ -901,7 +916,7 @@ mod tests {
         add_header(&provider, genesis.zone);
         add_header(&provider, block(1, 0x11));
         add_header(&provider, replacement);
-        let mut runtime = Runtime::new(snapshot);
+        let mut runtime = Runtime::new(snapshot, CheckerMetrics::default());
 
         let finished = refresh_canonical_head(&mut runtime, &store, &provider).unwrap();
 
