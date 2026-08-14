@@ -85,6 +85,8 @@ pub(crate) struct Metadata {
     pub active_finding: Option<FindingKey>,
     /// Number of previously active findings removed from the canonical branch by reorgs.
     pub cleared_findings: u64,
+    /// Most recently cleared finding, retained for operator inspection.
+    pub last_cleared_finding: Option<FindingKey>,
     pub coverage: Coverage,
     /// Why the checker stopped verifying new work.
     pub blocked: Option<CheckerBlockedReason>,

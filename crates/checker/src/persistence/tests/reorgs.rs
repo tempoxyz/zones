@@ -60,6 +60,7 @@ fn divergence_reorg_removes_the_active_latch() {
     let snapshot = store.reorg(&current(&store), bootstrap().zone).unwrap();
     assert_eq!(snapshot.meta.active_finding, None);
     assert_eq!(snapshot.meta.cleared_findings, 1);
+    assert_eq!(snapshot.meta.last_cleared_finding, Some(key));
 }
 
 #[test]
@@ -85,6 +86,7 @@ fn deep_reorg_retains_orphan_finding_as_structural_audit_record() {
     assert_eq!(reopened.meta.verified_zone_tip, bootstrap().zone);
     assert_eq!(reopened.meta.active_finding, None);
     assert_eq!(reopened.meta.cleared_findings, 1);
+    assert_eq!(reopened.meta.last_cleared_finding, Some(key));
 }
 
 #[test]

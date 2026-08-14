@@ -206,6 +206,7 @@ impl Persistence {
             observed_zone_tip: cut.zone,
             active_finding: None,
             cleared_findings: 0,
+            last_cleared_finding: None,
             coverage: Coverage::Complete,
             blocked: None,
         };
@@ -555,8 +556,9 @@ impl Persistence {
             if meta.observed_zone_tip.number > ancestor.number {
                 meta.observed_zone_tip = ancestor;
             }
-            if meta.active_finding.take().is_some() {
+            if let Some(cleared) = meta.active_finding.take() {
                 meta.cleared_findings = meta.cleared_findings.saturating_add(1);
+                meta.last_cleared_finding = Some(cleared);
             }
             meta.coverage = Coverage::Complete;
             Self::remove_obsolete_checkpoints(tx, meta, previous_active, previous_recovery)?;
