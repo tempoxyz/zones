@@ -14,8 +14,9 @@ use validation::{
 };
 
 pub(crate) use model::{
-    BlockNumHash, ChainCut, Checkpoint, CheckpointId, Coverage, Finding, FindingKey, Identity,
-    JournalEntry, MetaValue, Metadata, Snapshot,
+    BlockNumHash, ChainCut, Checkpoint, CheckpointChunk, CheckpointChunkKey, CheckpointId,
+    CheckpointManifest, Coverage, Finding, FindingKey, Identity, JournalEntry, MetaValue, Metadata,
+    Snapshot,
 };
 
 use crate::{CheckerBlockedReason, kernel::State};
@@ -27,7 +28,7 @@ use reth_db::{
     open_db_read_only,
     transaction::{DbTx, DbTxMut},
 };
-use schema::{Checkpoints, Findings, Journal, Meta, MetaKey, PersistenceTables};
+use schema::{CheckpointChunks, Checkpoints, Findings, Journal, Meta, MetaKey, PersistenceTables};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
@@ -36,8 +37,9 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) const SCHEMA_VERSION: u32 = 8;
+pub(crate) const SCHEMA_VERSION: u32 = 9;
 const CHECKPOINT_INTERVAL: u64 = 64;
+const CHECKPOINT_CHUNK_SIZE: usize = 1024 * 1024;
 /// Minimum Zone history retained for local reorg recovery.
 ///
 /// This is an availability horizon, not a Zone finality claim.
@@ -253,13 +255,9 @@ impl Persistence {
             return Err(PersistenceError::Identity);
         }
         validate_metadata(&meta)?;
-        let recovery = tx
-            .get::<Checkpoints>(meta.recovery_checkpoint)?
-            .ok_or_else(|| invalid("recovery checkpoint is missing"))?;
+        let recovery = Self::read_checkpoint(&tx, meta.recovery_checkpoint)?;
         validate_checkpoint(meta.recovery_checkpoint, &recovery, identity)?;
-        let active = tx
-            .get::<Checkpoints>(meta.active_checkpoint)?
-            .ok_or_else(|| invalid("active checkpoint is missing"))?;
+        let active = Self::read_checkpoint(&tx, meta.active_checkpoint)?;
         validate_checkpoint(meta.active_checkpoint, &active, identity)?;
         let mut checkpoints = tx.cursor_read::<Checkpoints>()?;
         let bootstrap_id = checkpoints
@@ -423,9 +421,7 @@ impl Persistence {
     pub(crate) fn retained_zone_coordinates(&self) -> Result<Vec<BlockNumHash>> {
         let tx = self.db.tx()?;
         let meta = read_metadata(&tx)?;
-        let recovery = tx
-            .get::<Checkpoints>(meta.recovery_checkpoint)?
-            .ok_or_else(|| invalid("recovery checkpoint is missing"))?;
+        let recovery = Self::read_checkpoint(&tx, meta.recovery_checkpoint)?;
         let mut coordinates = Vec::new();
         coordinates.push(recovery.cut.zone);
         for height in recovery.cut.zone.number.saturating_add(1)..=meta.verified_zone_tip.number {
@@ -576,9 +572,7 @@ impl Persistence {
         if meta.identity != identity || ancestor.number > meta.verified_zone_tip.number {
             return Err(invalid("invalid reorg ancestor"));
         }
-        let recovery = tx
-            .get::<Checkpoints>(meta.recovery_checkpoint)?
-            .ok_or_else(|| invalid("recovery checkpoint is missing"))?;
+        let recovery = Self::read_checkpoint(&tx, meta.recovery_checkpoint)?;
         validate_checkpoint(meta.recovery_checkpoint, &recovery, identity)?;
         if ancestor.number < recovery.cut.zone.number
             || (ancestor.number == recovery.cut.zone.number && ancestor != recovery.cut.zone)
@@ -590,9 +584,7 @@ impl Persistence {
         }
 
         let (checkpoint_id, checkpoint) = if meta.active_checkpoint.height <= ancestor.number {
-            let checkpoint = tx
-                .get::<Checkpoints>(meta.active_checkpoint)?
-                .ok_or_else(|| invalid("active checkpoint is missing"))?;
+            let checkpoint = Self::read_checkpoint(&tx, meta.active_checkpoint)?;
             validate_checkpoint(meta.active_checkpoint, &checkpoint, identity)?;
             (meta.active_checkpoint, checkpoint)
         } else {
@@ -640,14 +632,6 @@ impl Persistence {
             cut,
             state: state.clone(),
         };
-        // A valid protocol backlog can exceed the per-value codec bound. Keep the
-        // journal advancing and retry checkpointing after the semantic state shrinks
-        // instead of turning a storage representation limit into a checker outage.
-        match codec::encode(&checkpoint) {
-            Ok(_) => {}
-            Err(codec::CodecError::Oversize) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
         Self::write_checkpoint(tx, id, checkpoint)?;
         meta.active_checkpoint = id;
         self.advance_recovery_checkpoint(tx, meta)?;
@@ -704,15 +688,72 @@ impl Persistence {
         id: CheckpointId,
         checkpoint: Checkpoint,
     ) -> Result<()> {
-        codec::encode(&checkpoint)?;
-        if let Some(existing) = tx.get::<Checkpoints>(id)? {
-            if existing != checkpoint {
+        let encoded = codec::encode_unbounded(&checkpoint)?;
+        let chunk_count = encoded.len().div_ceil(CHECKPOINT_CHUNK_SIZE);
+        let chunk_count = u32::try_from(chunk_count)
+            .map_err(|_| invalid("checkpoint requires too many chunks"))?;
+        let encoded_len = u64::try_from(encoded.len())
+            .map_err(|_| invalid("checkpoint encoded length exceeds u64"))?;
+        let manifest = CheckpointManifest {
+            cut: checkpoint.cut,
+            chunk_count,
+            encoded_len,
+            commitment: alloy_primitives::keccak256(&encoded),
+        };
+        codec::encode(&manifest)?;
+        if tx.get::<Checkpoints>(id)?.is_some() {
+            if Self::read_checkpoint(tx, id)? != checkpoint {
                 return Err(invalid("checkpoint identity is immutable"));
             }
         } else {
-            tx.put::<Checkpoints>(id, checkpoint)?;
+            for (index, bytes) in encoded.chunks(CHECKPOINT_CHUNK_SIZE).enumerate() {
+                let index = u32::try_from(index)
+                    .map_err(|_| invalid("checkpoint chunk index exceeds u32"))?;
+                tx.put::<CheckpointChunks>(
+                    CheckpointChunkKey {
+                        checkpoint: id,
+                        index,
+                    },
+                    CheckpointChunk(bytes.to_vec()),
+                )?;
+            }
+            tx.put::<Checkpoints>(id, manifest)?;
         }
         Ok(())
+    }
+
+    /// Authenticate and reconstruct one chunked checkpoint.
+    fn read_checkpoint<T: DbTx>(tx: &T, id: CheckpointId) -> Result<Checkpoint> {
+        let manifest = tx
+            .get::<Checkpoints>(id)?
+            .ok_or_else(|| invalid("checkpoint manifest is missing"))?;
+        if manifest.chunk_count == 0 {
+            return Err(invalid("checkpoint manifest has no chunks"));
+        }
+        let capacity = usize::try_from(manifest.encoded_len)
+            .map_err(|_| invalid("checkpoint encoded length exceeds usize"))?;
+        let mut encoded = Vec::with_capacity(capacity);
+        for index in 0..manifest.chunk_count {
+            let chunk = tx
+                .get::<CheckpointChunks>(CheckpointChunkKey {
+                    checkpoint: id,
+                    index,
+                })?
+                .ok_or_else(|| invalid("checkpoint chunk is missing"))?;
+            if chunk.0.is_empty() || chunk.0.len() > CHECKPOINT_CHUNK_SIZE {
+                return Err(invalid("checkpoint chunk has invalid size"));
+            }
+            encoded.extend_from_slice(&chunk.0);
+        }
+        if encoded.len() != capacity || alloy_primitives::keccak256(&encoded) != manifest.commitment
+        {
+            return Err(invalid("checkpoint chunk commitment mismatch"));
+        }
+        let checkpoint: Checkpoint = codec::decode_unbounded(&encoded)?;
+        if checkpoint.cut != manifest.cut {
+            return Err(invalid("checkpoint manifest cut mismatch"));
+        }
+        Ok(checkpoint)
     }
 
     /// Retain only bootstrap, recovery, and active checkpoints.
@@ -725,8 +766,25 @@ impl Persistence {
         let bootstrap = Self::bootstrap_checkpoint_id(tx)?;
         for id in [previous_active, previous_recovery] {
             if id != bootstrap && id != meta.active_checkpoint && id != meta.recovery_checkpoint {
-                tx.delete::<Checkpoints>(id, None)?;
+                Self::delete_checkpoint(tx, id)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Delete one checkpoint manifest and all of its chunks.
+    fn delete_checkpoint(tx: &<DatabaseEnv as Database>::TXMut, id: CheckpointId) -> Result<()> {
+        if let Some(manifest) = tx.get::<Checkpoints>(id)? {
+            for index in 0..manifest.chunk_count {
+                tx.delete::<CheckpointChunks>(
+                    CheckpointChunkKey {
+                        checkpoint: id,
+                        index,
+                    },
+                    None,
+                )?;
+            }
+            tx.delete::<Checkpoints>(id, None)?;
         }
         Ok(())
     }
@@ -747,9 +805,7 @@ impl Persistence {
         height: u64,
         identity: Identity,
     ) -> Result<Checkpoint> {
-        let checkpoint = tx
-            .get::<Checkpoints>(checkpoint_id)?
-            .ok_or_else(|| invalid("recovery checkpoint is missing"))?;
+        let checkpoint = Self::read_checkpoint(tx, checkpoint_id)?;
         validate_checkpoint(checkpoint_id, &checkpoint, identity)?;
         if height < checkpoint.cut.zone.number || height > meta.verified_zone_tip.number {
             return Err(invalid("recovery checkpoint target is out of range"));

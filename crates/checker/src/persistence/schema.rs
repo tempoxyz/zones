@@ -1,6 +1,9 @@
 //! MDBX tables and fixed-width key encodings for persisted checker records.
 
-use super::{Checkpoint, CheckpointId, Finding, FindingKey, JournalEntry, MetaValue};
+use super::{
+    CheckpointChunk, CheckpointChunkKey, CheckpointId, CheckpointManifest, Finding, FindingKey,
+    JournalEntry, MetaValue,
+};
 use reth_db::{
     DatabaseError, TableSet,
     table::{Decode, Encode, Table, TableInfo},
@@ -66,6 +69,24 @@ fixed_key!(
     })
 );
 fixed_key!(
+    CheckpointChunkKey,
+    44,
+    |v: CheckpointChunkKey| {
+        let mut b = [0; 44];
+        b[..8].copy_from_slice(&v.checkpoint.height.to_be_bytes());
+        b[8..40].copy_from_slice(v.checkpoint.hash.as_slice());
+        b[40..].copy_from_slice(&v.index.to_be_bytes());
+        b
+    },
+    |v: &[u8]| Ok(CheckpointChunkKey {
+        checkpoint: CheckpointId {
+            height: u64::from_be_bytes(v[..8].try_into().map_err(|_| DatabaseError::Decode)?),
+            hash: alloy_primitives::B256::from_slice(&v[8..40]),
+        },
+        index: u32::from_be_bytes(v[40..].try_into().map_err(|_| DatabaseError::Decode)?),
+    })
+);
+fixed_key!(
     FindingKey,
     46,
     |v: FindingKey| {
@@ -108,7 +129,13 @@ macro_rules! table {
     };
 }
 table!(Meta, MetaKey, MetaValue, "Meta");
-table!(Checkpoints, CheckpointId, Checkpoint, "Checkpoints");
+table!(Checkpoints, CheckpointId, CheckpointManifest, "Checkpoints");
+table!(
+    CheckpointChunks,
+    CheckpointChunkKey,
+    CheckpointChunk,
+    "CheckpointChunks"
+);
 table!(Journal, u64, JournalEntry, "Journal");
 table!(Findings, FindingKey, Finding, "Findings");
 
@@ -120,6 +147,7 @@ impl TableSet for PersistenceTables {
             vec![
                 Box::new(Meta) as Box<dyn TableInfo>,
                 Box::new(Checkpoints),
+                Box::new(CheckpointChunks),
                 Box::new(Journal),
                 Box::new(Findings),
             ]

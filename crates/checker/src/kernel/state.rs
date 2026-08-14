@@ -370,6 +370,40 @@ impl State {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_pending_withdrawals_for_test(
+        identity: PortalIdentity,
+        count: u64,
+        callback_size: usize,
+    ) -> Self {
+        let mut state = Self::awaiting(identity);
+        for index in 1..=count {
+            let withdrawal = WithdrawalId {
+                zone_id: identity.zone_id,
+                index,
+            };
+            state.rows.insert(
+                StateKey::Withdrawal(withdrawal),
+                StateValue::Withdrawal(WithdrawalOwner::PendingUser {
+                    data: Withdrawal {
+                        token: identity.initial_token,
+                        sender_tag: B256::from(U256::from(index)),
+                        to: Address::repeat_byte(1),
+                        amount: 1,
+                        memo: B256::ZERO,
+                        gas_limit: 1,
+                        fallback_nonce: index,
+                        callback_data: Bytes::from(vec![0; callback_size]),
+                        encrypted_sender: Bytes::new(),
+                    },
+                    fallback: FallbackId::new(identity.zone_id, index)
+                        .expect("test index is nonzero"),
+                }),
+            );
+        }
+        state
+    }
+
+    #[cfg(test)]
     pub(super) fn from_rows(
         rows: BTreeMap<StateKey, StateValue>,
     ) -> Result<Self, StateFamilyError> {

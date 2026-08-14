@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn bounded_versioned_codec_rejects_unknown_trailing_truncated_and_oversize() {
-    assert_eq!(PersistenceTables::tables().count(), 4);
+    assert_eq!(PersistenceTables::tables().count(), 5);
     let (_, value) = finding(block(1, 0x11));
     let encoded = codec::encode(&value).unwrap();
     assert_eq!(codec::decode::<Finding>(&encoded).unwrap(), value);
@@ -143,7 +143,8 @@ fn restart_checks_active_history_but_defers_orphan_audit_validation() {
         hash: B256::repeat_byte(9),
     };
     let tx = store.db.tx_mut().unwrap();
-    tx.put::<Checkpoints>(
+    Persistence::write_checkpoint(
+        &tx,
         bad_id,
         super::super::Checkpoint {
             cut: bootstrap(),
@@ -219,7 +220,7 @@ fn schema_version_is_probed_before_incompatible_metadata_is_opened_writable() {
 #[test]
 fn checkpoint_size_and_bounded_journal_replay_are_measured() {
     let (directory, store) = create();
-    let checkpoint_bytes = codec::encode(&super::super::Checkpoint {
+    let checkpoint_bytes = codec::encode_unbounded(&super::super::Checkpoint {
         cut: bootstrap(),
         state: state(),
     })
@@ -248,4 +249,37 @@ fn checkpoint_size_and_bounded_journal_replay_are_measured() {
     let (_, snapshot) = Persistence::open(directory.path(), identity()).unwrap();
     assert_eq!(snapshot.meta.verified_zone_tip.number, 256);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn oversized_logical_checkpoint_round_trips_through_bounded_chunks() {
+    let (_directory, store) = create();
+    let id = super::super::CheckpointId {
+        height: 64,
+        hash: B256::repeat_byte(0x64),
+    };
+    let state = State::with_pending_withdrawals_for_test(
+        PortalIdentity {
+            portal: identity().portal,
+            zone_id: identity().zone_id,
+            initial_token: Address::repeat_byte(0x11),
+        },
+        9_000,
+        1_024,
+    );
+    let checkpoint = super::super::Checkpoint {
+        cut: ChainCut {
+            zone: block(64, 0x64),
+            tempo: block(64, 0x74),
+        },
+        state,
+    };
+    assert!(codec::encode_unbounded(&checkpoint).unwrap().len() > codec::MAX_VALUE_SIZE as usize);
+
+    let tx = store.db.tx_mut().unwrap();
+    Persistence::write_checkpoint(&tx, id, checkpoint.clone()).unwrap();
+    let manifest = tx.get::<Checkpoints>(id).unwrap().unwrap();
+    assert!(manifest.chunk_count > 8);
+    assert_eq!(Persistence::read_checkpoint(&tx, id).unwrap(), checkpoint);
+    tx.commit().unwrap();
 }

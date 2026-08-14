@@ -104,6 +104,26 @@ pub(crate) struct Checkpoint {
     pub state: State,
 }
 
+/// Integrity metadata for one checkpoint split across bounded database values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CheckpointManifest {
+    pub cut: ChainCut,
+    pub chunk_count: u32,
+    pub encoded_len: u64,
+    pub commitment: B256,
+}
+
+/// One bounded segment of an encoded checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CheckpointChunk(pub Vec<u8>);
+
+/// Stable key for one checkpoint segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct CheckpointChunkKey {
+    pub checkpoint: CheckpointId,
+    pub index: u32,
+}
+
 /// One verified Zone transition and its imported Tempo advancement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JournalEntry {

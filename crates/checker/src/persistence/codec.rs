@@ -24,6 +24,12 @@ fn options() -> impl Options {
         .reject_trailing_bytes()
         .with_limit(MAX_VALUE_SIZE - 1)
 }
+
+fn unbounded_options() -> impl Options {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+}
 /// Encode one persistence value with its versioned envelope.
 pub(crate) fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, CodecError> {
     let mut out = vec![ENVELOPE_VERSION];
@@ -45,6 +51,26 @@ pub(crate) fn decode<T: DeserializeOwned>(v: &[u8]) -> Result<T, CodecError> {
         return Err(CodecError::Version(version));
     }
     options().deserialize(body).map_err(map)
+}
+
+/// Encode a logical value that will be split into independently bounded rows.
+pub(crate) fn encode_unbounded<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
+    let mut out = vec![ENVELOPE_VERSION];
+    unbounded_options()
+        .serialize_into(&mut out, value)
+        .map_err(map)?;
+    Ok(out)
+}
+
+/// Decode a logical value after its bounded rows have been authenticated and joined.
+pub(crate) fn decode_unbounded<T: DeserializeOwned>(value: &[u8]) -> Result<T, CodecError> {
+    let (&version, body) = value
+        .split_first()
+        .ok_or_else(|| CodecError::Malformed("empty envelope".into()))?;
+    if version != ENVELOPE_VERSION {
+        return Err(CodecError::Version(version));
+    }
+    unbounded_options().deserialize(body).map_err(map)
 }
 /// Map bincode failures into durable codec errors.
 fn map(e: Box<bincode::ErrorKind>) -> CodecError {
@@ -80,7 +106,12 @@ macro_rules! value_codec {
     };
 }
 
-value_codec!(super::Checkpoint, super::JournalEntry, super::Finding);
+value_codec!(
+    super::CheckpointManifest,
+    super::CheckpointChunk,
+    super::JournalEntry,
+    super::Finding
+);
 
 impl Compress for super::MetaValue {
     type Compressed = Vec<u8>;
