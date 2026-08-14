@@ -178,7 +178,6 @@ enum DecodedPortalCallKind {
     ProcessWithdrawals(ZonePortal::processWithdrawalsCall),
     SetBouncebackGas(ZonePortal::setBouncebackGasCall),
     EnableToken(ZonePortal::enableTokenCall),
-    KnownIgnoredStateChange,
     Deposit,
     ClaimRefund,
 }
@@ -190,9 +189,7 @@ impl DecodedPortalCall {
             DecodedPortalCallKind::ProcessWithdrawals(_) => None,
             DecodedPortalCallKind::SetBouncebackGas(_) => None,
             DecodedPortalCallKind::EnableToken(_) => None,
-            DecodedPortalCallKind::KnownIgnoredStateChange
-            | DecodedPortalCallKind::Deposit
-            | DecodedPortalCallKind::ClaimRefund => None,
+            DecodedPortalCallKind::Deposit | DecodedPortalCallKind::ClaimRefund => None,
         }
     }
 
@@ -202,9 +199,7 @@ impl DecodedPortalCall {
             DecodedPortalCallKind::SubmitBatch(_) => None,
             DecodedPortalCallKind::SetBouncebackGas(_) => None,
             DecodedPortalCallKind::EnableToken(_) => None,
-            DecodedPortalCallKind::KnownIgnoredStateChange
-            | DecodedPortalCallKind::Deposit
-            | DecodedPortalCallKind::ClaimRefund => None,
+            DecodedPortalCallKind::Deposit | DecodedPortalCallKind::ClaimRefund => None,
         }
     }
 
@@ -214,7 +209,6 @@ impl DecodedPortalCall {
             DecodedPortalCallKind::SubmitBatch(_)
             | DecodedPortalCallKind::ProcessWithdrawals(_)
             | DecodedPortalCallKind::EnableToken(_)
-            | DecodedPortalCallKind::KnownIgnoredStateChange
             | DecodedPortalCallKind::Deposit
             | DecodedPortalCallKind::ClaimRefund => None,
         }
@@ -226,14 +220,9 @@ impl DecodedPortalCall {
             DecodedPortalCallKind::SubmitBatch(_)
             | DecodedPortalCallKind::ProcessWithdrawals(_)
             | DecodedPortalCallKind::SetBouncebackGas(_)
-            | DecodedPortalCallKind::KnownIgnoredStateChange
             | DecodedPortalCallKind::Deposit
             | DecodedPortalCallKind::ClaimRefund => None,
         }
-    }
-
-    pub(crate) const fn is_known_ignored_state_change(&self) -> bool {
-        matches!(self.kind, DecodedPortalCallKind::KnownIgnoredStateChange)
     }
 
     pub(crate) const fn is_deposit(&self) -> bool {
@@ -255,9 +244,9 @@ impl DecodedPortalCall {
             DecodedPortalCallKind::ProcessWithdrawals(_) => PortalCallFamily::ProcessWithdrawals,
             DecodedPortalCallKind::SetBouncebackGas(_) => PortalCallFamily::StateUpdate,
             DecodedPortalCallKind::EnableToken(_) => PortalCallFamily::StateUpdate,
-            DecodedPortalCallKind::KnownIgnoredStateChange
-            | DecodedPortalCallKind::Deposit
-            | DecodedPortalCallKind::ClaimRefund => PortalCallFamily::StateUpdate,
+            DecodedPortalCallKind::Deposit | DecodedPortalCallKind::ClaimRefund => {
+                PortalCallFamily::StateUpdate
+            }
         }
     }
 }
@@ -578,8 +567,6 @@ fn parse_portal_call(calldata: &[u8]) -> Result<DecodedPortalCall, AbiError> {
         Some(DecodedPortalCallKind::Deposit)
     } else if calldata.starts_with(&ZonePortal::claimRefundCall::SELECTOR) {
         Some(DecodedPortalCallKind::ClaimRefund)
-    } else if is_known_ignored_state_change(calldata) {
-        Some(DecodedPortalCallKind::KnownIgnoredStateChange)
     } else {
         None
     };
@@ -598,21 +585,6 @@ pub(crate) fn is_direct_portal_state_change(calldata: &[u8]) -> bool {
         || calldata.starts_with(&ZonePortal::depositCall::SELECTOR)
         || calldata.starts_with(&ZonePortal::depositEncryptedCall::SELECTOR)
         || calldata.starts_with(&ZonePortal::claimRefundCall::SELECTOR)
-        || is_known_ignored_state_change(calldata)
-}
-
-fn is_known_ignored_state_change(calldata: &[u8]) -> bool {
-    calldata.starts_with(&ZonePortal::pauseCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::resumeCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::abdicateCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::pauseDepositsCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::resumeDepositsCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::setZoneGasRateCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::setMaxTempoGasRateCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::transferAdminCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::acceptAdminCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::setRpcUrlCall::SELECTOR)
-        || calldata.starts_with(&ZonePortal::setSequencerEncryptionKeyCall::SELECTOR)
 }
 
 /// Preflight and decode chain-valid `submitBatch` calldata.

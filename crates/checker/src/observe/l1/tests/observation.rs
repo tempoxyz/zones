@@ -52,6 +52,70 @@ async fn eventful_submit_batch_fetches_once_and_decodes_direct_calldata() {
 }
 
 #[tokio::test]
+async fn ignored_lifecycle_call_does_not_shift_modeled_multicall_events() {
+    let envelope = aa_calls(vec![
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
+            input: ZonePortal::pauseCall {}.abi_encode().into(),
+        },
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
+            input: ZonePortal::setBouncebackGasCall {
+                newBouncebackGas: 42,
+            }
+            .abi_encode()
+            .into(),
+        },
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
+            input: submit_batch_calldata(),
+        },
+    ]);
+    let tx_hash = envelope.trie_hash();
+    let logs = vec![
+        event_log(
+            PORTAL,
+            ZonePortal::PortalPaused {
+                account: Address::repeat_byte(0xaa),
+            },
+            0,
+            0,
+        ),
+        event_log(
+            PORTAL,
+            ZonePortal::BouncebackGasUpdated { bouncebackGas: 42 },
+            0,
+            1,
+        ),
+        batch_submitted_log(0, 2),
+    ];
+    let (imported, receipts) = anchor_with_transactions(
+        vec![receipt(tx_hash, 0, true, logs)],
+        std::slice::from_ref(&envelope),
+    );
+    let block = block_response(&imported, vec![envelope]);
+    let asserter = Asserter::new();
+    asserter.push_success(&Some(block));
+    asserter.push_success(&Some(receipts));
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter);
+
+    let observed = observe_l1(&provider, &imported, PORTAL).await.unwrap();
+    let adaptation =
+        crate::adapter::adapt_imported(&observed, &imported, B256::repeat_byte(0xff), 7).unwrap();
+    assert!(matches!(
+        adaptation.facts.operations.as_slice(),
+        [
+            crate::kernel::ImportedOperation::UpdateBouncebackGas(42),
+            crate::kernel::ImportedOperation::SubmitBatch(_)
+        ]
+    ));
+}
+
+#[tokio::test]
 async fn eventful_process_withdrawals_fetches_once_and_retains_input_and_outcome() {
     let envelope = legacy_call(PORTAL, process_withdrawals_calldata(true));
     let tx_hash = envelope.trie_hash();

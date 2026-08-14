@@ -69,15 +69,6 @@ pub(super) fn facts(
                 }));
                 continue;
             }
-            if direct_call.is_known_ignored_state_change() {
-                let Some(L1ProtocolEvent::KnownIgnored) = all_events.get(event_cursor).copied()
-                else {
-                    return Err(AdapterFindingCode::Grammar
-                        .failure("Portal state update is not followed by its event"));
-                };
-                event_cursor += 1;
-                continue;
-            }
             if direct_call.is_deposit() {
                 let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::DepositMade(event))) =
                     all_events.get(event_cursor).copied()

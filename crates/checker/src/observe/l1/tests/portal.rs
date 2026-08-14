@@ -78,6 +78,11 @@ fn direct_portal_calls_tolerate_unrelated_aa_calls_and_preserve_order() {
         Call {
             to: PORTAL.into(),
             value: U256::ZERO,
+            input: ZonePortal::pauseCall {}.abi_encode().into(),
+        },
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
             input: calldata,
         },
         Call {
