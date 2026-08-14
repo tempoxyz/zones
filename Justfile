@@ -462,6 +462,26 @@ pause-portal:
     cargo run -p tempo-xtask -- pause-portal
 
 [group('zone')]
+[doc('Enables or disables closed-loop account enforcement. Pass true to close access or false to open it. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-access-mode enforced:
+    cargo run -p tempo-xtask -- set-access-mode {{ if enforced == "true" { "--enforced" } else { "" } }}
+
+[group('zone')]
+[doc('Enables or disables callback gateway enforcement. Pass true to enforce registered gateways or false to allow arbitrary targets. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway-mode enforced:
+    cargo run -p tempo-xtask -- set-gateway-mode {{ if enforced == "true" { "--enforced" } else { "" } }}
+
+[group('zone')]
+[doc('Adds or removes an account from closed-loop portal flows. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-allowed-account account allowed:
+    cargo run -p tempo-xtask -- set-allowed-account {{account}} {{ if allowed == "true" { "--allowed" } else { "" } }}
+
+[group('zone')]
+[doc('Adds or removes a callback gateway. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway account allowed:
+    cargo run -p tempo-xtask -- set-gateway {{account}} {{ if allowed == "true" { "--allowed" } else { "" } }}
+
+[group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
 list-enabled-tokens portal="":
     #!/bin/bash

@@ -205,6 +205,41 @@ ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone 
 available for admin-only portal calls such as changing either mode or account roles,
 enabling tokens, and pausing or resuming deposits.
 
+### Updating closed-loop access
+
+Configure memberships before enabling their corresponding enforcement mode so existing
+traffic is not denied during the transition:
+
+```bash
+export L1_RPC_URL=https://...
+export L1_PORTAL_ADDRESS=0x<portal>
+export ADMIN_KEY=0x<portal-admin-private-key>
+
+just set-allowed-account 0x<account> true
+just set-gateway 0x<gateway> true
+just set-access-mode true
+just set-gateway-mode true
+```
+
+Account and gateway roles are mutually exclusive. To move an address between roles,
+remove its current role before adding the new one. Disabling enforcement leaves stored
+roles intact, so they take effect again if the mode is re-enabled.
+
+To remove access, revoke the role directly:
+
+```bash
+just set-allowed-account 0x<account> false
+just set-gateway 0x<gateway> false
+```
+
+Revocations apply when each portal or zone-side action executes. In-flight destinations
+and gateways that have been revoked bounce back; revoked refund recipients cannot claim
+parked refunds until their account role is restored. Before closing access or removing a
+role, confirm that affected deposits, withdrawals, callbacks, and refunds have completed.
+
+Each command verifies the signer is the current portal admin, waits for the transaction,
+and reads the resulting mode or role back from the portal.
+
 ### 5. Start the Zone Node
 
 ```bash
@@ -696,6 +731,10 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (admin only) |
 | `just pause-deposits <token>` | Pause deposits for an enabled token on the portal (admin only) |
 | `just resume-deposits <token>` | Resume deposits for a paused token on the portal (admin only) |
+| `just set-access-mode <true\|false>` | Enable or disable closed-loop account enforcement (admin only) |
+| `just set-gateway-mode <true\|false>` | Enable or disable callback gateway enforcement (admin only) |
+| `just set-allowed-account <account> <true\|false>` | Add or remove an Account role (admin only) |
+| `just set-gateway <account> <true\|false>` | Add or remove a CallbackGateway role (admin only) |
 | `just list-enabled-tokens [portal]` | List TIP-20 token addresses enabled on a portal |
 | `just max-approve-outbox [token] [rpc]` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [amount] [to] [token] [memo] [gas-limit] [fallback-recipient] [data] [reveal-to] [rpc]` | Withdraw tokens from zone to L1 (defaults to sender) |
