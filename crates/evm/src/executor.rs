@@ -483,7 +483,8 @@ mod tests {
 
     #[test]
     fn withdrawal_requests_require_same_block_finalization() {
-        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
+        let spec = std::sync::Arc::new(ZoneChainSpec::from(tempo_chainspec::spec::DEV.clone()));
+        let factory = ZoneEvmFactory::new(spec, MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
         let chain_spec = ZoneChainSpec::from(DEV.clone());
         let ctx = TempoBlockExecutionCtx {
@@ -700,7 +701,8 @@ mod tests {
         .unwrap();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
             .unwrap();
-        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
+        let spec = std::sync::Arc::new(ZoneChainSpec::from(tempo_chainspec::spec::DEV.clone()));
+        let factory = ZoneEvmFactory::new(spec, MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(db, EvmEnv::default());
         let chain_spec = ZoneChainSpec::from(DEV.clone());
         let ctx = TempoBlockExecutionCtx {

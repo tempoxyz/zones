@@ -17,21 +17,41 @@ use tempo_chainspec::{
     TempoChainSpec, TempoConsensusSpec, hardfork::TempoHardfork, spec::TempoHardforks,
 };
 use tempo_primitives::TempoHeader;
+pub use zone_hardfork::ZoneHardfork;
 
 /// Chain specification for a Tempo Zone.
 ///
+/// Zone, Tempo, and Ethereum activations all live in the underlying canonical hardfork schedule;
+/// the typed query traits keep the protocol axes independently addressable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneChainSpec {
-    /// Underlying Tempo chain specification.
+    /// Underlying Tempo chain specification, extended with Zone hardfork activations.
     pub inner: Arc<TempoChainSpec>,
+}
+
+/// Typed queries for Zone-owned hardfork activations.
+pub trait ZoneHardforks: TempoHardforks {
+    /// Returns the activation condition for a Zone-owned hardfork.
+    fn zone_fork_activation(&self, fork: ZoneHardfork) -> ForkCondition;
+
+    /// Returns the Zone-owned hardfork active at `timestamp`.
+    fn zone_hardfork_at(&self, timestamp: u64) -> ZoneHardfork {
+        ZoneHardfork::VARIANTS
+            .iter()
+            .rev()
+            .copied()
+            .find(|&fork| {
+                self.zone_fork_activation(fork)
+                    .active_at_timestamp(timestamp)
+            })
+            .unwrap_or(ZoneHardfork::Z0)
+    }
 }
 
 impl ZoneChainSpec {
     /// Converts a genesis configuration into a Zone chain specification.
     pub fn from_genesis(genesis: Genesis) -> Self {
-        Self {
-            inner: Arc::new(TempoChainSpec::from_genesis(genesis)),
-        }
+        Self::from(TempoChainSpec::from_genesis(genesis))
     }
 
     /// Applies Tempo hardfork activations from the parent chain.
@@ -45,19 +65,52 @@ impl ZoneChainSpec {
         }
         self
     }
-}
 
-impl From<TempoChainSpec> for ZoneChainSpec {
-    fn from(inner: TempoChainSpec) -> Self {
+    fn from_tempo(mut inner: TempoChainSpec) -> Self {
+        let z1_time = inner
+            .genesis()
+            .config
+            .extra_fields
+            .get("z1Time")
+            .and_then(parse_activation_timestamp);
+
+        inner
+            .inner
+            .hardforks
+            .insert(ZoneHardfork::Z0, ForkCondition::Timestamp(0));
+        if let Some(timestamp) = z1_time {
+            inner
+                .inner
+                .hardforks
+                .insert(ZoneHardfork::Z1, ForkCondition::Timestamp(timestamp));
+        }
+
         Self {
             inner: Arc::new(inner),
         }
     }
 }
 
+fn parse_activation_timestamp(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value.as_str().and_then(|value| {
+            value.strip_prefix("0x").map_or_else(
+                || value.parse().ok(),
+                |hex| u64::from_str_radix(hex, 16).ok(),
+            )
+        })
+    })
+}
+
+impl From<TempoChainSpec> for ZoneChainSpec {
+    fn from(inner: TempoChainSpec) -> Self {
+        Self::from_tempo(inner)
+    }
+}
+
 impl From<Arc<TempoChainSpec>> for ZoneChainSpec {
     fn from(inner: Arc<TempoChainSpec>) -> Self {
-        Self { inner }
+        Self::from_tempo(inner.as_ref().clone())
     }
 }
 
@@ -153,6 +206,12 @@ impl TempoHardforks for ZoneChainSpec {
     }
 }
 
+impl ZoneHardforks for ZoneChainSpec {
+    fn zone_fork_activation(&self, fork: ZoneHardfork) -> ForkCondition {
+        self.fork(fork)
+    }
+}
+
 impl TempoConsensusSpec for ZoneChainSpec {
     fn shared_gas_limit_at(&self, _timestamp: u64, _gas_limit: u64) -> u64 {
         0
@@ -201,8 +260,8 @@ mod tests {
     fn delegates_tempo_chain_behavior() {
         let zone = ZoneChainSpec::from(DEV.clone());
 
-        assert!(Arc::ptr_eq(&zone.inner, &DEV));
         assert_eq!(zone.chain(), DEV.chain());
+        assert_eq!(zone.fork(ZoneHardfork::Z0), ForkCondition::Timestamp(0));
         assert_eq!(zone.genesis_hash(), DEV.genesis_hash());
         for &hardfork in TempoHardfork::VARIANTS {
             assert_eq!(
@@ -210,6 +269,34 @@ mod tests {
                 DEV.tempo_fork_activation(hardfork)
             );
         }
+    }
+
+    #[test]
+    fn zone_schedule_defaults_to_z0() {
+        let zone = ZoneChainSpec::from_genesis(Genesis::default());
+
+        assert_eq!(
+            zone.zone_fork_activation(ZoneHardfork::Z0),
+            ForkCondition::Timestamp(0)
+        );
+        assert_eq!(
+            zone.zone_fork_activation(ZoneHardfork::Z1),
+            ForkCondition::Never
+        );
+        assert_eq!(zone.zone_hardfork_at(u64::MAX), ZoneHardfork::Z0);
+    }
+
+    #[test]
+    fn parses_z1_timestamp_and_activates_at_boundary() {
+        let mut genesis = Genesis::default();
+        genesis
+            .config
+            .extra_fields
+            .insert("z1Time".into(), serde_json::json!(100));
+        let zone = ZoneChainSpec::from_genesis(genesis);
+
+        assert_eq!(zone.zone_hardfork_at(99), ZoneHardfork::Z0);
+        assert_eq!(zone.zone_hardfork_at(100), ZoneHardfork::Z1);
     }
 
     #[test]

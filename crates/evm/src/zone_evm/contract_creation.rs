@@ -106,7 +106,7 @@ mod tests {
         input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv>,
     ) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
         let db = L1OverlayDB::new(db, TestL1::default(), Address::ZERO);
-        ZoneEvm::new(TempoEvm::new(db, input))
+        ZoneEvm::new(TempoEvm::new(db, input), zone_hardfork::ZoneHardfork::Z0)
     }
 
     fn evm_with_contract(addr: Address, code: &[u8]) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
