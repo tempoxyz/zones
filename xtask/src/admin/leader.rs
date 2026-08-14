@@ -13,9 +13,7 @@ use zone_rpc::types::SetLeaderResponse;
 
 use super::{
     config::{SharedAdminArgs, format_duration, parse_nonzero_duration},
-    invariants::{
-        eligible_relayers, evaluate_base_invariants, is_rpc_only, l1_batch_invariant, resolve_node,
-    },
+    invariants::{eligible_relayers, evaluate_base_invariants, is_rpc_only, resolve_node},
     snapshot::{ClusterView, NodeSnapshot},
 };
 
@@ -91,7 +89,7 @@ impl LeaderSet {
         .await?;
 
         progress("Evaluating cluster preflight...");
-        let mut invariants = evaluate_base_invariants(
+        let invariants = evaluate_base_invariants(
             &view.config,
             view.manifest.as_ref(),
             &view.portal,
@@ -100,7 +98,6 @@ impl LeaderSet {
             None,
             None,
         );
-        invariants.push(l1_batch_invariant(&view.portal));
         let failed = invariants
             .iter()
             .filter(|result| result.required_failed())
@@ -161,12 +158,6 @@ impl LeaderSet {
             "target {} is not promotion-ready or has pending transitions",
             target_node.name
         );
-        ensure!(
-            target_node.common_block.is_some() || target_node.latest_block.is_some(),
-            "target {} is not canonical",
-            target_node.name
-        );
-
         let via_node = select_via(&view.nodes, self.via.as_deref())?;
         let via_info = via_node.sequencer.as_ref().ok_or_else(|| {
             eyre!(

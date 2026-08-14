@@ -17,7 +17,7 @@ use zone_sequencer::{encryption_key_identity, prove_encryption_key_possession};
 use super::{
     config::{ExpectedEncryptionKey, SharedAdminArgs, format_duration, parse_nonzero_duration},
     invariants::{
-        evaluate_base_invariants, l1_batch_invariant, portal_sequencer_coverage_invariant,
+        evaluate_base_invariants, portal_sequencer_coverage_invariant,
         required_decryption_keys_invariant,
     },
     secret_file::{
@@ -227,7 +227,7 @@ impl Register {
             ensure_registration_coverage(&view)?;
             return self.print_report(RegisterReport {
                 ok: true,
-                dry_run: false,
+                dry_run: !self.execute,
                 submitted: false,
                 tx_hash: None,
                 portal: view.portal.portal,
@@ -405,7 +405,7 @@ impl Register {
 }
 
 fn ensure_healthy(view: &ClusterView) -> eyre::Result<()> {
-    let mut invariants = evaluate_base_invariants(
+    let invariants = evaluate_base_invariants(
         &view.config,
         view.manifest.as_ref(),
         &view.portal,
@@ -414,7 +414,6 @@ fn ensure_healthy(view: &ClusterView) -> eyre::Result<()> {
         None,
         None,
     );
-    invariants.push(l1_batch_invariant(&view.portal));
     ensure_invariants("cluster preflight failed", &invariants)
 }
 
