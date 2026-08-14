@@ -36,6 +36,8 @@ pub enum CheckerBlockedReason {
     InvalidAuthenticatedData,
     /// A Zone reorg precedes the locally retained checker history.
     DeepReorgBeyondRetention,
+    /// Acquisition lag exceeded the bounded ExEx journal retention policy.
+    AcquisitionLagExceeded,
 }
 
 impl fmt::Display for CheckerBlockedReason {
@@ -45,6 +47,7 @@ impl fmt::Display for CheckerBlockedReason {
             Self::TempoChainMismatch => "Tempo chain mismatch",
             Self::InvalidAuthenticatedData => "invalid authenticated data",
             Self::DeepReorgBeyondRetention => "reorg exceeds retained checker history",
+            Self::AcquisitionLagExceeded => "acquisition lag exceeds retention bound",
         };
         f.write_str(reason)
     }

@@ -41,6 +41,10 @@ pub(crate) struct CheckerMetrics {
     recovering: Gauge,
     /// Whether a durable terminal condition prevents verification.
     blocked: Gauge,
+    /// ExEx height released for WAL reclamation.
+    reclamation_height: Gauge,
+    /// Whether WAL reclamation is ahead of semantic verification.
+    reclamation_ahead: Gauge,
 }
 
 impl CheckerMetrics {
@@ -105,6 +109,12 @@ impl CheckerMetrics {
     /// Record a Zone block whose checker transition committed durably.
     pub(crate) fn record_verified_block(&self) {
         self.verified_zone_blocks_total.increment(1);
+    }
+
+    pub(crate) fn publish_reclamation_height(&self, verified: u64, reclamation: u64) {
+        self.reclamation_height.set(reclamation as f64);
+        self.reclamation_ahead
+            .set(f64::from(reclamation > verified));
     }
 }
 

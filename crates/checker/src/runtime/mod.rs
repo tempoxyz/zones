@@ -127,6 +127,15 @@ impl Runtime {
         self.metrics.publish_snapshot(&self.snapshot);
     }
 
+    pub(crate) const fn is_retrying(&self) -> bool {
+        self.retry.is_some()
+    }
+
+    pub(crate) fn publish_reclamation_height(&self, height: BlockNumHash) {
+        self.metrics
+            .publish_reclamation_height(self.snapshot.meta.verified_zone_tip.number, height.number);
+    }
+
     /// Record the duration of one complete block authentication attempt.
     pub(crate) fn record_authentication(&self, duration: Duration) {
         self.metrics.record_authentication(duration);
