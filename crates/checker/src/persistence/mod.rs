@@ -36,7 +36,7 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+pub(crate) const SCHEMA_VERSION: u32 = 8;
 const CHECKPOINT_INTERVAL: u64 = 64;
 /// Minimum Zone history retained for local reorg recovery.
 ///
@@ -203,6 +203,7 @@ impl Persistence {
             imported_tempo_tip: cut.tempo,
             observed_zone_tip: cut.zone,
             active_finding: None,
+            cleared_findings: 0,
             coverage: Coverage::Complete,
             blocked: None,
         };
@@ -558,7 +559,9 @@ impl Persistence {
             if meta.observed_zone_tip.number > ancestor.number {
                 meta.observed_zone_tip = ancestor;
             }
-            meta.active_finding = None;
+            if meta.active_finding.take().is_some() {
+                meta.cleared_findings = meta.cleared_findings.saturating_add(1);
+            }
             meta.coverage = Coverage::Complete;
             Self::remove_obsolete_checkpoints(tx, meta, previous_active, previous_recovery)?;
             Ok(())
@@ -637,6 +640,14 @@ impl Persistence {
             cut,
             state: state.clone(),
         };
+        // A valid protocol backlog can exceed the per-value codec bound. Keep the
+        // journal advancing and retry checkpointing after the semantic state shrinks
+        // instead of turning a storage representation limit into a checker outage.
+        match codec::encode(&checkpoint) {
+            Ok(_) => {}
+            Err(codec::CodecError::Oversize) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
         Self::write_checkpoint(tx, id, checkpoint)?;
         meta.active_checkpoint = id;
         self.advance_recovery_checkpoint(tx, meta)?;

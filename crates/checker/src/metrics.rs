@@ -33,6 +33,8 @@ pub(crate) struct CheckerMetrics {
     verification_lag_blocks: Gauge,
     /// Whether an authenticated divergence remains on the canonical branch.
     divergence_active: Gauge,
+    /// Number of durable findings subsequently cleared by canonical reorgs.
+    cleared_findings_total: Gauge,
     /// Whether descendants are durably marked as unchecked.
     coverage_gap: Gauge,
     /// Whether canonical Zone history remains to be verified.
@@ -69,6 +71,8 @@ impl CheckerMetrics {
         );
         self.divergence_active
             .set(f64::from(meta.active_finding.is_some()));
+        self.cleared_findings_total
+            .set(meta.cleared_findings as f64);
         self.coverage_gap
             .set(f64::from(matches!(meta.coverage, Coverage::Gap { .. })));
         self.recovering

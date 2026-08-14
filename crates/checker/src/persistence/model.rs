@@ -83,6 +83,8 @@ pub(crate) struct Metadata {
     /// Latest canonical Zone head observed from the local node.
     pub observed_zone_tip: BlockNumHash,
     pub active_finding: Option<FindingKey>,
+    /// Number of previously active findings removed from the canonical branch by reorgs.
+    pub cleared_findings: u64,
     pub coverage: Coverage,
     /// Why the checker stopped verifying new work.
     pub blocked: Option<CheckerBlockedReason>,

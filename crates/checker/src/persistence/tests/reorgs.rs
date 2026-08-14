@@ -57,14 +57,9 @@ fn divergence_reorg_removes_the_active_latch() {
         store.reorg(&current(&store), block(1, 0xff)),
         Err(PersistenceError::Invalid(_))
     ));
-    assert_eq!(
-        store
-            .reorg(&current(&store), bootstrap().zone)
-            .unwrap()
-            .meta
-            .active_finding,
-        None
-    );
+    let snapshot = store.reorg(&current(&store), bootstrap().zone).unwrap();
+    assert_eq!(snapshot.meta.active_finding, None);
+    assert_eq!(snapshot.meta.cleared_findings, 1);
 }
 
 #[test]
@@ -89,6 +84,7 @@ fn deep_reorg_retains_orphan_finding_as_structural_audit_record() {
     let (_, reopened) = Persistence::open(directory.path(), identity()).unwrap();
     assert_eq!(reopened.meta.verified_zone_tip, bootstrap().zone);
     assert_eq!(reopened.meta.active_finding, None);
+    assert_eq!(reopened.meta.cleared_findings, 1);
 }
 
 #[test]

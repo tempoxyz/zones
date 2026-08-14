@@ -24,6 +24,8 @@ pub struct CheckerSnapshot {
     pub recovering: bool,
     /// Whether an authenticated divergence remains on the canonical branch.
     pub active_finding: bool,
+    /// Number of divergences that were later removed from the canonical branch.
+    pub cleared_findings: u64,
     /// Whether descendants are durably marked as unchecked.
     pub has_coverage_gap: bool,
     /// Durable reason verification cannot resume automatically.
@@ -43,6 +45,7 @@ pub fn inspect_database(path: impl AsRef<Path>) -> eyre::Result<CheckerSnapshot>
         observed_zone_tip: snapshot.meta.observed_zone_tip.into(),
         recovering: matches!(snapshot.meta.coverage, Coverage::Recovering),
         active_finding: snapshot.meta.active_finding.is_some(),
+        cleared_findings: snapshot.meta.cleared_findings,
         has_coverage_gap: matches!(snapshot.meta.coverage, Coverage::Gap { .. }),
         blocked_reason: snapshot.meta.blocked,
     })

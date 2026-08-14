@@ -88,6 +88,7 @@ impl CheckerCommand {
                             },
                             "recovering": snapshot.recovering,
                             "activeFinding": snapshot.active_finding,
+                            "clearedFindings": snapshot.cleared_findings,
                             "hasCoverageGap": snapshot.has_coverage_gap,
                             "blockedReason": snapshot.blocked_reason,
                         }))?
@@ -111,6 +112,7 @@ impl CheckerCommand {
                     );
                     println!("Recovering:            {}", snapshot.recovering);
                     println!("Active finding:       {}", snapshot.active_finding);
+                    println!("Cleared findings:     {}", snapshot.cleared_findings);
                     println!("Coverage gap:         {}", snapshot.has_coverage_gap);
                     println!(
                         "Blocked reason:       {}",
