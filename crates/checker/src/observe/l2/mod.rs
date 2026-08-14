@@ -5,10 +5,11 @@ use alloy_consensus::{
 };
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{Address, B256, Bloom};
+use alloy_sol_types::SolCall;
 use reth_primitives_traits::RecoveredBlock;
 use tempo_primitives::{Block, TempoReceipt, TempoTxEnvelope};
 
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::observe::events::{L2ProtocolEvent, classify_l2_protocol_event};
 
@@ -212,15 +213,23 @@ pub(crate) fn observe_l2_block_with_context(
             ObservationError::invalid_envelope(0, EnvelopeRule::AdvanceSystemCaller).into(),
         );
     }
-    if first.to() != Some(ZONE_INBOX_ADDRESS) {
-        return Err(ObservationError::invalid_envelope(0, EnvelopeRule::AdvanceDestination).into());
+    let mut advance_calls = first.calls().filter_map(|(kind, input)| {
+        (kind.to() == Some(&ZONE_INBOX_ADDRESS)
+            && input.starts_with(&IZoneInbox::advanceTempoCall::SELECTOR))
+        .then_some(input)
+    });
+    let advance_calldata = advance_calls
+        .next()
+        .ok_or_else(|| ObservationError::invalid_envelope(0, EnvelopeRule::AdvanceDestination))?;
+    if advance_calls.next().is_some() {
+        return Err(ObservationError::invalid_envelope(0, EnvelopeRule::AdvancePresent).into());
     }
     if !receipts[0].status() {
         return Err(ObservationError::invalid_envelope(0, EnvelopeRule::AdvanceSuccess).into());
     }
     let advance_coordinate =
         AuthenticatedTransaction::new(ProtocolChain::ZoneL2, 0, *first.tx_hash());
-    let advance_tempo = decode_advance_tempo(first.input(), advance_coordinate)?;
+    let advance_tempo = decode_advance_tempo(advance_calldata, advance_coordinate)?;
     let imported_header = advance_tempo.imported_header();
     let imported_tempo = BlockNumHash::new(imported_header.number(), imported_header.hash());
 

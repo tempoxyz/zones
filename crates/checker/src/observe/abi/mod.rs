@@ -176,6 +176,11 @@ pub(crate) struct DecodedPortalCall {
 enum DecodedPortalCallKind {
     SubmitBatch(Box<ZonePortal::submitBatchCall>),
     ProcessWithdrawals(ZonePortal::processWithdrawalsCall),
+    SetBouncebackGas(ZonePortal::setBouncebackGasCall),
+    EnableToken(ZonePortal::enableTokenCall),
+    KnownIgnoredStateChange,
+    Deposit,
+    ClaimRefund,
 }
 
 impl DecodedPortalCall {
@@ -183,6 +188,11 @@ impl DecodedPortalCall {
         match &self.kind {
             DecodedPortalCallKind::SubmitBatch(call) => Some(call),
             DecodedPortalCallKind::ProcessWithdrawals(_) => None,
+            DecodedPortalCallKind::SetBouncebackGas(_) => None,
+            DecodedPortalCallKind::EnableToken(_) => None,
+            DecodedPortalCallKind::KnownIgnoredStateChange
+            | DecodedPortalCallKind::Deposit
+            | DecodedPortalCallKind::ClaimRefund => None,
         }
     }
 
@@ -190,7 +200,48 @@ impl DecodedPortalCall {
         match &self.kind {
             DecodedPortalCallKind::ProcessWithdrawals(call) => Some(call),
             DecodedPortalCallKind::SubmitBatch(_) => None,
+            DecodedPortalCallKind::SetBouncebackGas(_) => None,
+            DecodedPortalCallKind::EnableToken(_) => None,
+            DecodedPortalCallKind::KnownIgnoredStateChange
+            | DecodedPortalCallKind::Deposit
+            | DecodedPortalCallKind::ClaimRefund => None,
         }
+    }
+
+    pub(crate) fn as_set_bounceback_gas(&self) -> Option<&ZonePortal::setBouncebackGasCall> {
+        match &self.kind {
+            DecodedPortalCallKind::SetBouncebackGas(call) => Some(call),
+            DecodedPortalCallKind::SubmitBatch(_)
+            | DecodedPortalCallKind::ProcessWithdrawals(_)
+            | DecodedPortalCallKind::EnableToken(_)
+            | DecodedPortalCallKind::KnownIgnoredStateChange
+            | DecodedPortalCallKind::Deposit
+            | DecodedPortalCallKind::ClaimRefund => None,
+        }
+    }
+
+    pub(crate) fn as_enable_token(&self) -> Option<&ZonePortal::enableTokenCall> {
+        match &self.kind {
+            DecodedPortalCallKind::EnableToken(call) => Some(call),
+            DecodedPortalCallKind::SubmitBatch(_)
+            | DecodedPortalCallKind::ProcessWithdrawals(_)
+            | DecodedPortalCallKind::SetBouncebackGas(_)
+            | DecodedPortalCallKind::KnownIgnoredStateChange
+            | DecodedPortalCallKind::Deposit
+            | DecodedPortalCallKind::ClaimRefund => None,
+        }
+    }
+
+    pub(crate) const fn is_known_ignored_state_change(&self) -> bool {
+        matches!(self.kind, DecodedPortalCallKind::KnownIgnoredStateChange)
+    }
+
+    pub(crate) const fn is_deposit(&self) -> bool {
+        matches!(self.kind, DecodedPortalCallKind::Deposit)
+    }
+
+    pub(crate) const fn is_claim_refund(&self) -> bool {
+        matches!(self.kind, DecodedPortalCallKind::ClaimRefund)
     }
 
     pub(crate) fn is_nonempty_process_withdrawals(&self) -> bool {
@@ -202,6 +253,11 @@ impl DecodedPortalCall {
         match &self.kind {
             DecodedPortalCallKind::SubmitBatch(_) => PortalCallFamily::SubmitBatch,
             DecodedPortalCallKind::ProcessWithdrawals(_) => PortalCallFamily::ProcessWithdrawals,
+            DecodedPortalCallKind::SetBouncebackGas(_) => PortalCallFamily::StateUpdate,
+            DecodedPortalCallKind::EnableToken(_) => PortalCallFamily::StateUpdate,
+            DecodedPortalCallKind::KnownIgnoredStateChange
+            | DecodedPortalCallKind::Deposit
+            | DecodedPortalCallKind::ClaimRefund => PortalCallFamily::StateUpdate,
         }
     }
 }
@@ -492,7 +548,7 @@ pub(crate) fn decode_portal_call(
     parse_portal_call(calldata).map_err(|error| error.into_observation(transaction))
 }
 
-/// Parse a supported Portal call and reject oversized or non-canonical encodings.
+/// Parse a supported Portal call using the same trailing-byte tolerance as Solidity.
 fn parse_portal_call(calldata: &[u8]) -> Result<DecodedPortalCall, AbiError> {
     if calldata.starts_with(&ZonePortal::submitBatchCall::SELECTOR) {
         return decode_submit_batch(calldata);
@@ -500,35 +556,82 @@ fn parse_portal_call(calldata: &[u8]) -> Result<DecodedPortalCall, AbiError> {
     if calldata.starts_with(&ZonePortal::processWithdrawalsCall::SELECTOR) {
         return decode_process_withdrawals(calldata);
     }
+    if calldata.starts_with(&ZonePortal::setBouncebackGasCall::SELECTOR) {
+        let surface = Surface::new(DataSource::PortalTransactionCalldata, calldata);
+        let call = ZonePortal::setBouncebackGasCall::abi_decode_validate(calldata)
+            .map_err(|error| surface.malformed(error))?;
+        return Ok(DecodedPortalCall {
+            kind: DecodedPortalCallKind::SetBouncebackGas(call),
+        });
+    }
+    if calldata.starts_with(&ZonePortal::enableTokenCall::SELECTOR) {
+        let surface = Surface::new(DataSource::PortalTransactionCalldata, calldata);
+        let call = ZonePortal::enableTokenCall::abi_decode_validate(calldata)
+            .map_err(|error| surface.malformed(error))?;
+        return Ok(DecodedPortalCall {
+            kind: DecodedPortalCallKind::EnableToken(call),
+        });
+    }
+    let kind = if calldata.starts_with(&ZonePortal::depositCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::depositEncryptedCall::SELECTOR)
+    {
+        Some(DecodedPortalCallKind::Deposit)
+    } else if calldata.starts_with(&ZonePortal::claimRefundCall::SELECTOR) {
+        Some(DecodedPortalCallKind::ClaimRefund)
+    } else if is_known_ignored_state_change(calldata) {
+        Some(DecodedPortalCallKind::KnownIgnoredStateChange)
+    } else {
+        None
+    };
+    if let Some(kind) = kind {
+        return Ok(DecodedPortalCall { kind });
+    }
     Err(
         Surface::new(DataSource::PortalTransactionCalldata, calldata)
             .malformed("selector does not match its authenticated protocol events"),
     )
 }
 
-/// Preflight and decode canonical `submitBatch` calldata.
+pub(crate) fn is_direct_portal_state_change(calldata: &[u8]) -> bool {
+    calldata.starts_with(&ZonePortal::setBouncebackGasCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::enableTokenCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::depositCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::depositEncryptedCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::claimRefundCall::SELECTOR)
+        || is_known_ignored_state_change(calldata)
+}
+
+fn is_known_ignored_state_change(calldata: &[u8]) -> bool {
+    calldata.starts_with(&ZonePortal::pauseCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::resumeCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::abdicateCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::pauseDepositsCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::resumeDepositsCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::setZoneGasRateCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::setMaxTempoGasRateCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::transferAdminCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::acceptAdminCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::setRpcUrlCall::SELECTOR)
+        || calldata.starts_with(&ZonePortal::setSequencerEncryptionKeyCall::SELECTOR)
+}
+
+/// Preflight and decode chain-valid `submitBatch` calldata.
 fn decode_submit_batch(calldata: &[u8]) -> Result<DecodedPortalCall, AbiError> {
     let surface = Surface::new(DataSource::SubmitBatchCalldata, calldata);
     preflight_submit_batch(calldata)?;
     let call = ZonePortal::submitBatchCall::abi_decode_validate(calldata)
         .map_err(|error| surface.malformed(error))?;
-    if call.abi_encode() != calldata {
-        return Err(surface.malformed("encoding is non-canonical or has trailing bytes"));
-    }
     Ok(DecodedPortalCall {
         kind: DecodedPortalCallKind::SubmitBatch(Box::new(call)),
     })
 }
 
-/// Preflight and decode canonical `processWithdrawals` calldata.
+/// Preflight and decode chain-valid `processWithdrawals` calldata.
 fn decode_process_withdrawals(calldata: &[u8]) -> Result<DecodedPortalCall, AbiError> {
     let surface = Surface::new(DataSource::ProcessWithdrawalsCalldata, calldata);
     preflight_process_withdrawals(calldata)?;
     let call = ZonePortal::processWithdrawalsCall::abi_decode_validate(calldata)
         .map_err(|error| surface.malformed(error))?;
-    if call.abi_encode() != calldata {
-        return Err(surface.malformed("encoding is non-canonical or has trailing bytes"));
-    }
     Ok(DecodedPortalCall {
         kind: DecodedPortalCallKind::ProcessWithdrawals(call),
     })

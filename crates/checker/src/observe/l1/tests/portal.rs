@@ -101,3 +101,47 @@ fn direct_portal_calls_tolerate_unrelated_aa_calls_and_preserve_order() {
     assert_eq!(calls[0].family(), PortalCallFamily::SubmitBatch);
     assert_eq!(calls[1].family(), PortalCallFamily::ProcessWithdrawals);
 }
+
+#[test]
+fn direct_portal_calls_retain_state_updates_between_checked_calls() {
+    let ordered = aa_calls(vec![
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
+            input: submit_batch_calldata(),
+        },
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
+            input: ZonePortal::setBouncebackGasCall {
+                newBouncebackGas: 42,
+            }
+            .abi_encode()
+            .into(),
+        },
+        Call {
+            to: PORTAL.into(),
+            value: U256::ZERO,
+            input: process_withdrawals_calldata(true),
+        },
+    ]);
+    let calls = l1_portal::decode_direct_portal_calls(
+        &ordered,
+        PORTAL,
+        0,
+        B256::ZERO,
+        &[
+            PortalCallFamily::SubmitBatch,
+            PortalCallFamily::ProcessWithdrawals,
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].as_submit_batch().is_some());
+    assert_eq!(
+        calls[1].as_set_bounceback_gas().unwrap().newBouncebackGas,
+        42
+    );
+    assert!(calls[2].as_process_withdrawals().is_some());
+}

@@ -33,6 +33,91 @@ pub(super) fn facts(
         let all_events: Vec<_> = tx.outcomes().iter().map(|x| x.event()).collect();
         let mut event_cursor = 0;
         for direct_call in tx.direct_calls() {
+            if let Some(call) = direct_call.as_set_bounceback_gas() {
+                let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::BouncebackGasUpdated(
+                    event,
+                ))) = all_events.get(event_cursor).copied()
+                else {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("setBouncebackGas is not followed by BouncebackGasUpdated"));
+                };
+                if event.bouncebackGas != call.newBouncebackGas {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("setBouncebackGas result differs from calldata"));
+                }
+                event_cursor += 1;
+                operations.push(ImportedOperation::UpdateBouncebackGas(event.bouncebackGas));
+                continue;
+            }
+            if let Some(call) = direct_call.as_enable_token() {
+                let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(event))) =
+                    all_events.get(event_cursor).copied()
+                else {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("enableToken is not followed by TokenEnabled"));
+                };
+                if event.token != call.token {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("enableToken result differs from calldata"));
+                }
+                event_cursor += 1;
+                operations.push(ImportedOperation::EnableToken(TokenEnable {
+                    token: event.token,
+                    name: event.name.clone(),
+                    symbol: event.symbol.clone(),
+                    currency: event.currency.clone(),
+                }));
+                continue;
+            }
+            if direct_call.is_known_ignored_state_change() {
+                let Some(L1ProtocolEvent::KnownIgnored) = all_events.get(event_cursor).copied()
+                else {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("Portal state update is not followed by its event"));
+                };
+                event_cursor += 1;
+                continue;
+            }
+            if direct_call.is_deposit() {
+                let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::DepositMade(event))) =
+                    all_events.get(event_cursor).copied()
+                else {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("deposit is not followed by DepositMade"));
+                };
+                event_cursor += 1;
+                let deposit = ordinary_deposit_event(event, "deposit")?;
+                operations.push(ImportedOperation::AppendDeposit(deposit));
+                effects.push(Effect::DepositAppended {
+                    id: crate::kernel::DepositId::new(
+                        observation.portal_address(),
+                        event.depositNumber,
+                    )
+                    .ok_or_else(|| AdapterFindingCode::Grammar.failure("zero deposit number"))?,
+                    queue_hash: event.newCurrentDepositQueueHash,
+                });
+                continue;
+            }
+            if direct_call.is_claim_refund() {
+                let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::RefundClaimed(event))) =
+                    all_events.get(event_cursor).copied()
+                else {
+                    return Err(AdapterFindingCode::Grammar
+                        .failure("claimRefund is not followed by RefundClaimed"));
+                };
+                event_cursor += 1;
+                operations.push(ImportedOperation::ClaimPortalRefund(RefundClaim {
+                    token: event.token,
+                    recipient: event.recipient,
+                    amount: event.amount,
+                }));
+                effects.push(Effect::RefundClaimed {
+                    token: event.token,
+                    recipient: event.recipient,
+                    amount: event.amount,
+                });
+                continue;
+            }
             if let Some(call) = direct_call.as_submit_batch() {
                 let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::BatchSubmitted(event))) =
                     all_events.get(event_cursor).copied()

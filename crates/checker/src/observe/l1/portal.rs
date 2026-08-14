@@ -6,7 +6,7 @@ use tempo_primitives::TempoTxEnvelope;
 use tempo_zone_contracts::ZonePortal;
 
 use super::super::{
-    abi::{DecodedPortalCall, decode_portal_call},
+    abi::{DecodedPortalCall, decode_portal_call, is_direct_portal_state_change},
     error::{
         AuthenticatedTransaction, ObservationError, PortalCallError, PortalCallFamily,
         ProtocolChain,
@@ -32,6 +32,10 @@ pub(super) fn decode_direct_portal_calls(
     let mut saw_empty_required_process = false;
     for (kind, calldata) in envelope.calls() {
         if kind != TxKind::Call(portal) {
+            continue;
+        }
+        if is_direct_portal_state_change(calldata) {
+            calls.push(decode_portal_call(calldata, coordinate)?);
             continue;
         }
         let family = if calldata.starts_with(&ZonePortal::submitBatchCall::SELECTOR) {

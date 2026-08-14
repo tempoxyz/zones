@@ -459,3 +459,23 @@ fn submit_batch_decodes_canonical_payload() {
     let call = submit_batch_call(vec![Bytes::from_static(b"signature")]);
     assert!(decode_portal(&call).unwrap().as_submit_batch().is_some());
 }
+
+#[test]
+fn portal_calls_accept_solidity_trailing_bytes() {
+    let mut batch = submit_batch_call(vec![Bytes::from_static(b"signature")]);
+    batch.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    assert!(decode_portal(&batch).unwrap().as_submit_batch().is_some());
+
+    let mut withdrawals = ZonePortal::processWithdrawalsCall {
+        withdrawals: Vec::new(),
+        remainingQueue: B256::ZERO,
+    }
+    .abi_encode();
+    withdrawals.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    assert!(
+        decode_portal(&withdrawals)
+            .unwrap()
+            .as_process_withdrawals()
+            .is_some()
+    );
+}

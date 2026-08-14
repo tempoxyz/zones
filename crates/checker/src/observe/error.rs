@@ -238,6 +238,8 @@ pub(crate) enum PortalCallFamily {
     SubmitBatch,
     #[error("processWithdrawals")]
     ProcessWithdrawals,
+    #[error("state update")]
+    StateUpdate,
 }
 
 /// Reconciliation failures between Portal events and top-level calldata.

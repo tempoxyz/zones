@@ -169,7 +169,7 @@ async fn eventful_empty_process_withdrawals_fails_closed() {
 #[tokio::test]
 async fn eventful_malformed_direct_calldata_fails_closed() {
     let mut malformed = submit_batch_calldata().to_vec();
-    malformed.push(0);
+    malformed.pop();
     let evidence = AuthenticatedDataEvidence::from_bytes(&malformed);
     let envelope = legacy_call(PORTAL, malformed.into());
     let tx_hash = envelope.trie_hash();
