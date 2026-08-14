@@ -1,5 +1,6 @@
 [files]
 extend-exclude = [
+    "specs/ref-impls/lib/**",
     ".git",
     "target",
     "testdata",
