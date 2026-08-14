@@ -7,13 +7,13 @@ use tempo_alloy::rpc::TempoTransactionReceipt;
 use crate::observe::events::{L1ProtocolEvent, Portal, classify_l1_protocol_event};
 
 use super::OrderedL1Outcome;
-use crate::observe::error::{ObservationError, PortalCallError, PortalCallFamily, ProtocolChain};
+use crate::observe::error::{ObservationError, PortalCallFamily, ProtocolChain};
 
 /// Protocol outcomes from one successful transaction before its calldata is reconciled.
 pub(super) struct PendingTransaction {
     pub(super) transaction_index: usize,
     pub(super) transaction_hash: B256,
-    pub(super) required_call: Option<PortalCallFamily>,
+    pub(super) required_calls: Vec<PortalCallFamily>,
     pub(super) outcomes: Vec<OrderedL1Outcome>,
 }
 
@@ -34,7 +34,7 @@ pub(super) fn ordered_transactions(
             continue;
         }
 
-        let mut required_call = None;
+        let mut required_calls = Vec::new();
         let mut outcomes = Vec::new();
         for (receipt_log_index, log) in receipt.logs().iter().enumerate() {
             let log_index = block_log_index;
@@ -57,11 +57,11 @@ pub(super) fn ordered_transactions(
                 continue;
             }
 
-            merge_requirement(
-                &mut required_call,
-                call_requirement(&event),
-                *transaction_hash,
-            )?;
+            if let Some(required) = call_requirement(&event)
+                && !required_calls.contains(&required)
+            {
+                required_calls.push(required);
+            }
             outcomes.push(OrderedL1Outcome { event });
         }
 
@@ -69,7 +69,7 @@ pub(super) fn ordered_transactions(
             transactions.push(PendingTransaction {
                 transaction_index,
                 transaction_hash: *transaction_hash,
-                required_call,
+                required_calls,
                 outcomes,
             });
         }
@@ -98,24 +98,5 @@ fn call_requirement(event: &L1ProtocolEvent) -> Option<PortalCallFamily> {
         | L1ProtocolEvent::Portal(_)
         | L1ProtocolEvent::FactoryZoneCreated(_)
         | L1ProtocolEvent::KnownIgnored => None,
-    }
-}
-
-/// Reject a transaction whose outcomes imply incompatible top-level Portal calls.
-fn merge_requirement(
-    current: &mut Option<PortalCallFamily>,
-    next: Option<PortalCallFamily>,
-    transaction_hash: B256,
-) -> Result<(), ObservationError> {
-    let Some(next) = next else {
-        return Ok(());
-    };
-    match *current {
-        None => {
-            *current = Some(next);
-            Ok(())
-        }
-        Some(required) if required == next => Ok(()),
-        Some(_) => Err(PortalCallError::ConflictingFamilies { transaction_hash }.into()),
     }
 }

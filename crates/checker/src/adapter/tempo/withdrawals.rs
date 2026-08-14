@@ -17,11 +17,26 @@ pub(crate) struct WithdrawalAdaptation {
 }
 
 /// Parse the exact event sequence produced by `processWithdrawals`.
+#[cfg(test)]
 pub(super) fn parse_withdrawal_events(
     events: &[&L1ProtocolEvent],
     member_count: usize,
     portal: Address,
 ) -> Result<WithdrawalAdaptation, Failure> {
+    let (adaptation, consumed) = parse_withdrawal_events_prefix(events, member_count, portal)?;
+    if consumed != events.len() {
+        return Err(AdapterFindingCode::Grammar
+            .failure("processWithdrawals has extra or out-of-order events"));
+    }
+    Ok(adaptation)
+}
+
+/// Parse one `processWithdrawals` prefix and return the consumed event count.
+pub(super) fn parse_withdrawal_events_prefix(
+    events: &[&L1ProtocolEvent],
+    member_count: usize,
+    portal: Address,
+) -> Result<(WithdrawalAdaptation, usize), Failure> {
     let mut cursor = 0;
     let mut outcomes = Vec::with_capacity(member_count);
     let mut effects = Vec::new();
@@ -126,11 +141,7 @@ pub(super) fn parse_withdrawal_events(
             }
         }
     }
-    if cursor != events.len() {
-        return Err(AdapterFindingCode::Grammar
-            .failure("processWithdrawals has extra or out-of-order events"));
-    }
-    Ok(WithdrawalAdaptation { outcomes, effects })
+    Ok((WithdrawalAdaptation { outcomes, effects }, cursor))
 }
 
 /// Parse one checker-relevant Portal event emitted by a withdrawal callback.

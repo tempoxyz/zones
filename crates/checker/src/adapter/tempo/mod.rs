@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{AdapterFindingCode, ImportedAdaptation, deposits::ordinary_deposit_event};
-use withdrawals::{WithdrawalAdaptation, parse_withdrawal_events};
+use withdrawals::{WithdrawalAdaptation, parse_withdrawal_events_prefix};
 
 /// Parse imported transaction envelopes into ordered kernel facts and effects.
 pub(super) fn facts(
@@ -30,24 +30,17 @@ pub(super) fn facts(
     let mut operations = Vec::new();
     let mut effects = Vec::new();
     for tx in observation.protocol_transactions() {
-        let events: Vec<_> = tx.outcomes().iter().map(|x| x.event()).collect();
-        let direct_call = tx.direct_call();
-        let is_creation_block = observation.block_hash() == portal_creation_block_hash;
-        let creation_event_index = events
-            .iter()
-            .position(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)));
-        let is_creation_transaction = creation_event_index.is_some();
-        if let Some(call) = direct_call {
-            if let Some(call) = call.as_submit_batch() {
-                if !matches!(
-                    events.as_slice(),
-                    [L1ProtocolEvent::Portal(
-                        Portal::ZonePortalEvents::BatchSubmitted(_)
-                    )]
-                ) {
+        let all_events: Vec<_> = tx.outcomes().iter().map(|x| x.event()).collect();
+        let mut event_cursor = 0;
+        for direct_call in tx.direct_calls() {
+            if let Some(call) = direct_call.as_submit_batch() {
+                let Some(L1ProtocolEvent::Portal(Portal::ZonePortalEvents::BatchSubmitted(event))) =
+                    all_events.get(event_cursor).copied()
+                else {
                     return Err(AdapterFindingCode::Grammar
-                        .failure("submitBatch requires exactly one BatchSubmitted event"));
-                }
+                        .failure("submitBatch is not followed by BatchSubmitted"));
+                };
+                event_cursor += 1;
                 operations.push(ImportedOperation::SubmitBatch(BatchSubmission {
                     tempo_block: call.tempoBlockNumber,
                     previous_block: call.blockTransition.prevBlockHash,
@@ -63,7 +56,18 @@ pub(super) fn facts(
                     withdrawal_queue_hash: call.withdrawalQueueHash,
                     next_zone_height: call.nextZoneHeight,
                 }));
-            } else if let Some(call) = call.as_process_withdrawals() {
+                effects.push(Effect::BatchSubmitted {
+                    id: crate::kernel::BatchId::new(zone_id, event.withdrawalBatchIndex)
+                        .ok_or_else(|| AdapterFindingCode::Grammar.failure("zero batch index"))?,
+                    queue_index: event.withdrawalQueueIndex,
+                    processed_deposit_hash: event.nextProcessedDepositQueueHash,
+                    final_block_hash: event.nextBlockHash,
+                    queue_hash: event.withdrawalQueueHash,
+                    processed_deposit_number: event.lastProcessedDepositNumber,
+                });
+                continue;
+            }
+            if let Some(call) = direct_call.as_process_withdrawals() {
                 let withdrawals = call
                     .withdrawals
                     .iter()
@@ -79,14 +83,18 @@ pub(super) fn facts(
                         encrypted_sender: w.encryptedSender.clone(),
                     })
                     .collect();
-                let WithdrawalAdaptation {
-                    outcomes,
-                    effects: processing_effects,
-                } = parse_withdrawal_events(
-                    &events,
+                let (
+                    WithdrawalAdaptation {
+                        outcomes,
+                        effects: processing_effects,
+                    },
+                    consumed,
+                ) = parse_withdrawal_events_prefix(
+                    &all_events[event_cursor..],
                     call.withdrawals.len(),
                     observation.portal_address(),
                 )?;
+                event_cursor += consumed;
                 effects.extend(processing_effects);
                 operations.push(ImportedOperation::ProcessWithdrawals(
                     WithdrawalProcessing {
@@ -101,20 +109,28 @@ pub(super) fn facts(
                         outcomes,
                     },
                 ));
-                continue;
             }
-        } else if events.iter().any(|event| {
-            matches!(
-                event,
-                L1ProtocolEvent::Portal(
-                    Portal::ZonePortalEvents::BatchSubmitted(_)
-                        | Portal::ZonePortalEvents::WithdrawalProcessed(_)
-                        | Portal::ZonePortalEvents::WithdrawalBounceBack(_)
-                        | Portal::ZonePortalEvents::DepositBounceBack(_)
-                        | Portal::ZonePortalEvents::DepositBounceBackPending(_)
+        }
+        let events = &all_events[event_cursor..];
+        let is_creation_block = observation.block_hash() == portal_creation_block_hash;
+        let creation_event_index = events
+            .iter()
+            .position(|event| matches!(event, L1ProtocolEvent::FactoryZoneCreated(_)));
+        let is_creation_transaction = creation_event_index.is_some();
+        if tx.direct_calls().is_empty()
+            && events.iter().any(|event| {
+                matches!(
+                    event,
+                    L1ProtocolEvent::Portal(
+                        Portal::ZonePortalEvents::BatchSubmitted(_)
+                            | Portal::ZonePortalEvents::WithdrawalProcessed(_)
+                            | Portal::ZonePortalEvents::WithdrawalBounceBack(_)
+                            | Portal::ZonePortalEvents::DepositBounceBack(_)
+                            | Portal::ZonePortalEvents::DepositBounceBackPending(_)
+                    )
                 )
-            )
-        }) {
+            })
+        {
             return Err(AdapterFindingCode::Grammar
                 .failure("direct-call event occurred outside its transaction envelope"));
         }
@@ -147,7 +163,7 @@ pub(super) fn facts(
             return Err(AdapterFindingCode::Grammar
                 .failure("ZoneCreated occurred outside the configured creation block"));
         }
-        for (event_index, event) in events.into_iter().enumerate() {
+        for (event_index, event) in events.iter().copied().enumerate() {
             match event {
                 L1ProtocolEvent::FactoryZoneCreated(Factory::ZoneCreated {
                     portal,
@@ -179,9 +195,7 @@ pub(super) fn facts(
                 L1ProtocolEvent::Portal(Portal::ZonePortalEvents::BouncebackGasUpdated(e)) => {
                     operations.push(ImportedOperation::UpdateBouncebackGas(e.bouncebackGas))
                 }
-                L1ProtocolEvent::Portal(Portal::ZonePortalEvents::DepositMade(e))
-                    if direct_call.is_none_or(|call| call.as_process_withdrawals().is_none()) =>
-                {
+                L1ProtocolEvent::Portal(Portal::ZonePortalEvents::DepositMade(e)) => {
                     let d = ordinary_deposit_event(e, "deposit")?;
                     operations.push(ImportedOperation::AppendDeposit(d));
                     effects.push(Effect::DepositAppended {
@@ -207,18 +221,6 @@ pub(super) fn facts(
                         amount: e.amount,
                     });
                 }
-                L1ProtocolEvent::Portal(Portal::ZonePortalEvents::BatchSubmitted(e)) => effects
-                    .push(Effect::BatchSubmitted {
-                        id: crate::kernel::BatchId::new(zone_id, e.withdrawalBatchIndex)
-                            .ok_or_else(|| {
-                                AdapterFindingCode::Grammar.failure("zero batch index")
-                            })?,
-                        queue_index: e.withdrawalQueueIndex,
-                        processed_deposit_hash: e.nextProcessedDepositQueueHash,
-                        final_block_hash: e.nextBlockHash,
-                        queue_hash: e.withdrawalQueueHash,
-                        processed_deposit_number: e.lastProcessedDepositNumber,
-                    }),
                 L1ProtocolEvent::Portal(Portal::ZonePortalEvents::TokenEnabled(_)) => {}
                 L1ProtocolEvent::FactoryZoneCreated(_) => {}
                 L1ProtocolEvent::KnownIgnored | L1ProtocolEvent::Portal(_) => {

@@ -250,8 +250,6 @@ pub(crate) enum PortalCallError {
         transaction_hash: B256,
         target: Option<Address>,
     },
-    #[error("conflicting portal call families in transaction {transaction_hash}")]
-    ConflictingFamilies { transaction_hash: B256 },
     #[error(
         "portal calldata/event mismatch in transaction {transaction_hash}: expected {expected}, got {actual}"
     )]

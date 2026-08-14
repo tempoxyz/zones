@@ -42,8 +42,8 @@ async fn eventful_submit_batch_fetches_once_and_decodes_direct_calldata() {
     assert_eq!(observed.protocol_transactions.len(), 1);
     assert!(
         observed.protocol_transactions[0]
-            .direct_call
-            .as_ref()
+            .direct_calls()
+            .first()
             .and_then(DecodedPortalCall::as_submit_batch)
             .is_some()
     );
@@ -72,7 +72,8 @@ async fn eventful_process_withdrawals_fetches_once_and_retains_input_and_outcome
         panic!("expected one protocol transaction");
     };
     let call = transaction
-        .direct_call()
+        .direct_calls()
+        .first()
         .and_then(DecodedPortalCall::as_process_withdrawals)
         .expect("authenticated processWithdrawals input");
     assert_eq!(call.withdrawals.len(), 1);

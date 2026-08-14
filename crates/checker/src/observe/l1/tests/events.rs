@@ -44,8 +44,8 @@ fn authenticated_event_order_uses_receipt_vectors_not_rpc_log_metadata() {
         L1ProtocolEvent::Portal(ZonePortal::ZonePortalEvents::BouncebackGasUpdated(_))
     ));
     assert_eq!(
-        observed[1].required_call,
-        Some(PortalCallFamily::SubmitBatch)
+        observed[1].required_calls,
+        vec![PortalCallFamily::SubmitBatch]
     );
 }
 
@@ -93,8 +93,8 @@ fn authenticated_event_order_preserves_operation_before_config() {
         L1ProtocolEvent::Portal(ZonePortal::ZonePortalEvents::BatchSubmitted(_))
     ));
     assert_eq!(
-        observed[0].required_call,
-        Some(PortalCallFamily::SubmitBatch)
+        observed[0].required_calls,
+        vec![PortalCallFamily::SubmitBatch]
     );
 
     let config = &observed[1].outcomes[0];
@@ -102,7 +102,7 @@ fn authenticated_event_order_preserves_operation_before_config() {
         config.event,
         L1ProtocolEvent::Portal(ZonePortal::ZonePortalEvents::BouncebackGasUpdated(_))
     ));
-    assert_eq!(observed[1].required_call, None);
+    assert!(observed[1].required_calls.is_empty());
 }
 
 #[test]

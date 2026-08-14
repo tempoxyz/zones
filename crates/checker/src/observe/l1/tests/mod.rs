@@ -23,7 +23,7 @@ use zone_precompiles::ecies::AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE;
 
 use super::{acquisition, events as l1_events, observe_l1, portal as l1_portal};
 use crate::observe::{
-    abi::{DecodedPortalCall, ImportedTempoHeader, decode_portal_call},
+    abi::{DecodedPortalCall, ImportedTempoHeader},
     error::{
         AcquisitionError, AcquisitionSource, AuthenticatedDataEvidence, AuthenticatedTransaction,
         DataSource, ObservationError, PortalCallError, PortalCallFamily, ProtocolChain,

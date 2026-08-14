@@ -36,17 +36,16 @@ impl OrderedL1Outcome {
     }
 }
 
-/// Authenticated outcomes and any directly decoded Portal input for one
-/// transaction. `direct_call` is absent when no transition needs calldata.
+/// Authenticated outcomes and directly decoded Portal inputs for one transaction.
 #[derive(Debug)]
 pub(crate) struct L1TransactionObservation {
-    direct_call: Option<DecodedPortalCall>,
+    direct_calls: Vec<DecodedPortalCall>,
     outcomes: Vec<OrderedL1Outcome>,
 }
 
 impl L1TransactionObservation {
-    pub(crate) fn direct_call(&self) -> Option<&DecodedPortalCall> {
-        self.direct_call.as_ref()
+    pub(crate) fn direct_calls(&self) -> &[DecodedPortalCall] {
+        &self.direct_calls
     }
 
     pub(crate) fn outcomes(&self) -> &[OrderedL1Outcome] {
@@ -105,22 +104,21 @@ where
 
     let mut protocol_transactions = Vec::with_capacity(pending.len());
     for transaction in pending {
-        let direct_call = match transaction.required_call {
-            Some(required) => {
-                let envelope: &tempo_primitives::TempoTxEnvelope =
-                    block.transactions[transaction.transaction_index].as_ref();
-                Some(portal::decode_direct_portal_call(
-                    envelope,
-                    portal,
-                    transaction.transaction_index,
-                    transaction.transaction_hash,
-                    required,
-                )?)
-            }
-            None => None,
+        let direct_calls = if transaction.required_calls.is_empty() {
+            Vec::new()
+        } else {
+            let envelope: &tempo_primitives::TempoTxEnvelope =
+                block.transactions[transaction.transaction_index].as_ref();
+            portal::decode_direct_portal_calls(
+                envelope,
+                portal,
+                transaction.transaction_index,
+                transaction.transaction_hash,
+                &transaction.required_calls,
+            )?
         };
         protocol_transactions.push(L1TransactionObservation {
-            direct_call,
+            direct_calls,
             outcomes: transaction.outcomes,
         });
     }
