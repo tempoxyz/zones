@@ -32,7 +32,7 @@ use crate::{
         L2BlockObservation, ZonePostStateOutputs, acquire_portal_token_balance,
         acquire_zone_post_state, observe_l1_range, observe_l2_block_with_context,
     },
-    persistence::{BlockNumHash, Identity, Persistence, Snapshot},
+    persistence::{BlockNumHash, Coverage, Identity, Persistence, Snapshot},
     runtime::{
         AuthenticatedBlock, AuthenticationFailure, AuthenticationRequest, Runtime, RuntimeAction,
     },
@@ -357,7 +357,12 @@ where
     P: BlockHashReader + BlockNumReader + ?Sized,
 {
     if let Some(verified) = refresh_canonical_head(runtime, store, provider)? {
-        ctx.send_finished_height(verified.into())?;
+        let finished = if matches!(runtime.snapshot().meta.coverage, Coverage::Gap { .. }) {
+            canonical_head(provider)?
+        } else {
+            verified
+        };
+        ctx.send_finished_height(finished.into())?;
     }
     Ok(())
 }
