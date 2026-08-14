@@ -3425,6 +3425,35 @@ impl ZoneAccount {
         Ok(())
     }
 
+    /// Approve the ZoneOutbox, then simulate a token withdrawal without submitting it.
+    pub(crate) async fn simulate_withdraw_token_with(
+        &mut self,
+        token: Address,
+        args: WithdrawalArgs,
+    ) -> eyre::Result<()> {
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
+
+        self.approve_outbox(token).await?;
+
+        let to = args.to.unwrap_or(self.address);
+        let zone_fallback_recipient = args.zone_fallback_recipient.unwrap_or(self.address);
+        IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
+            .requestWithdrawal(
+                token,
+                to,
+                args.amount,
+                args.memo,
+                args.gas_limit,
+                zone_fallback_recipient,
+                args.data,
+                args.reveal_to,
+            )
+            .from(self.address)
+            .call()
+            .await?;
+        Ok(())
+    }
+
     /// Approve the ZoneOutbox for a specific token, then request a withdrawal on L2.
     pub(crate) async fn withdraw_token(
         &mut self,

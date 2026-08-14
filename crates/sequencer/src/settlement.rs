@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock};
+use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 
 use crate::{
     ZoneSequencerProvider,
@@ -46,9 +46,35 @@ use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_primitives::{Block, TempoReceipt};
+use tokio_util::sync;
 use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
+
+#[derive(Debug)]
+pub enum BatchSubmitError {
+    Cancelled,
+    PortalAdvanced,
+    Other(eyre::Report),
+}
+
+impl From<eyre::Report> for BatchSubmitError {
+    fn from(error: eyre::Report) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl fmt::Display for BatchSubmitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
+            Self::PortalAdvanced => {
+                formatter.write_str("portal advanced while waiting for settlement quorum")
+            }
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
 
 /// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
 const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
@@ -56,6 +82,9 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
+
+/// How often a quorum wait rechecks whether another leader has advanced the portal.
+const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
@@ -290,7 +319,8 @@ impl BatchSubmitter {
     /// `verifierConfig` and `proof` are empty until real proof generation is
     /// implemented.
     ///
-    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt.
+    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
+    /// settlement quorum is cancelled when the leader generation shuts down.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
@@ -300,7 +330,11 @@ impl BatchSubmitter {
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
         withdrawal_batch_index = batch.withdrawal_batch_index,
     ))]
-    pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
+    pub async fn submit_batch(
+        &self,
+        batch: &BatchData,
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -326,9 +360,15 @@ impl BatchSubmitter {
                     zone_height = batch.zone_height,
                     threshold, "Waiting for settlement quorum"
                 );
-                let certificate = store
-                    .wait_for_settlement(batch.zone_height, threshold)
-                    .await;
+                let certificate = self
+                    .wait_for_settlement_or_portal_progress(
+                        store,
+                        batch.zone_height,
+                        threshold,
+                        batch.prev_block_hash,
+                        shutdown,
+                    )
+                    .await?;
                 let anchor_mode = match self
                     .validate_certificate(batch, batch.zone_height, metadata, &certificate)
                     .await
@@ -336,10 +376,14 @@ impl BatchSubmitter {
                     Ok(anchor_mode) => anchor_mode,
                     Err(err) => {
                         store.remove_settlement(batch.zone_height, certificate.digest);
-                        return Err(err);
+                        return Err(err.into());
                     }
                 };
-                let current_l1_block = self.l1_provider.get_block_number().await?;
+                let current_l1_block = self
+                    .l1_provider
+                    .get_block_number()
+                    .await
+                    .map_err(|error| BatchSubmitError::Other(error.into()))?;
                 (Some(certificate), anchor_mode, current_l1_block)
             } else {
                 let (anchor_mode, current_l1_block) =
@@ -360,17 +404,20 @@ impl BatchSubmitter {
             let anchor_block_hash = self
                 .l1_provider
                 .get_block_by_number(anchor_block_number.into())
-                .await?
+                .await
+                .map_err(|error| BatchSubmitError::Other(error.into()))?
                 .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
                 .header
                 .hash;
             let signer = signer
                 .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
-            eyre::ensure!(
-                metadata.signer_is_sequencer,
-                "local sequencer signer {} is not active in the portal sequencer set",
-                signer.address()
-            );
+            if !metadata.signer_is_sequencer {
+                return Err(eyre::eyre!(
+                    "local sequencer signer {} is not active in the portal sequencer set",
+                    signer.address()
+                )
+                .into());
+            }
             vec![self.sign_settlement_attestation(
                 signer,
                 metadata,
@@ -394,7 +441,8 @@ impl BatchSubmitter {
         let nonce = self
             .l1_provider
             .get_transaction_count_with_nonce_key(submission_address, SUBMIT_BATCH_NONCE_KEY)
-            .await?;
+            .await
+            .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         info!(
             anchor_mode = %anchor_mode,
@@ -433,15 +481,14 @@ impl BatchSubmitter {
         let receipt =
             tokio::time::timeout(std::time::Duration::from_secs(30), submission.send_sync())
                 .await
-                .map_err(|_| {
-                    eyre::eyre!("submitBatch sync submission timed out after 30 seconds")
-                })??;
+                .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))?
+                .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
-            return Err(eyre::eyre!(
-                "submitBatch tx {tx_hash} was included but reverted on L1"
-            ));
+            return Err(
+                eyre::eyre!("submitBatch tx {tx_hash} was included but reverted on L1").into(),
+            );
         }
 
         let event = self.decode_batch_submitted(receipt.logs())?;
@@ -458,6 +505,42 @@ impl BatchSubmitter {
         );
 
         Ok(event)
+    }
+
+    /// Wait for a local quorum while periodically checking that the proposal still extends the
+    /// portal tip. A portal change means another submission won the handoff race and the monitor
+    /// must resynchronize before attempting more work.
+    async fn wait_for_settlement_or_portal_progress(
+        &self,
+        store: &AttestationStore,
+        height: u64,
+        threshold: usize,
+        expected_portal_hash: B256,
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<SettlementCertificate, BatchSubmitError> {
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    return Err(BatchSubmitError::Cancelled);
+                }
+                certificate = store.wait_for_settlement(height, threshold, shutdown) => {
+                    return certificate.ok_or(BatchSubmitError::Cancelled);
+                }
+                () = tokio::time::sleep(SETTLEMENT_PORTAL_POLL_INTERVAL) => {}
+            }
+
+            let portal_hash = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    return Err(BatchSubmitError::Cancelled);
+                }
+                result = self.read_portal_block_hash() => result?,
+            };
+            if portal_hash != expected_portal_hash {
+                return Err(BatchSubmitError::PortalAdvanced);
+            }
+        }
     }
 
     fn sign_settlement_attestation(
@@ -1721,6 +1804,29 @@ mod tests {
 
         assert_eq!(anchor.block_hash, B256::ZERO);
         assert_eq!(anchor.block_number, 0);
+    }
+
+    #[tokio::test]
+    async fn quorum_wait_stops_when_the_portal_advances() {
+        let l1 = Asserter::new();
+        let advanced_hash = B256::repeat_byte(0x42);
+        l1.push_success(&Bytes::copy_from_slice(advanced_hash.as_slice()));
+        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+        let store = AttestationStore::default();
+
+        let error = submitter
+            .wait_for_settlement_or_portal_progress(
+                &store,
+                120,
+                2,
+                B256::repeat_byte(0x24),
+                &sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("portal progress must invalidate the stale quorum wait");
+
+        assert!(matches!(error, BatchSubmitError::PortalAdvanced));
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
