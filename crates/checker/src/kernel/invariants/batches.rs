@@ -422,7 +422,7 @@ impl<'a> BatchValidator<'a> {
         {
             let advance = self.settlement.batch_index - previous.index;
             let zone_advance = u64::try_from(self.settlement.zone_height)
-                .unwrap()
+                .map_err(|_| self.batch_error(StateKey::Portal))?
                 .saturating_sub(previous.zone_height);
             let tempo_advance = self
                 .settlement

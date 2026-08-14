@@ -124,11 +124,11 @@ impl<'a> OwnershipValidator<'a> {
             amount,
         }) = value
         else {
-            unreachable!("called only for bounce-back deposits")
+            return Err(violation(InvariantCode::OwnerLink, Some(key)));
         };
         let fallback =
             crate::kernel::state::FallbackId::new(withdrawal.zone_id, fallback_nonce.get())
-                .expect("stored fallback nonce is nonzero");
+                .ok_or_else(|| violation(InvariantCode::OwnerLink, Some(key)))?;
         let linked = matches!(
             self.state.rows().get(&StateKey::Fallback(fallback)),
             Some(StateValue::Fallback(FallbackState::Queued {

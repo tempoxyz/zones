@@ -115,8 +115,17 @@ fn verify_outputs(
             .keys()
             .chain(supplies.keys())
             .find(|token| block.outputs.supplies.get(*token) != supplies.get(*token))
-            .copied()
-            .expect("unequal maps have a differing key");
+            .copied();
+        let Some(token) = token else {
+            return Err(divergence(
+                FindingCategory::SupplyMismatch,
+                30,
+                None,
+                None,
+                None,
+                "token supply maps differ without an identifiable key",
+            ));
+        };
         return Err(divergence(
             FindingCategory::SupplyMismatch,
             30,

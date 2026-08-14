@@ -13,7 +13,7 @@ use crate::observe::events::L1ProtocolEvent;
 
 use super::{
     abi::{DecodedPortalCall, ImportedTempoHeader},
-    error::ObservationError,
+    error::{AcquisitionError, AcquisitionSource, ObservationError},
 };
 
 mod acquisition;
@@ -107,8 +107,17 @@ where
         let direct_calls = if transaction.required_calls.is_empty() {
             Vec::new()
         } else {
-            let envelope: &tempo_primitives::TempoTxEnvelope =
-                block.transactions[transaction.transaction_index].as_ref();
+            let envelope: &tempo_primitives::TempoTxEnvelope = block
+                .transactions
+                .get(transaction.transaction_index)
+                .ok_or_else(|| {
+                    ObservationError::from(AcquisitionError::inconsistent(
+                        AcquisitionSource::L1Transaction,
+                        transaction.transaction_index.saturating_add(1),
+                        block.transactions.len(),
+                    ))
+                })?
+                .as_ref();
             portal::decode_direct_portal_calls(
                 envelope,
                 portal,

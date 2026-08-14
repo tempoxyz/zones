@@ -66,7 +66,7 @@ pub(crate) fn apply_imported(
     let mut state = parent.clone();
     state
         .apply(&delta)
-        .expect("transition creates matching state row families");
+        .map_err(|_| TransitionError::CorruptState)?;
     Ok(ImportedCandidate {
         state,
         effects,

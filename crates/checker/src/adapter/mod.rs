@@ -68,7 +68,10 @@ pub(crate) fn adapt(o: &AuthenticatedObservation) -> Result<AuthenticatedBlock, 
         return Err(AdapterFindingCode::HeaderSequence
             .failure("advanceTempo requires exactly one Tempo observation"));
     }
-    let observation = &o.l1[0];
+    let observation = o.l1.first().ok_or_else(|| {
+        AdapterFindingCode::HeaderSequence
+            .failure("advanceTempo requires exactly one Tempo observation")
+    })?;
     let ImportedAdaptation {
         facts: imported_facts,
         effects: mut imported_effects,
