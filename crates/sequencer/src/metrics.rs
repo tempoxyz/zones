@@ -50,6 +50,18 @@ pub(crate) struct ProverMetrics {
     /// Encoded witness size for a successfully validated batch candidate.
     pub(crate) witness_bytes: Histogram,
 
+    /// Number of Zone blocks in a successfully validated batch witness.
+    pub(crate) batch_size_blocks: Histogram,
+
+    /// Number of deposits in a successfully validated batch witness.
+    pub(crate) deposits_per_batch: Histogram,
+
+    /// Number of withdrawals in a successfully validated batch witness.
+    pub(crate) withdrawals_per_batch: Histogram,
+
+    /// Number of user transactions in a successfully validated batch witness.
+    pub(crate) transactions_per_batch: Histogram,
+
     /// Number of Zone state trie nodes in a successfully validated batch witness.
     pub(crate) zone_state_nodes: Histogram,
 

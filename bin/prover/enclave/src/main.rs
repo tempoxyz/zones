@@ -6,6 +6,7 @@ use tempo_chainspec::TempoChainSpec;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
+use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, ErrorCode, PROTOCOL_VERSION, ProverConnection, TrustedChainSpecs,
     VerifyRequest, VerifyResponse, request_error_response,
@@ -237,10 +238,36 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
             message: format!("unsupported Tempo chain ID {}", request.tempo_chain_id),
         };
     };
-    let config = SpfConfig::new(
-        Arc::new(ZoneChainSpec::from(tempo_spec)),
-        request.witness.public_inputs.portal,
-    );
+    let zone_chain_id = match zone_chain_id(
+        request.tempo_chain_id,
+        request.witness.public_inputs.zone_id,
+    ) {
+        Ok(chain_id) => chain_id,
+        Err(error) => {
+            return VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::VerificationFailed,
+                message: error.to_string(),
+            };
+        }
+    };
+    // TODO: Configure the Nitro prover with the actual trusted Zone chain spec and select it by
+    // the full Zone chain ID instead of synthesizing one from the parent Tempo genesis.
+    let mut zone_genesis = tempo_spec.inner.genesis.clone();
+    zone_genesis.config.chain_id = zone_chain_id;
+    let zone_spec = match ZoneChainSpec::from_genesis_with_l1(zone_genesis, tempo_spec.as_ref()) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::UnsupportedChain,
+                message: error.to_string(),
+            };
+        }
+    };
+    let config = SpfConfig::new(Arc::new(zone_spec), request.witness.public_inputs.portal);
 
     match prove_zone_batch(&config, request.witness) {
         Ok(output) => VerifyResponse::Ok {

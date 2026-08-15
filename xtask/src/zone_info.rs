@@ -1,12 +1,12 @@
-use alloy::{
-    primitives::{Address, U256},
-    providers::ProviderBuilder,
-};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZoneFactory, ZonePortal};
+use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZoneFactory};
 
-use crate::zone_utils::MODERATO_ZONE_FACTORY;
+use crate::{
+    admin::{PortalSnapshot, read_portal_snapshot},
+    zone_utils::MODERATO_ZONE_FACTORY,
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct ZoneInfoCmd {
@@ -63,68 +63,69 @@ impl ZoneInfoCmd {
         println!("  Verifier:              {}", info.verifier);
         println!("  RPC URL:               {}", info.rpcUrl);
 
-        // Query live portal state
-        let portal = ZonePortal::new(info.portal, &provider);
-
-        let sequencer_count = portal.sequencerCount().call().await?.to::<usize>();
-        let mut sequencers = Vec::with_capacity(sequencer_count);
-        for index in 0..sequencer_count {
-            sequencers.push(portal.sequencerAt(U256::from(index)).call().await?);
-        }
-        let gas_rate = portal.zoneGasRate().call().await?;
-        let batch_index = portal.withdrawalBatchIndex().call().await?;
-        let block_hash = portal.blockHash().call().await?;
-        let deposit_queue = portal.currentDepositQueueHash().call().await?;
-        let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
-        let set_version = portal.sequencerSetVersion().call().await?;
-        let leader = portal.leader().call().await?;
-        let leader_epoch = portal.leaderEpoch().call().await?;
-        let leader_activation = portal.leaderActivationTempoBlock().call().await?;
-        let paused = portal.paused().call().await?;
-        let pause_expiry = portal.pauseExpiry().call().await?;
-        let pause_abdication_effective_at = portal
-            .abdicationEffectiveAt(ZonePortal::Capability::PausePortal)
-            .call()
-            .await?;
-        let access_abdication_effective_at = portal
-            .abdicationEffectiveAt(ZonePortal::Capability::AccessPolicy)
-            .call()
-            .await?;
+        // Reuse the same pinned finalized snapshot as `admin check` so related reads cannot mix
+        // state from different blocks.
+        let snapshot: PortalSnapshot =
+            read_portal_snapshot(&provider, self.zone_factory, zone_id, Some(info.portal)).await?;
 
         println!("\nPortal State");
-        println!("  Active Sequencers:     {sequencers:?}");
-        println!("  Sequencer Set Version: {set_version}");
-        if leader.is_zero() {
+        println!(
+            "  Finalized L1 Block:    {}",
+            snapshot.finalized_block_number
+        );
+        println!("  Active Sequencers:     {:?}", snapshot.sequencers);
+        println!(
+            "  Sequencer Set Version: {}",
+            snapshot.sequencer_set_version
+        );
+        if snapshot.leader.is_zero() {
             println!("  Leader:                (uninitialized)");
         } else {
-            println!("  Leader:                {leader}");
-            println!("  Leader Epoch:          {leader_epoch}");
-            println!("  Leader Activation:     Tempo block {leader_activation}");
+            println!("  Leader:                {}", snapshot.leader);
+            println!("  Leader Epoch:          {}", snapshot.leader_epoch);
+            println!(
+                "  Leader Activation:     Tempo block {}",
+                snapshot.leader_activation_tempo_block
+            );
         }
-        println!("  Zone Gas Rate:         {gas_rate}");
-        println!("  Paused:                {paused}");
-        println!("  Pause expiry:          {pause_expiry}");
-        println!("  Pause abdication at:   {pause_abdication_effective_at}");
-        println!("  Access abdication at:  {access_abdication_effective_at}");
-        println!("  Withdrawal Batch:      {batch_index}");
-        println!("  Block Hash:            {block_hash}");
-        println!("  Deposit Queue Hash:    {deposit_queue}");
-        println!("  Last Synced Block:     {last_synced}");
+        println!("  Zone Gas Rate:         {}", snapshot.zone_gas_rate);
+        println!("  Paused:                {}", snapshot.paused);
+        println!("  Pause expiry:          {}", snapshot.pause_expiry);
+        println!(
+            "  Pause abdication at:   {}",
+            snapshot.pause_abdication_effective_at
+        );
+        println!(
+            "  Access abdication at:  {}",
+            snapshot.access_abdication_effective_at
+        );
+        println!(
+            "  Withdrawal Batch:      {}",
+            snapshot.withdrawal_batch_index
+        );
+        println!("  Block Hash:            {}", snapshot.block_hash);
+        println!(
+            "  Deposit Queue Hash:    {}",
+            snapshot.current_deposit_queue_hash
+        );
+        println!(
+            "  Last Synced Block:     {}",
+            snapshot.last_synced_tempo_block
+        );
 
         // Encryption key
-        match portal.sequencerEncryptionKey().call().await {
-            Ok(key) => {
+        match snapshot.encryption_key {
+            Some(key) => {
                 println!("\nEncryption Key");
                 println!("  X:                     {}", key.x);
-                println!("  Y Parity:              0x{:02x}", key.yParity);
+                println!("  Y Parity:              0x{:02x}", key.y_parity);
             }
-            Err(_) => println!("\nEncryption Key:          (not set)"),
+            None => println!("\nEncryption Key:          (not set)"),
         }
 
         // Enabled tokens
-        let tokens = portal.enabled_tokens().await?;
-        println!("\nEnabled Tokens ({})", tokens.len());
-        for (i, token) in tokens.iter().enumerate() {
+        println!("\nEnabled Tokens ({})", snapshot.enabled_tokens.len());
+        for (i, token) in snapshot.enabled_tokens.iter().enumerate() {
             println!("  [{i}] {token}");
         }
 

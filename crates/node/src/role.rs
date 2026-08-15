@@ -547,9 +547,11 @@ enum Readiness {
 
 /// Evaluate the promotion barrier
 ///
-/// Forced-recovery promotion requires the local canonical head to remain exactly at the
-/// operator-selected block. Normal transitions need no additional evidence: the next-anchor rule
-/// and one-to-one zone/L1 block mapping ensure all earlier leaders' blocks are already local.
+/// Forced-recovery promotion requires the operator-selected block to remain in the local canonical
+/// chain. The node may have advanced beyond that checkpoint before restarting, so requiring it to
+/// remain the head would make every in-progress recovery restart fatal. Normal transitions need no
+/// additional evidence: the next-anchor rule and one-to-one zone/L1 block mapping ensure all
+/// earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -566,39 +568,43 @@ where
                 .portal_activation_tempo_block
                 .is_none_or(|activation| next_anchor < activation)
     }) {
-        let local_height = match provider.best_block_number() {
-            Ok(height) => height,
-            Err(err) => {
-                return Readiness::Conflicted(format!(
-                    "cannot read the local head for forced recovery: {err}"
-                ));
-            }
-        };
-        let header = match provider.sealed_header(local_height) {
-            Ok(Some(header)) => header,
-            Ok(None) => {
-                return Readiness::Conflicted(format!(
-                    "forced recovery local header {local_height} is missing"
-                ));
-            }
-            Err(err) => {
-                return Readiness::Conflicted(format!(
-                    "cannot read forced recovery local header {local_height}: {err}"
-                ));
-            }
-        };
-        if header.hash() != recovery.recovery_block_hash {
+        if let Err(err) = canonical_recovery_height(provider, recovery.recovery_block_hash) {
             return Readiness::Conflicted(format!(
-                "forced recovery canonical head mismatch at height {local_height}: expected {}, \
-                 found {}",
-                recovery.recovery_block_hash,
-                header.hash(),
+                "forced recovery checkpoint is not canonical: {err}"
             ));
         }
         return Readiness::Ready;
     }
 
     Readiness::Ready
+}
+
+/// Resolve an operator-selected recovery hash to its canonical header.
+///
+/// The hash-to-number index can contain a known non-canonical block, so the header at the resolved
+/// height is read through the canonical number index and compared again before the checkpoint is
+/// trusted. This proves local ancestry only: restart safety additionally assumes that participating
+/// nodes advanced on the same non-equivocating recovery-leader chain.
+pub(crate) fn canonical_recovery_height<P>(
+    provider: &P,
+    recovery_block_hash: alloy_primitives::B256,
+) -> eyre::Result<u64>
+where
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+{
+    let recovery_height = provider
+        .block_number(recovery_block_hash)?
+        .ok_or_else(|| eyre::eyre!("recovery block {recovery_block_hash} is unknown"))?;
+    let header = provider.sealed_header(recovery_height)?.ok_or_else(|| {
+        eyre::eyre!("canonical header at recovery height {recovery_height} is missing")
+    })?;
+    eyre::ensure!(
+        header.hash() == recovery_block_hash,
+        "recovery block {recovery_block_hash} is not canonical at height {recovery_height}; \
+         canonical hash is {}",
+        header.hash(),
+    );
+    Ok(recovery_height)
 }
 
 /// Run the role controller until the process shuts down.
@@ -1131,16 +1137,17 @@ mod tests {
     use std::{future::pending, time::Duration};
 
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use reth_primitives_traits::SealedHeader;
     use reth_provider::test_utils::MockEthProvider;
-    use tempo_primitives::TempoPrimitives;
+    use tempo_primitives::{TempoHeader, TempoPrimitives};
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
     use zone_p2p::{BackfillRequest, BackfillResponse};
     use zone_sequencer::ZoneSequencerHandle;
 
     use super::{
-        EventSinks, TaskEnd, latest_sealed_header, route_backfill_requests,
-        route_backfill_responses, supervise_sequencer_tasks,
+        EventSinks, TaskEnd, canonical_recovery_height, latest_sealed_header,
+        route_backfill_requests, route_backfill_responses, supervise_sequencer_tasks,
     };
 
     struct DropSignal(Option<oneshot::Sender<()>>);
@@ -1161,6 +1168,37 @@ mod tests {
             latest_sealed_header(&provider).is_err(),
             "leader startup must fail when its canonical head cannot be read"
         );
+    }
+
+    #[test]
+    fn recovery_checkpoint_may_be_a_canonical_ancestor() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let mut recovery_header = TempoHeader::default();
+        recovery_header.inner.number = 7;
+        let recovery_hash = SealedHeader::seal_slow(recovery_header.clone()).hash();
+        provider.add_header(recovery_hash, recovery_header);
+
+        let mut head = TempoHeader::default();
+        head.inner.number = 9;
+        let head_hash = SealedHeader::seal_slow(head.clone()).hash();
+        provider.add_header(head_hash, head);
+
+        assert_eq!(
+            canonical_recovery_height(&provider, recovery_hash).unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn recovery_checkpoint_rejects_a_known_noncanonical_hash() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let mut header = TempoHeader::default();
+        header.inner.number = 7;
+        let noncanonical_hash = alloy_primitives::B256::repeat_byte(0x42);
+        provider.add_header(noncanonical_hash, header);
+
+        let error = canonical_recovery_height(&provider, noncanonical_hash).unwrap_err();
+        assert!(error.to_string().contains("is not canonical at height 7"));
     }
 
     #[tokio::test]

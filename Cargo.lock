@@ -11410,7 +11410,6 @@ dependencies = [
  "once_cell",
  "paste",
  "reth-chainspec",
- "reth-cli",
  "reth-network-peers",
  "serde",
  "serde_json",
@@ -11779,8 +11778,11 @@ dependencies = [
  "tempo-revm",
  "tempo-zone-contracts",
  "tokio",
+ "toml",
+ "zone-p2p",
  "zone-precompiles",
  "zone-primitives",
+ "zone-rpc",
  "zone-sequencer",
 ]
 
@@ -11830,6 +11832,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zone-chainspec",
+ "zone-primitives",
  "zone-prover",
  "zone-spf",
 ]
@@ -11840,7 +11843,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
@@ -11852,7 +11854,7 @@ dependencies = [
  "const-hex",
  "eyre",
  "futures",
- "reqwest",
+ "reth-cli",
  "serde",
  "serde_json",
  "tempo-alloy",
@@ -13703,7 +13705,9 @@ dependencies = [
  "serde_json",
  "tempo-chainspec",
  "tempo-primitives",
+ "thiserror 2.0.18",
  "zone-hardfork",
+ "zone-primitives",
 ]
 
 [[package]]

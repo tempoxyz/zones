@@ -62,11 +62,11 @@ use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
     types::{
-        ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
-        LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
-        SequencerProgress, SequencerReadiness, SetLeaderResponse,
-        TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness, ZoneInfoResponse, internal,
-        raw_null, raw_zero, to_raw,
+        ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoundDecryptionKey, BoxEyreFut, BoxFut,
+        DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalSequencerInfo, PeerTipInfo,
+        SequencerInfoResponse, SequencerPeerInfo, SequencerProgress, SequencerReadiness,
+        SetLeaderResponse, TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness,
+        ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
     },
 };
 
@@ -94,6 +94,8 @@ pub struct SequencerRpcContext {
     pub local_ed25519_public_key: zone_p2p::P2pPeerId,
     /// Wallet-backed L1 provider signing with the individual key, when this node holds one.
     pub relayer: Option<DynProvider<TempoNetwork>>,
+    /// Publicly reportable view of locally loaded deposit-decryption keys.
+    pub encryption_keys: zone_l1::EncryptionKeyRing,
 }
 
 impl SequencerRpcContext {
@@ -106,6 +108,7 @@ impl SequencerRpcContext {
         local_secp256k1_address: Option<Address>,
         local_ed25519_public_key: zone_p2p::P2pPeerId,
         relayer: Option<DynProvider<TempoNetwork>>,
+        encryption_keys: zone_l1::EncryptionKeyRing,
     ) -> Self {
         Self {
             schedule,
@@ -115,6 +118,7 @@ impl SequencerRpcContext {
             local_secp256k1_address,
             local_ed25519_public_key,
             relayer,
+            encryption_keys,
         }
     }
 }
@@ -428,6 +432,10 @@ where
         return Ok(SequencerInfoResponse {
             mode: "single".to_owned(),
             portal: portal_address,
+            manifest_zone_id: None,
+            manifest_sequencer_set_version: None,
+            manifest_membership_digest: None,
+            decryption_keys: None,
             local: None,
             active_leader: None,
             local_tip: None,
@@ -482,6 +490,31 @@ where
     Ok(SequencerInfoResponse {
         mode: "multi".to_owned(),
         portal: portal_address,
+        manifest_zone_id: Some(U64::from(context.manifest.zone_id())),
+        manifest_sequencer_set_version: Some(U64::from(context.manifest.sequencer_set_version())),
+        manifest_membership_digest: Some(context.manifest.membership_digest()),
+        decryption_keys: Some({
+            let status = context.encryption_keys.public_status();
+            DecryptionKeyStatus {
+                candidates: status
+                    .candidates
+                    .into_iter()
+                    .map(|key| DecryptionKeyCandidate {
+                        x: key.x,
+                        y_parity: key.y_parity,
+                    })
+                    .collect(),
+                bound: status
+                    .bound
+                    .into_iter()
+                    .map(|key| BoundDecryptionKey {
+                        key_index: key.key_index,
+                        x: key.x,
+                        y_parity: key.y_parity,
+                    })
+                    .collect(),
+            }
+        }),
         local: Some(LocalSequencerInfo {
             name: local_node
                 .map(|node| node.name().to_owned())

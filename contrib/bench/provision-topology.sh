@@ -991,6 +991,7 @@ provision_up() {
         ZONE_PRIVATE_RPC_URL "$zone_redacted_rpc" \
         ZONE_REDACTED_RPC_URL "$zone_redacted_rpc" \
         ZONES_BENCH_TEMPO_GENESIS "$patched_genesis" \
+        ZONES_BENCH_ZONE_GENESIS "$zone_genesis" \
         ZONES_BENCH_TOKEN "$zone_token" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \

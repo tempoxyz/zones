@@ -51,7 +51,8 @@ docker buildx bake \
 ```
 
 CI supplies the downloaded devnet genesis as a named build context. The enclave payload stores it
-in `/etc/tempo/genesis/` and exposes that directory to the prover through `SPF_TEMPO_GENESIS`.
+in `/etc/tempo/genesis/` and passes that directory to the prover explicitly through the image
+entrypoint.
 
 Convert the payload to an EIF with the repository's pinned Nitro CLI builder image, then build the
 host image:

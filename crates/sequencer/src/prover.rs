@@ -90,6 +90,10 @@ struct ProverJob {
 #[derive(Debug)]
 struct ValidationStats {
     witness_bytes: usize,
+    blocks: usize,
+    deposits: usize,
+    withdrawals: usize,
+    transactions: usize,
     zone_state_nodes: usize,
     tempo_state_nodes: usize,
 }
@@ -154,6 +158,14 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                 Ok(stats) => {
                     metrics.validation_success_total.increment(1);
                     metrics.witness_bytes.record(stats.witness_bytes as f64);
+                    metrics.batch_size_blocks.record(stats.blocks as f64);
+                    metrics.deposits_per_batch.record(stats.deposits as f64);
+                    metrics
+                        .withdrawals_per_batch
+                        .record(stats.withdrawals as f64);
+                    metrics
+                        .transactions_per_batch
+                        .record(stats.transactions as f64);
                     metrics
                         .zone_state_nodes
                         .record(stats.zone_state_nodes as f64);
@@ -168,6 +180,10 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         next_block_hash = %job.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
                         witness_bytes = stats.witness_bytes,
+                        blocks = stats.blocks,
+                        deposits = stats.deposits,
+                        withdrawals = stats.withdrawals,
+                        transactions = stats.transactions,
                         zone_state_nodes = stats.zone_state_nodes,
                         tempo_state_nodes = stats.tempo_state_nodes,
                         "Shadow prover validated finalized batch candidate"
@@ -362,6 +378,22 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     Ok(ValidationStats {
         witness_bytes: witness_size(&witness),
+        blocks: witness.zone_blocks.len(),
+        deposits: witness
+            .zone_blocks
+            .iter()
+            .map(|block| block.deposits.len())
+            .sum(),
+        withdrawals: witness
+            .zone_blocks
+            .iter()
+            .map(|block| block.finalize_withdrawal_batch_encrypted_senders.len())
+            .sum(),
+        transactions: witness
+            .zone_blocks
+            .iter()
+            .map(|block| block.transactions.len())
+            .sum(),
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     })

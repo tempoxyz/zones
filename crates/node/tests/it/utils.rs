@@ -1306,7 +1306,7 @@ impl ZoneTestNode {
                 .expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
-        let chain_spec = ZoneChainSpec::from_genesis(genesis);
+        let chain_spec = ZoneChainSpec::from_genesis(genesis)?;
 
         let mut zone_node = ZoneNode::new(
             l1_ws_url,
