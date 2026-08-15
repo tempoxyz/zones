@@ -182,7 +182,7 @@ where
     ) -> Self::Evm<DB, NoOpInspector> {
         let zone_hardfork = self
             .chain_spec
-            .zone_hardfork_at(input.block_env.timestamp.to::<u64>());
+            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
@@ -200,7 +200,7 @@ where
     ) -> Self::Evm<DB, I> {
         let zone_hardfork = self
             .chain_spec
-            .zone_hardfork_at(input.block_env.timestamp.to::<u64>());
+            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
