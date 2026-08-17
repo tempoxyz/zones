@@ -38,7 +38,10 @@ import {
 } from "../../src/runtime/interfaces/IZone.sol";
 import { getBlockHash } from "../../src/runtime/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/runtime/libraries/DepositQueueLib.sol";
-import { NO_QUEUE_INDEX, WithdrawalQueueLib } from "../../src/runtime/libraries/WithdrawalQueueLib.sol";
+import {
+    NO_QUEUE_INDEX,
+    WithdrawalQueueLib
+} from "../../src/runtime/libraries/WithdrawalQueueLib.sol";
 import { ZoneMessenger } from "../../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
