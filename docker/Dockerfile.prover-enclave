@@ -19,12 +19,10 @@ FROM scratch AS tempo-genesis
 
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
 
-ENV SPF_TEMPO_GENESIS="/etc/tempo/genesis"
-
 COPY --from=tempo-genesis / /etc/tempo/genesis/
 
 WORKDIR /data
 COPY --from=builder /app/target/release/tempo-zone-prover-enclave /usr/local/bin/tempo-zone-prover-enclave
 
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave"]
+ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave", "--tempo-genesis", "/etc/tempo/genesis"]

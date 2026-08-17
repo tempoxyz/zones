@@ -282,25 +282,8 @@ impl<L1> ZoneEvmConfig<L1>
 where
     L1: L1StorageReader,
 {
-    /// Creates a Zone EVM config using Tempo hardfork conditions from the parent L1 spec.
-    pub fn new(
-        zone_chain_spec: Arc<ZoneChainSpec>,
-        tempo_chain_spec: Arc<TempoChainSpec>,
-        l1_provider: L1,
-        portal_address: Address,
-    ) -> Self {
-        let chain_spec = compose_chain_spec(&zone_chain_spec, &tempo_chain_spec);
-        Self::from_composed_chain_spec(chain_spec, l1_provider, portal_address)
-    }
-
-    /// Creates a Zone EVM config from an already-composed Zone chain specification.
-    ///
-    /// The supplied chain specification must already include the parent Tempo hardfork schedule.
-    pub fn from_composed_chain_spec(
-        chain_spec: Arc<ZoneChainSpec>,
-        l1_provider: L1,
-        portal_address: Address,
-    ) -> Self {
+    /// Creates a Zone EVM config from the node's canonical, composed chain specification.
+    pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1, portal_address: Address) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
@@ -331,7 +314,7 @@ where
         RecordingL1StorageReader<L1>,
     ) {
         let reader = RecordingL1StorageReader::new(self.zone_factory.l1_reader.clone());
-        let config = ZoneEvmConfig::from_composed_chain_spec(
+        let config = ZoneEvmConfig::new(
             self.chain_spec.clone(),
             reader.clone(),
             self.zone_factory.portal_address,
@@ -357,7 +340,7 @@ impl ZoneEvmConfig {
             ..Default::default()
         };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::from_composed_chain_spec(chain_spec, l1_provider, Address::ZERO)
+        Self::new(chain_spec, l1_provider, Address::ZERO)
     }
 }
 
@@ -550,11 +533,6 @@ pub struct TempoStorageRead {
     pub slot: B256,
 }
 
-/// Copies the Zone chain spec and applies the Tempo hardfork conditions from its parent chain.
-fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneChainSpec> {
-    Arc::new(zone.clone().with_tempo_hardforks_from(tempo))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,7 +547,7 @@ mod tests {
     };
     use tempo_chainspec::{
         hardfork::TempoHardfork,
-        spec::{DEV, MODERATO, TempoHardforks},
+        spec::{MODERATO, TempoHardforks},
     };
     use tempo_precompiles::{
         TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
@@ -577,22 +555,7 @@ mod tests {
     };
     use tempo_zone_contracts::IZoneInbox;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
-
-    #[test]
-    fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
-        let zone = ZoneChainSpec::from(DEV.clone());
-        let composed = compose_chain_spec(&zone, &MODERATO);
-
-        assert_eq!(composed.chain().id(), DEV.chain().id());
-        assert_eq!(composed.genesis_hash(), DEV.genesis_hash());
-        for &hardfork in TempoHardfork::VARIANTS {
-            assert_eq!(
-                composed.tempo_fork_activation(hardfork),
-                MODERATO.tempo_fork_activation(hardfork)
-            );
-        }
-    }
+    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, zone_chain_id};
 
     #[test]
     fn l1_storage_recorder_deduplicates_successful_reads_without_block_numbers() {
@@ -717,8 +680,13 @@ mod tests {
 
     #[test]
     fn tempo_evm_selects_parent_fork_from_zone_block_timestamp() {
-        let zone = ZoneChainSpec::from(DEV.clone());
-        let composed = compose_chain_spec(&zone, &MODERATO);
+        let mut genesis = MODERATO.genesis().clone();
+        genesis
+            .config
+            .extra_fields
+            .retain(|name, _| !name.ends_with("Time"));
+        genesis.config.chain_id = zone_chain_id(MODERATO.chain().id(), 1).unwrap();
+        let composed = Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap());
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
             .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
