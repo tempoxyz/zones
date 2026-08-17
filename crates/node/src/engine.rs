@@ -59,17 +59,6 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, 
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Select a Zone timestamp that preserves the L1 lower bound without backdating user activity.
-fn zone_timestamp_millis(
-    l1_timestamp_millis: u64,
-    parent_timestamp_millis: u64,
-    wall_clock_timestamp_millis: u64,
-) -> u64 {
-    l1_timestamp_millis
-        .max(wall_clock_timestamp_millis)
-        .max(parent_timestamp_millis.saturating_add(1))
-}
-
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
 /// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
@@ -448,6 +437,17 @@ impl AvailableBlockDrain for ZoneEngine {
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
         self.advance(block).await
     }
+}
+
+/// Select a Zone timestamp that preserves the L1 lower bound without backdating user activity.
+fn zone_timestamp_millis(
+    l1_timestamp_millis: u64,
+    parent_timestamp_millis: u64,
+    wall_clock_timestamp_millis: u64,
+) -> u64 {
+    l1_timestamp_millis
+        .max(wall_clock_timestamp_millis)
+        .max(parent_timestamp_millis.saturating_add(1))
 }
 
 #[cfg(test)]
