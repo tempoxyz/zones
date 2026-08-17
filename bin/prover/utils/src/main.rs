@@ -365,7 +365,6 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
         request_id,
-        tempo_chain_id: discovery.tempo_chain_id,
         witness,
     };
 

@@ -12,8 +12,6 @@ pub struct VerifyRequest {
     pub version: u16,
     /// Caller-selected identifier echoed in the corresponding response.
     pub request_id: String,
-    /// Tempo chain against which the witness must be verified.
-    pub tempo_chain_id: u64,
     /// Complete input to the Zone stateless proof function.
     pub witness: BatchWitness,
 }

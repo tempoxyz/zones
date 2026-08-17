@@ -350,14 +350,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     let output = if let Some(address) = &context.config.prover_address {
-        verify_remotely(
-            address,
-            context.config.parent_chain_id,
-            context.config.zone_id,
-            job,
-            &witness,
-        )
-        .await?
+        verify_remotely(address, context.config.zone_id, job, &witness).await?
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
         let attempt = witness.clone();
@@ -401,7 +394,6 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
 async fn verify_remotely(
     address: &str,
-    tempo_chain_id: u64,
     zone_id: u32,
     job: &ProverJob,
     witness: &BatchWitness,
@@ -412,7 +404,6 @@ async fn verify_remotely(
             "zone-{zone_id}-{}-{}-{}",
             job.from, job.to, job.batch.next_block_hash
         ),
-        tempo_chain_id,
         witness: witness.clone(),
     };
     let stream = TcpStream::connect(address)
