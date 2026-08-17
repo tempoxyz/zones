@@ -2,8 +2,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    sync::Arc,
+    fmt, io,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context as TaskContext, Poll},
     time::Instant,
 };
 
@@ -23,6 +25,7 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
@@ -118,6 +121,46 @@ struct Anchor {
     number: u64,
     hash: B256,
     ancestry_headers: Vec<Bytes>,
+}
+
+/// I/O wrapper that records when the first response byte is read.
+struct FirstReadTimed<T> {
+    inner: T,
+    first_read_at: Arc<OnceLock<Instant>>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for FirstReadTimed<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Ok(()))) && buf.filled().len() > filled_before {
+            let _ = this.first_read_at.set(Instant::now());
+        }
+        result
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
@@ -350,7 +393,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     let output = if let Some(address) = &context.config.prover_address {
-        verify_remotely(address, context.config.zone_id, job, &witness).await?
+        verify_remotely(address, context.config.zone_id, job, &witness, metrics).await?
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
         let attempt = witness.clone();
@@ -397,6 +440,7 @@ async fn verify_remotely(
     zone_id: u32,
     job: &ProverJob,
     witness: &BatchWitness,
+    metrics: &ProverMetrics,
 ) -> Result<BatchOutput> {
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
@@ -406,17 +450,49 @@ async fn verify_remotely(
         ),
         witness: witness.clone(),
     };
-    let stream = TcpStream::connect(address)
-        .await
-        .wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+    let started = Instant::now();
+    let stream = TcpStream::connect(address).await;
+    metrics
+        .spf_remote_connect_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+    let stream = stream.wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+
+    let first_read_at = Arc::new(OnceLock::new());
+    let stream = FirstReadTimed {
+        inner: stream,
+        first_read_at: Arc::clone(&first_read_at),
+    };
     let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
-    connection
-        .send(&request)
-        .await
-        .wrap_err_with(|| format!("send request to remote prover at {address}"))?;
-    let response: VerifyResponse = connection
-        .receive()
-        .await
+
+    let started = Instant::now();
+    let send_result = connection.send(&request).await;
+    metrics
+        .spf_remote_request_send_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+    send_result.wrap_err_with(|| format!("send request to remote prover at {address}"))?;
+
+    let response_started = Instant::now();
+    let response_result = connection.receive();
+    let response_result = response_result.await;
+    let response_finished = Instant::now();
+    if let Some(first_read_at) = first_read_at.get().copied() {
+        metrics
+            .spf_remote_response_wait_duration_seconds
+            .record(first_read_at.duration_since(response_started).as_secs_f64());
+        metrics.spf_remote_response_receive_duration_seconds.record(
+            response_finished
+                .duration_since(first_read_at)
+                .as_secs_f64(),
+        );
+    } else {
+        // EOF or an I/O failure before any response bytes still belongs to the wait phase.
+        metrics.spf_remote_response_wait_duration_seconds.record(
+            response_finished
+                .duration_since(response_started)
+                .as_secs_f64(),
+        );
+    }
+    let response: VerifyResponse = response_result
         .wrap_err_with(|| format!("read response from remote prover at {address}"))?
         .ok_or_else(|| eyre::eyre!("remote prover closed the connection without a response"))?;
 
