@@ -372,6 +372,19 @@ impl EarnZoneFixture {
                 excessFeeRateBps: Default::default(),
             },
         };
+        let access_policy = if protected {
+            let whitelist_id = l1.create_whitelist_policy().await?;
+            let compound_id = l1
+                .create_compound_policy(1, whitelist_id, whitelist_id)
+                .await?;
+            Some(EarnAccessPolicy {
+                compound_id,
+                whitelist_id,
+            })
+        } else {
+            None
+        };
+
         let params = EarnDeployParams {
             deploymentId: keccak256("zones-earn-e2e-v1"),
             engine,
@@ -387,7 +400,7 @@ impl EarnZoneFixture {
                 updateDelay: Default::default(),
             },
             fees,
-            transferPolicyId: 0,
+            transferPolicyId: access_policy.map_or(0, |policy| policy.compound_id),
         };
 
         let provider = l1.dev_provider();
@@ -515,8 +528,7 @@ impl EarnZoneFixture {
         )
         .await?;
 
-        let access_policy = if protected {
-            let whitelist_id = l1.create_whitelist_policy().await?;
+        if let Some(policy) = access_policy {
             let outsider = l1.signer_at(3).address();
             for account in [
                 earn_vault,
@@ -528,20 +540,9 @@ impl EarnZoneFixture {
                 user_address,
                 outsider,
             ] {
-                l1.whitelist_address(whitelist_id, account).await?;
+                l1.whitelist_address(policy.whitelist_id, account).await?;
             }
-            let compound_id = l1
-                .create_compound_policy(1, whitelist_id, whitelist_id)
-                .await?;
-            l1.change_transfer_policy_id(earn_share, compound_id)
-                .await?;
-            Some(EarnAccessPolicy {
-                compound_id,
-                whitelist_id,
-            })
-        } else {
-            None
-        };
+        }
 
         l1.enable_token_on_portal(portal, vault_asset).await?;
         l1.enable_token_on_portal(portal, alternate_asset).await?;
