@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 alloy-genesis.workspace = true
 zone-chainspec.workspace = true
 zone-primitives.workspace = true
@@ -26,6 +27,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+aws-nitro-enclaves-nsm-api.workspace = true
+serde_bytes.workspace = true
 tokio-vsock.workspace = true
 
 [dev-dependencies]
