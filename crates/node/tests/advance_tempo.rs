@@ -1,10 +1,7 @@
-//! Reproduce the `advanceTempo` system tx reverting at 232 gas.
-//!
-//! Run with: `cargo test -p zone-node --test advance_tempo -- --nocapture`
+//! Zone genesis and portal storage-layout conformance tests.
 
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
-use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
-use alloy_sol_types::{SolCall, sol};
+use alloy_primitives::{Address, B256, U256, address, keccak256};
 use revm::{
     context::result::{ExecutionResult, Output},
     database::{CacheDB, EmptyDB},
@@ -16,7 +13,6 @@ use tempo_revm::TempoBlockEnv;
 use zone_primitives::constants::{
     PORTAL_ADMIN_SLOT, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
-    zone_chain_id,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -24,31 +20,6 @@ const ZONE_INBOX_ADDRESS: Address = address!("0x1c000000000000000000000000000000
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-
-sol! {
-    function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions, EnabledToken[] calldata enabledTokens);
-    function tempoBlockHash() external view returns (bytes32);
-
-    struct QueuedDeposit {
-        uint8 depositType;
-        bytes depositData;
-    }
-    struct ChaumPedersenProof {
-        bytes32 s;
-        bytes32 c;
-    }
-    struct DecryptionData {
-        bytes32 sharedSecret;
-        uint8 sharedSecretYParity;
-        ChaumPedersenProof cpProof;
-    }
-    struct EnabledToken {
-        address token;
-        string name;
-        string symbol;
-        string currency;
-    }
-}
 
 /// Load a Foundry artifact's creation bytecode from the specs output directory.
 fn load_artifact(name: &str) -> Vec<u8> {
@@ -132,18 +103,8 @@ fn deploy_contract(
     println!("Deployed {name} at {predeploy_addr} (created at {created_addr})");
 }
 
-/// Build an EVM with the zone contracts deployed in-memory (same as xtask generate_zone_genesis).
-fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
-    setup_zone_evm_with_contracts_for_portal(
-        zone_chain_id(4217, 1).unwrap(),
-        Address::repeat_byte(0xbb),
-    )
-}
-
-fn setup_zone_evm_with_contracts_for_portal(
-    chain_id: u64,
-    tempo_portal: Address,
-) -> TempoEvm<CacheDB<EmptyDB>> {
+/// Build an EVM with the retained `ZoneInbox` Solidity artifact deployed in-memory.
+fn setup_zone_inbox_for_portal(chain_id: u64, tempo_portal: Address) -> TempoEvm<CacheDB<EmptyDB>> {
     let gas_limit = 30_000_000u64;
 
     let db = CacheDB::default();
@@ -165,30 +126,7 @@ fn setup_zone_evm_with_contracts_for_portal(
         },
     );
 
-    // A minimal RLP-encoded Tempo genesis header (all zeros / minimal valid).
-    // This is the same format used by TempoState constructor.
-    // We create a dummy header RLP: an RLP list of empty/zero fields.
-    // For testing, use a simple valid RLP that TempoState will accept.
-    let dummy_header_rlp = build_dummy_header_rlp();
-
-    let mut nonce = 0u64;
-
-    // 1. TempoState(bytes headerRlp)
-    let tempo_state_bytecode = load_artifact("TempoState");
-    let tempo_state_args =
-        alloy_sol_types::SolValue::abi_encode_params(&(Bytes::from(dummy_header_rlp),));
-    deploy_contract(
-        &mut evm,
-        &tempo_state_bytecode,
-        &tempo_state_args,
-        TEMPO_STATE_ADDRESS,
-        "TempoState",
-        chain_id,
-        nonce,
-    );
-    nonce += 1;
-
-    // 2. ZoneInbox(address tempoPortal, address tempoState)
+    // ZoneInbox(address tempoPortal, address tempoState)
     let zone_inbox_bytecode = load_artifact("ZoneInbox");
     let zone_inbox_args =
         alloy_sol_types::SolValue::abi_encode_params(&(tempo_portal, TEMPO_STATE_ADDRESS));
@@ -199,25 +137,9 @@ fn setup_zone_evm_with_contracts_for_portal(
         ZONE_INBOX_ADDRESS,
         "ZoneInbox",
         chain_id,
-        nonce,
-    );
-    nonce += 1;
-
-    // 3. ZoneOutbox(address tempoPortal, address tempoState)
-    let zone_outbox_bytecode = load_artifact("ZoneOutbox");
-    let zone_outbox_args =
-        alloy_sol_types::SolValue::abi_encode_params(&(tempo_portal, TEMPO_STATE_ADDRESS));
-    deploy_contract(
-        &mut evm,
-        &zone_outbox_bytecode,
-        &zone_outbox_args,
-        ZONE_OUTBOX_ADDRESS,
-        "ZoneOutbox",
-        chain_id,
-        nonce,
+        0,
     );
 
-    println!("All zone contracts deployed successfully");
     evm
 }
 
@@ -290,13 +212,13 @@ fn metadata_footer_desc(metadata_footer_len: Option<usize>) -> String {
 }
 
 #[test]
-fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
+fn zone_test_genesis_inbox_bytecode_matches_foundry_artifact() {
     // The L1 e2e tests boot the zone from this checked-in genesis fixture. If the
     // fixture falls behind the Solidity artifacts, ABI-breaking contract changes
     // can pass against old bytecode even though CI built the new artifacts. The
     // comparison ignores Solidity's CBOR metadata footer because metadata hashes
     // can differ across build environments while the executable bytecode matches.
-    let mut evm = setup_zone_evm_with_contracts_for_portal(1337, Address::ZERO);
+    let mut evm = setup_zone_inbox_for_portal(1337, Address::ZERO);
 
     // TempoState and ZoneOutbox are native precompiles. The genesis generator intentionally uses
     // the non-empty native-account marker instead of deploying their Solidity reference shims.
@@ -347,175 +269,6 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
             bytecode_hash(expected_view.compared)
         );
     }
-}
-
-/// Build a minimal valid RLP-encoded TempoHeader.
-///
-/// We look at the TempoHeader struct to determine which fields to encode.
-/// For a minimal genesis header, most fields are zeroed.
-fn build_dummy_header_rlp() -> Vec<u8> {
-    use alloy_rlp::Encodable;
-    use tempo_primitives::TempoHeader;
-
-    // Construct a minimal TempoHeader (genesis-like)
-    let header = TempoHeader::default();
-
-    let mut buf = Vec::new();
-    header.encode(&mut buf);
-    buf
-}
-
-#[test]
-fn advance_tempo_repro() {
-    let mut evm = setup_zone_evm_with_contracts();
-
-    // System transactions execute with the protocol caller.
-    let sequencer = Address::ZERO;
-
-    // ---------------------------------------------------------------
-    // Step 1: Call tempoBlockHash() on TempoState to verify it works
-    // ---------------------------------------------------------------
-    println!("\n=== Calling TempoState.tempoBlockHash() ===");
-    let hash_calldata = tempoBlockHashCall {}.abi_encode();
-    let hash_result =
-        evm.transact_system_call(sequencer, TEMPO_STATE_ADDRESS, Bytes::from(hash_calldata));
-    match &hash_result {
-        Ok(result) => {
-            let gas_used = result.result.tx_gas_used();
-            match &result.result {
-                ExecutionResult::Success { output, .. } => {
-                    if let Output::Call(data) = output {
-                        println!("tempoBlockHash() returned: {data}");
-                    }
-                    println!("tempoBlockHash() gas_used: {gas_used}");
-                }
-                ExecutionResult::Revert { output, .. } => {
-                    println!("tempoBlockHash() REVERTED: {output}, gas_used: {gas_used}");
-                }
-                other => println!("tempoBlockHash() other: {other:?}"),
-            }
-        }
-        Err(e) => println!("tempoBlockHash() ERROR: {e:?}"),
-    }
-
-    // ---------------------------------------------------------------
-    // Step 2: Call advanceTempo with a minimal next header
-    // ---------------------------------------------------------------
-    // Verify contracts have code
-    {
-        let inbox_code = evm
-            .db_mut()
-            .cache
-            .accounts
-            .get(&ZONE_INBOX_ADDRESS)
-            .and_then(|a| a.info.code.as_ref())
-            .map(|c| c.len())
-            .unwrap_or(0);
-        let tempostate_code = evm
-            .db_mut()
-            .cache
-            .accounts
-            .get(&TEMPO_STATE_ADDRESS)
-            .and_then(|a| a.info.code.as_ref())
-            .map(|c| c.len())
-            .unwrap_or(0);
-        println!("ZoneInbox code size: {inbox_code}");
-        println!("TempoState code size: {tempostate_code}");
-    }
-
-    // ---------------------------------------------------------------
-    // Step 2.5: Call finalizeTempo directly on TempoState to isolate
-    // ---------------------------------------------------------------
-    println!("\n=== Building child header ===");
-
-    // Build a "next" header that's a child of the genesis.
-    // finalizeTempo requires: tempoParentHash == prev tempoBlockHash, tempoBlockNumber == prev + 1
-    let genesis_hash = {
-        use alloy_rlp::Encodable;
-        let genesis = tempo_primitives::TempoHeader::default();
-        let mut buf = Vec::new();
-        genesis.encode(&mut buf);
-        alloy_primitives::keccak256(&buf)
-    };
-    println!("Genesis hash (computed): {genesis_hash}");
-
-    let next_header = tempo_primitives::TempoHeader {
-        inner: alloy_consensus::Header {
-            number: 1,
-            parent_hash: genesis_hash,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let next_header_rlp = {
-        use alloy_rlp::Encodable;
-        let mut buf = Vec::new();
-        next_header.encode(&mut buf);
-        buf
-    };
-    println!("Next header RLP length: {}", next_header_rlp.len());
-    println!("Next header block number: {}", next_header.inner.number);
-    println!("Next header parent hash: {}", next_header.inner.parent_hash);
-
-    // NOTE: finalizeTempo() tested separately and works (86729 gas).
-    // Skip calling it directly here to avoid corrupting state for the advanceTempo call.
-
-    println!("\n=== Calling ZoneInbox.advanceTempo() ===");
-
-    let advance_calldata = advanceTempoCall {
-        header: Bytes::from(next_header_rlp),
-        deposits: vec![],
-        decryptions: vec![],
-        enabledTokens: vec![],
-    }
-    .abi_encode();
-
-    println!(
-        "advanceTempo calldata length: {} bytes",
-        advance_calldata.len()
-    );
-    println!(
-        "advanceTempo selector: 0x{}",
-        const_hex::encode(&advance_calldata[..4])
-    );
-
-    let advance_result =
-        evm.transact_system_call(sequencer, ZONE_INBOX_ADDRESS, Bytes::from(advance_calldata));
-    match &advance_result {
-        Ok(result) => {
-            let gas_used = result.result.tx_gas_used();
-            match &result.result {
-                ExecutionResult::Success { output, .. } => {
-                    if let Output::Call(data) = output {
-                        println!("advanceTempo() SUCCESS, output: {data}");
-                    }
-                    println!("advanceTempo() gas_used: {gas_used}");
-                }
-                ExecutionResult::Revert { output, .. } => {
-                    println!("advanceTempo() REVERTED: {output}");
-                    println!("advanceTempo() gas_used: {gas_used}");
-                    if output.len() >= 4 {
-                        let sel = &output[..4];
-                        println!("  error selector: 0x{}", const_hex::encode(sel));
-                        if sel == [0x08, 0xc3, 0x79, 0xa0]
-                            && output.len() > 4
-                            && let Ok(msg) = <alloy_sol_types::sol_data::String as alloy_sol_types::SolType>::abi_decode(&output[4..])
-                        {
-                            println!("  Error message: {msg}");
-                        }
-                    }
-                }
-                ExecutionResult::Halt { reason, .. } => {
-                    println!("advanceTempo() HALTED: {reason:?}");
-                    println!("advanceTempo() gas_used: {gas_used}");
-                }
-            }
-        }
-        Err(e) => println!("advanceTempo() ERROR: {e:?}"),
-    }
-
-    // The test should not panic; we want to see the output
-    println!("\n=== Test complete ===");
 }
 
 /// Pins the Rust portal storage-slot constants to the ZonePortal storage layout.
