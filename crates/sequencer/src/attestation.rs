@@ -168,15 +168,87 @@ impl AttestationStore {
         (inserted, signature_count)
     }
 
-    /// Wait until any statement at `height` has at least `quorum` distinct signatures. If there aren't
-    /// enough to meet quorum, the zone blocks will stall, this is intentional.
-    pub async fn wait_for_settlement(&self, height: u64, quorum: usize) -> SettlementCertificate {
-        loop {
-            let notified = self.settlement_changed.notified();
-            if let Some(certificate) = self.settlement_at(height, quorum) {
-                return certificate;
-            }
-            notified.await;
+    /// Check that a follower signature belongs to an active leader proposal and is new.
+    pub fn precheck_follower_settlement(
+        &self,
+        height: u64,
+        digest: B256,
+        leader: Address,
+        follower: Address,
+    ) -> eyre::Result<()> {
+        let all = self
+            .settlements
+            .read()
+            .expect("attestation store lock poisoned");
+        let signatures = all
+            .get(&height)
+            .and_then(|by_digest| by_digest.get(&digest))
+            .filter(|signatures| signatures.contains_key(&leader))
+            .ok_or_else(|| eyre::eyre!("settlement response has no active leader proposal"))?;
+        eyre::ensure!(
+            !signatures.contains_key(&follower),
+            "settlement response signer is already stored"
+        );
+        Ok(())
+    }
+
+    /// Insert a new follower signature only while its leader proposal remains active.
+    pub fn insert_follower_settlement(
+        &self,
+        domain: AttestationDomain,
+        leader: Address,
+        follower: Address,
+        signed: SignedSettlementAttestation,
+    ) -> eyre::Result<usize> {
+        let height = signed
+            .attestation
+            .zoneHeight
+            .try_into()
+            .expect("validated settlement zone height must fit in u64");
+        let digest = domain.settlement_digest(&signed.attestation);
+
+        let signature_count = {
+            let mut all = self
+                .settlements
+                .write()
+                .expect("attestation store lock poisoned");
+            let signatures = all
+                .get_mut(&height)
+                .and_then(|by_digest| by_digest.get_mut(&digest))
+                .filter(|signatures| signatures.contains_key(&leader))
+                .ok_or_else(|| eyre::eyre!("settlement response has no active leader proposal"))?;
+            eyre::ensure!(
+                !signatures.contains_key(&follower),
+                "settlement response signer is already stored"
+            );
+            signatures.insert(follower, signed);
+            signatures.len()
+        };
+
+        self.settlement_changed.notify_one();
+        Ok(signature_count)
+    }
+
+    /// Wait until any statement at `height` has at least `quorum` distinct signatures, or return
+    /// `None` when the leader generation is cancelled.
+    pub async fn wait_for_settlement(
+        &self,
+        height: u64,
+        quorum: usize,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> Option<SettlementCertificate> {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => None,
+            certificate = async {
+                loop {
+                    let notified = self.settlement_changed.notified();
+                    if let Some(certificate) = self.settlement_at(height, quorum) {
+                        break certificate;
+                    }
+                    notified.await;
+                }
+            } => Some(certificate),
         }
     }
 
@@ -244,7 +316,6 @@ impl AttestationStore {
 mod tests {
     use alloy_primitives::{Address, B256, U256, keccak256, uint};
     use alloy_signer_local::PrivateKeySigner;
-    use alloy_sol_types::{SolStruct as _, SolValue as _};
 
     use super::*;
 
@@ -389,7 +460,11 @@ mod tests {
 
         let waiting = {
             let store = store.clone();
-            tokio::spawn(async move { store.wait_for_settlement(10, 2).await })
+            tokio::spawn(async move {
+                store
+                    .wait_for_settlement(10, 2, &tokio_util::sync::CancellationToken::new())
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
@@ -399,7 +474,7 @@ mod tests {
             signer_b.address(),
             SignedSettlementAttestation::sign(attestation, domain(), &signer_b).unwrap(),
         );
-        let certificate = waiting.await.unwrap();
+        let certificate = waiting.await.unwrap().unwrap();
         assert_eq!(certificate.signatures.len(), 2);
 
         store.remove_submitted(10);

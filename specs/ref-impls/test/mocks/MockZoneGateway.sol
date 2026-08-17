@@ -56,13 +56,13 @@ contract MockZoneGateway is IWithdrawalReceiver {
     {
         IZonePortal portal = IZonePortal(sourcePortal);
         if (msg.sender != portal.messenger()) revert UnauthorizedMessenger();
-        if (portal.role(address(this)) != Role.CallbackGateway) {
+        if (!portal.hasRole(address(this), Role.CallbackGateway)) {
             revert UnregisteredGateway();
         }
 
         GatewayCallbackData memory callback = abi.decode(callbackData, (GatewayCallbackData));
         if (callback.outputToken != token) revert InvalidOutputToken();
-        if (portal.role(callback.tempoRefundRecipient) != Role.Account) {
+        if (!portal.hasRole(callback.tempoRefundRecipient, Role.Account)) {
             revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);
         }
         if (amount < callback.minOutputAmount) {

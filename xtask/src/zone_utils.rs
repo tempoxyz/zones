@@ -15,6 +15,33 @@ use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
 use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZonePortal};
 
+/// Write a file that may contain key material with owner-only permissions on Unix.
+///
+/// Permissions are restricted before truncating an existing file, so updating a
+/// legacy file with broader permissions does not expose its new contents.
+pub(crate) fn write_owner_only(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::{
+            fs::{OpenOptions, Permissions},
+            io::Write as _,
+            os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+        };
+
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).mode(0o600);
+        let mut file = options.open(path)?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(contents.as_ref())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// Shared Moderato ZoneFactory.
 ///
@@ -51,7 +78,7 @@ impl ZoneMetadata {
     }
 
     pub(crate) fn save(&self) -> eyre::Result<()> {
-        std::fs::write(
+        write_owner_only(
             &self.path,
             serde_json::to_string_pretty(&self.value).wrap_err("failed encoding zone.json")?,
         )
@@ -125,7 +152,7 @@ pub(crate) async fn fund_l1_wallet<P: Provider<TempoNetwork>>(
 
 /// Verifies that `resolved_admin` is the portal's on-chain admin.
 ///
-/// Portal governance calls (`enableToken`, deposit pause/resume) are `onlyAdmin`,
+/// Portal governance calls such as `enableToken` and portal unpause are admin-only,
 /// so a key resolved via the sequencer fallback only works on legacy zones where
 /// `admin == sequencer`. Checking against `portal.admin()` fails fast with a
 /// clear message instead of reverting on-chain with `NotAdmin`.

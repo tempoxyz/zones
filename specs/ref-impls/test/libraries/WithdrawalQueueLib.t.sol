@@ -3,9 +3,7 @@ pragma solidity ^0.8.13;
 
 import { Withdrawal } from "../../src/interfaces/IZone.sol";
 import {
-    EMPTY_SENTINEL,
     NO_QUEUE_INDEX,
-    WITHDRAWAL_QUEUE_CAPACITY,
     WithdrawalQueue,
     WithdrawalQueueLib
 } from "../../src/libraries/WithdrawalQueueLib.sol";
@@ -59,6 +57,8 @@ contract WithdrawalQueueHarness {
 /// @notice Direct tests for WithdrawalQueueLib functionality
 contract WithdrawalQueueLibTest is Test {
 
+    uint256 internal constant TEST_BATCH_COUNT = 100;
+
     WithdrawalQueueHarness internal harness;
 
     address public alice = address(0x200);
@@ -86,7 +86,7 @@ contract WithdrawalQueueLibTest is Test {
 
     function test_enqueue_singleBatch() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         uint256 assignedIndex = harness.enqueue(wHash);
 
@@ -127,15 +127,6 @@ contract WithdrawalQueueLibTest is Test {
         assertFalse(harness.hasWithdrawals());
     }
 
-    function test_enqueue_revertsForEmptySentinel() public {
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
-        harness.enqueue(EMPTY_SENTINEL);
-
-        assertEq(harness.head(), 0);
-        assertEq(harness.tail(), 0);
-        assertFalse(harness.hasWithdrawals());
-    }
-
     function test_enqueue_mixedEmptyAndNonEmpty() public {
         bytes32 h1 = keccak256("batch1");
         bytes32 h2 = keccak256("batch2");
@@ -158,39 +149,41 @@ contract WithdrawalQueueLibTest is Test {
         assertEq(harness.slots(1), h2);
     }
 
-    function test_enqueue_revertsWhenFull() public {
-        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+    function test_enqueue_isUnbounded() public {
+        for (uint256 i = 0; i < TEST_BATCH_COUNT; i++) {
             harness.enqueue(keccak256(abi.encode("b", i)));
         }
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
 
-        vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
-        harness.enqueue(keccak256("overflow"));
+        bytes32 nextHash = keccak256("next");
+        assertEq(harness.enqueue(nextHash), TEST_BATCH_COUNT);
+        assertEq(harness.slots(TEST_BATCH_COUNT), nextHash);
+        assertEq(harness.length(), TEST_BATCH_COUNT + 1);
     }
 
-    function test_enqueue_afterDequeueReuseSlots() public {
+    function test_enqueue_afterDequeueUsesNextLogicalIndex() public {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 h1 = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 h1 = keccak256(abi.encode(w1, bytes32(0)));
 
-        // Fill all slots
+        // Build a backlog.
         harness.enqueue(h1);
-        for (uint256 i = 1; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+        for (uint256 i = 1; i < TEST_BATCH_COUNT; i++) {
             harness.enqueue(keccak256(abi.encode("b", i)));
         }
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
 
         // Dequeue first to free a slot
         harness.dequeue(w1, bytes32(0));
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY - 1);
+        assertEq(harness.length(), TEST_BATCH_COUNT - 1);
+        assertEq(harness.slots(0), bytes32(0));
 
-        // Enqueue again — should succeed since we freed a slot
+        // Enqueue at the next logical index; cleared keys are not reused.
         bytes32 hNew = keccak256("new");
         uint256 assignedIndex = harness.enqueue(hNew);
-        assertEq(assignedIndex, WITHDRAWAL_QUEUE_CAPACITY);
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(assignedIndex, TEST_BATCH_COUNT);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
 
-        // hNew should be written to slots[tail % capacity] = slots[CAPACITY % CAPACITY] = slots[0]
-        assertEq(harness.slots(0), hNew);
+        assertEq(harness.slots(TEST_BATCH_COUNT), hNew);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -199,7 +192,7 @@ contract WithdrawalQueueLibTest is Test {
 
     function test_dequeue_singleWithdrawal() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         harness.enqueue(wHash);
 
@@ -207,7 +200,7 @@ contract WithdrawalQueueLibTest is Test {
 
         assertEq(harness.head(), 1);
         assertEq(harness.tail(), 1);
-        assertEq(harness.slots(0), EMPTY_SENTINEL);
+        assertEq(harness.slots(0), bytes32(0));
         assertFalse(harness.hasWithdrawals());
     }
 
@@ -215,8 +208,8 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        // Build queue: w1 outermost, w2 innermost (wraps EMPTY_SENTINEL)
-        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        // Build queue: w1 outermost, w2 innermost (terminates at zero)
+        bytes32 innerHash = keccak256(abi.encode(w2, bytes32(0)));
         bytes32 batchHash = keccak256(abi.encode(w1, innerHash));
 
         harness.enqueue(batchHash);
@@ -229,15 +222,15 @@ contract WithdrawalQueueLibTest is Test {
         // Dequeue w2
         harness.dequeue(w2, bytes32(0));
         assertEq(harness.head(), 1);
-        assertEq(harness.slots(0), EMPTY_SENTINEL);
+        assertEq(harness.slots(0), bytes32(0));
     }
 
     function test_dequeue_multipleSlots() public {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        bytes32 h1 = keccak256(abi.encode(w1, EMPTY_SENTINEL));
-        bytes32 h2 = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 h1 = keccak256(abi.encode(w1, bytes32(0)));
+        bytes32 h2 = keccak256(abi.encode(w2, bytes32(0)));
 
         harness.enqueue(h1);
         harness.enqueue(h2);
@@ -256,7 +249,7 @@ contract WithdrawalQueueLibTest is Test {
     function test_dequeue_revertsIfEmpty() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
 
-        vm.expectRevert(WithdrawalQueueLib.NoWithdrawalsInQueue.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w, bytes32(0));
     }
 
@@ -264,11 +257,11 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        bytes32 h1 = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 h1 = keccak256(abi.encode(w1, bytes32(0)));
         harness.enqueue(h1);
 
         // Try to dequeue w2 (wrong withdrawal)
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w2, bytes32(0));
     }
 
@@ -276,59 +269,47 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w1 = _makeWithdrawal(alice, bob, 100e6);
         Withdrawal memory w2 = _makeWithdrawal(bob, charlie, 200e6);
 
-        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 innerHash = keccak256(abi.encode(w2, bytes32(0)));
         bytes32 batchHash = keccak256(abi.encode(w1, innerHash));
 
         harness.enqueue(batchHash);
 
         // Try to dequeue with wrong remaining queue
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w1, keccak256("wrongHash"));
     }
 
-    function test_dequeue_revertsIfRemainingQueueIsEmptySentinel() public {
+    function test_dequeue_revertsIfCurrentSlotIsEmpty() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
-        harness.enqueue(wHash);
+        harness.setRawState(0, 1, 0, bytes32(0));
 
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
-        harness.dequeue(w, EMPTY_SENTINEL);
-
-        assertEq(harness.head(), 0);
-        assertEq(harness.slots(0), wHash);
-    }
-
-    function test_dequeue_revertsIfCurrentSlotIsEmptySentinel() public {
-        Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
-        harness.setRawState(0, 1, 0, EMPTY_SENTINEL);
-
-        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalProof.selector);
         harness.dequeue(w, bytes32(0));
 
         assertEq(harness.head(), 0);
-        assertEq(harness.slots(0), EMPTY_SENTINEL);
+        assertEq(harness.slots(0), bytes32(0));
     }
 
     /*//////////////////////////////////////////////////////////////
-                      REVERT WHEN FULL TESTS
+                         UNBOUNDED FIFO TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_enqueue_emptyTransitionSucceedsWhenFull() public {
-        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+    function test_enqueue_emptyTransitionDoesNotConsumeIndex() public {
+        for (uint256 i = 0; i < TEST_BATCH_COUNT; i++) {
             harness.enqueue(keccak256(abi.encode("b", i)));
         }
         assertEq(harness.head(), 0);
-        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.tail(), TEST_BATCH_COUNT);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
 
         harness.enqueue(bytes32(0));
 
         assertEq(harness.head(), 0);
-        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.tail(), TEST_BATCH_COUNT);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
     }
 
-    function test_ringBuffer_multiCycleWraparound() public {
+    function test_fifoLogicalIndicesDoNotWrap() public {
         Withdrawal[] memory ws = new Withdrawal[](4);
         ws[0] = _makeWithdrawal(alice, bob, 100e6);
         ws[1] = _makeWithdrawal(bob, charlie, 200e6);
@@ -337,75 +318,73 @@ contract WithdrawalQueueLibTest is Test {
 
         bytes32[] memory hs = new bytes32[](4);
         for (uint256 i = 0; i < 4; i++) {
-            hs[i] = keccak256(abi.encode(ws[i], EMPTY_SENTINEL));
+            hs[i] = keccak256(abi.encode(ws[i], bytes32(0)));
         }
 
-        // Fill to capacity
+        // Build a backlog and then advance the head.
         harness.enqueue(hs[0]);
         harness.enqueue(hs[1]);
-        for (uint256 i = 2; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+        for (uint256 i = 2; i < TEST_BATCH_COUNT; i++) {
             harness.enqueue(keccak256(abi.encode("fill", i)));
         }
         assertEq(harness.head(), 0);
-        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.tail(), TEST_BATCH_COUNT);
 
-        // Dequeue first (head=1), enqueue C (tail=CAPACITY, slot 0)
+        // Cleared keys stay empty and new entries use monotonically increasing keys.
         harness.dequeue(ws[0], bytes32(0));
         harness.enqueue(hs[2]);
         assertEq(harness.head(), 1);
-        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY + 1);
-        assertEq(harness.slots(0), hs[2]); // slot 0 reused
+        assertEq(harness.tail(), TEST_BATCH_COUNT + 1);
+        assertEq(harness.slots(0), bytes32(0));
+        assertEq(harness.slots(TEST_BATCH_COUNT), hs[2]);
 
-        // Dequeue second (head=2), enqueue D (tail=CAPACITY+1, slot 1)
         harness.dequeue(ws[1], bytes32(0));
         harness.enqueue(hs[3]);
         assertEq(harness.head(), 2);
-        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY + 2);
-        assertEq(harness.slots(1), hs[3]); // slot 1 reused
+        assertEq(harness.tail(), TEST_BATCH_COUNT + 2);
+        assertEq(harness.slots(1), bytes32(0));
+        assertEq(harness.slots(TEST_BATCH_COUNT + 1), hs[3]);
 
-        // Verify wrapping worked by checking slot contents
-        assertEq(harness.slots(0), hs[2]);
-        assertEq(harness.slots(1), hs[3]);
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
     }
 
-    /// @notice A full queue dequeues every withdrawal in FIFO order and empties.
-    function test_enqueueDequeue_fullCapacityInFifoOrder() public {
-        Withdrawal[] memory withdrawals = new Withdrawal[](WITHDRAWAL_QUEUE_CAPACITY);
+    /// @notice A large queue dequeues every withdrawal in FIFO order and empties.
+    function test_enqueueDequeue_largeBacklogInFifoOrder() public {
+        Withdrawal[] memory withdrawals = new Withdrawal[](TEST_BATCH_COUNT);
 
-        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+        for (uint256 i = 0; i < TEST_BATCH_COUNT; i++) {
             withdrawals[i] = _makeWithdrawal(alice, bob, uint128(i + 1));
-            harness.enqueue(keccak256(abi.encode(withdrawals[i], EMPTY_SENTINEL)));
+            harness.enqueue(keccak256(abi.encode(withdrawals[i], bytes32(0))));
             assertEq(harness.length(), i + 1);
         }
 
-        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.length(), TEST_BATCH_COUNT);
 
-        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+        for (uint256 i = 0; i < TEST_BATCH_COUNT; i++) {
             harness.dequeue(withdrawals[i], bytes32(0));
-            assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY - i - 1);
+            assertEq(harness.length(), TEST_BATCH_COUNT - i - 1);
         }
 
         assertFalse(harness.hasWithdrawals());
-        assertEq(harness.head(), WITHDRAWAL_QUEUE_CAPACITY);
-        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.head(), TEST_BATCH_COUNT);
+        assertEq(harness.tail(), TEST_BATCH_COUNT);
     }
 
-    /// @notice Dequeuing the last item marks the exhausted slot empty.
-    function test_dequeue_setsEmptySentinelWhenSlotExhausted() public {
+    /// @notice Dequeuing the last item clears the exhausted slot.
+    function test_dequeue_clearsSlotWhenExhausted() public {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
 
-        harness.enqueue(keccak256(abi.encode(w, EMPTY_SENTINEL)));
+        harness.enqueue(keccak256(abi.encode(w, bytes32(0))));
         harness.dequeue(w, bytes32(0));
 
-        assertEq(harness.slots(0), EMPTY_SENTINEL);
+        assertEq(harness.slots(0), bytes32(0));
         assertEq(harness.head(), 1);
         assertEq(harness.length(), 0);
     }
 
     /// @notice Fuzzed enqueues and dequeues preserve FIFO position and length.
     function testFuzz_enqueueDequeue_preservesFifoAndLength(bytes32 seed) public {
-        uint256 count = (uint256(seed) % WITHDRAWAL_QUEUE_CAPACITY) + 1;
+        uint256 count = (uint256(seed) % TEST_BATCH_COUNT) + 1;
         Withdrawal[] memory withdrawals = new Withdrawal[](count);
 
         for (uint256 i = 0; i < count; i++) {
@@ -416,7 +395,7 @@ contract WithdrawalQueueLibTest is Test {
                 address(uint160(uint256(keccak256(abi.encode(seed, "to", i))))),
                 amount
             );
-            harness.enqueue(keccak256(abi.encode(withdrawals[i], EMPTY_SENTINEL)));
+            harness.enqueue(keccak256(abi.encode(withdrawals[i], bytes32(0))));
             assertEq(harness.length(), i + 1);
         }
 

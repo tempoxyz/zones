@@ -89,6 +89,7 @@ ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/neobank-e2e}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-e2e.json}"
 ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUTPUT/scenario.rendered.yml}"
+ZONES_BENCH_SPF_RANGE="${ZONES_BENCH_SPF_RANGE:-target/zones-benchmark/spf-range.env}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
@@ -679,6 +680,9 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
 esac
 
+private_flow_parent_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+[[ "$private_flow_parent_block" =~ ^[0-9]+$ ]] ||
+    die "could not read the Zone head before the measured private flow"
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
@@ -687,6 +691,16 @@ build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$sample_instances" "${scenario_report_args[@]}"
 stage_end private_flow
+private_flow_tip_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+[[ "$private_flow_tip_block" =~ ^[0-9]+$ ]] ||
+    die "could not read the Zone head after the measured private flow"
+(( 10#$private_flow_tip_block > 10#$private_flow_parent_block )) ||
+    die "the measured private flow produced no Zone blocks"
+mkdir -p "$(dirname "$ZONES_BENCH_SPF_RANGE")"
+{
+    printf 'ZONES_BENCH_SPF_FROM_BLOCK=%s\n' "$((10#$private_flow_parent_block + 1))"
+    printf 'ZONES_BENCH_SPF_TO_BLOCK=%s\n' "$((10#$private_flow_tip_block))"
+} >"$ZONES_BENCH_SPF_RANGE"
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
     stage_start slippage_postcondition

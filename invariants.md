@@ -29,7 +29,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-ADMIN-NONZERO` | Portal `admin != address(0)` for every zone | 🟡 | Token governance can become permanently unavailable |
 | `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can govern tokens and access modes or set `zoneGasRate`, `maxTempoGasRate`, and `bouncebackGas` | 🟡 | A sequencer or user can enable malicious assets, reopen paused deposits, alter access policy, or exceed governance fee bounds |
-| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set `tempoGasRate`, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
+| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only a registered sequencer can set `tempoGasRate`, set RPC URL, submit batches, and process withdrawals; the portal admin or a registered sequencer can set encryption keys | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
 | `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `maxTempoGasRate` never exceed `MAX_GAS_FEE_RATE`, and `tempoGasRate` never exceeds the finalized `maxTempoGasRate` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
 
 ### Token Registry and Supply
@@ -37,6 +37,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-TOKEN-ENABLEMENT-APPEND-ONLY` | Once enabled, a token remains enabled and remains in the append-only enabled token list | 🔴 | Withdrawals can be disabled after deposits, breaking the non-custodial bridge guarantee |
+| `TEMPO-ZONE-TOKEN-ENABLEMENT-BINDING` | Every non-genesis `advanceTempo` hashes the exact ordered token-address and metadata delta from `ZoneInbox.processedTokenEnablementHash`, requires equality with `ZonePortal.tokenEnablementHash` at the final imported Tempo state, and initializes all entries before processing deposits | 🔴 | A sequencer can omit or alter an irreversible enablement, causing enabled-token deposits to bounce permanently and locking the asset out of the zone |
 | `TEMPO-ZONE-TOKEN-DEPOSIT-PAUSE-ONLY` | Pausing a token only disables new deposits; withdrawals for enabled tokens remain requestable and processable | 🔴 | Admin can lock users inside the zone by pausing deposits |
 | `TEMPO-ZONE-MESSENGER-AUTH` | The shared messenger only relays when `msg.sender == ZoneFactory.zones(zoneId).portal` | 🟡 | A caller can spoof a source zone or invoke receiver callbacks outside the portal-controlled withdrawal path |
 | `TEMPO-ZONE-SUPPLY-SOLVENCY` | For each token, zone-side total supply equals accepted deposits plus withdrawal bounce-backs minus requested withdrawals minus deposit bounce-backs | 🔴 | The zone can mint unbacked tokens or burn user funds without matching L1 release |
@@ -83,7 +84,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-ENCRYPTED-SENDER-SHAPE` | If `revealTo` is set, `encryptedSender` is present and exactly 113 bytes; otherwise it is empty | 🟢 | Selective reveal consumers cannot authenticate sender metadata reliably |
 | `TEMPO-ZONE-WITHDRAWAL-BATCH-INDEX` | `finalizeWithdrawalBatch` advances `withdrawalBatchIndex` exactly once per submitted batch, including zero-withdrawal batches | 🔴 | Sequencer can omit or replay batches containing withdrawals |
 | `TEMPO-ZONE-WITHDRAWAL-HASH-LIFO-FIFO` | Outbox builds each withdrawal hash chain LIFO so the portal processes user withdrawals FIFO | 🔴 | Withdrawal order can be reversed, skipped, or duplicated |
-| `TEMPO-ZONE-WITHDRAWAL-QUEUE-RING` | Portal withdrawal queue satisfies `tail >= head`, `tail - head <= WITHDRAWAL_QUEUE_CAPACITY`, and empty slots equal `EMPTY_SENTINEL` | 🔴 | Queue overflow or stale slot reuse can lose or replay withdrawals |
+| `TEMPO-ZONE-WITHDRAWAL-QUEUE-FIFO` | Portal withdrawal queue uses monotonically increasing logical indices with `tail >= head`; slots in `[head, tail)` contain non-zero hash chains, consumed slots are cleared to zero, and backlog size cannot block batch submission | 🔴 | Queue capacity or stale entries can block batch submission, lose withdrawals, or permit replay |
 | `TEMPO-ZONE-WITHDRAWAL-DEQUEUE-AUTH` | `processWithdrawals` only dequeues when `keccak256(abi.encode(withdrawal, remainingQueue))` matches the current head slot | 🔴 | Sequencer can process arbitrary withdrawals or steal portal escrow |
 | `TEMPO-ZONE-WITHDRAWAL-POP-ONCE` | Each processed withdrawal is popped exactly once, whether transfer/callback succeeds or bounces back | 🔴 | Failed withdrawals can block the queue or successful withdrawals can be replayed |
 | `TEMPO-ZONE-WITHDRAWAL-FAIL-BOUNCEBACK` | Any failed user-facing transfer or callback enqueues exactly one withdrawal bounce-back deposit for `amount`, excluding fee | 🔴 | Failed withdrawals can lose funds or duplicate refunds |
@@ -122,8 +123,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-ADVANCE-TEMPO-FIRST` | When present, `advanceTempo` is the first transaction in a zone block | 🟡 | User transactions can execute against the wrong Tempo binding or stale config |
 | `TEMPO-ZONE-CONTRACT-CREATION-DISABLED` | User `CREATE` and `CREATE2` always revert on zones | 🟡 | Users can deploy contracts that bypass privacy and system-token assumptions |
-| `TEMPO-ZONE-BALANCE-ALLOWANCE-PRIVACY` | `balanceOf` and `allowance` reveal values only to authorized callers or the sequencer | 🟡 | Account balances and approvals leak through token precompiles |
-| `TEMPO-ZONE-ACCOUNT-GETTER-PRIVACY` | Account-indexed `NonceManager` and `AccountKeychain` getters reveal values only when their immediate caller owns the queried account or is an active sequencer | 🟡 | Forwarding contracts or ordinary users can expose another account's nonce activity, keys, limits, call scopes, or authorization metadata |
+| `TEMPO-ZONE-BALANCE-ALLOWANCE-PRIVACY` | `balanceOf(account)` reveals values only to `account`; `allowance(owner, spender)` reveals values only to `owner` or `spender` | 🟡 | Account balances and approvals leak through token precompiles |
+| `TEMPO-ZONE-ACCOUNT-GETTER-PRIVACY` | Account-indexed `NonceManager` and `AccountKeychain` getters reveal values only when their immediate caller owns the queried account | 🟡 | Forwarding contracts or ordinary users can expose another account's nonce activity, keys, limits, call scopes, or authorization metadata |
 | `TEMPO-ZONE-REFUND-READ-PRIVACY` | `ZoneInbox.refunds(token, owner)` reveals a value only when its immediate caller is `owner` or an active sequencer | 🟡 | Forwarding contracts can expose another account's pending refund balance |
 | `TEMPO-ZONE-FIXED-TOKEN-GAS` | TIP-20 transfer and approve operations charge fixed gas independent of account storage layout | 🟢 | Gas timing leaks whether addresses have prior token activity |
 | `TEMPO-ZONE-BLOCK-TIMESTAMP-MONOTONIC` | Zone block timestamps are non-decreasing and block numbers increment by one | 🟢 | Time-dependent application logic and proof replay assumptions can break |

@@ -16,8 +16,7 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
-    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal as IZonePortal,
-    ZonePortalError,
+    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal::Role, ZonePortalError,
 };
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -29,7 +28,8 @@ use crate::{
     storage::{L1State, L1StorageReader},
 };
 
-const MAX_CALLBACK_DATA_SIZE: usize = 1024;
+/// Maximum callback payload accepted by the Zone Outbox.
+pub const MAX_CALLBACK_DATA_SIZE: usize = 1024;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
 
 /// Returns whether `calldata` is a canonical `finalizeWithdrawalBatch` call.
@@ -66,7 +66,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        if caller != Address::ZERO && !l1.read_portal(|portal| &portal.is_sequencer[caller])? {
+        if caller != Address::ZERO && !l1.has_portal_role(caller, Role::Sequencer)? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -83,6 +83,11 @@ impl ZoneOutbox {
             return Err(ZonePortalError::token_not_enabled().into());
         }
 
+        let pause_expiry = l1.read_portal(|portal| &portal.pause_expiry)?;
+        if self.storage.timestamp().to::<u64>() < pause_expiry {
+            return Err(ZonePortalError::portal_is_paused().into());
+        }
+
         let access_enforced = l1.read_portal(|portal| &portal.is_access_enforced)?;
         let gateway_enforced = l1.read_portal(|portal| &portal.is_gateway_enforced)?;
 
@@ -91,17 +96,13 @@ impl ZoneOutbox {
                 return Ok(());
             }
 
-            let role = l1.read_portal(|portal| &portal.role[to])?;
-            if gateway_enforced && role == IZonePortal::Role::CallbackGateway as u8 {
+            if gateway_enforced && l1.has_portal_role(to, Role::CallbackGateway)? {
                 return Err(ZonePortalError::invalid_callback_target().into());
             }
-            if access_enforced && role != IZonePortal::Role::Account as u8 {
+            if access_enforced && !l1.has_portal_role(to, Role::Account)? {
                 return Err(ZonePortalError::account_not_allowed(to).into());
             }
-        } else if gateway_enforced
-            && l1.read_portal(|portal| &portal.role[to])?
-                != IZonePortal::Role::CallbackGateway as u8
-        {
+        } else if gateway_enforced && !l1.has_portal_role(to, Role::CallbackGateway)? {
             return Err(ZonePortalError::invalid_callback_target().into());
         }
 
@@ -313,7 +314,6 @@ impl ZoneOutbox {
 
         let mut withdrawal_queue_hash = B256::ZERO;
         if count > 0 {
-            withdrawal_queue_hash = zone_primitives::constants::EMPTY_SENTINEL;
             for (index, encrypted_sender) in call.encryptedSenders.into_iter().enumerate().rev() {
                 let pending = self.pending_withdrawals[index].read()?;
                 let withdrawal = pending.into_withdrawal(encrypted_sender)?;
@@ -395,7 +395,8 @@ impl ZoneOutbox {
         Ok(pending)
     }
 
-    fn last_batch(&self) -> TempoResult<IZoneOutbox::LastBatch> {
+    /// Returns the last finalized withdrawal batch from Zone state.
+    pub fn last_batch(&self) -> TempoResult<IZoneOutbox::LastBatch> {
         Ok(IZoneOutbox::LastBatch {
             withdrawalQueueHash: self.withdrawal_queue_hash.read()?,
             withdrawalBatchIndex: self.withdrawal_batch_index.read()?,

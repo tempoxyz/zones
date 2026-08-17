@@ -20,22 +20,32 @@ env:
 jobs:
   build-test-artifacts:
     name: build test artifacts
+    # Keep private-copy PR validation while avoiding a full test run for every
+    # hourly mirror update to its main branch.
+    if: github.repository == 'tempoxyz/zones' || github.event_name != 'push'
     runs-on: depot-ubuntu-latest-16
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Mint read-only Earn token
+        id: earn-token
+        uses: tempoxyz/gh-actions/actions/github-sts@183a02178c660ce295e9a262edc5857cb7135f06 # main
+        with:
+          scope: tempoxyz/earn
+          policy: zones-read
       - name: Check out Earn contracts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
           ref: main
           path: earn
-          ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
+          token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
           submodules: true
       - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
@@ -94,7 +104,7 @@ jobs:
           compression-level: 0
 
   test:
-    name: test (${{ matrix.partition }}/2)
+    name: test (${{ matrix.partition }}/4)
     runs-on: depot-ubuntu-latest-16
     needs: build-test-artifacts
     timeout-minutes: 20
@@ -103,7 +113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2]
+        partition: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -130,12 +140,14 @@ jobs:
             --archive-file nextest-archive.tar.zst \
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile ci \
-            --partition hash:${{ matrix.partition }}/2
+            --partition hash:${{ matrix.partition }}/4
 
   test-success:
     name: test success
     runs-on: ubuntu-latest
-    if: always()
+    if: >-
+      always() &&
+      (github.repository == 'tempoxyz/zones' || github.event_name != 'push')
     permissions: {}
     needs:
       - build-test-artifacts

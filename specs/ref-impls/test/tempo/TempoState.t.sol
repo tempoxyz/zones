@@ -4,7 +4,6 @@ pragma solidity ^0.8.13;
 import { ITempoState, ZONE_INBOX } from "../../src/interfaces/IZone.sol";
 import { TempoState } from "../../src/tempo/TempoState.sol";
 import { Test, stdJson } from "forge-std/Test.sol";
-import { Vm } from "forge-std/Vm.sol";
 
 contract TempoStateRlpHarness is TempoState {
 
@@ -58,11 +57,6 @@ contract TempoStateTest is Test {
 
         tempoState = new TempoState(genesisHeader);
         rlpHarness = new TempoStateRlpHarness(genesisHeader);
-    }
-
-    function _singleHeader(bytes memory header) internal pure returns (bytes[] memory headers) {
-        headers = new bytes[](1);
-        headers[0] = header;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -120,7 +114,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(zoneInbox);
-        tempoState.finalizeTempo(_singleHeader(header));
+        tempoState.finalizeTempo(header);
 
         // Verify state was updated
         assertEq(tempoState.tempoBlockHash(), keccak256(header));
@@ -139,7 +133,12 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
+        vm.prank(zoneInbox);
+        tempoState.finalizeTempo(header1);
+
         bytes32 block101Hash = keccak256(header1);
+        assertEq(tempoState.tempoBlockHash(), block101Hash);
+        assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 1);
 
         // Finalize block 102
         bytes memory header2 = _buildTempoHeader(
@@ -152,31 +151,12 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 24
         );
 
-        bytes[] memory headers = new bytes[](2);
-        headers[0] = header1;
-        headers[1] = header2;
-
-        vm.recordLogs();
         vm.prank(zoneInbox);
-        tempoState.finalizeTempo(headers);
+        tempoState.finalizeTempo(header2);
 
         bytes32 block102Hash = keccak256(header2);
         assertEq(tempoState.tempoBlockHash(), block102Hash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 2);
-
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 1, "multi-header finalization must emit one event");
-        assertEq(logs[0].emitter, address(tempoState));
-        assertEq(logs[0].topics[0], keccak256("TempoBlockFinalized(bytes32,uint64,bytes32)"));
-        assertEq(logs[0].topics[1], block102Hash);
-        assertEq(logs[0].topics[2], bytes32(uint256(GENESIS_BLOCK_NUMBER + 2)));
-        assertEq(logs[0].data, abi.encode(keccak256("stateRoot2")));
-    }
-
-    function test_finalizeTempo_revertsOnEmptyHeaders() public {
-        vm.prank(zoneInbox);
-        vm.expectRevert(ITempoState.InvalidRlpData.selector);
-        tempoState.finalizeTempo(new bytes[](0));
     }
 
     function test_finalizeTempo_revertsOnInvalidParentHash() public {
@@ -192,7 +172,7 @@ contract TempoStateTest is Test {
 
         vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidParentHash.selector);
-        tempoState.finalizeTempo(_singleHeader(header));
+        tempoState.finalizeTempo(header);
     }
 
     function test_finalizeTempo_revertsOnInvalidBlockNumber() public {
@@ -208,7 +188,7 @@ contract TempoStateTest is Test {
 
         vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
-        tempoState.finalizeTempo(_singleHeader(header));
+        tempoState.finalizeTempo(header);
     }
 
     function test_finalizeTempo_revertsOnSkippedBlockNumber() public {
@@ -224,7 +204,7 @@ contract TempoStateTest is Test {
 
         vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
-        tempoState.finalizeTempo(_singleHeader(header));
+        tempoState.finalizeTempo(header);
     }
 
     function test_finalizeTempo_revertsIfNotZoneInbox() public {
@@ -240,7 +220,7 @@ contract TempoStateTest is Test {
 
         vm.prank(notZoneInbox);
         vm.expectRevert(ITempoState.OnlyZoneInbox.selector);
-        tempoState.finalizeTempo(_singleHeader(header));
+        tempoState.finalizeTempo(header);
     }
 
     function test_finalizeTempo_emitsEvent() public {
@@ -260,7 +240,7 @@ contract TempoStateTest is Test {
         emit ITempoState.TempoBlockFinalized(
             keccak256(header), GENESIS_BLOCK_NUMBER + 1, newStateRoot
         );
-        tempoState.finalizeTempo(_singleHeader(header));
+        tempoState.finalizeTempo(header);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -493,7 +473,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(zoneInbox);
-        tempoState.finalizeTempo(_singleHeader(header1));
+        tempoState.finalizeTempo(header1);
 
         bytes memory header2 = _buildTempoHeader(
             genesisBlockHash,
@@ -507,7 +487,7 @@ contract TempoStateTest is Test {
 
         vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidParentHash.selector);
-        tempoState.finalizeTempo(_singleHeader(header2));
+        tempoState.finalizeTempo(header2);
     }
 
     /// @notice Finalization rejects a later header with a skipped block number.
@@ -523,7 +503,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(zoneInbox);
-        tempoState.finalizeTempo(_singleHeader(header1));
+        tempoState.finalizeTempo(header1);
 
         bytes memory header2 = _buildTempoHeader(
             keccak256(header1),
@@ -537,14 +517,14 @@ contract TempoStateTest is Test {
 
         vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
-        tempoState.finalizeTempo(_singleHeader(header2));
+        tempoState.finalizeTempo(header2);
     }
 
     /// @notice Access control is enforced before malformed header decoding.
     function test_finalizeTempo_revertsOnAccessControlBeforeDecodingHeader() public {
         vm.prank(notZoneInbox);
         vm.expectRevert(ITempoState.OnlyZoneInbox.selector);
-        tempoState.finalizeTempo(_singleHeader(hex"01"));
+        tempoState.finalizeTempo(hex"01");
     }
 
 }

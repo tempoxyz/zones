@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock};
+use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 
 use crate::{
     ZoneSequencerProvider,
@@ -46,9 +46,35 @@ use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_primitives::{Block, TempoReceipt};
+use tokio_util::sync;
 use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
+
+#[derive(Debug)]
+pub enum BatchSubmitError {
+    Cancelled,
+    PortalAdvanced,
+    Other(eyre::Report),
+}
+
+impl From<eyre::Report> for BatchSubmitError {
+    fn from(error: eyre::Report) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl fmt::Display for BatchSubmitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
+            Self::PortalAdvanced => {
+                formatter.write_str("portal advanced while waiting for settlement quorum")
+            }
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
 
 /// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
 const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
@@ -57,14 +83,25 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
+/// How often a quorum wait rechecks whether another leader has advanced the portal.
+const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
 /// map overhead while covering more than the current Zone E recovery gap.
 const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
-/// Maximum number of pending withdrawal queue slots in the portal ring buffer.
-pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
+/// Bounded gas for one `submitBatch` call when gas estimation is unavailable.
+///
+/// Estimation against state N cannot see hash(N) in EIP-2935, but a transaction submitted after
+/// observing N can only execute in N+1 or later, where that hash is available. Eight certificate
+/// signatures still fit comfortably within this limit.
+const SUBMIT_BATCH_GAS_LIMIT: u64 = 2_000_000;
+
+/// Maximum number of pending withdrawal slots reconstructed in one recovery page.
+/// Bounds L1 topic filters and temporary withdrawal data without limiting the on-chain FIFO.
+pub(crate) const WITHDRAWAL_RECOVERY_PAGE_SIZE: u64 = 100;
 
 /// Maximum block span for one bounded log query.
 ///
@@ -282,7 +319,8 @@ impl BatchSubmitter {
     /// `verifierConfig` and `proof` are empty until real proof generation is
     /// implemented.
     ///
-    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt.
+    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
+    /// settlement quorum is cancelled when the leader generation shuts down.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
@@ -292,7 +330,11 @@ impl BatchSubmitter {
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
         withdrawal_batch_index = batch.withdrawal_batch_index,
     ))]
-    pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
+    pub async fn submit_batch(
+        &self,
+        batch: &BatchData,
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -318,9 +360,15 @@ impl BatchSubmitter {
                     zone_height = batch.zone_height,
                     threshold, "Waiting for settlement quorum"
                 );
-                let certificate = store
-                    .wait_for_settlement(batch.zone_height, threshold)
-                    .await;
+                let certificate = self
+                    .wait_for_settlement_or_portal_progress(
+                        store,
+                        batch.zone_height,
+                        threshold,
+                        batch.prev_block_hash,
+                        shutdown,
+                    )
+                    .await?;
                 let anchor_mode = match self
                     .validate_certificate(batch, batch.zone_height, metadata, &certificate)
                     .await
@@ -328,10 +376,14 @@ impl BatchSubmitter {
                     Ok(anchor_mode) => anchor_mode,
                     Err(err) => {
                         store.remove_settlement(batch.zone_height, certificate.digest);
-                        return Err(err);
+                        return Err(err.into());
                     }
                 };
-                let current_l1_block = self.l1_provider.get_block_number().await?;
+                let current_l1_block = self
+                    .l1_provider
+                    .get_block_number()
+                    .await
+                    .map_err(|error| BatchSubmitError::Other(error.into()))?;
                 (Some(certificate), anchor_mode, current_l1_block)
             } else {
                 let (anchor_mode, current_l1_block) =
@@ -339,6 +391,10 @@ impl BatchSubmitter {
                 (None, anchor_mode, current_l1_block)
             };
         let recent_tempo_block_number = anchor_mode.recent_block_number();
+        // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
+        // cannot land before N+1, so anchoring to the current tip is valid at execution time.
+        let anchors_to_current_tip =
+            anchor_mode.anchor_block_number(batch.tempo_block_number) == current_l1_block;
 
         let signatures = if let Some(certificate) = &certificate {
             certificate.signatures.clone()
@@ -348,17 +404,20 @@ impl BatchSubmitter {
             let anchor_block_hash = self
                 .l1_provider
                 .get_block_by_number(anchor_block_number.into())
-                .await?
+                .await
+                .map_err(|error| BatchSubmitError::Other(error.into()))?
                 .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
                 .header
                 .hash;
             let signer = signer
                 .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
-            eyre::ensure!(
-                metadata.signer_is_sequencer,
-                "local sequencer signer {} is not active in the portal sequencer set",
-                signer.address()
-            );
+            if !metadata.signer_is_sequencer {
+                return Err(eyre::eyre!(
+                    "local sequencer signer {} is not active in the portal sequencer set",
+                    signer.address()
+                )
+                .into());
+            }
             vec![self.sign_settlement_attestation(
                 signer,
                 metadata,
@@ -382,46 +441,54 @@ impl BatchSubmitter {
         let nonce = self
             .l1_provider
             .get_transaction_count_with_nonce_key(submission_address, SUBMIT_BATCH_NONCE_KEY)
-            .await?;
+            .await
+            .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         info!(
             anchor_mode = %anchor_mode,
             recent_tempo_block_number,
             current_l1_block,
+            anchors_to_current_tip,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
             nonce,
             "Submitting batch to ZonePortal on L1"
         );
 
-        let receipt = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            self.portal
-                .submitBatch(
-                    batch.tempo_block_number,
-                    recent_tempo_block_number,
-                    block_transition,
-                    deposit_transition,
-                    batch.withdrawal_queue_hash,
-                    verifier_config,
-                    Bytes::new(),
-                    U256::from(batch.zone_height),
-                    signatures,
-                )
-                .nonce_key(SUBMIT_BATCH_NONCE_KEY)
-                .nonce(nonce)
-                .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
-                .max_priority_fee_per_gas(0)
-                .send_sync(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))??;
+        let mut submission = self
+            .portal
+            .submitBatch(
+                batch.tempo_block_number,
+                recent_tempo_block_number,
+                block_transition,
+                deposit_transition,
+                batch.withdrawal_queue_hash,
+                verifier_config,
+                Bytes::new(),
+                U256::from(batch.zone_height),
+                signatures,
+            )
+            .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+            .nonce(nonce)
+            .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+            .max_priority_fee_per_gas(0);
+        // Estimation against state N cannot see hash(N), although execution in N+1 can. If this
+        // send does not settle, a retry after the head advances uses normal estimation.
+        if anchors_to_current_tip {
+            submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+        }
+
+        let receipt =
+            tokio::time::timeout(std::time::Duration::from_secs(30), submission.send_sync())
+                .await
+                .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))?
+                .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
-            return Err(eyre::eyre!(
-                "submitBatch tx {tx_hash} was included but reverted on L1"
-            ));
+            return Err(
+                eyre::eyre!("submitBatch tx {tx_hash} was included but reverted on L1").into(),
+            );
         }
 
         let event = self.decode_batch_submitted(receipt.logs())?;
@@ -438,6 +505,42 @@ impl BatchSubmitter {
         );
 
         Ok(event)
+    }
+
+    /// Wait for a local quorum while periodically checking that the proposal still extends the
+    /// portal tip. A portal change means another submission won the handoff race and the monitor
+    /// must resynchronize before attempting more work.
+    async fn wait_for_settlement_or_portal_progress(
+        &self,
+        store: &AttestationStore,
+        height: u64,
+        threshold: usize,
+        expected_portal_hash: B256,
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<SettlementCertificate, BatchSubmitError> {
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    return Err(BatchSubmitError::Cancelled);
+                }
+                certificate = store.wait_for_settlement(height, threshold, shutdown) => {
+                    return certificate.ok_or(BatchSubmitError::Cancelled);
+                }
+                () = tokio::time::sleep(SETTLEMENT_PORTAL_POLL_INTERVAL) => {}
+            }
+
+            let portal_hash = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    return Err(BatchSubmitError::Cancelled);
+                }
+                result = self.read_portal_block_hash() => result?,
+            };
+            if portal_hash != expected_portal_hash {
+                return Err(BatchSubmitError::PortalAdvanced);
+            }
+        }
     }
 
     fn sign_settlement_attestation(
@@ -485,14 +588,11 @@ impl BatchSubmitter {
 
     /// Read all mutable portal state needed for one submission at a single L1 block.
     ///
-    /// The portal and chain identifiers are immutable, so the first call includes and caches
-    /// them. Sequencer membership, verifier configuration, and queue state are deliberately
-    /// refreshed on every submission.
+    /// The portal and chain identifiers are immutable, so the first call includes and caches them.
+    /// Sequencer membership and verifier configuration are deliberately refreshed on every submission.
     async fn read_submission_metadata(&self, signer: Address) -> Result<PortalSubmissionMetadata> {
         if let Some(stable) = self.stable_portal_metadata.get().copied() {
             let (
-                queue_head,
-                queue_tail,
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -501,8 +601,6 @@ impl BatchSubmitter {
             ) = self
                 .l1_provider
                 .multicall()
-                .add(self.portal.withdrawalQueueHead())
-                .add(self.portal.withdrawalQueueTail())
                 .add(self.portal.withdrawalBatchIndex())
                 .add(self.portal.sequencerSetVersion())
                 .add(self.portal.sequencerThreshold())
@@ -510,10 +608,8 @@ impl BatchSubmitter {
                 .add(self.portal.verifier())
                 .aggregate()
                 .await?;
-            return Self::build_submission_metadata(
+            return Ok(Self::build_submission_metadata(
                 RawPortalSubmissionMetadata {
-                    queue_head,
-                    queue_tail,
                     withdrawal_batch_index,
                     sequencer_set_version,
                     sequencer_threshold,
@@ -521,12 +617,10 @@ impl BatchSubmitter {
                     verifier,
                 },
                 stable,
-            );
+            ));
         }
 
         let (
-            queue_head,
-            queue_tail,
             withdrawal_batch_index,
             sequencer_set_version,
             sequencer_threshold,
@@ -537,8 +631,6 @@ impl BatchSubmitter {
         ) = self
             .l1_provider
             .multicall()
-            .add(self.portal.withdrawalQueueHead())
-            .add(self.portal.withdrawalQueueTail())
             .add(self.portal.withdrawalBatchIndex())
             .add(self.portal.sequencerSetVersion())
             .add(self.portal.sequencerThreshold())
@@ -555,10 +647,8 @@ impl BatchSubmitter {
                 .map_err(|_| eyre::eyre!("Tempo L1 chain ID overflow"))?,
         };
         let _ = self.stable_portal_metadata.set(stable);
-        Self::build_submission_metadata(
+        Ok(Self::build_submission_metadata(
             RawPortalSubmissionMetadata {
-                queue_head,
-                queue_tail,
                 withdrawal_batch_index,
                 sequencer_set_version,
                 sequencer_threshold,
@@ -566,29 +656,21 @@ impl BatchSubmitter {
                 verifier,
             },
             stable,
-        )
+        ))
     }
 
     fn build_submission_metadata(
         raw: RawPortalSubmissionMetadata,
         stable: StablePortalMetadata,
-    ) -> Result<PortalSubmissionMetadata> {
-        Ok(PortalSubmissionMetadata {
-            queue_head: raw
-                .queue_head
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue head overflow"))?,
-            queue_tail: raw
-                .queue_tail
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue tail overflow"))?,
+    ) -> PortalSubmissionMetadata {
+        PortalSubmissionMetadata {
             withdrawal_batch_index: raw.withdrawal_batch_index,
             stable,
             sequencer_set_version: raw.sequencer_set_version,
             sequencer_threshold: raw.sequencer_threshold,
             signer_is_sequencer: raw.signer_is_sequencer,
             verifier: raw.verifier,
-        })
+        }
     }
 
     fn validate_submission_metadata(
@@ -615,13 +697,6 @@ impl BatchSubmitter {
                 metadata.sequencer_threshold == 1,
                 "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {}",
                 metadata.sequencer_threshold
-            );
-        }
-        if !batch.withdrawal_queue_hash.is_zero() {
-            let pending = metadata.queue_tail.saturating_sub(metadata.queue_head);
-            eyre::ensure!(
-                pending < WITHDRAWAL_QUEUE_CAPACITY,
-                "withdrawal queue full ({pending} pending slots, capacity {WITHDRAWAL_QUEUE_CAPACITY})"
             );
         }
         Ok(())
@@ -715,15 +790,11 @@ impl BatchSubmitter {
         );
 
         let current_l1_block = self.l1_provider.get_block_number().await?;
-        eyre::ensure!(
-            attestation.anchorBlockNumber < current_l1_block,
-            "certificate anchor block is not yet available through EIP-2935"
-        );
-        eyre::ensure!(
-            current_l1_block.saturating_sub(attestation.anchorBlockNumber)
-                < self.anchor_config.history_window(),
-            "certificate anchor block fell outside the EIP-2935 history window"
-        );
+        validate_certificate_anchor(
+            attestation.anchorBlockNumber,
+            current_l1_block,
+            self.anchor_config.history_window(),
+        )?;
 
         let anchor = self
             .l1_provider
@@ -765,7 +836,7 @@ impl BatchSubmitter {
     async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<(AnchorMode, u64)> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
-        if tempo_block_number >= current_l1_block {
+        if tempo_block_number > current_l1_block {
             return Err(eyre::eyre!(
                 "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 \
                  (tip={current_l1_block}), will retry after L1 advances"
@@ -932,55 +1003,49 @@ impl BatchSubmitter {
         ))
     }
 
-    /// Re-populate the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
-    /// after a sequencer restart.
+    /// Re-populate one page of the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
+    /// after a sequencer restart or page refill.
     ///
     /// The L1 portal stores only hash chains, not the actual [`Withdrawal`](abi::Withdrawal)
     /// structs. This method reconstructs them by:
     ///
     /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
-    ///    to determine which slots are still pending.
-    /// 2. Querying the `BatchSubmitted` event for each pending slot (plus the
-    ///    predecessor for zone block range boundaries) via the indexed
-    ///    `withdrawalQueueIndex` topic.
+    ///    to determine which bounded page starts at the current head.
+    /// 2. Querying the `BatchSubmitted` event for each slot in that page via the
+    ///    indexed `withdrawalQueueIndex` topic.
     /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
     /// 4. Fetching `WithdrawalRequested` events from the **zone L2** outbox in
-    ///    the corresponding block range.
+    ///    that block. A non-empty withdrawal batch is finalized in the same
+    ///    zone block as its requests.
     /// 5. Reading the head slot's current on-chain hash for partial processing
     ///    detection.
     /// 6. Verifying the hash chain and trimming already-processed withdrawals.
     ///
-    /// Returns a map of portal_slot → verified withdrawals ready to be stored.
+    /// Returns one bounded page of verified withdrawals starting at the portal head.
     #[instrument(skip_all, fields(portal = %self.portal_address))]
     pub async fn fetch_pending_withdrawals<P: ZoneSequencerProvider>(
         &self,
         zone_provider: &P,
         outbox_address: Address,
-    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
-        // Step 1: read pending slot range from the L1 portal.
+    ) -> Result<WithdrawalPage> {
+        // Step 1: read pending slot range from the L1 portal and bound this recovery page.
         let (head, tail) = self.read_portal_withdrawal_queue_bounds().await?;
+        let page_tail = tail.min(head.saturating_add(WITHDRAWAL_RECOVERY_PAGE_SIZE));
 
         if head >= tail {
-            info!(head, tail, "No pending withdrawals to restore");
-            return Ok(BTreeMap::new());
+            return Ok(WithdrawalPage {
+                head,
+                tail: head,
+                batches: BTreeMap::new(),
+            });
         }
 
-        info!(
-            head,
-            tail,
-            pending = tail - head,
-            "Restoring pending withdrawals"
-        );
-
-        // Step 2: query BatchSubmitted events for pending slots [head, tail)
-        // plus the predecessor (head-1) by their indexed withdrawalQueueIndex.
-        let events = self
-            .find_batch_events_by_index(head.saturating_sub(1), tail)
-            .await?;
+        // Step 2: query BatchSubmitted events for this page [head, page_tail)
+        // by their indexed withdrawalQueueIndex.
+        let events = self.find_batch_events_by_index(head, page_tail).await?;
 
         // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
-        // Maps portal_slot → last zone L2 block in that batch.
-        let mut zone_end_by_slot: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut zone_block_by_slot: BTreeMap<u64, u64> = BTreeMap::new();
         for (&portal_slot, event) in &events {
             let block_number = zone_provider
                 .block_number(event.nextBlockHash)?
@@ -990,45 +1055,33 @@ impl BatchSubmitter {
                         event.nextBlockHash
                     )
                 })?;
-            zone_end_by_slot.insert(portal_slot, block_number);
+            zone_block_by_slot.insert(portal_slot, block_number);
         }
 
         // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
         let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
-        for portal_slot in head..tail {
-            if !events.contains_key(&portal_slot) {
-                continue;
-            }
-            let zone_end = zone_end_by_slot[&portal_slot];
-            let zone_start = if portal_slot == 0 {
-                1
-            } else if let Some(prev_end) = zone_end_by_slot.get(&(portal_slot - 1)) {
-                prev_end + 1
-            } else {
-                warn!(
-                    portal_slot,
-                    "predecessor event missing, cannot determine zone block range start"
-                );
+        for portal_slot in head..page_tail {
+            let Some(&zone_block) = zone_block_by_slot.get(&portal_slot) else {
                 continue;
             };
             let withdrawals =
-                fetch_slot_withdrawals(zone_provider, outbox_address, zone_start, zone_end).await?;
+                fetch_slot_withdrawals(zone_provider, outbox_address, zone_block).await?;
             slot_withdrawals.insert(portal_slot, withdrawals);
         }
 
         // Step 5: read the head slot's current on-chain hash (for partial processing detection).
         let head_slot_hash = self
             .portal
-            .withdrawalQueueSlot(U256::from(head % WITHDRAWAL_QUEUE_CAPACITY))
+            .withdrawalQueueSlot(U256::from(head))
             .call()
             .await?;
 
         // Guard: verify the queue didn't change during the multi-RPC replay.
         let (head2, tail2) = self.read_portal_withdrawal_queue_bounds().await?;
 
-        if head2 != head || tail2 != tail {
+        if head2 != head || tail2 < page_tail {
             eyre::bail!(
-                "withdrawal queue changed during restore ({}..{} -> {}..{}), retry on next startup",
+                "withdrawal queue changed during page restore ({}..{} -> {}..{}), retry from the current head",
                 head,
                 tail,
                 head2,
@@ -1037,7 +1090,13 @@ impl BatchSubmitter {
         }
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
-        resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash)
+        resolve_pending_slots(head, page_tail, &events, &slot_withdrawals, head_slot_hash).map(
+            |batches| WithdrawalPage {
+                head,
+                tail: tail2,
+                batches,
+            },
+        )
     }
 
     /// Fetch `BatchSubmitted` events for logical queue indices `[first_index, tail)`
@@ -1045,11 +1104,6 @@ impl BatchSubmitter {
     /// `withdrawalQueueIndex` topic. Logical queue indices never repeat
     /// (head/tail are non-wrapping counters), so the topic filter identifies
     /// each batch exactly without positional counting.
-    ///
-    /// The caller passes `first_index = head - 1` so the predecessor batch is
-    /// included (its `nextBlockHash` bounds the zone block range of the first
-    /// pending slot). When `head == 0` the predecessor does not exist; the
-    /// caller falls back to zone block 1.
     async fn find_batch_events_by_index(
         &self,
         first_index: u64,
@@ -1096,6 +1150,17 @@ impl BatchSubmitter {
 
         Ok(found)
     }
+}
+
+/// Verified bounded window of the portal withdrawal queue reconstructed from chain history.
+#[derive(Debug)]
+pub struct WithdrawalPage {
+    /// Portal head observed before reconstructing the page.
+    pub head: u64,
+    /// Portal tail observed after reconstruction was validated.
+    pub tail: u64,
+    /// Verified payloads keyed by logical portal queue index.
+    pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
 /// Data required to submit a single batch to the ZonePortal on L1.
@@ -1174,8 +1239,6 @@ struct StablePortalMetadata {
 }
 
 struct RawPortalSubmissionMetadata {
-    queue_head: U256,
-    queue_tail: U256,
     withdrawal_batch_index: u64,
     sequencer_set_version: u64,
     sequencer_threshold: u8,
@@ -1185,8 +1248,6 @@ struct RawPortalSubmissionMetadata {
 
 #[derive(Debug, Clone, Copy)]
 struct PortalSubmissionMetadata {
-    queue_head: u64,
-    queue_tail: u64,
     withdrawal_batch_index: u64,
     stable: StablePortalMetadata,
     sequencer_set_version: u64,
@@ -1210,15 +1271,6 @@ struct CachedAncestryHeader {
 struct ResolvedAncestry {
     headers: Vec<Bytes>,
     fetched_headers: Vec<(u64, CachedAncestryHeader)>,
-}
-
-#[derive(Debug)]
-struct RequestedWithdrawalLog {
-    block_number: u64,
-    tx_index: u64,
-    log_index: u64,
-    tx_hash: B256,
-    event: abi::IZoneOutbox::WithdrawalRequested,
 }
 
 /// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
@@ -1261,6 +1313,22 @@ impl AnchorMode {
             Self::Ancestry { anchor_block, .. } => *anchor_block,
         }
     }
+}
+
+fn validate_certificate_anchor(
+    anchor_block_number: u64,
+    current_l1_block: u64,
+    history_window: u64,
+) -> Result<()> {
+    eyre::ensure!(
+        anchor_block_number <= current_l1_block,
+        "certificate anchor block is ahead of the current L1 tip"
+    );
+    eyre::ensure!(
+        current_l1_block.saturating_sub(anchor_block_number) < history_window,
+        "certificate anchor block fell outside the EIP-2935 history window"
+    );
+    Ok(())
 }
 
 impl fmt::Display for AnchorMode {
@@ -1363,6 +1431,10 @@ fn resolve_pending_slots(
     slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
     head_slot_hash: B256,
 ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+    if head < tail && head_slot_hash.is_zero() {
+        eyre::bail!("pending withdrawal head slot {head} is zero for queue range {head}..{tail}");
+    }
+
     let mut result: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
 
     for portal_slot in head..tail {
@@ -1402,16 +1474,18 @@ fn resolve_pending_slots(
 
 /// Find the offset into `withdrawals` where the remaining hash chain matches
 /// `current_slot_hash`. Returns `Some(0)` if no withdrawals have been processed,
-/// `Some(n)` if n have been processed (n remaining), or `None` if no match is
-/// found.
-///
-/// Also checks `offset == len` (all consumed, hash chain = `B256::ZERO`).
+/// `Some(n)` if n have been processed, or `None` if no match is found.
 pub(crate) fn find_processed_offset(
     withdrawals: &[abi::Withdrawal],
     current_slot_hash: B256,
 ) -> Option<usize> {
-    for offset in 0..=withdrawals.len() {
-        let hash = abi::Withdrawal::queue_hash(&withdrawals[offset..]);
+    if current_slot_hash == B256::ZERO {
+        return Some(withdrawals.len());
+    }
+
+    let mut hash = B256::ZERO;
+    for (offset, withdrawal) in withdrawals.iter().enumerate().rev() {
+        hash = withdrawal.hash_with_tail(hash);
         if hash == current_slot_hash {
             return Some(offset);
         }
@@ -1510,28 +1584,38 @@ pub(crate) async fn fetch_finalized_batch_boundaries<P: ZoneSequencerProvider>(
     Ok(boundaries)
 }
 
-/// Fetch one finalized L2 withdrawal batch for a range ending at `to`.
+/// Fetch one finalized L2 withdrawal batch.
 ///
 /// The submitted hash and index come from the supplied `BatchFinalized` event.
 /// Withdrawal structs are reconstructed from `WithdrawalRequested` logs in the
-/// supplied boundary-aligned range so the off-chain processor can service the
-/// portal queue.
+/// same block: every non-empty withdrawal batch is finalized in the block that
+/// contains its requests.
 pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
     zone_provider: &P,
     outbox_address: Address,
-    from: u64,
     target: &FinalizedBatchLog,
 ) -> Result<FinalizedBatch> {
-    let to = target.block_number;
-    let request_from = from;
+    let (block, receipts) = block_with_receipts(zone_provider, target.block_number)?;
+    let mut requests = Vec::new();
+    for (tx, receipt) in block.body.transactions.iter().zip(&receipts) {
+        for log in receipt.logs() {
+            if log.address != outbox_address
+                || log.topics().first() != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
+            {
+                continue;
+            }
+            let event = IZoneOutbox::WithdrawalRequested::decode_log(log)
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "invalid WithdrawalRequested log in zone block {}: {err}",
+                        target.block_number
+                    )
+                })?
+                .data;
+            requests.push((*tx.tx_hash(), event));
+        }
+    }
 
-    let requests = if request_from <= to {
-        fetch_requested_withdrawal_logs(zone_provider, outbox_address, request_from, to)?
-    } else {
-        Vec::new()
-    };
-
-    let (block, _) = block_with_receipts(zone_provider, target.block_number)?;
     let finalize_tx = block
         .body
         .transactions
@@ -1566,8 +1650,8 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
     let withdrawals = requests
         .into_iter()
         .zip(encrypted_senders)
-        .map(|(request, encrypted_sender)| {
-            abi::Withdrawal::from_requested_event(&request.event, request.tx_hash, encrypted_sender)
+        .map(|((tx_hash, event), encrypted_sender)| {
+            abi::Withdrawal::from_requested_event(&event, tx_hash, encrypted_sender)
         })
         .collect::<Vec<_>>();
 
@@ -1589,67 +1673,27 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
 }
 
 /// Fetch `WithdrawalRequested` events for one portal queue slot.
+///
+/// A portal queue slot is created only for a non-empty withdrawal batch. The
+/// outbox finalizes pending withdrawals in the same zone block as their
+/// requests, so recovery needs to inspect only the block referenced by the
+/// slot's `BatchSubmitted.nextBlockHash`.
 pub(crate) async fn fetch_slot_withdrawals(
     zone_provider: &impl ZoneSequencerProvider,
     outbox_address: Address,
-    from: u64,
-    to: u64,
+    block_number: u64,
 ) -> Result<Vec<abi::Withdrawal>> {
     let boundaries =
-        fetch_finalized_batch_boundaries(zone_provider, outbox_address, to, to).await?;
-    let target = boundaries
-        .into_iter()
-        .next()
-        .ok_or_else(|| eyre::eyre!("zone block {to} does not contain a BatchFinalized boundary"))?;
+        fetch_finalized_batch_boundaries(zone_provider, outbox_address, block_number, block_number)
+            .await?;
+    let target = boundaries.into_iter().next().ok_or_else(|| {
+        eyre::eyre!("zone block {block_number} does not contain a BatchFinalized boundary")
+    })?;
     Ok(
-        fetch_finalized_batch(zone_provider, outbox_address, from, &target)
+        fetch_finalized_batch(zone_provider, outbox_address, &target)
             .await?
             .withdrawals,
     )
-}
-
-fn fetch_requested_withdrawal_logs<P: ZoneSequencerProvider>(
-    provider: &P,
-    outbox_address: Address,
-    from: u64,
-    to: u64,
-) -> Result<Vec<RequestedWithdrawalLog>> {
-    let mut requests = Vec::new();
-    for block_number in from..=to {
-        let (block, receipts) = block_with_receipts(provider, block_number)?;
-        for (tx_index, (tx, receipt)) in block
-            .body
-            .transactions
-            .iter()
-            .zip(receipts.iter())
-            .enumerate()
-        {
-            for (log_index, log) in receipt.logs().iter().enumerate() {
-                if log.address != outbox_address
-                    || log.topics().first()
-                        != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
-                {
-                    continue;
-                }
-                requests.push(RequestedWithdrawalLog {
-                    block_number,
-                    tx_index: tx_index as u64,
-                    log_index: log_index as u64,
-                    tx_hash: *tx.tx_hash(),
-                    event: IZoneOutbox::WithdrawalRequested::decode_log(log)
-                        .map_err(|err| {
-                            eyre::eyre!(
-                                "invalid WithdrawalRequested log in zone block {block_number}: {err}"
-                            )
-                        })?
-                        .data,
-                });
-            }
-        }
-    }
-    requests.sort_by_key(|request| (request.block_number, request.tx_index, request.log_index));
-
-    Ok(requests)
 }
 
 fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
@@ -1760,6 +1804,29 @@ mod tests {
 
         assert_eq!(anchor.block_hash, B256::ZERO);
         assert_eq!(anchor.block_number, 0);
+    }
+
+    #[tokio::test]
+    async fn quorum_wait_stops_when_the_portal_advances() {
+        let l1 = Asserter::new();
+        let advanced_hash = B256::repeat_byte(0x42);
+        l1.push_success(&Bytes::copy_from_slice(advanced_hash.as_slice()));
+        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+        let store = AttestationStore::default();
+
+        let error = submitter
+            .wait_for_settlement_or_portal_progress(
+                &store,
+                120,
+                2,
+                B256::repeat_byte(0x24),
+                &sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("portal progress must invalidate the stale quorum wait");
+
+        assert!(matches!(error, BatchSubmitError::PortalAdvanced));
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]
@@ -2091,7 +2158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anchor_resolution_returns_observed_l1_tip() {
+    async fn anchor_resolution_accepts_observed_l1_tip() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
@@ -2099,11 +2166,42 @@ mod tests {
         let submitter = BatchSubmitter::new(Address::ZERO, provider);
 
         asserter.push_success(&100_u64);
-        let (mode, current_l1_block) = submitter.resolve_anchor_mode(99).await.unwrap();
+        let (mode, current_l1_block) = submitter.resolve_anchor_mode(100).await.unwrap();
 
         assert!(matches!(mode, AnchorMode::Direct));
         assert_eq!(current_l1_block, 100);
         assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn anchor_resolution_rejects_future_l1_block() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+
+        asserter.push_success(&100_u64);
+        let err = match submitter.resolve_anchor_mode(101).await {
+            Ok(_) => panic!("future L1 anchor was accepted"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("tempo_block_number (101) is not yet confirmed on L1 (tip=100)")
+        );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[test]
+    fn certificate_anchor_validation_accepts_tip_and_rejects_future() {
+        validate_certificate_anchor(100, 100, 10).unwrap();
+
+        let err = validate_certificate_anchor(101, 100, 10).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("certificate anchor block is ahead of the current L1 tip")
+        );
     }
 
     #[tokio::test]
@@ -2118,8 +2216,6 @@ mod tests {
         let submitter = BatchSubmitter::new(portal_address, provider);
 
         asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(U256::from(3)),
-            abi_word(U256::from(5)),
             abi_word(7_u64),
             abi_word(11_u64),
             abi_word(U256::from(1)),
@@ -2129,8 +2225,6 @@ mod tests {
             abi_word(U256::from(42431)),
         ]));
         let first = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(first.queue_head, 3);
-        assert_eq!(first.queue_tail, 5);
         assert_eq!(first.withdrawal_batch_index, 7);
         assert_eq!(first.sequencer_set_version, 11);
         assert!(first.signer_is_sequencer);
@@ -2140,8 +2234,6 @@ mod tests {
 
         let next_verifier = Address::repeat_byte(0x55);
         asserter.push_success(&abi_encode_multicall(vec![
-            abi_word(U256::from(4)),
-            abi_word(U256::from(6)),
             abi_word(8_u64),
             abi_word(12_u64),
             abi_word(U256::from(1)),
@@ -2149,8 +2241,6 @@ mod tests {
             abi_word(next_verifier),
         ]));
         let second = submitter.read_submission_metadata(signer).await.unwrap();
-        assert_eq!(second.queue_head, 4);
-        assert_eq!(second.queue_tail, 6);
         assert_eq!(second.withdrawal_batch_index, 8);
         assert_eq!(second.sequencer_set_version, 12);
         assert!(!second.signer_is_sequencer);
@@ -2179,8 +2269,6 @@ mod tests {
             withdrawal_batch_index: 1,
         };
         let metadata = PortalSubmissionMetadata {
-            queue_head: 0,
-            queue_tail: 0,
             withdrawal_batch_index: 0,
             stable: StablePortalMetadata {
                 zone_id: 1,
@@ -2235,55 +2323,45 @@ mod tests {
     }
 
     #[test]
-    fn find_offset_no_withdrawals_processed() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
-        let withdrawals = vec![w0, w1];
-        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
-        assert_eq!(find_processed_offset(&withdrawals, full_hash), Some(0));
+    fn finds_processed_withdrawal_offset() {
+        let withdrawals = vec![
+            test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100),
+            test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200),
+            test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300),
+        ];
+        let cases = [
+            (
+                "full queue",
+                abi::Withdrawal::queue_hash(&withdrawals),
+                Some(0),
+            ),
+            (
+                "partial queue",
+                abi::Withdrawal::queue_hash(&withdrawals[1..]),
+                Some(1),
+            ),
+            (
+                "partial queue suffix",
+                abi::Withdrawal::queue_hash(&withdrawals[2..]),
+                Some(2),
+            ),
+            ("fully consumed", B256::ZERO, Some(withdrawals.len())),
+            ("corrupted hash", B256::repeat_byte(0xde), None),
+        ];
+
+        for (case, current_slot_hash, expected) in cases {
+            assert_eq!(
+                find_processed_offset(&withdrawals, current_slot_hash),
+                expected,
+                "{case}"
+            );
+        }
     }
 
     #[test]
-    fn find_offset_one_processed() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
-        let withdrawals = vec![w0, w1];
-        let hash = abi::Withdrawal::queue_hash(&withdrawals[1..]);
-        assert_eq!(find_processed_offset(&withdrawals, hash), Some(1));
-    }
-
-    #[test]
-    fn find_offset_all_processed() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let withdrawals = vec![w0];
-        // B256::ZERO = queue_hash(&[]), meaning all withdrawals have been consumed.
-        assert_eq!(find_processed_offset(&withdrawals, B256::ZERO), Some(1));
-    }
-
-    #[test]
-    fn find_offset_no_match() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let withdrawals = vec![w0];
-        let random_hash = B256::from([0xdeu8; 32]);
-        assert_eq!(find_processed_offset(&withdrawals, random_hash), None);
-    }
-
-    #[test]
-    fn find_offset_single_withdrawal_unprocessed() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 999);
-        let withdrawals = vec![w];
-        let hash = abi::Withdrawal::queue_hash(&withdrawals);
-        assert_eq!(find_processed_offset(&withdrawals, hash), Some(0));
-    }
-
-    #[test]
-    fn find_offset_partial_three_withdrawals() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
-        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
-        let withdrawals = vec![w0, w1, w2];
-        let hash = abi::Withdrawal::queue_hash(&withdrawals[2..]);
-        assert_eq!(find_processed_offset(&withdrawals, hash), Some(2));
+    fn finds_processed_offset_for_empty_queue() {
+        assert_eq!(find_processed_offset(&[], B256::ZERO), Some(0));
+        assert_eq!(find_processed_offset(&[], B256::random()), None);
     }
 
     #[test]
@@ -2351,7 +2429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_batch_events_by_logical_index_across_ring_wrap() {
+    async fn finds_batch_events_by_logical_index_beyond_legacy_capacity() {
         use alloy_provider::ProviderBuilder;
         use alloy_transport::mock::Asserter;
 
@@ -2446,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_single_slot_fully_processed() {
+    fn resolve_single_pending_slot_rejects_zero_hash() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
         let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
@@ -2456,10 +2534,9 @@ mod tests {
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, withdrawals);
 
-        // B256::ZERO = queue_hash(&[]), all consumed. find_processed_offset returns
-        // Some(1) (offset == len), so remaining is empty and slot is not stored.
-        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap();
-        assert!(result.is_empty());
+        let error =
+            resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap_err();
+        assert!(error.to_string().contains("head slot 5 is zero"));
     }
 
     #[test]

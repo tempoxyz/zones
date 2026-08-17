@@ -17,8 +17,10 @@ import {
     PATH_USD_ADDRESS,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
     QueuedDeposit,
+    Role,
     WithdrawalBounceBackDeposit,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
@@ -52,6 +54,9 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice Refunds parked after a withdrawal-bounce-back mint reverts on the zone.
     mapping(address token => mapping(address owner => uint128 amount)) private _refunds;
+
+    /// @notice Last portal token-enablement commitment applied by this zone.
+    bytes32 public processedTokenEnablementHash;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -178,6 +183,19 @@ contract ZoneInbox is IZoneInbox {
         okm = _hmacSha256(abi.encodePacked(prk), expandInput);
     }
 
+    function _hashTokenEnablement(
+        bytes32 previousHash,
+        EnabledToken memory token
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(previousHash, token.token, token.name, token.symbol, token.currency)
+        );
+    }
+
     function _readEncryptionKey(uint256 keyIndex) internal view returns (bytes32 x, uint8 yParity) {
         uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
         uint256 slotX = base + (keyIndex * 2);
@@ -195,18 +213,15 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice Advance Tempo state and process deposits in a single system transaction
     /// @dev This is the main entry point for the sequencer's system transaction.
-    ///      1. Advances the zone's view of Tempo by processing the header array
-    ///      2. Processes deposits from the unified queue (regular + encrypted)
-    ///      3. Validates the resulting hash chain equals Tempo's currentDepositQueueHash
-    ///      The proof and system call require exact equality with the final queue head.
+    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      2. Processes user deposits and internal withdrawal bounce-backs
+    ///      3. Requires the resulting hash chain to equal Tempo's currentDepositQueueHash
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
-    /// @param headers Ordered RLP-encoded Tempo block headers; only the final
-    ///        header's state root is used for every Tempo read in this call, including
-    ///        TIP-403 policy resolution for every deposit; no per-header policy snapshots exist
-    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param header RLP-encoded Tempo block header
+    /// @param deposits All queued deposits through the current head, oldest first
     /// @param decryptions Decryption data for valid user deposits, in order
     function advanceTempo(
-        bytes[] calldata headers,
+        bytes calldata header,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
@@ -216,7 +231,20 @@ contract ZoneInbox is IZoneInbox {
         if (msg.sender != address(0)) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
-        _tempoState.finalizeTempo(headers);
+        _tempoState.finalizeTempo(header);
+
+        // Authenticate the complete append-only token-enablement delta before activating any
+        // token or processing any deposit.
+        bytes32 nextTokenEnablementHash = processedTokenEnablementHash;
+        for (uint256 i = 0; i < enabledTokens.length; i++) {
+            nextTokenEnablementHash =
+                _hashTokenEnablement(nextTokenEnablementHash, enabledTokens[i]);
+        }
+        bytes32 tempoTokenEnablementHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT);
+        if (nextTokenEnablementHash != tempoTokenEnablementHash) {
+            revert InvalidTokenEnablementHash();
+        }
 
         // Activate new tokens directly in the Inbox.
         for (uint256 i = 0; i < enabledTokens.length; i++) {
@@ -229,6 +257,9 @@ contract ZoneInbox is IZoneInbox {
             token.grantRole(issuerRole, address(this));
             token.grantRole(issuerRole, ZONE_OUTBOX);
             emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
+        }
+        if (enabledTokens.length != 0) {
+            processedTokenEnablementHash = nextTokenEnablementHash;
         }
 
         // Step 2: Process deposits and build hash chain
@@ -290,12 +321,16 @@ contract ZoneInbox is IZoneInbox {
                 bool valid = proofValid;
                 bytes memory decryptedPlaintext;
                 if (valid) {
-                    // Step 2: Derive AES key from shared secret using HKDF-SHA256
+                    // Step 2: Derive AES key from shared secret and the public deposit sender
+                    // using HKDF-SHA256. Binding the sender prevents a valid encrypted payload
+                    // from being replayed by another account to dust its hidden recipient.
                     // This is done in Solidity using the SHA256 precompile (0x02)
                     bytes32 aesKey = _hkdfSha256(
                         dec.sharedSecret,
                         "ecies-aes-key",
-                        abi.encodePacked(tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX)
+                        abi.encodePacked(
+                            tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX, ed.sender
+                        )
                     );
 
                     // Step 3: Decrypt using AES-256-GCM precompile
@@ -334,8 +369,8 @@ contract ZoneInbox is IZoneInbox {
         if (decryptionIndex != decryptions.length) revert ExtraDecryptionData();
 
         // Step 3: Validate against Tempo state
-        // Read currentDepositQueueHash from the portal's storage using the final imported root.
-        // The system transaction is all-or-nothing: every queued deposit through the final
+        // Read currentDepositQueueHash from the portal's storage using the new Tempo state.
+        // The system transaction is all-or-nothing: every queued deposit through the current
         // queue head must be processed in this call, or the entire call reverts. That rollback
         // also undoes the Tempo checkpoint, token activation, and any deposit-side effects above.
         bytes32 tempoCurrentHash =
@@ -386,8 +421,9 @@ contract ZoneInbox is IZoneInbox {
     }
 
     function _isSequencer(address account) internal view returns (bool) {
-        bytes32 slot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
-        return uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)) != 0;
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        return uint8(uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)))
+            == uint8(Role.Sequencer);
     }
 
     function _processWithdrawalBounceBack(WithdrawalBounceBackDeposit memory d) internal {

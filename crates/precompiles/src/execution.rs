@@ -27,16 +27,20 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
     dispatch::selector_from_calldata,
-    error::TempoPrecompileError,
     input_cost,
-    storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    storage::{
+        PrecompileStorageProvider, StorageCtx, actions::StorageActions,
+        evm::EvmPrecompileStorageProvider,
+    },
     storage_credits::NonCreditableSlots,
 };
+use zone_hardfork::ZoneHardfork;
 
 /// Shared EVM configuration and accounting state installed for every Zone precompile wrapper.
 #[derive(Clone)]
 pub struct ZonePrecompileEnv {
     cfg: revm::context::CfgEnv<TempoHardfork>,
+    zone_hardfork: ZoneHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 }
@@ -45,14 +49,21 @@ impl ZonePrecompileEnv {
     /// Captures the active EVM configuration and transaction-local storage accounting state.
     pub fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
+        zone_hardfork: ZoneHardfork,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
             cfg: cfg.clone(),
+            zone_hardfork,
             actions,
             non_creditable_slots,
         }
+    }
+
+    /// Returns the active Zone-owned protocol revision.
+    pub const fn zone_hardfork(&self) -> ZoneHardfork {
+        self.zone_hardfork
     }
 }
 
@@ -62,14 +73,6 @@ pub(crate) enum CallCheck {
     Continue,
     /// Revert with ABI-encoded data. The execution wrapper MUST apply input gas and reservoir.
     Revert(Bytes),
-    /// Abort admission because a state read failed.
-    Error(CallRuleError),
-}
-
-/// State-read failures raised while applying pre-execution rules.
-pub(crate) enum CallRuleError {
-    /// Error from Zone-local or L1-mirrored precompile storage.
-    Tempo(TempoPrecompileError),
 }
 
 /// Selector and caller dependent precompile call rules evaluated after storage setup.
@@ -135,6 +138,11 @@ pub(crate) fn create_precompile(
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
+        if fixed_gas.is_some() {
+            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
+            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
+            storage.set_tip1060_storage_credits(false);
+        }
 
         let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
             CallCheck::Continue => execute(data, caller),
@@ -143,12 +151,11 @@ pub(crate) fn create_precompile(
                 let output = s.revert_output(output);
                 add_input_cost(s, data, Ok(output))
             }
-            CallCheck::Error(CallRuleError::Tempo(error)) => {
-                StorageCtx::default().error_result(error)
-            }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
+            // Disable refunds to not leak any data about previous storage values.
+            output.gas_refunded = 0;
         }
         result
     })
@@ -179,6 +186,7 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+    use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
@@ -228,6 +236,7 @@ mod tests {
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -263,6 +272,50 @@ mod tests {
     }
 
     #[test]
+    fn fixed_gas_disables_storage_credits_and_discards_refunds() {
+        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        cfg.spec = TempoHardfork::T8;
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let storage_owner = Address::repeat_byte(0x33);
+        let credit_slot = U256::from_be_slice(storage_owner.as_slice());
+        let observed_credit_state = Rc::new(Cell::new(U256::MAX));
+        let execute_credit_state = observed_credit_state.clone();
+        let precompile = create_precompile(
+            "FixedGasAccountingTest",
+            &env,
+            RecordingRules(Rc::new(RefCell::new(None))),
+            move |_, _| {
+                let mut storage = StorageCtx::default();
+                storage
+                    .sstore(storage_owner, U256::ZERO, U256::ONE)
+                    .unwrap();
+                execute_credit_state
+                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
+
+                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
+                storage.refund_gas(4_800);
+                let mut output = storage.success_output(Bytes::new());
+                output.gas_refunded = storage.gas_refunded();
+                Ok(output)
+            },
+        );
+
+        let mut ctx = test_context();
+        let output = precompile
+            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
+            .unwrap();
+
+        assert_eq!(output.gas_used, FIXED_GAS);
+        assert_eq!(output.gas_refunded, 0);
+        assert_eq!(observed_credit_state.get(), U256::ZERO);
+    }
+
+    #[test]
     fn protocol_precompile_applies_admission_and_evm_spec() {
         let observed_spec = Rc::new(Cell::new(None));
         let execute_spec = observed_spec.clone();
@@ -270,6 +323,7 @@ mod tests {
         cfg.spec = TempoHardfork::T8;
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -322,6 +376,7 @@ mod tests {
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );

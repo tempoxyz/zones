@@ -4,10 +4,7 @@
 //! fresh authorization tokens, rebuilding the HTTP client when the
 //! current token approaches expiry.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::hex;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -17,7 +14,7 @@ use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
 
 use crate::{
-    auth::{X_AUTHORIZATION_TOKEN, build_token_fields},
+    auth::{X_AUTHORIZATION_TOKEN, build_token_fields, now_unix_seconds},
     metrics::ZoneProviderMetrics,
 };
 
@@ -78,7 +75,7 @@ impl ZoneProvider {
     ///
     /// Transparently refreshes the token if it's about to expire.
     pub fn provider(&self) -> DynProvider<TempoNetwork> {
-        let now = now_secs();
+        let now = now_unix_seconds();
         let mut state = self.state.lock();
         if now + REFRESH_BUFFER_SECS < state.expires_at {
             return state.provider.clone();
@@ -104,7 +101,7 @@ impl ZoneProvider {
 fn build_provider_with_token(
     config: &ZoneProviderConfig,
 ) -> eyre::Result<(DynProvider<TempoNetwork>, u64)> {
-    let now = now_secs();
+    let now = now_unix_seconds();
     let expires_at = now + config.token_ttl.as_secs();
 
     let (fields, digest) = build_token_fields(config.zone_id, config.chain_id, now, expires_at);
@@ -136,11 +133,4 @@ fn build_provider_with_token(
         .erased();
 
     Ok((provider, expires_at))
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
 }

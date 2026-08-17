@@ -136,6 +136,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
     }
 
     stub!(net_version);
+    stub!(client_version);
     stub!(syncing);
     stub!(coinbase);
     stub!(gas_price);
@@ -280,15 +281,24 @@ impl TestContext {
     }
 
     async fn start_shared(api: Arc<MockZoneRpcApi>) -> Self {
+        Self::start_shared_with_max_response_size(api, 160 * 1024 * 1024).await
+    }
+
+    async fn start_with_max_response_size(api: MockZoneRpcApi, max_response_size: usize) -> Self {
+        Self::start_shared_with_max_response_size(Arc::new(api), max_response_size).await
+    }
+
+    async fn start_shared_with_max_response_size(
+        api: Arc<MockZoneRpcApi>,
+        max_response_size: usize,
+    ) -> Self {
         let signer = PrivateKeySigner::random();
         let config = RedactedRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
-            l1_rpc_url: "http://127.0.0.1:1".to_string(),
-            zone_rpc_url: "http://127.0.0.1:1".to_string(),
-            retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+            max_response_size,
             zone_portal: Address::ZERO,
         };
         let addr = start_redacted_rpc(config, api).await.unwrap();
@@ -488,6 +498,51 @@ async fn ws_batch_request() {
 }
 
 #[tokio::test]
+async fn ws_oversized_response_matches_jsonrpsee_error() {
+    let ctx = TestContext::start_with_max_response_size(MockZoneRpcApi::default(), 64).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc("zone_getZoneInfo", 7).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 7);
+    assert_eq!(resp["error"]["code"], -32008);
+    assert_eq!(resp["error"]["message"], "Response is too big");
+    assert_eq!(resp["error"]["data"], "Exceeded max limit of 64");
+}
+
+#[tokio::test]
+async fn ws_batch_response_limit_is_aggregate() {
+    let one_response = json!({"jsonrpc":"2.0","result":"0x42","id":1}).to_string();
+    let max_response_size = one_response.len() + 2;
+    let ctx =
+        TestContext::start_with_max_response_size(MockZoneRpcApi::default(), max_response_size)
+            .await;
+    let mut ws = connect_with_header(&ctx).await;
+    let batch = json!([
+        {"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1},
+        {"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":2},
+    ]);
+
+    ws.send(tungstenite::Message::Text(batch.to_string().into()))
+        .await
+        .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], Value::Null);
+    assert_eq!(resp["error"]["code"], -32011);
+    assert_eq!(resp["error"]["message"], "The batch response was too large");
+    assert_eq!(
+        resp["error"]["data"],
+        format!("Exceeded max limit of {max_response_size}")
+    );
+}
+
+#[tokio::test]
 async fn ws_invalid_json() {
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
@@ -570,6 +625,33 @@ async fn ws_subscribe_new_heads_emits_redacted_headers() {
             .get("transactions")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn ws_subscription_notifications_match_unredacted_size_behavior() {
+    let max_response_size = 64;
+    let ctx = TestContext::start_with_max_response_size(
+        MockZoneRpcApi::with_ws_subscriptions(),
+        max_response_size,
+    )
+    .await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let response = parse_response(ws.next().await.unwrap().unwrap());
+    assert!(response["result"].as_str().is_some());
+
+    let notification = ws.next().await.unwrap().unwrap();
+    let tungstenite::Message::Text(text) = &notification else {
+        panic!("expected text notification");
+    };
+    assert!(text.len() > max_response_size);
+    let notification = parse_response(notification);
+    assert_eq!(notification["method"], "eth_subscription");
 }
 
 #[tokio::test]

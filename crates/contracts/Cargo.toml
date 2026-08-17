@@ -21,9 +21,11 @@ alloy-contract = { workspace = true, optional = true }
 alloy-network = { workspace = true, optional = true }
 alloy-provider = { workspace = true, optional = true }
 alloy-rpc-types-eth = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
+alloy-signer = { workspace = true, optional = true }
+alloy-transport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+k256 = { workspace = true, optional = true }
 
 [dev-dependencies]
 alloy-transport.workspace = true
@@ -43,6 +45,8 @@ rpc = [
     "dep:alloy-network",
     "dep:alloy-provider",
     "dep:alloy-rpc-types-eth",
-    "dep:futures",
+    "dep:alloy-signer",
+    "dep:alloy-transport",
+    "dep:k256",
     "dep:tokio",
 ]

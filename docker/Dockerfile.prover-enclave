@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+
+ARG CHEF_IMAGE=chef
+
+FROM ${CHEF_IMAGE} AS builder
+
+ARG RUST_PROFILE=release
+
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git \
+    --mount=type=cache,target=$SCCACHE_DIR,sharing=locked,id=sccache \
+    RUSTFLAGS="-C link-arg=-fuse-ld=mold" \
+    cargo build --locked --profile ${RUST_PROFILE} --bin tempo-zone-prover-enclave \
+    && /app/target/${RUST_PROFILE}/tempo-zone-prover-enclave --help >/dev/null
+
+FROM scratch AS tempo-genesis
+
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
+
+COPY --from=tempo-genesis / /etc/tempo/genesis/
+
+WORKDIR /data
+COPY --from=builder /app/target/release/tempo-zone-prover-enclave /usr/local/bin/tempo-zone-prover-enclave
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave", "--tempo-genesis", "/etc/tempo/genesis"]

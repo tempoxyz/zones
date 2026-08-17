@@ -12,9 +12,8 @@ use alloy_evm::{
     block::{BlockExecutionResult, BlockExecutor as _, BlockExecutorFactory, TxResult as _},
     eth::EthBlockExecutionCtx,
 };
-use alloy_primitives::{Address, B256, Bytes, U256};
-use alloy_rlp::Decodable as _;
-use alloy_sol_types::SolCall as _;
+use alloy_primitives::{B256, Bytes, U256};
+use alloy_sol_types::{ContractError, SolCall as _, SolInterface as _};
 use reth_chainspec::EthereumHardforks as _;
 use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
 use revm::{
@@ -27,12 +26,13 @@ use tempo_primitives::{
     TempoHeader, TempoReceipt, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
-use tempo_zone_contracts::{IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{
+    IZoneInbox, IZoneOutbox, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+};
 use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
-use zone_primitives::constants::zone_chain_id;
 
 use crate::{
-    Error, SpfConfig, ZoneBlock,
+    Error, ZoneBlock,
     execution::database::{TempoWitnessDatabase, WitnessDatabase},
 };
 
@@ -53,8 +53,6 @@ pub(crate) struct ExecutedZoneBlock {
 pub(crate) struct BlockReplayContext<'a> {
     pub(crate) parent: &'a TempoHeader,
     pub(crate) block_index: usize,
-    pub(crate) zone_id: u32,
-    pub(crate) portal: Address,
 }
 
 /// Execute a complete Zone block in system-then-user order.
@@ -63,17 +61,14 @@ pub(crate) struct BlockReplayContext<'a> {
 /// That call invokes `TempoState.finalizeTempo`, then processes deposits and
 /// enabled tokens. User transactions run only after that system transition.
 pub(crate) fn execute_zone_block(
-    config: &SpfConfig,
     zone_state: &mut ZoneState,
-    tempo_database: &TempoWitnessDatabase,
+    evm_config: ZoneEvmConfig<TempoWitnessDatabase>,
     replay: BlockReplayContext<'_>,
     block: &ZoneBlock,
 ) -> Result<ExecutedZoneBlock, Error> {
     let BlockReplayContext {
         parent,
         block_index: zone_block_index,
-        zone_id,
-        portal,
     } = replay;
     let user_transactions = decode_user_transactions(zone_block_index, &block.transactions)?;
     let mut transactions = Vec::with_capacity(
@@ -99,25 +94,18 @@ pub(crate) fn execute_zone_block(
         .block_hashes
         .insert(parent_number, block.parent_hash);
 
-    let evm_config = ZoneEvmConfig::new(
-        config.zone_chain_spec.clone(),
-        config.zone_chain_spec.inner.clone(),
-        tempo_database.clone(),
-        portal,
-    );
     let attributes = next_block_env_attributes(evm_config.chain_spec(), parent, block)?;
-    let mut env = evm_config
+    let env = evm_config
         .next_evm_env(parent, &attributes)
         .map_err(|_| Error::EvmEnvironment)?;
-    // The Zone ID is verifier-bound independently of the parent Tempo chain specification.
-    env.cfg_env.chain_id = zone_chain_id(zone_id);
+    let chain_id = env.cfg_env.chain_id;
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;
     let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm(&mut *zone_state, env);
     let mut executor = BlockExecutorFactory::create_executor(
         &evm_config,
         evm,
-        next_block_execution_context(config.zone_chain_spec.as_ref(), block, block_gas_limit),
+        next_block_execution_context(evm_config.chain_spec().as_ref(), block, block_gas_limit),
     );
 
     executor.apply_pre_execution_changes().map_err(|error| {
@@ -134,6 +122,7 @@ pub(crate) fn execute_zone_block(
         &block.tempo_header_rlp,
         block,
         zone_block_index,
+        chain_id,
     )?);
     transactions.extend(execute_user_transactions(
         &mut executor,
@@ -147,6 +136,7 @@ pub(crate) fn execute_zone_block(
             block.number,
             block.finalize_withdrawal_batch_encrypted_senders.clone(),
             zone_block_index,
+            chain_id,
         )?);
     }
 
@@ -176,13 +166,6 @@ pub(crate) fn next_block_env_attributes(
 ) -> Result<TempoNextBlockEnvAttributes, Error> {
     let block_gas_limit = parent.inner.gas_limit;
 
-    let mut encoded = block.tempo_header_rlp.as_ref();
-    let header = TempoHeader::decode(&mut encoded)
-        .map_err(|_| crate::WitnessDatabaseError::InvalidTempoHeader)?;
-    if !encoded.is_empty() {
-        return Err(crate::WitnessDatabaseError::InvalidTempoHeader.into());
-    }
-
     Ok(TempoNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
             timestamp: block.timestamp,
@@ -199,8 +182,8 @@ pub(crate) fn next_block_env_attributes(
             slot_number: None,
         },
         general_gas_limit: 0,
-        shared_gas_limit: block_gas_limit,
-        timestamp_millis_part: header.timestamp_millis_part,
+        shared_gas_limit: 0,
+        timestamp_millis_part: block.timestamp_millis_part,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
     })
@@ -209,7 +192,7 @@ pub(crate) fn next_block_env_attributes(
 pub(crate) fn next_block_execution_context(
     chain_spec: &zone_chainspec::ZoneChainSpec,
     block: &ZoneBlock,
-    gas_limit: u64,
+    _gas_limit: u64,
 ) -> TempoBlockExecutionCtx<'static> {
     TempoBlockExecutionCtx {
         inner: EthBlockExecutionCtx {
@@ -226,7 +209,7 @@ pub(crate) fn next_block_execution_context(
             slot_number: None,
         },
         general_gas_limit: 0,
-        shared_gas_limit: gas_limit,
+        shared_gas_limit: 0,
         validator_set: None,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
@@ -238,6 +221,7 @@ fn execute_advance_tempo<'a, 'db, I>(
     header: &Bytes,
     block: &ZoneBlock,
     block_index: usize,
+    chain_id: u64,
 ) -> Result<TempoTxEnvelope, Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
@@ -250,7 +234,7 @@ where
     }
     .abi_encode();
     let transaction = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -277,6 +261,7 @@ fn execute_finalize_withdrawal_batch<'a, 'db, I>(
     block_number: u64,
     encrypted_senders: Vec<Bytes>,
     block_index: usize,
+    chain_id: u64,
 ) -> Result<TempoTxEnvelope, Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
@@ -288,7 +273,7 @@ where
     }
     .abi_encode();
     let transaction = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -374,14 +359,38 @@ fn execute_recovered_transaction<'a, 'db, I>(
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
 {
-    let result = executor
-        .execute_transaction_without_commit(transaction)
-        .map_err(|error| map_block_execution_error(error, execution_error))?;
+    let result = match executor.execute_transaction_without_commit(transaction) {
+        Ok(result) => result,
+        Err(error) => return Err(map_block_execution_error(error, execution_error)),
+    };
     if require_success && !result.result().result.is_success() {
-        return Err(execution_error);
+        return Err(match (execution_error, &result.result().result) {
+            (
+                Error::AdvanceTempoExecution { block_index },
+                revm::context::result::ExecutionResult::Revert { output, .. },
+            ) => Error::AdvanceTempoRevert {
+                block_index,
+                reason: decode_advance_tempo_revert(output),
+                output: output.clone(),
+            },
+            (error, _) => error,
+        });
     }
     executor.commit_transaction(result);
     Ok(())
+}
+
+fn decode_advance_tempo_revert(output: &Bytes) -> String {
+    if output.is_empty() {
+        return "empty revert data".to_owned();
+    }
+    if let Ok(error) = ContractError::<IZoneInbox::IZoneInboxErrors>::abi_decode(output.as_ref()) {
+        return format!("{error:?}");
+    }
+    if let Ok(error) = ContractError::<TempoState::TempoStateErrors>::abi_decode(output.as_ref()) {
+        return format!("{error:?}");
+    }
+    "unknown revert".to_owned()
 }
 
 fn map_block_execution_error(
@@ -402,4 +411,40 @@ fn map_block_execution_error(
     }
 
     execution_error
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_sol_types::SolError as _;
+
+    use super::*;
+
+    #[test]
+    fn decodes_zone_inbox_advance_tempo_revert() {
+        let output = Bytes::from(IZoneInbox::InvalidDepositQueueHash {}.abi_encode());
+
+        assert!(decode_advance_tempo_revert(&output).contains("InvalidDepositQueueHash"));
+    }
+
+    #[test]
+    fn decodes_tempo_state_advance_tempo_revert() {
+        let output = Bytes::from(TempoState::InvalidParentHash {}.abi_encode());
+
+        assert!(decode_advance_tempo_revert(&output).contains("InvalidParentHash"));
+    }
+
+    #[test]
+    fn retains_unknown_advance_tempo_revert_data() {
+        let output = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]);
+        let error = Error::AdvanceTempoRevert {
+            block_index: 7,
+            reason: decode_advance_tempo_revert(&output),
+            output,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "advanceTempo reverted in zone block 7: unknown revert; data: 0xdeadbeef"
+        );
+    }
 }

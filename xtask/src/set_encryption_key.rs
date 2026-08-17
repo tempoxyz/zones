@@ -22,23 +22,27 @@ pub(crate) struct SetEncryptionKey {
     #[arg(long, env = "L1_PORTAL_ADDRESS")]
     portal: Address,
 
-    /// Sequencer private key (hex). Used both as the signing key for the
-    /// transaction and as the encryption key to register.
-    #[arg(long, env = "PRIVATE_KEY")]
+    /// Encryption private key (hex). Also signs the transaction unless
+    /// `transaction_private_key` is provided.
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
+
+    /// Private key of the active sequencer that submits the L1 transaction.
+    /// Defaults to `private_key` for single-sequencer zones.
+    #[arg(long, env = "TRANSACTION_PRIVATE_KEY", hide_env_values = true)]
+    transaction_private_key: Option<String>,
 }
 
 impl SetEncryptionKey {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
+        let encryption_signer = parse_private_key(&self.private_key)?;
+        let transaction_signer = parse_private_key(
+            self.transaction_private_key
+                .as_deref()
+                .unwrap_or(&self.private_key),
+        )?;
 
-        // The sequencer key is used both to sign the tx and as the encryption key
-        let signer: PrivateKeySigner = key_str.parse()?;
-
-        let wallet = EthereumWallet::from(signer.clone());
+        let wallet = EthereumWallet::from(transaction_signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
             .connect(&self.l1_rpc_url)
@@ -48,7 +52,7 @@ impl SetEncryptionKey {
             "Sending setSequencerEncryptionKey to portal {}...",
             self.portal
         );
-        let tx_hash = register_encryption_key(&provider, self.portal, &signer)
+        let tx_hash = register_encryption_key(&provider, self.portal, &encryption_signer)
             .await
             .wrap_err("failed to send setSequencerEncryptionKey")?;
 
@@ -56,5 +60,27 @@ impl SetEncryptionKey {
         println!("Explorer: https://explore.moderato.tempo.xyz/tx/{tx_hash}");
 
         Ok(())
+    }
+}
+
+fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
+    Ok(private_key
+        .strip_prefix("0x")
+        .unwrap_or(private_key)
+        .parse()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_private_key;
+
+    #[test]
+    fn parses_prefixed_and_unprefixed_private_keys() {
+        let key = "1111111111111111111111111111111111111111111111111111111111111111";
+
+        assert_eq!(
+            parse_private_key(key).unwrap().to_bytes(),
+            parse_private_key(&format!("0x{key}")).unwrap().to_bytes()
+        );
     }
 }

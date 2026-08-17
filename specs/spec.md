@@ -123,7 +123,9 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## System Overview
 
-Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. Each zone also has a separate **admin** role that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+Each zone is operated by one or more **sequencers** that collect transactions, produce blocks, generate proofs, and submit batches to Tempo. Each zone also has an independent **admin** authority that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). The admin address may also be assigned a portal role, including `Sequencer`. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+
+The admin may also schedule permanent abdication of independently controlled portal capabilities.
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
@@ -169,13 +171,14 @@ sequenceDiagram
 
 ## Access Control
 
-Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal): an **admin** and a set of **sequencers**. The roles are intentionally separated so that mission-critical governance powers can be held in a cold key (or multisig) while day-to-day block production runs from operational keys. An admin MAY also be a sequencer; the protocol does not enforce separation.
+Each zone has an **admin** authority and a set of **sequencers** registered on the [`ZonePortal`](#izoneportal). They can be operationally separated so mission-critical governance powers remain in a cold key or multisig, but the protocol does not require distinct addresses: admin authority is independent from the mutually exclusive portal role assigned to an address.
 
 ### Roles
 
 **Admin.**
 
 - Holds governance powers over the zone (token enablement, deposit pause/resume, and account and gateway membership).
+- Can schedule permanent abdication of portal capabilities after a delay.
 - Expected to be a cold key, multisig, or governance contract.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
 - Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
@@ -188,9 +191,10 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero threshold no greater than the set size.
 - May be replaced atomically by the admin together with the threshold. The configuration nonce starts at `0`; each later replacement increments `sequencerSetVersion` and invalidates certificates from earlier configurations.
 - Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
-- Hold the encryption private keys used to decrypt [deposits](#deposits).
+- Hold the encryption private keys corresponding to the portal's encryption public keys and used to decrypt [deposits](#deposits).
 
-A zone MAY include its admin in the sequencer set. The protocol still treats each privileged call as belonging to its role.
+The admin may also be a member of the sequencer set. Admin authorization remains independent of
+the account's mutually exclusive portal role.
 
 ### Permission Matrix
 
@@ -201,7 +205,12 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setRole(account, role)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `pause()` | [`ZonePortal`](#izoneportal) | **admin, sequencer, or pause guardian** |
+| `resume()` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setAllowedAccount(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setPauseGuardian(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `abdicate(capability)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setAccessMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setGatewayMode(mode)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -210,7 +219,7 @@ The following table lists every privileged action and the role authorized to inv
 | `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setMaxTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **admin or any active sequencer** |
 | `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer with a threshold certificate** |
 | `processWithdrawals(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
@@ -222,8 +231,9 @@ The following table lists every privileged action and the role authorized to inv
 Rationale notes:
 
 - **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
+- **Capability abdication is admin-only** because it permanently removes a Portal configuration surface after the delay.
 - **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
-- **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key.
+- **Encryption public-key management is admin- or sequencer-authorized**. Both paths require a proof of possession from the corresponding encryption private key, so neither role can register a public key it cannot decrypt with.
 - **Zone-side system calls** to `ZoneOutbox` use `msg.sender == address(0)`. Withdrawal finalization is system-only; sequencers may call the gas-rate and withdrawal-limit setters directly.
 - **Withdrawal processing is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
 
@@ -245,7 +255,9 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | `threshold` | The number of distinct active-sequencer signatures required for settlement. MUST be nonzero and no greater than `sequencers.length`. |
 | `rpcUrl` | The operator RPC endpoint advertised for the zone. |
 
-The native factory assigns a unique `zoneId`, etches the TIP-1091 proxy runtime at its reserved vanity address, initializes the portal storage with the fixed messenger and verifier, sets `blockHash` and the initial sequencer-set configuration nonce to zero, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
+The native factory assigns a unique `zoneId`, etches the TIP-1091 proxy runtime at its reserved vanity address, initializes the portal storage with the fixed messenger and verifier, sets `blockHash` and the initial sequencer-set configuration nonce to zero, and enables the initial token. Enabling the initial token also initializes `tokenEnablementHash` from the exact token metadata included in the initial `TokenEnabled` event, using the transition defined in [Token Enablement Commitment](#token-enablement-commitment). The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
+
+Canonical Zone genesis MUST anchor to a finalized Tempo block preceding the block that creates its portal. It MUST leave `ZoneInbox.processedTokenEnablementHash` at zero and replay the portal-creation block, including the initial `TokenEnabled` event. Implementations MUST reject genesis construction at or after portal deployment rather than pre-populating protocol state from a later portal snapshot.
 
 The shared portal runtime MUST preserve the native factory's constructor-equivalent storage suffix:
 
@@ -263,19 +275,34 @@ The shared portal runtime MUST preserve the native factory's constructor-equival
 | 20 | 0 | `role` |
 | 21 | 0 | `_isAccessEnforced` |
 | 21 | 1 | `_isGatewayEnforced` |
+| 22 | 0 | `maxTempoGasRate` |
+| 23 | 0 | `leader` |
+| 23 | 20 | `leaderEpoch` |
+| 24 | 0 | `leaderActivationTempoBlock` |
+| 24 | 8 | `_depositCountBlock` |
+| 24 | 16 | `_depositsInCurrentBlock` |
+| 24 | 24 | `_tokenEnableCountBlock` |
+| 25 | 0 | `_tokensEnabledInCurrentBlock` |
+| 26 | 0 | `tokenEnablementHash` |
 
 The factory performs this initialization natively in the portal account; the Solidity
 `initialize` function documents and tests the equivalent state transition.
 
 ### Chain ID
 
-Each zone has a unique chain ID derived from its zone ID:
+Each zone has a unique chain ID derived from its parent Tempo chain ID and zone ID:
 
 ```
-chain_id = 421700000 + zone_id
+if parent_chain_id == 4217:
+    chain_id = 421700000 + zone_id       # zone_id < 1002610000
+else if parent_chain_id == 42431:
+    chain_id = 1424310000 + zone_id      # zone_id < 723173648
+else:
+    chain_id = (parent_chain_id << 32) | zone_id
+    # 0 < parent_chain_id <= 1048574
 ```
 
-The prefix `4217` is derived from the Tempo chain ID. This ensures replay protection between zones. A transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration and validated by the zone node at startup.
+The production ranges reject exhaustion rather than wrapping. Generic IDs are at least `2^32` and cannot collide with the sub-`2^31` production ranges. The generic-parent ceiling ensures that even the largest `zone_id` keeps the EIP-155 legacy signature `v` value below JavaScript's `Number.MAX_SAFE_INTEGER`. Distinct devnets MUST use distinct parent chain IDs. This prevents replay between zones and between mainnet, Moderato, and devnets. The chain ID is set in genesis and validated at startup against both the connected parent and the zone ID returned by the configured `ZonePortal.zoneId()`.
 
 ### Tempo Contracts
 
@@ -285,7 +312,7 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 |----------|---------|
 | [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 
-The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. Portal roles are managed atomically with `setRole(account, role)`. An account has exactly one of `None`, `Account`, or `CallbackGateway`; the messenger cannot have the `Account` role. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
+The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. An account has exactly one of `None`, `Sequencer`, `Account`, `CallbackGateway`, or `PauseGuardian`. The admin manages these roles through `setAllowedAccount`, `setGateway`, and `setPauseGuardian`, while sequencer membership changes only through `setSequencerSet`. Each managed-role setter controls only its corresponding role, so changing roles requires first clearing the current role and then assigning the new one. `setAccessMode` and `setGatewayMode` activate or deactivate enforcement of the corresponding roles without clearing them.
 
 Account and gateway membership is evaluated when each portal or zone-side action executes. Revoked in-flight destinations and gateways bounce back, while revoked refund recipients have funds parked until membership is restored.
 
@@ -302,7 +329,7 @@ Each zone has four system contracts deployed at genesis at fixed addresses:
 
 ### Zone Token Model
 
-Contract creation is disabled on zones (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the sequencer enables a token on the portal, `ZoneInbox` directly initializes the corresponding TIP-20 state and bridge roles during `advanceTempo`. The TIP-20 factory is disabled on zones.
+Contract creation is disabled on zones (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the admin enables a token on the portal, `ZoneInbox` directly initializes the corresponding TIP-20 state and bridge roles during `advanceTempo` after authenticating the enablement against Tempo state. The TIP-20 factory is disabled on zones.
 
 Token supply on the zone is controlled exclusively by the system contracts:
 
@@ -322,8 +349,43 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
+- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
+  the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
+  extended while active. Proof-verified batch submission continues so settlement remains current
+  and an expired pause does not require recovery across the full pause interval.
+- `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
+  remains available after `Capability.PausePortal` is abdicated.
+- `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
+  `ABDICATION_DELAY` (30 days). It does not clear an active pause; any pause started before
+  abdication takes effect runs to its own expiry.
+- `abdicate(Capability.AccessPolicy)`: Permanently freeze account roles, gateway roles, and
+  enforcement modes after the same delay. Existing access roles cannot be revoked afterward.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Metadata copied into the zone is bounded by encoded byte length: 64 bytes for `name` and 31 bytes each for `symbol` and `currency`. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+
+### Token Enablement Commitment
+
+`ZonePortal.tokenEnablementHash` is an append-only commitment to every token enabled for the zone and to the exact metadata used to initialize its zone-side TIP-20 representation. Its initial value is zero. For an enabled token `t`, the next commitment is:
+
+```
+nextTokenEnablementHash = keccak256(
+    abi.encode(
+        tokenEnablementHash,
+        t.token,
+        t.name,
+        t.symbol,
+        t.currency
+    )
+)
+```
+
+The encoding is Solidity's standard `abi.encode(bytes32,address,string,string,string)` encoding, not packed encoding. Implementations in other languages must produce exactly the same bytes. `ZonePortal` updates `tokenEnablementHash` once in `_enableTokenInternal`, using the same metadata bytes emitted in `TokenEnabled`, and no other operation may modify it. The native `ZoneFactory` performs the identical transition for the initial token when it creates a portal.
+
+`ZoneInbox` stores `processedTokenEnablementHash`, initially zero, in a new storage-layout slot appended after its existing state. After importing a Tempo header, `advanceTempo` starts from this stored value and applies the transition above to every supplied `enabledTokens` entry in order. It then reads the portal's `tokenEnablementHash` from the imported Tempo state and requires exact equality. A mismatch reverts the complete system transaction before any token initialization or deposit processing. Partial token-enablement processing is not permitted.
+
+Consequently, `enabledTokens` is the exact ordered append-only delta that transforms the prior zone commitment into the portal commitment at the imported header. It is the sequence of `TokenEnabled` events from that Tempo block in transaction and log order. The bootstrap import is the portal-creation block, so this sequence starts with the initial token enablement and transforms the zero genesis commitment into the imported portal commitment. After equality is established, `ZoneInbox` initializes every supplied token, grants the Inbox and Outbox bridge roles, updates `processedTokenEnablementHash`, and only then processes deposits. An offchain comparison against observed receipt logs is defense in depth and is not a substitute for this consensus check.
+
+A protocol upgrade with existing non-empty token registries must initialize the portal and zone commitments from authenticated historical enablements or migrate to fresh state. Implementations must not treat a zero commitment as a legacy bypass.
 
 ### Gas Rate Configuration
 
@@ -403,9 +465,9 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Deposit, deposit, cur
 
 The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` and `processedDepositNumber` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo L1 at the zone's finalized checkpoint.
 
-Each portal accepts at most `MAX_UNPROCESSED_DEPOSITS` deposits outstanding in its queue. Before appending a deposit or withdrawal bounce-back, the portal computes `depositCount - lastProcessedDepositNumber`; the append is rejected when that count has reached the applicable limit. Twenty slots are reserved for withdrawal bounce-backs, enough for one maximum-size sequencer withdrawal batch, so user deposits stop at `MAX_UNPROCESSED_DEPOSITS - 20`. This bounds the complete deposit vector below the Zone's `advanceTempo()` system gas budget.
+Each portal accepts at most `MAX_DEPOSITS_PER_TEMPO_BLOCK` deposits in one Tempo block. The cap applies to encrypted deposits and internal withdrawal bounce-backs because both append to the same queue. Twenty slots are reserved for withdrawal bounce-backs, enough for one maximum-size sequencer withdrawal batch, so user deposits stop at `MAX_DEPOSITS_PER_TEMPO_BLOCK - 20`. This both bounds the complete per-block deposit vector below the Zone's `advanceTempo()` system gas budget and guarantees FIFO withdrawal progress under sustained public deposit load.
 
-`advanceTempo()` reads the portal's `currentDepositQueueHash` from Tempo L1 at the zone's finalized checkpoint. The call must process deposits through the current queue head: after rebuilding the hash chain, the resulting `processedDepositQueueHash` must equal the portal's `currentDepositQueueHash`. This check is binding and atomic: a mismatch reverts the entire system transaction, including the Tempo checkpoint advancement, token enablement, deposit mints, and any bounce-back side effects. The opening `advanceTempo` system transaction is also consensus-critical: if it reverts or halts for any reason, the containing zone block is invalid and must not be committed; it is not a valid block with a failed system-transaction receipt.
+`advanceTempo()` reads the portal's `currentDepositQueueHash` from Tempo L1 at the zone's finalized checkpoint. The call must process deposits through the current queue head: after rebuilding the hash chain, the resulting `processedDepositQueueHash` must equal the portal's `currentDepositQueueHash`.
 
 After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced, and updates `lastProcessedDepositNumber` from the proven `DepositQueueTransition`. Users should track deposit inclusion by deposit number: `DepositMade` emits `depositNumber`, `ZoneInbox.TempoAdvanced` emits the inbox's `lastProcessedDepositNumber`, and `ZonePortal.BatchSubmitted` emits the accepted portal value. A deposit with number `N` is processed once `lastProcessedDepositNumber >= N`.
 
@@ -416,7 +478,7 @@ Users can encrypt the recipient and memo of a deposit so that only the sequencer
 The encryption scheme is ECIES with secp256k1:
 
 1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
-2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
+2. The user derives an AES-256 key from the shared secret and the deposit sender using HKDF-SHA256.
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
 4. The user calls `deposit(token, amount, keyIndex, encryptedPayload, tempoRefundRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `tempoRefundRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). In closed access mode, the caller and refund recipient must be allowed; a caller with the `CallbackGateway` role is the exception while gateway mode is enforced. Open access mode skips membership checks. The decrypted `to` address is not checked against Tempo membership. `deposit` also enforces its fee, encryption-key, payload-shape, and TIP-403 checks.
 
@@ -450,7 +512,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 1. **Chaum-Pedersen proof.** The sequencer provides a zero-knowledge proof that the shared secret was correctly derived: "I know `privSeq` such that `pubSeq = privSeq * G` AND `sharedSecretPoint = privSeq * ephemeralPub`." The [Chaum-Pedersen Verify](#chaum-pedersen-verify) precompile checks this proof. The sequencer's public key is looked up from the onchain key history, not supplied by the sequencer, preventing key substitution.
 
-2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, and `ephemeralPubkeyX` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint.
+2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, `ephemeralPubkeyX`, and the public deposit `sender` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint. Binding the sender means replaying a payload from another account derives a different AES key and fails authentication, causing the deposit to bounce back instead of minting to the hidden recipient.
 
 If any step fails (invalid proof, GCM tag mismatch, or invalid decrypted plaintext length), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `tempoRefundRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `deposit` requires a non-zero `tempoRefundRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
@@ -608,7 +670,7 @@ Withdrawal requests are bounded before they enter the pending queue. `gasLimit` 
 
 The sequencer can additionally configure `maxWithdrawalsPerBlock` on the outbox. A value of `0` means unlimited. When nonzero, only that many `requestWithdrawal` calls can be accepted in a single zone block; further requests in the same block revert with `TooManyWithdrawalsThisBlock` before any token transfer or burn. The outbox tracks the last block number counted and resets the per-block counter when `block.number` changes.
 
-The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
+Before transferring or burning tokens, the outbox reads the packed pause expiry from the portal at the latest finalized Tempo checkpoint. An active pause reverts the request with `PortalIsPaused`. Otherwise the outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
 
 Keeping the recipient in zone state prevents the L1-visible withdrawal and any later bounce-back from revealing the user's private zone address. A monotonic nonce is deterministic under the zone's canonical transaction ordering, including multi-sequencer execution, while remaining collision-free; it reveals only relative withdrawal order and count, not the mapped recipient.
 
@@ -630,7 +692,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 A withdrawal batch ends with exactly one call to `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox` in the final block of that batch. The block builder includes this as the last transaction using the zone system caller (`msg.sender == address(0)`), and the `blockNumber` argument must match the current zone block number. The encrypted-senders array carries one sequencer-supplied ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`); `senderTag` is recomputed by the outbox from the queued withdrawal sender, transaction hash, and fallback nonce. This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
 
 ```
-withdrawalQueueHash = EMPTY_SENTINEL
+withdrawalQueueHash = 0
 for i from (count - 1) down to 0:
     withdrawalQueueHash = keccak256(abi.encode(withdrawals[i], withdrawalQueueHash))
 ```
@@ -641,11 +703,11 @@ Batch cadence is deterministic. It closes a batch when there are pending withdra
 
 ### Withdrawal Queue
 
-The portal stores withdrawals in a fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100`. Each batch with a non-zero `withdrawalQueueHash` gets its own logical queue index. Empty batches advance `withdrawalBatchIndex` but do not consume a queue index.
+The portal stores withdrawals in an unbounded FIFO. Each batch with a non-zero `withdrawalQueueHash` gets its own logical queue index. Empty batches advance `withdrawalBatchIndex` but do not consume a queue index.
 
-The portal tracks `head` (oldest unprocessed batch) and `tail` (the logical index assigned to the next non-empty batch). Both are monotonically increasing counters that never wrap. The physical ring-buffer slot for a logical queue index is `index % 100`. `withdrawalQueueSlot(physicalSlot)` reads a physical slot, so clients resolving a pending logical index from an event must call `withdrawalQueueSlot(withdrawalQueueIndex % 100)`. Empty physical slots contain `EMPTY_SENTINEL` (`0xff...ff`) instead of `0x00` to avoid storage clearing and gas refund incentive issues.
+The portal tracks `head` (oldest unprocessed batch) and `tail` (the logical index assigned to the next non-empty batch). Both are monotonically increasing counters that never wrap. Each logical index is used directly as the key in the queue's storage mapping, and `withdrawalQueueSlot(queueIndex)` reads that key. Exhausted slots are deleted. Under TIP-1060, each deletion earns the portal a storage credit that can offset a later queue-slot creation; only growth beyond the queue's previous high-water storage footprint requires net-new storage.
 
-When `submitBatch` includes a non-zero `withdrawalQueueHash`, the current `tail` is assigned as its logical `withdrawalQueueIndex`, the hash is written to `slots[withdrawalQueueIndex % 100]`, and `tail` advances. `BatchSubmitted.withdrawalQueueIndex` emits that assigned logical index. For an empty batch, the event emits `NO_QUEUE_INDEX = type(uint256).max` and `tail` does not advance. The queue reverts with `WithdrawalQueueFull` if `tail - head >= 100`.
+When `submitBatch` includes a non-zero `withdrawalQueueHash`, the current `tail` is assigned as its logical `withdrawalQueueIndex`, the hash is written to `slots[withdrawalQueueIndex]`, and `tail` advances. `BatchSubmitted.withdrawalQueueIndex` emits that assigned logical index. For an empty batch, the event emits `NO_QUEUE_INDEX = type(uint256).max` and `tail` does not advance. Queue capacity cannot prevent a valid batch from acknowledging processed deposits.
 
 ### Withdrawal Processing
 
@@ -653,7 +715,7 @@ The sequencer processes ordered withdrawals atomically on Tempo by calling `proc
 
 Before each call, the portal bounds the attempted withdrawal count by the deposit-queue capacity that remains before the next Tempo batch can process deposits. Specifically, with `unprocessed = depositCount - lastProcessedDepositNumber` and `remainingCapacity = MAX_UNPROCESSED_DEPOSITS - unprocessed`, the call must satisfy `withdrawals.length <= remainingCapacity`. This conservative check assumes every attempted withdrawal fails and creates a bounce-back, so all possible side effects fit within the outstanding-deposit limit. A finalized withdrawal batch may therefore be split across multiple ordered `processWithdrawals` calls, each carrying the appropriate `remainingQueue`; if `remainingCapacity` is zero, the operator must first run `advanceTempo()` to process queued deposits and reopen capacity.
 
-The portal dequeues before executing the withdrawal, then independently requires `withdrawal.token` to be enabled. Failed callbacks roll back in an external self-call and become bounce-backs, so the dequeue remains committed and cannot block the FIFO. If `remainingQueue` is zero (last item in the slot), processing sets the slot to `EMPTY_SENTINEL` and advances `head`; otherwise it updates the slot to `remainingQueue`.
+The portal dequeues before executing the withdrawal, then independently requires `withdrawal.token` to be enabled. Failed callbacks roll back in an external self-call and become bounce-backs, so the dequeue remains committed and cannot block the FIFO. If `remainingQueue` is zero (last item in the slot), processing deletes the slot and advances `head`; otherwise it updates the slot to `remainingQueue`.
 
 The sequencer first packs withdrawals into transactions using a configurable per-transaction gas budget, then submits them through a queue bounded by transaction count. Transactions use consecutive nonces on the dedicated withdrawal nonce key, preserving FIFO queue transitions even when later transactions are broadcast before earlier receipts arrive. If a submission reverts or cannot be confirmed, the sequencer stops admitting new transactions, drains those already submitted, then reconciles the on-chain queue and retries its unfinished suffix.
 
@@ -750,15 +812,13 @@ Transaction-pool admission requires the recovered sender to hold a nonzero balan
 
 Each zone block contains system transactions and user transactions in a fixed order:
 
-1. `ZoneInbox.advanceTempo(headers, deposits, decryptions, enabledTokens)` (required as the first transaction in every non-genesis block). Imports one or more consecutive finalized Tempo blocks, enables newly-bridged tokens, processes any pending deposits, and verifies encrypted deposit decryptions. The headers are ordered from oldest to newest; only the final header supplies the Tempo state root used by the rest of the call. All deposits in the call, including deposits enqueued in an intermediate imported Tempo block, use that final root for every Tempo state read and TIP-403 policy decision.
+1. `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` (required as the first transaction in every non-genesis block). Imports exactly one finalized Tempo block, authenticates and initializes its token-enablement delta, processes pending deposits, and verifies encrypted deposit decryptions.
 2. User transactions, executed in order.
 3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called at each batch boundary even if there are zero withdrawals so the batch index advances. It is the unique final transaction and uses the zone system caller (`msg.sender == address(0)`).
 
 A batch covers one or more zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The bootstrap batch MUST contain at least two blocks. Its first block is the canonical genesis block, which contains no transactions, and every subsequent block follows the non-genesis rules above. This guarantees that the first submitted batch imports at least one finalized Tempo block, performs the corresponding Tempo state reads, and finalizes the withdrawal batch in a non-genesis block.
 
-After bootstrap, zone blocks and imported Tempo blocks have an order-preserving correspondence: every zone block imports one or more Tempo blocks, and every imported Tempo block is used by exactly one zone block. The first imported Tempo block must be the immediate child of the block imported by the preceding zone block, and each later header in the array must be the immediate child of the preceding header in that array. A zone may lag the finalized Tempo head and catch up by importing many consecutive Tempo blocks in one zone block, but it cannot skip Tempo blocks, import a Tempo block more than once, or advance beyond the available finalized Tempo chain.
-
-A multi-header range MUST NOT cross a leader transition. Let `first` and `last` be the numbers of the first and final imported Tempo headers, and let `activation` be the final-root value of the portal's `leaderActivationTempoBlock`. The range is invalid when `first < activation <= last`; a range beginning at `activation` is valid because every imported header is then governed by the new leader. When the range is valid, all imported headers belong to one leadership epoch, and the zone block beneficiary MUST match the final-root `leader` for that epoch. This rule is enforced by block production, follower import, stateless execution, proving, and settlement verification; it does not require state reads from intermediate headers.
+After bootstrap, zone blocks and imported Tempo blocks have a one-to-one, order-preserving correspondence: every zone block imports exactly one Tempo block, and every imported Tempo block is used by exactly one zone block. The imported Tempo block must be the immediate child of the block imported by the preceding zone block. A zone may lag the finalized Tempo head and catch up by producing blocks at full speed, but it cannot skip Tempo blocks, produce multiple blocks for the same Tempo block, or advance beyond the available finalized Tempo chain.
 
 ### Block Header Format
 
@@ -778,7 +838,7 @@ be recreated.
 
 Zone execution differs from standard Tempo execution in three areas. These changes are enforced at the EVM level, not just at the RPC layer, so they apply to all code paths including user transactions, `eth_call` simulations, and prover re-execution.
 
-- **Account-indexed state access control.** Every getter on a zone system contract or precompile that selects privacy-bearing state by account must authorize that account against `msg.sender`. Unless a getter defines additional legitimate readers, it reverts unless `msg.sender` is the selected account or the sequencer. This includes AccountKeychain key configuration and limits, TIP-20 permit nonces, Nonce Manager lanes, Permit2 allowances and nonce bitmaps, FeeManager preferences and collected fees, FeeAMM liquidity balances, and ZoneInbox refund balances. The `ZoneInbox.refunds` mapping is not publicly readable; its explicit `refunds(token, owner)` getter authorizes only `owner` or the sequencer. `balanceOf(account)` authorizes the account owner or sequencer; `allowance(owner, spender)` authorizes the owner, spender, or sequencer. Enforcement applies to nested calls, including calls forwarded by Multicall3 or another contract, as well as direct calls.
+- **Account-indexed state access control.** Every getter on a zone system contract or precompile that selects privacy-bearing state by account must authorize that account against `msg.sender`. Unless a getter explicitly defines additional legitimate readers, it reverts unless `msg.sender` is the selected account. This includes AccountKeychain key configuration and limits, TIP-20 permit nonces, Nonce Manager lanes, Permit2 allowances and nonce bitmaps, FeeManager preferences and collected fees, FeeAMM liquidity balances, and ZoneInbox refund balances. The `ZoneInbox.refunds` mapping is not publicly readable; its explicit `refunds(token, owner)` getter authorizes only `owner` or the sequencer. `balanceOf(account)` authorizes only the account owner; `allowance(owner, spender)` authorizes the owner or spender. Enforcement applies to nested calls, including calls forwarded by Multicall3 or another contract, as well as direct calls.
 - **Fixed gas for transfers.** All TIP-20 transfer and approve operations charge a fixed 100,000 gas regardless of storage layout. This eliminates a side channel where variable gas costs reveal whether a recipient has previously received tokens.
 - **Contract creation disabled.** `CREATE` and `CREATE2` revert. The zone runs only predeploys and TIP-20 token precompiles. Arbitrary contract deployment would allow users to circumvent the execution-level privacy controls.
 
@@ -786,7 +846,7 @@ Zone execution differs from standard Tempo execution in three areas. These chang
 
 ## Tempo State Reads
 
-The zone reads all of its configuration from Tempo: the sequencer address, the token registry, the deposit queue hash, and TIP-403 policy state. These reads use the finalized Tempo checkpoint.
+The zone reads all of its configuration from Tempo: the sequencer address, the token registry and token-enablement commitment, the deposit queue hash, and TIP-403 policy state. These reads use the finalized Tempo checkpoint.
 
 ### TempoState Predeploy
 
@@ -804,17 +864,17 @@ Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a gene
 
 ### Header Finalization
 
-`ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(headers)` to advance the zone's view of Tempo. This function decodes the non-empty, ordered RLP header array, validates the first header against the previous finalized checkpoint, validates each subsequent header against its predecessor (parent hash and consecutive block number), stores only the final header as the new checkpoint, and emits exactly one `TempoBlockFinalized` event for the final header's hash, number, and state root. Intermediate headers produce no finalization events; they are used only for hash-chain validation and never for Tempo state reads.
+`ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo. This function decodes the RLP header, requires its timestamp (seconds and millisecond component) to exactly match the executing zone block, validates chain continuity (parent hash must match the previous finalized header, block number must increment by one), stores the new checkpoint, and emits the decoded state root in `TempoBlockFinalized`.
 
-The first import is the exception to the continuity check. When `tempoBlockHash == 0`, `finalizeTempo` may start at any finalized Tempo block only if a proof against the final header's state root shows that this zone's portal already exists. Existence is established by reading the portal's `sequencer` storage field and requiring it to be non-zero. This prevents importing a Tempo block from before the portal's creation without requiring its hash or number during zone deployment. The headers after the first must still form a consecutive hash chain. After this bootstrap import, ordinary parent-hash and consecutive-number validation applies to the first header and to every later header in each array.
+Canonical deployed Zones start with the nonzero pre-portal Tempo checkpoint recorded in genesis. Their first import begins with its immediate child—the portal-creation block—and ordinary parent-hash and consecutive-number validation applies from that block onward. The standalone zero-hash genesis template MUST be anchored before use and MUST NOT bootstrap a deployed portal from an arbitrary later snapshot.
 
-Every non-genesis zone block must call `advanceTempo` exactly once as its first transaction. Consequently, its Tempo binding advances to the final header in its array.
+Every non-genesis zone block must call `advanceTempo` exactly once as its first transaction. Consequently, its Tempo binding advances by exactly one block.
 
 ### L1 Storage Reads
 
-`ZoneInbox`, `ZoneOutbox`, and TIP-403 execution read Tempo account storage from the final block selected by the finalized checkpoint. Each read identifies a Tempo account and storage slot, and the zone node resolves the value through its finalized Tempo L1 provider. No state reads are performed against intermediate headers imported in the same zone block. In particular, every deposit in a multi-header `advanceTempo` call is evaluated against the final imported block, even when that deposit was enqueued by an earlier block in the imported range.
+`ZoneInbox`, `ZoneOutbox`, and TIP-403 execution read Tempo account storage from the block selected by the finalized checkpoint. Each read identifies a Tempo account and storage slot, and the zone node resolves the value through its finalized Tempo L1 provider.
 
-The prover validates each read against the Tempo state root from the final header in the corresponding zone block's header array and includes Merkle proofs for every account and storage slot accessed by system precompiles during the batch.
+The prover validates each read against the Tempo state root from the corresponding finalized header witness and includes Merkle proofs for every account and storage slot accessed by system precompiles during the batch.
 
 Native L1 storage reads use transaction-local cold/warm pricing keyed by Tempo account and storage slot. The first native access to a key in a transaction charges 2,100 gas and subsequent accesses charge 100 gas. This consensus access set is independent of the node's block-versioned L1 value cache, so prefetching and cache state cannot affect gas usage. Native precompile reads select the anchor by performing the ordinary local `TempoState.tempoBlockNumber` `SLOAD` before the L1 fetch.
 
@@ -824,11 +884,9 @@ TIP-403 policy authorization on the zone executes Tempo's registry precompile at
 
 ### Staleness and Finality
 
-The zone's view of Tempo is the final Tempo block imported by the latest zone block. It may lag the finalized Tempo head when zone block production is behind, but every catch-up zone block imports the next consecutive range of Tempo block.
+The zone's view of Tempo is the finalized Tempo block imported by its latest block. It may lag the finalized Tempo head when zone block production is behind, but every catch-up zone block imports the next consecutive Tempo block.
 
 The zone node must only finalize Tempo headers that have reached finality on Tempo. Proofs should only reference finalized Tempo blocks to avoid reorg risk.
-
-Operators MUST preserve a historical Tempo state witness at least every 35 minutes and at every leader transition. Each catch-up range needs only the witness for its final anchor; intermediate headers are retained for continuity validation.
 
 <br>
 
@@ -840,11 +898,11 @@ Zones inherit compliance policies from Tempo automatically. Token issuers set tr
 
 The zone has a `TIP403Registry` deployed at the same address as on Tempo. This contract is read-only and does not support writing policies. Its read methods execute Tempo's registry logic over raw L1 policy storage at the finalized `TempoState.tempoBlockNumber` anchor.
 
-Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts. For a multi-header import, all TIP-403 checks for all deposits use the final imported Tempo block's registry state; deposits are never evaluated against per-header policy snapshots.
+Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts.
 
 ### Policy Inheritance
 
-Issuers manage policies exclusively on Tempo. When an issuer freezes an address, updates a blacklist, or modifies a whitelist on Tempo, the zone inherits the change when an `advanceTempo` call's final imported block contains the update in its state. A change that occurs in an intermediate imported block is not observed against deposits until a call whose final root includes that change.
+Issuers manage policies exclusively on Tempo. When an issuer freezes an address, updates a blacklist, or modifies a whitelist on Tempo, the zone inherits the change the next time `advanceTempo` imports a Tempo block containing the update.
 
 If a TIP-403 policy causes a withdrawal transfer to fail, it bounces back to the sender's `zoneFallbackRecipient`.
 
@@ -890,9 +948,9 @@ Keychain keys allow session keys and scoped access keys to authenticate to the R
 
 ### Method Access Control
 
-The RPC uses a default-deny model. Any method not explicitly listed returns `-32601` (method not found). Methods fall into four categories:
+The RPC uses a default-deny model. Any method not explicitly listed returns `-32601` (method not found). Exposed methods fall into two categories:
 
-**Allowed.** `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber` and `eth_getBlockByHash` (without full transactions), `eth_syncing`, `eth_coinbase`, `net_version`, `net_listening`, `web3_clientVersion`, `web3_sha3`.
+**Allowed.** `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber` and `eth_getBlockByHash` (without full transactions), `eth_syncing`, `eth_coinbase`, `net_version`, `net_listening`, `web3_clientVersion`, `web3_sha3`, `zone_getAuthorizationTokenInfo`, `zone_getZoneInfo`, and `zone_getEncryptionKey`.
 
 Fee quotes are caller-independent: `eth_gasPrice` returns the fixed T1 gas price and `eth_maxPriorityFeePerGas` returns `0`.
 
@@ -900,30 +958,29 @@ Fee quotes are caller-independent: `eth_gasPrice` returns the fixed T1 gas price
 
 - `eth_getBalance`, `eth_getTransactionCount`: return `0x0` for non-self queries (no error, to avoid leaking account existence).
 - `eth_getTransactionByHash`, `eth_getTransactionReceipt`: return `null` if the caller is not the sender.
-- `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account.
-- `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. Account-indexed reads are then protected by the execution-level access controls described in [Privacy Modifications](#privacy-modifications), including for nested calls. State override sets and block override objects are rejected for non-sequencer callers.
+- `eth_sendRawTransaction`, `eth_sendRawTransactionSync`: reject if the transaction sender does not match the authenticated account.
+- `eth_fillTransaction`: fills but does not sign an unsigned transaction, with the same authenticated `from` enforcement as simulation methods.
+- `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. Account-indexed reads are then protected by the execution-level access controls described in [Privacy Modifications](#privacy-modifications), including for nested calls. State override sets and block override objects are rejected.
 - `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`: filtered to TIP-20 events where the caller is a relevant party (see [Event Filtering](#event-filtering)).
 - `eth_newFilter`, `eth_newBlockFilter`, `eth_uninstallFilter`: allowed, filters are scoped to the authenticated account.
 
-**Restricted (sequencer-only).** Methods that expose raw state, full block data, or transaction-level detail that would break per-account privacy. This includes raw state access (`eth_getStorageAt`, `eth_getCode`, `eth_createAccessList`), full block queries (`eth_getBlockByNumber`/`eth_getBlockByHash` with full transactions, `eth_getBlockReceipts`, `eth_getBlockTransactionCountByNumber`/`Hash`, `eth_getTransactionByBlockNumberAndIndex`/`HashAndIndex`, `eth_getUncleCountByBlockNumber`/`Hash`), and all `debug_*`, `admin_*`, and `txpool_*` namespace methods.
-
-**Disabled.** Methods not available on zones. `eth_getProof` leaks trie structure. `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` enable mempool observation. Uncle query methods (`eth_getUncleByBlockNumberAndIndex`, `eth_getUncleByBlockHashAndIndex`) and mining methods (`eth_mining`, `eth_hashrate`, `eth_getWork`, `eth_submitWork`, `eth_submitHashrate`) do not apply to zones.
+Methods outside this allowlist are not classified separately as restricted or disabled. Raw state and full block endpoints, mining and mempool methods, and all `debug_*`, `admin_*`, and `txpool_*` methods return `-32601`. Sequencers and operators use the unrestricted RPC on port 8545 instead of receiving elevated access through an authorization token. Requests for full transactions through the otherwise-allowed `eth_getBlockByNumber` and `eth_getBlockByHash` methods return `-32005` and must likewise use the unrestricted endpoint.
 
 **Note on timing side channel attacks:** Scoped methods returning empty values could technically be timed to estimate if the values exist. However, (1) Benchmarked timing differences are very small and (2) The values like `transactionHash` etc... can't be correlated to actual user data, so any leaked signal is not material.
 
 ### Block Responses
 
-For non-sequencer callers, block responses are modified:
+Block responses from the redacted RPC are modified:
 
 - The `transactions` field is always an empty array, regardless of the `include_transactions` parameter.
 - Header fields that reveal aggregate execution activity are zeroed or emptied: `gasUsed`, `transactionsRoot`, `receiptsRoot`, `stateRoot`, `extraData`, `logsBloom`, `size`, optional blob gas fields (`blobGasUsed`, `excessBlobGas`), and optional withdrawal fields (`withdrawals`, `withdrawalsRoot`). The Bloom filter summarizes all log topics and emitting addresses in the block, and the other redacted fields reveal transaction count, payload size, state changes, receipt/log activity, blob usage, or withdrawal activity.
 - Public block identity and timing fields such as `number`, `hash`, `parentHash`, `timestamp`, and fee metadata remain visible.
 
-The sequencer receives full block data.
+Sequencers and operators retrieve full block data from the unrestricted RPC on port 8545.
 
 ### Fee History
 
-`eth_feeHistory` uses the underlying node implementation for block range resolution, history limits, and reward percentile validation, then redacts activity-derived fields before returning the response to non-sequencer callers:
+`eth_feeHistory` uses the underlying node implementation for block range resolution, history limits, and reward percentile validation, then redacts activity-derived fields before returning the response:
 
 - `baseFeePerGas` is set to the public zone T0 base fee for every returned entry.
 - `gasUsedRatio`, `baseFeePerBlobGas` and `blobGasUsedRatio` are set to `0`.
@@ -953,7 +1010,7 @@ To avoid leaking how much activity occurred in a block, some fields of returned 
 
 WebSocket connections follow the same authorization model. The authorization token is provided during the handshake and scopes all subscriptions for that connection.
 
-- `eth_subscribe("newHeads")`: allowed, pushes block headers with the same header redaction as HTTP block responses for non-sequencer callers.
+- `eth_subscribe("newHeads")`: allowed, pushes block headers with the same header redaction as HTTP block responses.
 - `eth_subscribe("logs")`: scoped to the authenticated account using the same event filtering rules.
 - `eth_subscribe("newPendingTransactions")`: disabled.
 
@@ -995,8 +1052,9 @@ There are no state-changing methods via authorization token. Withdrawals require
 | `-32002` | Authorization token expired | Token has expired |
 | `-32003` | Transaction rejected | Sender mismatch on `eth_sendRawTransaction` |
 | `-32004` | Account mismatch | `from` mismatch on `eth_call` / `eth_estimateGas` |
-| `-32005` | Sequencer only | Method requires sequencer access |
-| `-32006` | Method disabled | Method not available on zones |
+| `-32005` | Sequencer only | Full block transactions require the unrestricted operator RPC |
+| `-32006` | Method disabled | WebSocket subscription kind is not available on zones |
+| `-32601` | Method not found | Method is not exposed by the redacted RPC allowlist |
 
 Methods where the user explicitly supplies a mismatched parameter return explicit errors (the user already knows the address they provided). Methods that query about other accounts return silent dummy values (`0x0`, `null`, empty results) to avoid revealing "data exists but you can't see it."
 
@@ -1020,10 +1078,11 @@ It takes a complete witness of zone blocks and their dependencies, executes EVM 
 
 The witness contains everything needed to re-execute the batch:
 
-- **PublicInputs**: `zone_id`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with. For an ordinary batch, `prevBlockHash` is derived from `prev_block_header` and bound through the public `block_transition` output. For the bootstrap proof it is zero and the transition function derives the canonical genesis block from `zone_id`. The bootstrap batch has to continue through at least one non-genesis block.
-- **BatchWitness**: the public inputs, the previous batch's canonical Tempo header (absent for the bootstrap proof), the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
-- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlps` (a non-empty ordered array for every non-genesis block), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
-- **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included, including the `TempoState.tempoBlockNumber` slot used by the TIP-403 overlay's host-side anchor lookup. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
+- **PublicInputs**: `parent_chain_id`, `zone_id`, `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. The verifier binds `parent_chain_id` to the L1 execution environment's chain ID; the portal supplies the remaining values, and the proof must be consistent with them.
+- **BatchWitness**: the public inputs, the parent header, the zone blocks to execute, the initial zone state, the Tempo state witness, and Tempo ancestry headers (for ancestry validation).
+- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `timestamp_millis_part`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
+- **ZoneStateWitness**: a deduplicated pool of zone-state trie nodes and a bytecode pool. Account and storage values are decoded directly from trie leaves; the initial state root comes from the parent header. The witness includes EIP-2935 history-contract slots used by `BLOCKHASH`. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
+- **TempoStateWitness**: the RLP-encoded Tempo header for the checkpoint already bound in the parent zone state and a deduplicated pool of Tempo-state trie nodes. The header supplies the authenticated initial Tempo state root for L1 storage reads.
 
 ### Input Schematic
 
@@ -1034,13 +1093,13 @@ flowchart TB
     subgraph BW["BatchWitness"]
         direction TB
 
-        PI["PublicInputs<br/>zone_id<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
+        PI["PublicInputs<br/>parent_chain_id<br/>zone_id<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
 
         PH["parent_header: ZoneHeader<br/>parent_hash<br/>beneficiary<br/>state_root<br/>transactions_root<br/>receipts_root<br/>number<br/>timestamp<br/>protocol_version"]
 
         subgraph ZBL["zone_blocks"]
             direction TB
-            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>beneficiary<br/>tempo_header_rlps<br/>enabled_tokens<br/>finalize_withdrawal_batch_count<br/>finalize_withdrawal_batch_encrypted_senders<br/>transactions"]
+            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>timestamp_millis_part<br/>beneficiary<br/>tempo_header_rlp<br/>enabled_tokens<br/>finalize_withdrawal_batch_count<br/>finalize_withdrawal_batch_encrypted_senders<br/>transactions"]
 
             subgraph DEP["deposits"]
                 direction TB
@@ -1098,8 +1157,12 @@ The prover-side inputs are defined concretely below. Types that mirror the oncha
 
 ```rust
 pub struct PublicInputs {
+    /// Parent Tempo chain ID. The verifier must bind this to the L1 execution
+    /// environment's chain ID; the program uses it to derive the zone chain ID.
+    pub parent_chain_id: u64,
+
     /// Zone ID. The verifier must bind this public input to the zone portal;
-    /// the program derives the EVM chain ID from it.
+    /// the program derives the EVM chain ID from it and `parent_chain_id`.
     pub zone_id: u32,
 
     /// Tempo block number for the batch (must equal portal's tempoBlockNumber)
@@ -1150,25 +1213,30 @@ pub struct ZoneBlock {
     /// Timestamp
     pub timestamp: u64,
 
+    /// Millisecond component of the timestamp
+    pub timestamp_millis_part: u64,
+
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
 
-    /// Ordered Tempo header RLPs used by the call (ZoneInbox.advanceTempo).
-    /// Empty only for the canonical genesis block; every other block must
-    /// import at least one header.
-    pub tempo_header_rlps: Vec<Vec<u8>>,
+    /// Tempo header RLP used by the call (ZoneInbox.advanceTempo).
+    /// If None, the block does not advance Tempo and the binding carries over.
+    pub tempo_header_rlp: Option<Vec<u8>>,
 
     /// Deposits processed by the system tx (oldest first, unified queue).
-    /// Must be empty only for the canonical genesis block.
+    /// Must be empty if tempo_header_rlp is None.
     pub deposits: Vec<QueuedDeposit>,
 
     /// Decryption data for encrypted deposits in the system tx.
-    /// Must be empty only for the canonical genesis block.
+    /// Must be empty if tempo_header_rlp is None.
     pub decryptions: Vec<DecryptionData>,
 
-    /// Tokens enabled by the system tx, in the exact calldata order passed to
-    /// `ZoneInbox.advanceTempo(headers, deposits, decryptions, enabledTokens)`.
-    /// Must be empty only for the canonical genesis block.
+    /// Exact ordered token-enablement delta passed to
+    /// `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)`.
+    /// For every non-genesis block, the delta must transform the prior ZoneInbox
+    /// token-enablement commitment into the portal commitment at the imported Tempo
+    /// header. It is empty for the canonical genesis block and may be empty
+    /// for other blocks when there are no enablements.
     pub enabled_tokens: Vec<EnabledToken>,
 
     /// Sequencer-only: finalize a batch (only in final block, must be last)
@@ -1236,24 +1304,6 @@ pub struct TempoStateWitness {
 
     /// Deduplicated pool of all MPT nodes
     pub node_pool: Vec<Vec<u8>>,
-
-    /// Tempo state reads verified against the shared node pool
-    pub reads: Vec<L1StateRead>,
-}
-
-pub struct L1StateRead {
-    /// Which zone block performed this read
-    pub zone_block_index: u64,
-
-    /// Which final imported Tempo block to read from (must match TempoState for this block)
-    pub tempo_block_number: u64,
-
-    /// Tempo account and storage slot
-    pub account: Address,
-    pub slot: U256,
-
-    /// Expected value
-    pub value: U256,
 }
 ```
 
@@ -1286,53 +1336,53 @@ The state transition function produces:
 
 The stateless execution function must reject the witness on any failed check, missing read, or inconsistent state transition. A correct implementation proceeds in the following order:
 
-1. **Derive the previous block hash and bind the predecessor state.**
-    For an ordinary batch, require `prev_block_header` to be present, compute `initial_prev_block_hash` with Tempo's canonical `TempoHeader` hash function, and require `prev_block_header.state_root == initial_zone_state.state_root`. For the bootstrap proof, require `prev_block_header` to be absent, set `initial_prev_block_hash = 0`, and require `initial_zone_state` to be the predefined pre-genesis state. The returned `block_transition.prev_block_hash` must equal `initial_prev_block_hash`; the verifier binds it to the submitted `BlockTransition`, whose `prevBlockHash` the portal checks against its stored `blockHash`.
+1. **Bind the parent header to the public inputs.**
+   Require `keccak256(rlp(parent_header)) == public_inputs.prev_block_hash`. Use `parent_header.state_root` as the initial zone-state root. This binds the witness to the exact predecessor block already committed on Tempo without duplicating its state root.
 
 2. **Initialize the initial zone-state reader.**
-   Apply the [shared trie proof format](#shared-trie-proof-format) to `zone_state_witness`: index each node in `zone_state_witness.node_pool` by `keccak256(rlp(node))` and create a witness-backed reader rooted at `parent_header.state_root`. As execution first accesses an account or storage slot, derive its key from the operation, prove and decode its trie leaf, and cache the result in the in-memory execution state. For non-empty account code, find its preimage in `zone_state_witness.bytecodes` by the committed code hash. Valid non-membership yields the canonical empty account or zero storage; an unavailable trie node or bytecode preimage is an error.
+   Apply the [shared trie proof format](#shared-trie-proof-format) to `zone_state_witness`: index each node in `zone_state_witness.node_pool` by `keccak256(rlp(node))` and create a witness-backed reader rooted at `parent_header.state_root`. As execution first accesses an account or storage slot, derive its key from the operation, prove and decode its trie leaf, and cache the result in the in-memory execution state. Resolve `BLOCKHASH(n)` through the EIP-2935 history contract at slot `n % 8191`; the corresponding account and storage paths must be present in the Zone state witness. For non-empty account code, find its preimage in `zone_state_witness.bytecodes` by the committed code hash. Valid non-membership yields the canonical empty account or zero storage; an unavailable trie node or bytecode preimage is an error.
 
 3. **Initialize the Tempo state witness.**
    Compute `keccak256(rlp(node))` for each node in `tempo_state_witness.node_pool` and build a hash-to-node index for proof traversal. Decode `tempo_state_witness.initial_tempo_header_rlp`; require its hash and block number to equal `TempoState.tempoBlockHash` and `TempoState.tempoBlockNumber` in the initial zone state. Set the active Tempo trie root to the decoded header's `state_root`.
 
 4. **For each `zone_blocks[i]`, verify the block witness before executing it.**
-   In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `public_inputs.zone_id`, including `chain_id = 421700000 + zone_id`; its parent hash is zero and it contains no user or system transactions. Apply the ordinary block rules to every remaining bootstrap block and to every block in an ordinary batch: require `block.parent_hash == prev_block_hash`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlps` to be non-empty. Require `finalize_withdrawal_batch_count` to be absent in the genesis block and all intermediate blocks, and present in the final block of a batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
+   In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `(public_inputs.parent_chain_id, public_inputs.zone_id)`, including `chain_id = zone_chain_id(parent_chain_id, zone_id)` under the rules in [Chain ID](#chain-id); its parent hash is zero and it contains no user or system transactions. Apply the ordinary block rules to every remaining bootstrap block and to every block in an ordinary batch: require `block.parent_hash == prev_block_hash`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlp` to be present. Require `finalize_withdrawal_batch_count` to be absent in the genesis block and all intermediate blocks, and present in the final block of a batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
 
-5. **Execute `advanceTempo` as the first transaction.**
-   Skip this step for the canonical genesis block. For every non-genesis block, decode all `tempo_header_rlps` and call `TempoState.finalizeTempo(headers)` in the modeled execution environment. If the stored `tempoBlockHash` is non-zero, require the first imported header's number to be the stored `tempoBlockNumber + 1` and its parent hash to equal the stored `tempoBlockHash`. If the stored hash is zero, instead verify a Tempo state proof for this portal's `sequencer` slot against the final imported header's state root and require the value to be non-zero. For every subsequent imported header, require its number to be the preceding header's number plus one and its parent hash to equal the preceding header's hash. Then update the bound `tempoBlockNumber` and `tempoBlockHash` to the final header and make only the final header's state root available for subsequent Tempo L1 storage reads in this block. Require the finalized `tempoBlockHash` to equal the hash of the final header. Reject any non-genesis block that omits or executes more than one `advanceTempo` call.
+5. **Execute `advanceTempo` if the block imports a Tempo header.**
+   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This requires the imported Tempo header's timestamp and millisecond component to exactly match the zone block, validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
 
-   After binding the final imported root, read the portal's final-root `leaderActivationTempoBlock`. If the first imported header number is less than that activation and the final imported header number is greater than or equal to it, reject the block because its imported range crosses a leader transition. Otherwise, require the block beneficiary to equal the final-root `leader` for the single leadership epoch covering the range.
+6. **Authenticate token enablements inside `advanceTempo`.**
+   Using the now-bound Tempo root for this block, verify the portal's `tokenEnablementHash`. Execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order. Starting from the pre-state `ZoneInbox.processedTokenEnablementHash`, apply the [token enablement commitment](#token-enablement-commitment) transition to each entry and require the result to equal the portal's `tokenEnablementHash` proven against the imported Tempo root. Reject omitted, extra, reordered, or modified entries. After equality is established, initialize each enabled token and its bridge roles, then update `processedTokenEnablementHash`. Token activation must complete before processing any deposit in the call.
 
-6. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
-   Using the now-bound final Tempo root for this block, verify the Tempo-side reads needed by `ZoneInbox` such as the portal's current deposit queue hash. Execute `ZoneInbox.advanceTempo(headers, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order; this order is part of the system transaction calldata and therefore affects the transaction root, receipts/logs root, and resulting state transition. Process every `deposit` in witness order against the final imported root, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue); do not switch roots based on the Tempo block that enqueued a deposit. Require the rebuilt queue hash to equal the final-root `currentDepositQueueHash`; otherwise revert the entire system transaction and retain the prior Tempo checkpoint and zone state. A reverted or halted `advanceTempo` result invalidates the containing zone block, so the block must be rejected before its state, receipts, or commitments are accepted. Require exactly one `DecryptionData` entry for every encrypted deposit and consume those entries in deposit order. For each encrypted deposit, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification).
+7. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
+   Continuing the same `advanceTempo` call, verify the portal's current deposit queue hash and process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). Require exactly one `DecryptionData` entry for every encrypted deposit and consume those entries in deposit order. For each encrypted deposit, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification). The enabled-token, deposit, and decryption arrays are part of the system transaction calldata and therefore affect the transaction root, receipts/logs root, and resulting state transition.
 
-7. **Execute user transactions in order.**
-   Run each user transaction against the materialized zone state using the current block environment. Whenever execution performs a Tempo L1 storage read, satisfy it by locating the corresponding `L1StateRead`, proving it against the Tempo root currently bound for this block, and requiring the decoded value to match the witness entry. Any zone-state or Tempo-state access not covered by the witness is an error. `ZoneOutbox.requestWithdrawal` execution must include the `maxWithdrawalsPerBlock` state machine exactly, including the `block.number`-based counter reset, because rejected withdrawal requests must not enter the pending queue or contribute to `withdrawal_queue_hash`.
+8. **Execute user transactions in order.**
+   Run each user transaction against the materialized zone state using the current block environment.
 
-8. **Execute `finalizeWithdrawalBatch` at the end of the final block.**
+9. **Execute `finalizeWithdrawalBatch` at the end of the final block.**
    If `finalize_withdrawal_batch_count` is present, execute `ZoneOutbox.finalizeWithdrawalBatch(count, block.number, finalize_withdrawal_batch_encrypted_senders)` as the final zone system transaction after all user transactions in that block. This call uses the zone system caller (`msg.sender == address(0)`) and must update the outbox's last-batch state and compute the `withdrawal_queue_hash` committed by the batch. The encrypted-sender array is derived deterministically as specified in [Authenticated Withdrawals](#authenticated-withdrawals), and it is part of each public `Withdrawal` encoded into the withdrawal hash chain. Intermediate blocks must not execute this call.
 
-9. **Compute the resulting block header and carry it forward.**
+10. **Compute the resulting block header and carry it forward.**
     After block execution, use the canonical Tempo block assembler and the active Tempo fork rules to derive the complete `TempoHeader`, including the transaction root, receipt root, logs bloom, state root, gas fields, millisecond timestamp, and applicable optional fields. Compute `next_block_hash` with Tempo's canonical header hash function, then set `prev_block_hash = next_block_hash` and `prev_header = header` before moving to the next block.
 
-10. **Extract the final batch commitments from the post-state.**
+11. **Extract the final batch commitments from the post-state.**
     Read the final `ZoneInbox.processedDepositQueueHash`, `ZoneOutbox.lastBatch`, `TempoState.tempoBlockNumber`, and `TempoState.tempoBlockHash` from the executed state.
 
-11. **Verify the batch's final Tempo binding and anchor.**
+12. **Verify the batch's final Tempo binding and anchor.**
     Require `TempoState.tempoBlockNumber == public_inputs.tempo_block_number`. If `anchor_block_number == tempo_block_number`, require `TempoState.tempoBlockHash == anchor_block_hash`. Otherwise, verify the parent-hash chain from `tempo_block_number` to `anchor_block_number` using `tempo_ancestry_headers`, ending at `anchor_block_hash`. This check also applies to the bootstrap proof because its required non-genesis block imports Tempo.
 
-12. **Return the batch outputs.**
+13. **Return the batch outputs.**
     Set `block_transition.prev_block_hash = initial_prev_block_hash` and `block_transition.next_block_hash = prev_block_hash` after the final block. Set `deposit_queue_transition.prev_processed_hash` and `deposit_queue_transition.prev_deposit_number` to the values captured before executing the batch, and set `deposit_queue_transition.next_processed_hash` and `deposit_queue_transition.next_deposit_number` to the final inbox processed hash and processed deposit number. Set `withdrawal_queue_hash` and `last_batch_commitment.withdrawal_batch_index` from the final `ZoneOutbox.lastBatch` state.
 
 ### Tempo State Witness
 
-System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). `BatchStateProof` applies the [shared trie proof format](#shared-trie-proof-format) to the final Tempo root imported by the current zone block's required `advanceTempo` call. The witness includes a `BatchStateProof` containing:
+System contracts read Tempo state during execution (deposit queue hash, token-enablement commitment, sequencer address, token registry, TIP-403 policies). `TempoStateWitness` applies the [shared trie proof format](#shared-trie-proof-format) to the Tempo root from the header currently bound by `TempoState` at the moment of each read. Its `initial_tempo_header_rlp` supplies the initial active root. If `advanceTempo()` runs during the batch, later reads are verified against the newer root decoded from that block's `tempo_header_rlp`, not the root from the start of the batch. The witness includes a `TempoStateWitness` containing:
 
 - The RLP-encoded header for the initially bound Tempo checkpoint. Its hash and block number must match the `TempoState` values in the initial zone state.
 - A deduplicated `node_pool` of raw RLP-encoded MPT nodes. The prover computes `keccak256(rlp(node))` for each entry and builds a hash-to-node index.
-- A list of `L1StateRead` entries, each specifying the zone block index, final imported Tempo block number, account, storage slot, and expected value.
 
-Reads are indexed and verified on demand during execution. Each `L1StateRead` is additionally tagged with `zone_block_index` and `tempo_block_number` so the prover can bind that read to the final header in the zone block's in-batch Tempo checkpoint. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is verified once against the initial zone-state root at batch start, while `BatchStateProof` reads are verified against the single final Tempo root bound by the active Tempo checkpoint at the moment of each read. Intermediate imported headers have no state-proof reads.
+Reads are derived, verified, and decoded on demand during execution: the `TempoState.readTempoStorageSlot` invocation supplies the account and storage slot, and the active Tempo header supplies the bound root. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is rooted once at `parent_header.state_root` for the initial state, while `TempoStateWitness` reads are verified against the Tempo root bound by the active Tempo checkpoint at the moment of each read.
 
 Anchor validation ensures the zone's view of Tempo is correct. If `anchor_block_number` equals `tempo_block_number`, the zone's `tempoBlockHash` must match `anchor_block_hash` directly. If `anchor_block_number` is greater (for zones that have been offline longer than the EIP-2935 window), the proof verifies the parent-hash chain from `tempo_block_number` to `anchor_block_number` using the ancestry headers in the witness.
 
@@ -1374,7 +1424,7 @@ On success, the portal:
 2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
 3. Advances `withdrawalBatchIndex`.
 4. Updates `zoneHeight`.
-5. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to physical slot `tail % WITHDRAWAL_QUEUE_CAPACITY`, and advances `tail`.
+5. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to `slots[tail]`, and advances `tail`.
 6. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for an empty batch.
 
 ### Verifier Interface
@@ -1404,7 +1454,7 @@ The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHas
 
 The portal needs to verify that the zone's view of Tempo (via `TempoState`) is anchored to a real Tempo block. It looks up a block hash via the EIP-2935 block hash history precompile and passes it to the verifier.
 
-If `recentTempoBlockNumber` is `0`, the portal looks up `tempoBlockNumber` directly from EIP-2935. The proof must show that the zone's `tempoBlockHash` matches this hash. In the bootstrap batch, the first non-genesis block performs the first Tempo import; the proof must additionally show that the portal's `sequencer` slot is non-zero in the final imported block's state, proving that the imported range is not entirely before portal creation.
+If `recentTempoBlockNumber` is `0`, the portal looks up `tempoBlockNumber` directly from EIP-2935. The proof must show that the zone's `tempoBlockHash` matches this hash. In the bootstrap batch, the first non-genesis block performs the first Tempo import; the proof must additionally show that the portal's `sequencer` slot is non-zero in that block's state, proving that the imported block is not from before portal creation.
 
 If `recentTempoBlockNumber` is greater than `tempoBlockNumber`, the portal looks up `recentTempoBlockNumber` from EIP-2935 instead. The proof verifies the parent-hash chain from `tempoBlockNumber` to `recentTempoBlockNumber` internally, using Tempo headers included in the witness. This allows batch submission even when `tempoBlockNumber` has rotated out of the EIP-2935 window (roughly 8192 blocks), preventing the zone from being bricked after extended downtime.
 
@@ -1421,8 +1471,9 @@ The proof must validate:
 5. `ZoneOutbox.lastBatch().withdrawalQueueHash` matches the submitted `withdrawalQueueHash`.
 6. Every non-genesis zone block `beneficiary` is an active member of the versioned sequencer set committed by the settlement certificate; the genesis block must match the canonical header in full.
 7. Deposit processing is correct: deposits are processed oldest-first and contiguously from `prevProcessedHash`, `nextProcessedHash` equals the post-state `ZoneInbox.processedDepositQueueHash`, `nextDepositNumber` equals the post-state processed deposit number, and the proof shows `nextProcessedHash` equals the portal's `currentDepositQueueHash` read from Tempo state.
+8. Token enablement is correct in every non-genesis zone block: hashing the ordered `enabledTokens` calldata from the pre-state `ZoneInbox.processedTokenEnablementHash` produces the portal's `tokenEnablementHash` authenticated against the imported Tempo state; those tokens are initialized before deposits; and the resulting hash is stored as `ZoneInbox.processedTokenEnablementHash`.
 
-For the first proof, requirement 1 specifically means a transition from `prevBlockHash == 0` through the canonical zone genesis block derived from `zoneId` to the final non-genesis block of a batch containing at least two blocks. That batch's first Tempo import makes requirement 3 applicable immediately and includes the non-zero portal sequencer storage proof against the final imported Tempo block described above.
+For the first proof, requirement 1 specifically means a transition from `prevBlockHash == 0` through the canonical zone genesis block derived from `parent_chain_id` and `zoneId` to the final non-genesis block of a batch containing at least two blocks. That batch's first Tempo import makes requirement 3 applicable immediately and includes the non-zero portal sequencer storage proof against the imported Tempo block described above.
 
 ## Zone Precompiles
 
@@ -1432,7 +1483,7 @@ Zones have three categories of precompiles: TIP-20 token precompiles (one per en
 
 Each enabled TIP-20 token is deployed as a precompile at the same address as on Tempo. The precompile implements the standard TIP-20 interface with privacy modifications:
 
-- `balanceOf` and `allowance` are restricted to the account owner (or sequencer).
+- `balanceOf` is restricted to the account owner; `allowance` is restricted to its owner or spender.
 - Transfer-family operations (`transfer`, `transferFrom`, `approve`) charge a fixed 100,000 gas.
 - `mint` is restricted to `ZoneInbox`, `burn` is restricted to `ZoneOutbox`.
 
@@ -1545,6 +1596,13 @@ struct QueuedDeposit {
     bytes depositData;  // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
 }
 
+struct EnabledToken {
+    address token;
+    string name;
+    string symbol;
+    string currency;
+}
+
 struct DecryptionData {
     bytes32 sharedSecret;
     uint8 sharedSecretYParity;
@@ -1602,8 +1660,15 @@ struct LastBatch {
 ```solidity
 enum Role {
     None,
+    Sequencer,
     Account,
-    CallbackGateway
+    CallbackGateway,
+    PauseGuardian
+}
+
+enum Capability {
+    PausePortal,
+    AccessPolicy
 }
 
 interface IZoneFactory {
@@ -1689,18 +1754,27 @@ interface IZonePortal {
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
-    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
+    event SequencerEncryptionKeyUpdated(
+        bytes32 x, uint8 yParity, address pubkey, uint256 keyIndex, uint64 activationBlock
+    );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
+    event PortalPaused(address indexed account);
+    event PortalResumed(address indexed account);
+    event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
     event RoleUpdated(address indexed account, Role prev, Role next);
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
     error NotSequencer();
     error NotAdmin();
+    error NotPauseAuthority();
+    error CapabilityAbdicated(Capability capability);
+    error AbdicationAlreadyScheduled(Capability capability);
+    error PortalIsPaused();
     error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
@@ -1715,9 +1789,7 @@ interface IZonePortal {
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);
     error TokenEnablementBlockCapacityExceeded(uint64 maximum);
-    error TokenNameTooLong(uint256 actual, uint256 maximum);
-    error TokenSymbolTooLong(uint256 actual, uint256 maximum);
-    error TokenCurrencyTooLong(uint256 actual, uint256 maximum);
+    error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -1731,9 +1803,7 @@ interface IZonePortal {
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
     function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
     function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
-    function MAX_TOKEN_NAME_BYTES() external view returns (uint256);
-    function MAX_TOKEN_SYMBOL_BYTES() external view returns (uint256);
-    function MAX_TOKEN_CURRENCY_BYTES() external view returns (uint256);
+    function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
     function MAX_GAS_FEE_RATE() external view returns (uint128);
 
@@ -1741,19 +1811,27 @@ interface IZonePortal {
     function enableToken(address token) external;
     function pauseDeposits(address token) external;
     function resumeDeposits(address token) external;
+    function paused() external view returns (bool);
+    function pauseExpiry() external view returns (uint64);
+    function abdicationEffectiveAt(Capability capability) external view returns (uint64);
+    function pause() external;
+    function resume() external;
+    function abdicate(Capability capability) external;
     function isTokenEnabled(address token) external view returns (bool);
     function areDepositsActive(address token) external view returns (bool);
     function tokenConfig(address token) external view returns (TokenConfig memory);
     function enabledTokenCount() external view returns (uint256);
     function enabledTokenAt(uint256 index) external view returns (address);
+    function tokenEnablementHash() external view returns (bytes32);
 
     // Access and callback configuration
     function isAccessEnforced() external view returns (bool);
     function setAccessMode(bool enforced) external; // admin-only
     function isGatewayOpen() external view returns (bool);
     function setGatewayMode(bool enforced) external; // admin-only
-    function role(address account) external view returns (Role);
-    function setRole(address account, Role role) external; // admin-only
+    function hasRole(address account, Role role) external view returns (bool);
+    function setAllowedAccount(address account, bool allowed) external; // admin-only
+    function setGateway(address account, bool allowed) external; // admin-only
 
     // Zone RPC endpoint. Published on-chain so clients can discover how to reach the zone.
     event RpcUrlUpdated(string rpcUrl);
@@ -1819,7 +1897,8 @@ interface IZonePortal {
 
     // Encryption keys
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+    function sequencerEncryptionKey()
+        external view returns (bytes32 x, uint8 yParity, address pubkey);
     
     function encryptionKeyCount() external view returns (uint256);
     function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);
@@ -1840,7 +1919,7 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32);
 }
 ```
 
@@ -1878,10 +1957,12 @@ Address: `0x1c00000000000000000000000000000000000000`
 interface ITempoState {
     event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
+    error InvalidTimestamp();
+
     function tempoBlockHash() external view returns (bytes32);
     function tempoBlockNumber() external view returns (uint64);
 
-    function finalizeTempo(bytes[] calldata headers) external;
+    function finalizeTempo(bytes calldata header) external;
 }
 ```
 
@@ -1928,10 +2009,13 @@ interface IZoneInbox {
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
+    error InvalidTokenEnablementHash();
+
     function processedDepositQueueHash() external view returns (bytes32);
     function processedDepositNumber() external view returns (uint64);
+    function processedTokenEnablementHash() external view returns (bytes32);
     function advanceTempo(
-        bytes[] calldata headers, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
+        bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
     ) external;
 
@@ -1946,7 +2030,7 @@ interface IZoneInbox {
 }
 ```
 
-`EnabledToken` carries token metadata (`token`, `name`, `symbol`, `currency`) for direct activation of zone-side TIP-20 precompiles by `ZoneInbox`. `ZonePortal` admits at most 8 such activations per Tempo block and rejects metadata whose encoded byte length exceeds 64 bytes for `name` or 31 bytes for `symbol` or `currency`.
+`EnabledToken` carries the token address and exact metadata bytes committed by `ZonePortal.tokenEnablementHash` for direct activation of zone-side TIP-20 precompiles by `ZoneInbox`. The array passed to `advanceTempo` is untrusted until the Inbox verifies that applying the canonical hash transition from `processedTokenEnablementHash` reaches the portal commitment at the imported Tempo state. `ZonePortal` admits at most 8 such activations per Tempo block and rejects any `name`, `symbol`, or `currency` whose encoded byte length exceeds 31 bytes.
 
 ### IZoneOutbox
 

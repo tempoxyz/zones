@@ -7,13 +7,14 @@ import {
     IZonePortal,
     LastBatch,
     PORTAL_ACCESS_MODE_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_PAUSE_SLOT,
+    PORTAL_ROLE_SLOT,
     PendingWithdrawal,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_TX_CONTEXT
 } from "../../src/interfaces/IZone.sol";
-import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
@@ -61,12 +62,11 @@ contract ZoneOutboxTest is Test {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         tempoState.setMockStorageValue(
             mockPortal,
-            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
-            bytes32(uint256(1))
+            keccak256(abi.encode(sequencer, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
         tempoState.setMockMaxTempoGasRate(mockPortal, TEST_MAX_TEMPO_GAS_RATE);
-        tempoState.setMockAccountAllowed(mockPortal, sequencer, true);
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);
@@ -209,7 +209,7 @@ contract ZoneOutboxTest is Test {
             encryptedSender: ""
         });
 
-        bytes32 expectedHash = keccak256(abi.encode(expected, EMPTY_SENTINEL));
+        bytes32 expectedHash = keccak256(abi.encode(expected, bytes32(0)));
         assertEq(_finalizeWithdrawalBatch(1), expectedHash);
     }
 
@@ -335,6 +335,20 @@ contract ZoneOutboxTest is Test {
         assertEq(disabledToken.balanceOf(alice), 1000e6);
     }
 
+    function test_requestWithdrawal_revertsWhilePortalPaused() public {
+        uint64 expiry = uint64(block.timestamp + 30 days);
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_PAUSE_SLOT, bytes32(uint256(expiry) << 64)
+        );
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.PortalIsPaused.selector);
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
+
+        assertEq(_pendingWithdrawalsCount(), 0);
+        assertEq(zoneToken.balanceOf(alice), 10_000e6);
+    }
+
     function test_requestWithdrawal_openAccessStillEnforcesGatewayRegistration() public {
         address outsider = address(0x999);
         _setModes(false, true);
@@ -412,7 +426,7 @@ contract ZoneOutboxTest is Test {
 
         // Expected hash
         Withdrawal memory w = _withdrawal(1, alice, alice, 500e6, bytes32("memo"), 0, alice, "");
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 expectedHash = keccak256(abi.encode(w, bytes32(0)));
 
         bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
 
@@ -435,11 +449,11 @@ contract ZoneOutboxTest is Test {
         // Build expected hash (oldest = outermost)
         // w0 = alice's withdrawal (first, oldest)
         // w1 = bob's withdrawal (second, newest)
-        // Hash chain: hash(w0, hash(w1, EMPTY_SENTINEL))
+        // Hash chain: hash(w0, hash(w1, 0))
         Withdrawal memory w0 = _withdrawal(1, alice, alice, 500e6, bytes32(0), 0, alice, "");
         Withdrawal memory w1 = _withdrawal(2, bob, bob, 300e6, bytes32(0), 0, alice, "");
 
-        bytes32 innerHash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
+        bytes32 innerHash = keccak256(abi.encode(w1, bytes32(0)));
         bytes32 expectedHash = keccak256(abi.encode(w0, innerHash));
 
         bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
@@ -499,7 +513,7 @@ contract ZoneOutboxTest is Test {
         Withdrawal memory w2 = _withdrawal(2, alice, alice, 200e6, bytes32("w2"), 0, alice, "");
         Withdrawal memory w3 = _withdrawal(3, alice, alice, 300e6, bytes32("w3"), 0, alice, "");
         Withdrawal memory w4 = _withdrawal(4, alice, alice, 400e6, bytes32("w4"), 0, alice, "");
-        bytes32 hash4 = keccak256(abi.encode(w4, EMPTY_SENTINEL));
+        bytes32 hash4 = keccak256(abi.encode(w4, bytes32(0)));
         bytes32 hash3 = keccak256(abi.encode(w3, hash4));
         bytes32 hash2 = keccak256(abi.encode(w2, hash3));
         bytes32 expectedHash = keccak256(abi.encode(w1, hash2));
@@ -515,7 +529,7 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         Withdrawal memory w = _withdrawal(1, alice, alice, 500e6, bytes32(0), 0, alice, "");
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 expectedHash = keccak256(abi.encode(w, bytes32(0)));
 
         // New event format: BatchFinalized(withdrawalQueueHash, withdrawalBatchIndex)
         vm.expectEmit(true, false, false, true);
@@ -534,7 +548,7 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         Withdrawal memory w = _withdrawal(1, alice, alice, 500e6, bytes32(0), 0, alice, "");
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 expectedHash = keccak256(abi.encode(w, bytes32(0)));
 
         _finalizeWithdrawalBatch(type(uint256).max);
 
@@ -579,7 +593,9 @@ contract ZoneOutboxTest is Test {
 
         // Any additional active member has the same authority.
         tempoState.setMockStorageValue(
-            mockPortal, keccak256(abi.encode(bob, PORTAL_IS_SEQUENCER_SLOT)), bytes32(uint256(1))
+            mockPortal,
+            keccak256(abi.encode(bob, PORTAL_ROLE_SLOT)),
+            bytes32(uint256(uint8(Role.Sequencer)))
         );
         vm.prank(bob);
         bytes32 hash = outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);
@@ -661,7 +677,7 @@ contract ZoneOutboxTest is Test {
         Withdrawal memory w = _withdrawal(
             1, alice, callbackTarget, 500e6, bytes32("pay"), 100_000, alice, callbackData
         );
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        bytes32 expectedHash = keccak256(abi.encode(w, bytes32(0)));
 
         bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
 
@@ -1043,8 +1059,8 @@ contract ZoneOutboxTest is Test {
         Withdrawal memory w2 = _withdrawal(2, bob, bob, 200e6, bytes32("w2"), 0, alice, "");
         Withdrawal memory w3 = _withdrawal(3, charlie, charlie, 300e6, bytes32("w3"), 0, alice, "");
 
-        // Hash chain: w1 outermost, w3 innermost wrapping EMPTY_SENTINEL
-        bytes32 innermost = keccak256(abi.encode(w3, EMPTY_SENTINEL));
+        // Hash chain: w1 outermost, w3 innermost terminating at zero
+        bytes32 innermost = keccak256(abi.encode(w3, bytes32(0)));
         bytes32 middle = keccak256(abi.encode(w2, innermost));
         bytes32 expectedHash = keccak256(abi.encode(w1, middle));
 
@@ -1133,7 +1149,7 @@ contract ZoneOutboxTest is Test {
         Withdrawal memory expected = _withdrawal(
             1, alice, callbackTarget, 500e6, bytes32("payment123"), 50_000, charlie, callbackData
         );
-        bytes32 expectedHash = keccak256(abi.encode(expected, EMPTY_SENTINEL));
+        bytes32 expectedHash = keccak256(abi.encode(expected, bytes32(0)));
 
         bytes32 hash = _finalizeWithdrawalBatch(1);
 
@@ -1397,7 +1413,7 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         Withdrawal memory w = _withdrawal(1, alice, bob, 500e6, bytes32("memo"), 0, alice, data);
-        assertEq(_finalizeWithdrawalBatch(1), keccak256(abi.encode(w, EMPTY_SENTINEL)));
+        assertEq(_finalizeWithdrawalBatch(1), keccak256(abi.encode(w, bytes32(0))));
     }
 
     /// @notice Finalized withdrawal hashes chain in reverse dequeue order.
@@ -1419,7 +1435,7 @@ contract ZoneOutboxTest is Test {
             withdrawals[i] = _withdrawal(i + 1, sender, sender, amount, memo, 0, alice, "");
         }
 
-        bytes32 expectedHash = EMPTY_SENTINEL;
+        bytes32 expectedHash = bytes32(0);
         for (uint256 i = count; i > 0; i--) {
             expectedHash = keccak256(abi.encode(withdrawals[i - 1], expectedHash));
         }

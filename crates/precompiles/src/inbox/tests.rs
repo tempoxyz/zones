@@ -1,9 +1,9 @@
 use super::*;
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{Bytes, address, keccak256};
+use alloy_primitives::{B256, Bytes, U256, address, keccak256};
 use alloy_rlp::Encodable as _;
-use alloy_sol_types::{SolCall, SolError};
+use alloy_sol_types::{SolCall, SolError, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
@@ -54,6 +54,16 @@ impl Harness {
         ctx.cfg.spec = TempoHardfork::T9;
         let genesis_rlp = encode_header(&TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
+        let child_header = TempoHeader {
+            inner: alloy_consensus::Header {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ctx.block.inner.timestamp = U256::from(child_header.inner.timestamp);
+        ctx.block.timestamp_millis_part = child_header.timestamp_millis_part;
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -101,6 +111,16 @@ impl Harness {
             .with_storage(1, || {
                 ZonePortalStorage::new(PORTAL)
                     .current_deposit_queue_hash
+                    .write(hash)
+            })
+            .unwrap();
+    }
+
+    fn set_token_enablement_hash(&self, hash: B256) {
+        self.l1
+            .with_storage(1, || {
+                ZonePortalStorage::new(PORTAL)
+                    .token_enablement_hash
                     .write(hash)
             })
             .unwrap();
@@ -225,7 +245,7 @@ fn maximum_metadata_token(index: u16) -> EnabledToken {
     token[18..].copy_from_slice(&index.to_be_bytes());
     EnabledToken {
         token: Address::from(token),
-        name: "n".repeat(64),
+        name: "n".repeat(31),
         symbol: "s".repeat(31),
         currency: "c".repeat(31),
     }
@@ -236,6 +256,10 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
     let enabled_tokens = (1..=token_enablements)
         .map(|index| maximum_metadata_token(index as u16))
         .collect::<Vec<_>>();
+    let token_enablement_hash = enabled_tokens
+        .iter()
+        .fold(B256::ZERO, |hash, enabled| enabled.hash_with_previous(hash));
+    harness.set_token_enablement_hash(token_enablement_hash);
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -257,7 +281,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
 
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x);
+    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&BOB, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -528,15 +552,20 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
             StorageCtx.sstore(TIP403_REGISTRY_ADDRESS, binding_slot, anchored_policy)
         })?;
     }
-    let mut call = harness.advance_call(Vec::new(), Vec::new());
-    call.enabledTokens.push(EnabledToken {
+    let enabled = EnabledToken {
         token,
         name: "Example Dollar".into(),
         symbol: "EXD".into(),
         currency: "USD".into(),
-    });
+    };
+    harness.set_token_enablement_hash(enabled.hash_with_previous(B256::ZERO));
 
-    harness.call(Address::ZERO, call.abi_encode())?;
+    harness.call(
+        Address::ZERO,
+        harness
+            .advance_call_with_tokens(Vec::new(), Vec::new(), vec![enabled])
+            .abi_encode(),
+    )?;
 
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -552,6 +581,31 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         );
         Ok(())
     })?;
+    Ok(())
+}
+
+#[test]
+fn omitted_token_enablement_reverts() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = address!("0x20c00000000000000000000000000000000000ab");
+    let enabled = EnabledToken {
+        token,
+        name: "Example Dollar".into(),
+        symbol: "EXD".into(),
+        currency: "USD".into(),
+    };
+
+    harness.set_token_enablement_hash(enabled.hash_with_previous(B256::ZERO));
+    harness.set_queue_hash(B256::ZERO);
+
+    let output = harness.call(
+        Address::ZERO,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+    assert_eq!(
+        output.bytes,
+        IZoneInbox::InvalidTokenEnablementHash {}.abi_encode()
+    );
     Ok(())
 }
 
@@ -578,12 +632,48 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
 }
 
 #[test]
+fn non_canonical_encrypted_deposit_is_rejected() {
+    let deposit = Deposit {
+        token: Address::ZERO,
+        sender: Address::ZERO,
+        amount: 0,
+        tempoRefundRecipient: Address::ZERO,
+        keyIndex: U256::ZERO,
+        encrypted: tempo_zone_contracts::DepositPayload {
+            ephemeralPubkeyX: B256::ZERO,
+            ephemeralPubkeyYParity: 0,
+            ciphertext: Bytes::new(),
+            nonce: [0; 12].into(),
+            tag: [0; 16].into(),
+        },
+    };
+    let canonical = deposit.abi_encode();
+    let mut non_canonical = canonical.clone();
+    non_canonical.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    assert!(
+        decode_deposits(vec![QueuedDeposit {
+            depositType: DepositType::Deposit,
+            depositData: canonical.into(),
+        }])
+        .is_ok()
+    );
+    assert!(
+        decode_deposits(vec![QueuedDeposit {
+            depositType: DepositType::Deposit,
+            depositData: non_canonical.into(),
+        }])
+        .is_err()
+    );
+}
+
+#[test]
 fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
     let portal = PORTAL;
-    let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x);
+    let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -658,7 +748,7 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x);
+    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);

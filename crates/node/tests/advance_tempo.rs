@@ -15,7 +15,8 @@ use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
 use zone_primitives::constants::{
     PORTAL_ADMIN_SLOT, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, zone_chain_id,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
+    zone_chain_id,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -133,7 +134,10 @@ fn deploy_contract(
 
 /// Build an EVM with the zone contracts deployed in-memory (same as xtask generate_zone_genesis).
 fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
-    setup_zone_evm_with_contracts_for_portal(zone_chain_id(1), Address::repeat_byte(0xbb))
+    setup_zone_evm_with_contracts_for_portal(
+        zone_chain_id(4217, 1).unwrap(),
+        Address::repeat_byte(0xbb),
+    )
 }
 
 fn setup_zone_evm_with_contracts_for_portal(
@@ -529,13 +533,18 @@ fn zone_portal_storage_slot_constants_match_solidity() {
         "_encryptionKeys is slot 5"
     );
     assert_eq!(
-        PORTAL_IS_SEQUENCER_SLOT,
-        B256::from(U256::from(19)),
-        "isSequencer is slot 19"
+        PORTAL_ROLE_SLOT,
+        B256::from(U256::from(20)),
+        "role is slot 20"
     );
     assert_eq!(
         PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
         B256::from(U256::from(22)),
         "maxTempoGasRate is slot 22"
+    );
+    assert_eq!(
+        PORTAL_TOKEN_ENABLEMENT_HASH_SLOT,
+        B256::from(U256::from(26)),
+        "tokenEnablementHash is slot 26"
     );
 }

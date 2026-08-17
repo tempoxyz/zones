@@ -7,17 +7,21 @@ publish = false
 
 [workspace]
 members = [
-  "bin/tempo-zone-spf",
+  "bin/prover/utils",
+  "bin/prover/vsock-proxy",
+  "bin/prover/enclave",
   "bin/tempo-zone",
   "crates/chainspec",
   "crates/contracts",
   "crates/evm",
+  "crates/hardfork",
   "crates/l1",
   "crates/node",
   "crates/p2p",
   "crates/payload",
   "crates/precompiles",
   "crates/primitives",
+  "crates/prover",
   "crates/rpc",
   "crates/sequencer",
   "crates/spf",
@@ -96,36 +100,39 @@ incremental = false
 
 [workspace.dependencies]
 # tempo (from upstream)
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72" }
-tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
-tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false, features = [
+tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73" }
+tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false, features = [
   "serde",
 ] }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
-tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72" }
-tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
-tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72" }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false, features = [
+tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73" }
+tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73" }
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false, features = [
   "reth",
   "serde",
   "serde-bincode-compat",
   "reth-codec",
 ] }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
-tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "de760926aa6520c5e1cdb85f453c206057ea0e72", default-features = false }
+tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
+tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "4953f9b9984bf28139bcb99c10eb49cebe75cf73", default-features = false }
 
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-chainspec = { path = "crates/chainspec" }
 zone-evm = { path = "crates/evm" }
+zone-hardfork = { path = "crates/hardfork", default-features = false }
 zone-l1 = { path = "crates/l1" }
 zone-node = { path = "crates/node" }
 zone-p2p = { path = "crates/p2p" }
 zone-payload = { path = "crates/payload" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
+zone-prover = { path = "crates/prover" }
 zone-rpc = { path = "crates/rpc" }
 zone-sequencer = { path = "crates/sequencer" }
 zone-spf = { path = "crates/spf" }
@@ -156,6 +163,7 @@ reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4
   "optional-checks",
 ] }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
+reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
@@ -175,6 +183,8 @@ revm = { version = "42.0.1", features = [
 
 # alloy
 alloy = { version = "2.3.0", default-features = false }
+alloy-chains = "0.2.36"
+alloy-hardforks = { version = "0.4.7", default-features = false }
 alloy-consensus = { version = "2.3.0", default-features = false }
 alloy-contract = { version = "2.3.0", default-features = false }
 alloy-eips = { version = "2.3.0", default-features = false }
@@ -215,6 +225,7 @@ futures = "0.3.31"
 indicatif = "0.18"
 itertools = "0.14.0"
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
+libc = "0.2.186"
 metrics = "0.24.3"
 k256 = { version = "0.13.4", features = ["arithmetic", "ecdh"] }
 parking_lot = "0.12.4"
@@ -233,8 +244,10 @@ serde_yaml = "0.9.34"
 schnellru = "0.2.4"
 thiserror = "2"
 tokio = { version = "1.45.1", features = ["full"] }
+tokio-vsock = "0.7.2"
 tokio-util = "0.7.18"
 toml = "0.9.12"
+vsock = "0.5.4"
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
@@ -243,6 +256,8 @@ reqwest = { version = "0.13", default-features = false, features = [
 tokio-tungstenite = "0.28"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+vergen = { version = "10.0.1", features = ["build", "cargo", "emit_and_set"] }
+vergen-git2 = "10.0.1"
 zeroize = "1.9.0"
 
 # Keep Commonware aligned with the revision used by upstream Tempo. Cargo does

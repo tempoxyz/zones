@@ -813,6 +813,7 @@ provision_up() {
         --engine.share-execution-cache-with-payload-builder
         --builder.enable-prewarming
         --builder.gaslimit "$l1_gas_limit"
+        --rpc.eth-proof-window 1024
         --rpc.max-connections 10000
         --txpool.pending-max-count 200000
         --txpool.basefee-max-count 200000
@@ -941,7 +942,6 @@ provision_up() {
         --zone-gas-rate 0 \
         --bounceback-gas 0
 
-    export SEQUENCER_KEY="$sequencer_key"
     # The pinned Reth revision predates the retained-branch pruning fix. Its
     # default sparse-trie pruning can make a multi-transaction Zone payload
     # disagree with the root obtained during final validation.
@@ -952,9 +952,9 @@ provision_up() {
         --l1.portal-address "$portal" \
         --zone.id "$zone_id" \
         --http --http.addr 127.0.0.1 --http.port 8546 \
-        --http.api eth,net,web3,txpool \
+        --http.api all \
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
-        --ws.api eth,net,web3,txpool \
+        --ws.api all \
         --metrics 127.0.0.1:9201 \
         --redacted-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
@@ -964,8 +964,9 @@ provision_up() {
         --log.file.directory "$log_dir/zone" \
         --ipcdisable \
         --engine.disable-sparse-trie-cache-pruning \
-        --sequencer
-    unset SEQUENCER_KEY sequencer_key owner_key admin_key
+        --sequencer \
+        --sequencer-key-file <(printf '%s\n' "$sequencer_key")
+    unset sequencer_key owner_key admin_key
 
     local zone_rpc="http://127.0.0.1:8546"
     local zone_redacted_rpc="http://127.0.0.1:8544"
@@ -987,7 +988,10 @@ provision_up() {
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
         ZONE_WS_RPC_URL "ws://127.0.0.1:8546" \
+        ZONE_PRIVATE_RPC_URL "$zone_redacted_rpc" \
         ZONE_REDACTED_RPC_URL "$zone_redacted_rpc" \
+        ZONES_BENCH_TEMPO_GENESIS "$patched_genesis" \
+        ZONES_BENCH_ZONE_GENESIS "$zone_genesis" \
         ZONES_BENCH_TOKEN "$zone_token" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \

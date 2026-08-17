@@ -4,27 +4,47 @@ use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
 use tempo_primitives::TempoHeader;
-use zone_chainspec::ZoneChainSpec;
 
 pub use tempo_zone_contracts::{
     BlockTransition, ChaumPedersenProof, DecryptionData, DepositQueueTransition, DepositType,
     EnabledToken, QueuedDeposit,
 };
+use zone_chainspec::ZoneChainSpec;
+use zone_evm::ZoneEvmConfig;
+use zone_precompiles::L1StorageReader;
+
 /// Trusted network configuration for Zone execution.
 ///
 /// This is deliberately separate from [`BatchWitness`]: it is selected by the
-/// verifier for the network it serves, not supplied by the prover. The zone
-/// chain specification provides the parent Tempo hard-fork schedule. Block gas
-/// limits and other inherited execution fields come from the canonical parent
-/// Tempo header carried by the witness.
+/// verifier for the Zone it serves, not supplied by the prover. The chain
+/// specification contains the actual Zone genesis and the parent Tempo hard-fork
+/// schedule. Block gas limits and other inherited execution fields come from the
+/// canonical parent Tempo header carried by the witness.
 #[derive(Debug, Clone)]
 pub struct SpfConfig {
-    pub zone_chain_spec: Arc<ZoneChainSpec>,
+    chain_spec: Arc<ZoneChainSpec>,
+    portal: Address,
 }
 
 impl SpfConfig {
-    pub fn new(zone_chain_spec: Arc<ZoneChainSpec>) -> Self {
-        Self { zone_chain_spec }
+    /// Creates a new [`SpfConfig`] with the given composed chainspec and portal address.
+    pub fn new(chain_spec: Arc<ZoneChainSpec>, portal: Address) -> Self {
+        Self { chain_spec, portal }
+    }
+
+    /// Returns a reference to the [`ZoneChainSpec`].
+    pub fn chain_spec(&self) -> &Arc<ZoneChainSpec> {
+        &self.chain_spec
+    }
+
+    /// Returns the portal address.
+    pub fn portal(&self) -> Address {
+        self.portal
+    }
+
+    /// Crates a [`ZoneEvmConfig`] for the given L1 storage reader.
+    pub fn evm_config<L1: L1StorageReader>(&self, l1_provider: L1) -> ZoneEvmConfig<L1> {
+        ZoneEvmConfig::new(self.chain_spec.clone(), l1_provider, self.portal)
     }
 }
 
@@ -33,6 +53,8 @@ impl SpfConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct PublicInputs {
+    /// Parent Tempo chain ID used to domain-separate the Zone EVM chain ID.
+    pub parent_chain_id: u64,
     /// Zone identifier from which the SPF derives the EVM chain ID.
     pub zone_id: u32,
     /// Tempo ZonePortal whose state governs L1-backed Zone execution.
@@ -76,6 +98,7 @@ pub struct ZoneBlock {
     pub number: u64,
     pub parent_hash: B256,
     pub timestamp: u64,
+    pub timestamp_millis_part: u64,
     pub beneficiary: Address,
     /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`.
     pub tempo_header_rlp: Bytes,

@@ -115,8 +115,8 @@ impl StatelessSparseTrie {
         })
     }
 
-    /// Apply the cumulative execution changes to this revealed pre-state trie
-    /// and calculate the resulting state root.
+    /// Apply the supplied execution changes to this revealed state trie and
+    /// calculate the resulting state root.
     pub(crate) fn calculate_state_root(
         &mut self,
         state: HashedPostState,

@@ -4,6 +4,7 @@
 //! Unlike the Tempo L1 `TempoBlockExecutor`, this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
+use alloy_consensus::TxReceipt as _;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
@@ -12,11 +13,13 @@ use alloy_evm::{
     },
     eth::{EthBlockExecutor, EthTxResult},
 };
+use alloy_sol_types::SolEvent as _;
 use reth_evm::block::StateDB;
 use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
+use tempo_zone_contracts::IZoneOutbox;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{
@@ -137,9 +140,10 @@ where
 
 /// Simplified block executor for zone nodes.
 ///
-/// Enforces the single successful block-opening `advanceTempo` system transaction, then delegates
-/// ordinary execution to [`EthBlockExecutor`] without Tempo subblock validation, gas-section
-/// tracking, or end-of-block metadata requirements.
+/// Enforces the successful block-opening `advanceTempo` system transaction and same-block
+/// finalization of requested withdrawals, then delegates ordinary execution to
+/// [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or end-of-block
+/// metadata requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
     phase: ZoneBlockPhase,
@@ -231,6 +235,25 @@ where
             )
             .into());
         }
+
+        let requested_withdrawal = self
+            .inner
+            .receipts()
+            .iter()
+            .flat_map(|receipt| receipt.logs())
+            .any(|log| {
+                log.address == ZONE_OUTBOX_ADDRESS
+                    && log.topics().first()
+                        == Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
+            });
+        if requested_withdrawal && self.phase != ZoneBlockPhase::WithdrawalsFinalized {
+            return Err(BlockValidationError::msg(
+                "zone block with withdrawal requests is missing its finalizeWithdrawalBatch \
+                 system transaction",
+            )
+            .into());
+        }
+
         self.inner.finish()
     }
 
@@ -256,9 +279,10 @@ mod tests {
 
     use alloy_consensus::{Header, Signed, TxLegacy};
     use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
-    use alloy_primitives::{Address, B256, Bytes, Signature, U256, keccak256};
+    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256, keccak256};
     use alloy_rlp::Encodable as _;
-    use alloy_sol_types::SolCall;
+    use alloy_sol_types::{SolCall, SolEvent};
+    use reth_chainspec::EthChainSpec as _;
     use reth_primitives_traits::Recovered;
     use revm::database::{CacheDB, EmptyDB};
     use tempo_chainspec::spec::DEV;
@@ -270,7 +294,7 @@ mod tests {
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
     use tempo_primitives::{
-        TempoHeader, TempoTxEnvelope,
+        TempoHeader, TempoReceipt, TempoTxEnvelope, TempoTxType,
         subblock::TEMPO_SUBBLOCK_NONCE_KEY_PREFIX,
         transaction::{
             Call, TempoSignature, TempoTransaction,
@@ -281,7 +305,7 @@ mod tests {
     use tempo_zone_contracts::{ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox};
     use zone_chainspec::ZoneChainSpec;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-    use zone_primitives::constants::TEMPO_STATE_ADDRESS;
+    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, zone_chain_id};
 
     use crate::ZoneEvmFactory;
 
@@ -314,6 +338,31 @@ mod tests {
             .abi_encode()
             .into(),
         )
+    }
+
+    fn withdrawal_requested_receipt(address: Address) -> TempoReceipt {
+        let event = IZoneOutbox::WithdrawalRequested {
+            withdrawalIndex: 0,
+            sender: Address::repeat_byte(0x11),
+            token: Address::repeat_byte(0x22),
+            to: Address::repeat_byte(0x33),
+            amount: 1,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackNonce: 1,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        };
+        TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success: true,
+            cumulative_gas_used: 0,
+            logs: vec![Log {
+                address,
+                data: event.encode_log_data(),
+            }],
+        }
     }
 
     fn ordinary_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
@@ -430,6 +479,48 @@ mod tests {
                 .validate_transaction(&ordinary)
                 .unwrap(),
             ZoneBlockPhase::Executing
+        );
+    }
+
+    #[test]
+    fn withdrawal_requests_require_same_block_finalization() {
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+        let factory =
+            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
+        let ctx = TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: None,
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(1),
+                slot_number: None,
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        executor.phase = ZoneBlockPhase::Executing;
+        executor
+            .inner
+            .receipts
+            .push(withdrawal_requested_receipt(ZONE_OUTBOX_ADDRESS));
+
+        let error = match executor.finish() {
+            Ok(_) => panic!("withdrawal request block without finalization was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "zone block with withdrawal requests is missing its finalizeWithdrawalBatch system \
+             transaction"
         );
     }
 
@@ -613,9 +704,12 @@ mod tests {
         .unwrap();
         db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
             .unwrap();
-        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
+        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+        let factory =
+            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
         let evm = factory.create_evm(db, EvmEnv::default());
-        let chain_spec = ZoneChainSpec::from(DEV.clone());
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,

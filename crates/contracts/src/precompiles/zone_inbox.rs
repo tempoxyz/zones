@@ -6,7 +6,8 @@ pub use IZoneInbox::{
     WithdrawalBounceBackDeposit,
 };
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256, keccak256};
+use alloy_sol_types::SolValue;
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -80,6 +81,15 @@ crate::sol! {
             uint128 amount
         );
 
+        event DepositRejected(
+            bytes32 indexed depositHash,
+            address indexed sender,
+            DepositType depositType,
+            address token,
+            uint128 amount,
+            address tempoRefundRecipient
+        );
+
         event WithdrawalBounceBackProcessed(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
         event WithdrawalBounceBackPending(address indexed zoneFallbackRecipient, address token, uint128 amount);
@@ -92,6 +102,7 @@ crate::sol! {
         error OnlySequencer();
         error InvalidDepositQueueHash();
         error InvalidWithdrawalBounceBack();
+        error InvalidTokenEnablementHash();
         error MissingDecryptionData();
         error ExtraDecryptionData();
         error InvalidSharedSecretProof();
@@ -99,6 +110,7 @@ crate::sol! {
 
         function processedDepositQueueHash() external view returns (bytes32);
         function processedDepositNumber() external view returns (uint64);
+        function processedTokenEnablementHash() external view returns (bytes32);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
@@ -114,6 +126,20 @@ crate::sol! {
 }
 
 impl EnabledToken {
+    /// Hash this token enablement as the next link in the portal commitment.
+    pub fn hash_with_previous(&self, previous_hash: B256) -> B256 {
+        keccak256(
+            (
+                previous_hash,
+                self.token,
+                self.name.as_str(),
+                self.symbol.as_str(),
+                self.currency.as_str(),
+            )
+                .abi_encode_params(),
+        )
+    }
+
     /// Build the event emitted after enabling this token on the zone.
     pub fn enabled_event(self) -> ZoneInboxEvent {
         ZoneInboxEvent::token_enabled(self.token, self.name, self.symbol, self.currency)

@@ -11,8 +11,16 @@ address constant ZONE_MESSENGER_ADDRESS = 0x5A4d00000000000000000000000000000000
 /// @notice Mutually exclusive authorization role assigned to a Tempo account.
 enum Role {
     None,
+    Sequencer,
     Account,
-    CallbackGateway
+    CallbackGateway,
+    PauseGuardian
+}
+
+/// @notice Independently abdicated Portal configuration surfaces.
+enum Capability {
+    PausePortal,
+    AccessPolicy
 }
 
 /// @title IZoneToken
@@ -67,8 +75,8 @@ struct BlockTransition {
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
-/// @dev The proof reads currentDepositQueueHash from Tempo state and requires
-///      nextProcessedHash to equal it. Deposit processing is all-or-nothing per system call.
+/// @dev The proof reads currentDepositQueueHash from Tempo state to validate
+///      that nextProcessedHash equals currentDepositQueueHash.
 ///      The deposit numbers mirror the hash chain for easy status checking:
 ///      a deposit with number N is confirmed once lastProcessedDepositNumber >= N.
 struct DepositQueueTransition {
@@ -348,14 +356,16 @@ interface IZoneTxContext {
 //            + sequencerThreshold (uint8) [packed]
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
-//   slot 19: isSequencer (mapping(address => bool))
+//   slot 19: _reservedSlot19 (available for future use)
 //   slot 20: role (mapping(address => Role))
 //   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //   slot 22: maxTempoGasRate (uint128)
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
 //            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
-//   slot 25: _tokensEnabledInCurrentBlock (uint64)
+//   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64) [packed]
+//   slot 26: tokenEnablementHash (bytes32)
+//   slot 27: abdicationEffectiveAt (mapping(Capability => uint64))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -366,15 +376,16 @@ bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(5));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
+bytes32 constant PORTAL_TOKEN_ENABLEMENT_HASH_SLOT = bytes32(uint256(26));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
-bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
-bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
+bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(20));
 bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
 bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
     bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
 bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_LEADER_SLOT = bytes32(uint256(PORTAL_MAX_TEMPO_GAS_RATE_SLOT) + 1);
+bytes32 constant PORTAL_PAUSE_SLOT = bytes32(uint256(25));
 bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT =
     bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
 
@@ -563,10 +574,11 @@ interface IZonePortal {
     /// @notice Emitted when sequencer updates their encryption key
     /// @param x The X coordinate of the new key
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    /// @param pubkey The address derived from the new key
     /// @param keyIndex The index of this key in the history array
     /// @param activationBlock The Tempo block when this key becomes active
     event SequencerEncryptionKeyUpdated(
-        bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
+        bytes32 x, uint8 yParity, address pubkey, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
@@ -580,6 +592,15 @@ interface IZonePortal {
 
     /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
+
+    /// @notice Emitted when deposits and withdrawal processing are paused.
+    event PortalPaused(address indexed account);
+
+    /// @notice Emitted when the admin resumes deposits and withdrawal processing early.
+    event PortalResumed(address indexed account);
+
+    /// @notice Emitted when the admin schedules permanent abdication of a capability.
+    event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
 
     /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
@@ -605,6 +626,10 @@ interface IZonePortal {
 
     error NotSequencer();
     error NotAdmin();
+    error NotPauseAuthority();
+    error CapabilityAbdicated(Capability capability);
+    error AbdicationAlreadyScheduled(Capability capability);
+    error PortalIsPaused();
     error NotFactory();
     error NotSelf();
     error AlreadyInitialized();
@@ -623,13 +648,9 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
-    error DepositQueueCapacityExceeded(uint64 maximum);
-    error WithdrawalBatchCapacityExceeded(uint256 attempted, uint64 remaining);
     error DepositBlockCapacityExceeded(uint64 maximum);
     error TokenEnablementBlockCapacityExceeded(uint64 maximum);
-    error TokenNameTooLong(uint256 actual, uint256 maximum);
-    error TokenSymbolTooLong(uint256 actual, uint256 maximum);
-    error TokenCurrencyTooLong(uint256 actual, uint256 maximum);
+    error TokenMetadataTooLong();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -646,9 +667,7 @@ interface IZonePortal {
     error InvalidQuorumCertificate();
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
-    error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
-
     /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);
 
@@ -671,20 +690,14 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
-    /// @notice Maximum deposits that may remain unprocessed in this portal's queue.
-    function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
+    /// @notice Maximum deposits accepted by this portal in one Tempo block.
+    function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
 
     /// @notice Maximum tokens enabled by this portal in one Tempo block.
     function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
 
-    /// @notice Maximum byte length accepted for a bridged token name.
-    function MAX_TOKEN_NAME_BYTES() external view returns (uint256);
-
-    /// @notice Maximum byte length accepted for a bridged token symbol.
-    function MAX_TOKEN_SYMBOL_BYTES() external view returns (uint256);
-
-    /// @notice Maximum byte length accepted for a bridged token currency.
-    function MAX_TOKEN_CURRENCY_BYTES() external view returns (uint256);
+    /// @notice Maximum byte length accepted for each bridged token metadata string.
+    function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
 
     /// @notice Maximum callback gas accepted for withdrawals
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
@@ -709,16 +722,17 @@ interface IZonePortal {
     /// @notice Change callback gateway enforcement. Only callable by the admin.
     function setGatewayMode(bool enforced) external;
 
-    function role(address account) external view returns (Role);
-
-    /// @notice Assign an account's portal role. Only callable by the admin.
-    function setRole(address account, Role role) external;
+    /// @notice Whether an account has a Portal role.
+    function hasRole(address account, Role role) external view returns (bool);
 
     /// @notice Add or remove an account from closed-loop portal flows.
     function setAllowedAccount(address account, bool allowed) external;
 
     /// @notice Add or remove a callback gateway.
     function setGateway(address account, bool allowed) external;
+
+    /// @notice Add or remove a pause guardian.
+    function setPauseGuardian(address account, bool allowed) external;
 
     function admin() external view returns (address);
 
@@ -744,7 +758,7 @@ interface IZonePortal {
 
     function withdrawalQueueTail() external view returns (uint256);
 
-    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 queueIndex) external view returns (bytes32);
 
     /// @notice Configuration nonce for the active sequencer set and threshold.
     function sequencerSetVersion() external view returns (uint64);
@@ -774,8 +788,8 @@ interface IZonePortal {
     function leaderActivationTempoBlock() external view returns (uint64);
 
     /// @notice Transfer block-production leadership to another sequencer-set member.
-    /// @dev Only callable by an active sequencer. A call naming the already-active leader is a
-    ///      successful no-op so operators can fan the same request out to every node.
+    /// @dev Only callable by the admin or an active sequencer. A call naming the already-active
+    ///      leader is a successful no-op so operators can fan the same request out to every node.
     /// @param newLeader The individual sequencer address of the new leader.
     /// @param expectedEpoch The finalized leaderEpoch the caller observed (compare-and-set).
     function setLeader(address newLeader, uint64 expectedEpoch) external;
@@ -798,6 +812,27 @@ interface IZonePortal {
 
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
+
+    /// @notice Append-only commitment to enabled token addresses and metadata
+    function tokenEnablementHash() external view returns (bytes32);
+
+    /// @notice Whether new deposits and withdrawal processing are paused.
+    function paused() external view returns (bool);
+
+    /// @notice Timestamp at which the current Portal pause expires.
+    function pauseExpiry() external view returns (uint64);
+
+    /// @notice Timestamp at which permanent abdication of a capability takes effect.
+    function abdicationEffectiveAt(Capability capability) external view returns (uint64);
+
+    /// @notice Pause deposits and withdrawal processing for 30 days.
+    function pause() external;
+
+    /// @notice Resume deposits and withdrawal processing before the pause expires.
+    function resume() external;
+
+    /// @notice Schedule permanent abdication of a Portal capability. Only callable by admin.
+    function abdicate(Capability capability) external;
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
@@ -832,9 +867,13 @@ interface IZonePortal {
     /// @notice Get the sequencer's current encryption public key for deposits
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+    /// @return pubkey The address derived from the public key
+    function sequencerEncryptionKey()
+        external
+        view
+        returns (bytes32 x, uint8 yParity, address pubkey);
 
-    /// @notice Set the sequencer's encryption public key. Only callable by sequencer.
+    /// @notice Set the sequencer's encryption public key. Only callable by an active sequencer or admin.
     /// @dev Appends to key history. The new key becomes active at the current Tempo block.
     /// @param x The X coordinate of the secp256k1 public key
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
@@ -933,8 +972,6 @@ interface IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
-    /// @dev The attempted withdrawal count must fit within the remaining deposit-queue
-    ///      capacity, conservatively assuming every withdrawal fails and creates a bounce-back.
     function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
     function deliverWithdrawal(
@@ -1032,6 +1069,7 @@ interface ITempoState {
 
     error InvalidParentHash();
     error InvalidBlockNumber();
+    error InvalidTimestamp();
     error InvalidRlpData();
     error OnlyZoneInbox();
 
@@ -1041,11 +1079,11 @@ interface ITempoState {
     /// @notice Current finalized Tempo block number
     function tempoBlockNumber() external view returns (uint64);
 
-    /// @notice Finalize an ordered array of Tempo block headers. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity across the full array and stores only the final header.
+    /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
+    /// @dev Validates chain continuity and exact timestamp alignment with the Zone block.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
-    /// @param headers Ordered RLP-encoded Tempo headers
-    function finalizeTempo(bytes[] calldata headers) external;
+    /// @param header RLP-encoded Tempo header
+    function finalizeTempo(bytes calldata header) external;
 
     /// @notice Read a storage slot from a Tempo contract
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
@@ -1111,6 +1149,7 @@ interface IZoneInbox {
     /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
+    error InvalidTokenEnablementHash();
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error InvalidWithdrawalBounceBack();
@@ -1130,29 +1169,28 @@ interface IZoneInbox {
 
     function processedDepositNumber() external view returns (uint64);
 
+    /// @notice Append-only commitment already applied by the zone
+    function processedTokenEnablementHash() external view returns (bytes32);
+
     function refunds(address token, address owner) external view returns (uint128);
 
     function claimRefund(address token) external returns (uint128 amount);
 
     /// @notice Advance Tempo state and process deposits in a single system-only call.
     /// @dev This is the main entry point for the block executor at block start.
-    ///      1. Advances the zone's view of Tempo by processing the header array
-    ///      2. Processes deposits from the unified queue (regular and encrypted)
-    ///      3. Validates the resulting hash chain equals Tempo's currentDepositQueueHash
-    ///
-    ///      The system transaction is all-or-nothing and must process every pending deposit
-    ///      through the final queue head. A mismatch reverts the complete call.
+    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      2. Processes user deposits and internal withdrawal bounce-backs
+    ///      3. Requires the resulting hash chain to equal Tempo's currentDepositQueueHash
     ///
     ///      For user deposits, the sequencer provides DecryptionData with the
     ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
     ///
-    /// @param headers Ordered RLP-encoded Tempo block headers; only the final
-    ///        header's state root is used for Tempo reads in this call
-    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param header RLP-encoded Tempo block header
+    /// @param deposits All queued deposits through the current head, oldest first
     /// @param decryptions Decryption data for valid user deposits, in order
     /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
-        bytes[] calldata headers,
+        bytes calldata header,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens

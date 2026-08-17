@@ -1,3 +1,6 @@
+// Override targets for profiling builds with frame pointers enabled
+// Variables inherited from docker/docker-bake.hcl when files are merged
+
 variable "VERGEN_GIT_SHA" {
   default = ""
 }
@@ -6,25 +9,19 @@ variable "VERGEN_GIT_SHA_SHORT" {
   default = ""
 }
 
-group "default" {
-  targets = ["tempo-zone", "tempo-zone-xtask"]
-}
-
-target "docker-metadata" {}
-
-# Base image with all dependencies pre-compiled
 target "chef" {
-  dockerfile = "Dockerfile.chef"
+  dockerfile = "docker/Dockerfile.chef"
   context = "."
   platforms = ["linux/amd64"]
   args = {
     RUST_PROFILE = "profiling"
     RUST_FEATURES = "jemalloc"
+    EXTRA_RUSTFLAGS = "-C force-frame-pointers=yes"
   }
 }
 
 target "_common" {
-  dockerfile = "Dockerfile"
+  dockerfile = "docker/Dockerfile"
   context = "."
   contexts = {
     chef = "target:chef"
@@ -32,6 +29,7 @@ target "_common" {
   args = {
     CHEF_IMAGE = "chef"
     RUST_PROFILE = "profiling"
+    EXTRA_RUSTFLAGS = "-C force-frame-pointers=yes"
     VERGEN_GIT_SHA = "${VERGEN_GIT_SHA}"
     VERGEN_GIT_SHA_SHORT = "${VERGEN_GIT_SHA_SHORT}"
   }
@@ -41,9 +39,4 @@ target "_common" {
 target "tempo-zone" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo-zone"
-}
-
-target "tempo-zone-xtask" {
-  inherits = ["_common", "docker-metadata"]
-  target = "tempo-zone-xtask"
 }

@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use revm::{
@@ -30,9 +31,6 @@ pub enum WitnessDatabaseError {
     /// The Zone witness supplied the same bytecode preimage more than once.
     #[error("duplicate bytecode hash in Zone state witness: {code_hash:?}")]
     DuplicateBytecodeHash { code_hash: B256 },
-    /// REVM requested a block hash not supplied by the witness.
-    #[error("missing block hash in witness: {number}")]
-    MissingBlockHash { number: u64 },
     /// The execution inputs assigned two different hashes to one Zone block number.
     #[error("conflicting block hash for {number}: expected {expected:?}, got {actual:?}")]
     ConflictingBlockHash {
@@ -51,8 +49,6 @@ impl revm::database_interface::DBErrorMarker for WitnessDatabaseError {}
 #[derive(Debug)]
 pub struct WitnessDatabase {
     state: StatelessSparseTrie,
-    pre_state_root: B256,
-    node_pool: Vec<Bytes>,
     accounts: AddressMap<Option<AccountInfo>>,
     storage: AddressMap<U256Map<U256>>,
     code_by_hash: B256Map<Bytecode>,
@@ -87,25 +83,39 @@ impl WitnessDatabase {
 
         Ok(Self {
             state,
-            pre_state_root: state_root,
-            node_pool,
             accounts: AddressMap::default(),
             storage: AddressMap::default(),
             code_by_hash,
         })
     }
 
-    /// Calculate the post-state root from the initial witness and cumulative
-    /// in-memory execution changes.
+    /// Apply one block's execution changes to the current Zone state trie and
+    /// return the resulting post-state root.
     pub(crate) fn state_root(
-        &self,
-        bundle_state: &BundleState,
+        &mut self,
+        bundle_state: BundleState,
     ) -> Result<B256, StatelessSparseTrieError> {
-        let mut trie = StatelessSparseTrie::new(self.pre_state_root, &self.node_pool)?;
+        // Advance the trie from the previous block's root using this block's changes.
         let state = reth_trie_common::HashedPostState::from_bundle_state::<
             reth_trie_common::KeccakKeyHasher,
         >(bundle_state.state());
-        trie.calculate_state_root(state)
+        let state_root = self.state.calculate_state_root(state)?;
+
+        // Keep database read caches coherent with the newly advanced trie.
+        for (address, account) in bundle_state.state() {
+            self.accounts.insert(*address, account.info.clone());
+
+            if account.status.is_storage_known() {
+                self.storage.remove(address);
+            }
+
+            let storage_entry = self.storage.entry(*address).or_default();
+            for (slot, value) in account.storage.iter() {
+                storage_entry.insert(*slot, value.present_value);
+            }
+        }
+
+        Ok(state_root)
     }
 }
 
@@ -150,7 +160,12 @@ impl Database for WitnessDatabase {
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        Err(WitnessDatabaseError::MissingBlockHash { number })
+        // EIP-2935 makes historical block hashes part of the authenticated Zone state.
+        // Resolve BLOCKHASH through the history contract so the ordinary storage witness
+        // proves the returned value against the parent header's state root.
+        let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+        let value = self.storage(HISTORY_STORAGE_ADDRESS, slot)?;
+        Ok(B256::from(value.to_be_bytes::<32>()))
     }
 }
 

@@ -24,7 +24,10 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
 use tempo_primitives::{Block, TempoHeader};
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
@@ -35,8 +38,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, resolve_portal_zone_anchor,
-    spawn_zone_sequencer,
+    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
+    resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -47,7 +50,7 @@ mod zone_transaction_pool_alias {
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     replication::{
-        AttestationContext, PeerTipRegistry, broadcast_persisted_blocks,
+        AttestationContext, BroadcasterShutdown, PeerTipRegistry, broadcast_persisted_blocks,
         collect_follower_settlement_signatures, run_follower_block_sync,
     },
     settlement_attestation::collect_leader_settlements,
@@ -57,7 +60,10 @@ use crate::{
 /// Backoff after a transient role or promotion-readiness derivation failure.
 const ROLE_DECISION_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// How long a stopping generation may take before its remaining tasks are aborted.
-const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Must cover the longest in-flight L1 confirmation (`processWithdrawals` and `submitBatch`
+/// both wait up to 30s for a receipt) plus a 10s margin so demotion does not abort those waits.
+const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(40);
 /// Backoff after a generation task fails unexpectedly.
 const GENERATION_RESTART_BACKOFF: Duration = Duration::from_millis(500);
 /// Buffer size for per-generation event channels.
@@ -110,6 +116,7 @@ pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
+    pub prover_config: Option<ShadowProverConfig>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
@@ -307,6 +314,16 @@ enum TaskEnd {
     Ended(&'static str),
 }
 
+/// Whether a generation stopped with its canonical-state boundary proven.
+///
+/// A failed stop must fence the role controller: an aborted engine task may have an already
+/// enqueued Engine API message that Reth can still apply after the task has gone away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationStopOutcome {
+    Stopped,
+    Failed,
+}
+
 /// Supervise the two long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
@@ -355,18 +372,77 @@ async fn supervise_sequencer_tasks(
     }
 }
 
+/// Leader-only controls that must either both exist or both be absent.
+struct LeaderShutdown {
+    /// Fires when the leader engine task returns.
+    engine_done: oneshot::Receiver<()>,
+    /// Receives exactly one shutdown decision for the persisted-block broadcaster.
+    broadcaster: oneshot::Sender<BroadcasterShutdown>,
+}
+
 struct RunningGeneration {
     id: u64,
     role: DesiredRole,
     token: CancellationToken,
+    leader_shutdown: Option<LeaderShutdown>,
     tasks: JoinSet<TaskEnd>,
 }
 
 impl RunningGeneration {
-    async fn stop(mut self, sinks: &EventSinks) {
+    async fn stop(mut self, sinks: &EventSinks) -> GenerationStopOutcome {
         sinks.clear();
         self.token.cancel();
         let deadline = tokio::time::Instant::now() + GENERATION_STOP_TIMEOUT;
+
+        let mut outcome = GenerationStopOutcome::Stopped;
+
+        // Cancellation is not a block boundary: an in-flight advance still completes before the
+        // engine returns, so the canonical head keeps moving after `token.cancel()`. The
+        // broadcaster can only be given a drain target once the engine has actually stopped.
+        let mut leader_shutdown = self.leader_shutdown.take();
+        let draining = match leader_shutdown.as_mut() {
+            Some(LeaderShutdown { engine_done, .. }) => {
+                match tokio::time::timeout_at(deadline, engine_done).await {
+                    Ok(Ok(())) => true,
+                    Ok(Err(_)) => {
+                        outcome = GenerationStopOutcome::Failed;
+                        error!(
+                            target: "zone::role",
+                            generation = self.id,
+                            "Engine task ended without acknowledging a clean stop; fencing role controller"
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        outcome = GenerationStopOutcome::Failed;
+                        error!(
+                            target: "zone::role",
+                            generation = self.id,
+                            "Engine did not stop within the timeout; fencing role controller"
+                        );
+                        false
+                    }
+                }
+            }
+            // Not a leader generation, so there is no canonical tail to drain.
+            None => false,
+        };
+        if let Some(LeaderShutdown { broadcaster, .. }) = leader_shutdown {
+            let command = if draining {
+                BroadcasterShutdown::Drain
+            } else {
+                BroadcasterShutdown::Stop
+            };
+            if broadcaster.send(command).is_err() {
+                outcome = GenerationStopOutcome::Failed;
+                error!(
+                    target: "zone::role",
+                    generation = self.id,
+                    ?command,
+                    "Persisted block broadcaster exited before its shutdown could be acknowledged; fencing role controller"
+                );
+            }
+        }
         loop {
             match tokio::time::timeout_at(deadline, self.tasks.join_next()).await {
                 Ok(Some(result)) => {
@@ -383,14 +459,41 @@ impl RunningGeneration {
                         generation = self.id,
                         "Generation did not stop within the timeout; aborting remaining tasks"
                     );
+                    outcome = GenerationStopOutcome::Failed;
                     self.tasks.abort_all();
                     while self.tasks.join_next().await.is_some() {}
                     break;
                 }
             }
         }
-        info!(target: "zone::role", generation = self.id, role = self.role.name(), "Role generation stopped");
+        match outcome {
+            GenerationStopOutcome::Stopped => {
+                info!(target: "zone::role", generation = self.id, role = self.role.name(), "Role generation stopped");
+            }
+            GenerationStopOutcome::Failed => {
+                error!(target: "zone::role", generation = self.id, role = self.role.name(), "Role generation teardown was not proven safe");
+            }
+        }
+        outcome
     }
+}
+
+/// Stop the active generation and keep the controller fenced if its teardown is unproven.
+///
+/// Returns `false` when the controller must exit rather than allow a successor generation to
+/// start after a failed teardown.
+async fn stop_current_generation(
+    current: &mut Option<RunningGeneration>,
+    sinks: &EventSinks,
+) -> bool {
+    if let Some(generation) = current.take()
+        && generation.stop(sinks).await == GenerationStopOutcome::Failed
+    {
+        error!(target: "zone::role", "Role controller exiting after an unproven generation teardown");
+        return false;
+    }
+
+    true
 }
 
 /// Derive the desired role for the next anchor from local canonical state and the schedule.
@@ -444,9 +547,11 @@ enum Readiness {
 
 /// Evaluate the promotion barrier
 ///
-/// Forced-recovery promotion requires the local canonical head to remain exactly at the
-/// operator-selected block. Normal transitions need no additional evidence: the next-anchor rule
-/// and one-to-one zone/L1 block mapping ensure all earlier leaders' blocks are already local.
+/// Forced-recovery promotion requires the operator-selected block to remain in the local canonical
+/// chain. The node may have advanced beyond that checkpoint before restarting, so requiring it to
+/// remain the head would make every in-progress recovery restart fatal. Normal transitions need no
+/// additional evidence: the next-anchor rule and one-to-one zone/L1 block mapping ensure all
+/// earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -463,39 +568,43 @@ where
                 .portal_activation_tempo_block
                 .is_none_or(|activation| next_anchor < activation)
     }) {
-        let local_height = match provider.best_block_number() {
-            Ok(height) => height,
-            Err(err) => {
-                return Readiness::Conflicted(format!(
-                    "cannot read the local head for forced recovery: {err}"
-                ));
-            }
-        };
-        let header = match provider.sealed_header(local_height) {
-            Ok(Some(header)) => header,
-            Ok(None) => {
-                return Readiness::Conflicted(format!(
-                    "forced recovery local header {local_height} is missing"
-                ));
-            }
-            Err(err) => {
-                return Readiness::Conflicted(format!(
-                    "cannot read forced recovery local header {local_height}: {err}"
-                ));
-            }
-        };
-        if header.hash() != recovery.recovery_block_hash {
+        if let Err(err) = canonical_recovery_height(provider, recovery.recovery_block_hash) {
             return Readiness::Conflicted(format!(
-                "forced recovery canonical head mismatch at height {local_height}: expected {}, \
-                 found {}",
-                recovery.recovery_block_hash,
-                header.hash(),
+                "forced recovery checkpoint is not canonical: {err}"
             ));
         }
         return Readiness::Ready;
     }
 
     Readiness::Ready
+}
+
+/// Resolve an operator-selected recovery hash to its canonical header.
+///
+/// The hash-to-number index can contain a known non-canonical block, so the header at the resolved
+/// height is read through the canonical number index and compared again before the checkpoint is
+/// trusted. This proves local ancestry only: restart safety additionally assumes that participating
+/// nodes advanced on the same non-equivocating recovery-leader chain.
+pub(crate) fn canonical_recovery_height<P>(
+    provider: &P,
+    recovery_block_hash: alloy_primitives::B256,
+) -> eyre::Result<u64>
+where
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+{
+    let recovery_height = provider
+        .block_number(recovery_block_hash)?
+        .ok_or_else(|| eyre::eyre!("recovery block {recovery_block_hash} is unknown"))?;
+    let header = provider.sealed_header(recovery_height)?.ok_or_else(|| {
+        eyre::eyre!("canonical header at recovery height {recovery_height} is missing")
+    })?;
+    eyre::ensure!(
+        header.hash() == recovery_block_hash,
+        "recovery block {recovery_block_hash} is not canonical at height {recovery_height}; \
+         canonical hash is {}",
+        header.hash(),
+    );
+    Ok(recovery_height)
 }
 
 /// Run the role controller until the process shuts down.
@@ -554,7 +663,11 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
         // Only forced recovery has an additional promotion barrier. Normal transitions are
         // complete when the local next anchor is assigned to this node.
-        let mut promotion_reasons = Vec::new();
+        let mut promotion_reasons = if can_lead {
+            Vec::new()
+        } else {
+            vec!["rpc-only nodes cannot get promoted".to_owned()]
+        };
         if let DesiredRole::Leader { epoch, next_anchor } = desired
             && !current
                 .as_ref()
@@ -585,8 +698,8 @@ pub(crate) async fn run_role_controller<P, Pool>(
             .as_ref()
             .is_some_and(|generation| generation.role.same_variant(desired))
         {
-            if let Some(generation) = current.take() {
-                generation.stop(&sinks).await;
+            if !stop_current_generation(&mut current, &sinks).await {
+                return;
             }
             generation_id += 1;
             match start_generation(&context, &sinks, desired, generation_id).await {
@@ -682,6 +795,12 @@ pub(crate) async fn run_role_controller<P, Pool>(
                             epoch,
                             "Engine halted at the activation boundary; demoting"
                         );
+                        // Stop here rather than letting the next iteration notice the role
+                        // change, so the broadcaster drains this leader's final blocks before
+                        // the successor starts producing.
+                        if !stop_current_generation(&mut current, &sinks).await {
+                            return;
+                        }
                         // The next loop iteration derives Follower from the same schedule.
                     }
                     Some(Ok(TaskEnd::Engine(EngineExit::Fenced { tempo_anchor }))) => {
@@ -690,8 +809,8 @@ pub(crate) async fn run_role_controller<P, Pool>(
                             tempo_anchor,
                             "Engine fenced on an ungoverned anchor"
                         );
-                        if let Some(generation) = current.take() {
-                            generation.stop(&sinks).await;
+                        if !stop_current_generation(&mut current, &sinks).await {
+                            return;
                         }
                         tokio::time::sleep(GENERATION_RESTART_BACKOFF).await;
                     }
@@ -701,15 +820,15 @@ pub(crate) async fn run_role_controller<P, Pool>(
                         // A generation task ended while its generation is still desired:
                         // restart the whole generation to keep the task graph coherent.
                         error!(target: "zone::role", task = name, "Generation task ended unexpectedly; restarting generation");
-                        if let Some(generation) = current.take() {
-                            generation.stop(&sinks).await;
+                        if !stop_current_generation(&mut current, &sinks).await {
+                            return;
                         }
                         tokio::time::sleep(GENERATION_RESTART_BACKOFF).await;
                     }
                     Some(Err(err)) => {
                         error!(target: "zone::role", %err, "Generation task panicked; restarting generation");
-                        if let Some(generation) = current.take() {
-                            generation.stop(&sinks).await;
+                        if !stop_current_generation(&mut current, &sinks).await {
+                            return;
                         }
                         tokio::time::sleep(GENERATION_RESTART_BACKOFF).await;
                     }
@@ -749,6 +868,7 @@ where
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
 {
     let token = CancellationToken::new();
+    let mut leader_shutdown = None;
     let mut tasks = JoinSet::new();
 
     match desired {
@@ -873,13 +993,26 @@ where
             // Canonical head writer: the engine with the per-anchor production permit.
             let engine = build_engine(context, sequencer, last_header);
             let engine_token = token.clone();
-            tasks.spawn(async move { TaskEnd::Engine(engine.run_until(engine_token).await) });
+            let (engine_done_tx, engine_done_rx) = oneshot::channel();
+            tasks.spawn(async move {
+                let exit = engine.run_until(engine_token).await;
+                // Signalled before the task resolves so `stop` learns the canonical head is
+                // pinned without having to drain the JoinSet first.
+                let _ = engine_done_tx.send(());
+                TaskEnd::Engine(exit)
+            });
 
-            let broadcast_token = token.clone();
+            // The broadcaster outlives the generation token on purpose: it must still be able to
+            // publish the engine's final blocks after every other task has been cancelled.
+            let (broadcaster_tx, broadcaster_rx) = oneshot::channel();
+            leader_shutdown = Some(LeaderShutdown {
+                engine_done: engine_done_rx,
+                broadcaster: broadcaster_tx,
+            });
             let provider = context.provider.clone();
             let commands = context.commands.clone();
             tasks.spawn(async move {
-                broadcast_persisted_blocks(provider, commands, broadcast_token).await;
+                broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
                 TaskEnd::Ended("block-broadcast")
             });
 
@@ -936,12 +1069,14 @@ where
                 .clone()
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
             let zone_provider = context.provider.clone();
+            let prover_config = sequencer.prover_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,
                     zone_provider,
+                    prover_config,
                     sequencer_token.clone(),
                 )
                 .await;
@@ -956,6 +1091,7 @@ where
         id,
         role: desired,
         token,
+        leader_shutdown,
         tasks,
     })
 }
@@ -1001,16 +1137,17 @@ mod tests {
     use std::{future::pending, time::Duration};
 
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use reth_primitives_traits::SealedHeader;
     use reth_provider::test_utils::MockEthProvider;
-    use tempo_primitives::TempoPrimitives;
+    use tempo_primitives::{TempoHeader, TempoPrimitives};
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
     use zone_p2p::{BackfillRequest, BackfillResponse};
     use zone_sequencer::ZoneSequencerHandle;
 
     use super::{
-        EventSinks, TaskEnd, latest_sealed_header, route_backfill_requests,
-        route_backfill_responses, supervise_sequencer_tasks,
+        EventSinks, TaskEnd, canonical_recovery_height, latest_sealed_header,
+        route_backfill_requests, route_backfill_responses, supervise_sequencer_tasks,
     };
 
     struct DropSignal(Option<oneshot::Sender<()>>);
@@ -1031,6 +1168,37 @@ mod tests {
             latest_sealed_header(&provider).is_err(),
             "leader startup must fail when its canonical head cannot be read"
         );
+    }
+
+    #[test]
+    fn recovery_checkpoint_may_be_a_canonical_ancestor() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let mut recovery_header = TempoHeader::default();
+        recovery_header.inner.number = 7;
+        let recovery_hash = SealedHeader::seal_slow(recovery_header.clone()).hash();
+        provider.add_header(recovery_hash, recovery_header);
+
+        let mut head = TempoHeader::default();
+        head.inner.number = 9;
+        let head_hash = SealedHeader::seal_slow(head.clone()).hash();
+        provider.add_header(head_hash, head);
+
+        assert_eq!(
+            canonical_recovery_height(&provider, recovery_hash).unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn recovery_checkpoint_rejects_a_known_noncanonical_hash() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let mut header = TempoHeader::default();
+        header.inner.number = 7;
+        let noncanonical_hash = alloy_primitives::B256::repeat_byte(0x42);
+        provider.add_header(noncanonical_hash, header);
+
+        let error = canonical_recovery_height(&provider, noncanonical_hash).unwrap_err();
+        assert!(error.to_string().contains("is not canonical at height 7"));
     }
 
     #[tokio::test]

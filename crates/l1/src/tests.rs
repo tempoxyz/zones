@@ -1041,6 +1041,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         seq_pub_y_parity,
         recipient,
         B256::ZERO,
+        sender,
         portal,
         U256::ZERO,
     )
@@ -1050,6 +1051,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         .apply_rotation(&EncryptionKeyRotation {
             x: seq_pub_x,
             y_parity: seq_pub_y_parity,
+            pubkey: encryption_key_address(seq_pub_x, seq_pub_y_parity).unwrap(),
             key_index: U256::ZERO,
             activation_block: block_number,
         })
@@ -1118,6 +1120,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             .apply_rotation(&EncryptionKeyRotation {
                 x,
                 y_parity,
+                pubkey: encryption_key_address(x, y_parity).unwrap(),
                 key_index,
                 activation_block: key_index.to::<u64>() + 10,
             })
@@ -1127,6 +1130,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             y_parity,
             recipient,
             B256::ZERO,
+            sender,
             portal,
             key_index,
         )
@@ -1140,6 +1144,7 @@ async fn deposits_select_the_private_key_by_portal_index() {
             &encrypted.tag,
             portal,
             key_index,
+            sender,
         )
         .unwrap();
         expected_shared_secrets.push(decrypted.proof.shared_secret);
@@ -1458,12 +1463,14 @@ fn encryption_key_updated_log(
     portal: Address,
     x: B256,
     y_parity: u8,
+    pubkey: Address,
     key_index: U256,
     activation_block: u64,
 ) -> Log {
     let event = crate::abi::ZonePortal::SequencerEncryptionKeyUpdated {
         x,
         yParity: y_parity,
+        pubkey,
         keyIndex: key_index,
         activationBlock: activation_block,
     };
@@ -1477,14 +1484,18 @@ fn encryption_key_updated_log(
 }
 
 #[test]
-fn decodes_encryption_key_rotation_into_portal_events() {
+fn encryption_key_event_binds_private_key_to_portal_index() {
     let portal = address!("0x0000000000000000000000000000000000000ABC");
-    let x = B256::repeat_byte(0x42);
+    let private_key = k256::SecretKey::from_slice(&[0x42; 32]).unwrap();
+    let public_key = private_key.public_key();
+    let (x, y_parity) = crate::precompiles::ecies::compressed_x_and_parity(public_key.as_affine());
+    let pubkey = encryption_key_address(x, y_parity).unwrap();
+    let key_index = U256::from(7);
     let mut events = L1PortalEvents::default();
 
     events
         .push_log(
-            &encryption_key_updated_log(portal, x, 0x03, U256::from(7), 77),
+            &encryption_key_updated_log(portal, x, y_parity, pubkey, key_index, 77),
             77,
         )
         .unwrap();
@@ -1493,10 +1504,19 @@ fn decodes_encryption_key_rotation_into_portal_events() {
         events.encryption_key_rotations,
         vec![EncryptionKeyRotation {
             x,
-            y_parity: 0x03,
-            key_index: U256::from(7),
+            y_parity,
+            pubkey,
+            key_index,
             activation_block: 77,
         }]
+    );
+
+    let ring = EncryptionKeyRing::new([private_key.clone()]);
+    ring.apply_rotation(&events.encryption_key_rotations[0])
+        .unwrap();
+    assert_eq!(
+        ring.key(key_index).unwrap().to_bytes(),
+        private_key.to_bytes()
     );
 }
 
@@ -1624,6 +1644,51 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     let (events, _) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
+}
+
+#[test]
+fn pause_events_invalidate_cached_portal_storage() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let portal = subscriber.config.portal_address;
+    let account = address!("0x0000000000000000000000000000000000000123");
+    let pause_slot = B256::with_last_byte(25);
+    {
+        let mut cache = subscriber.config.l1_state_cache.lock();
+        cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
+    }
+    let logs = vec![
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: crate::abi::ZonePortal::PortalPaused { account }.encode_log_data(),
+            },
+            ..Default::default()
+        },
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: crate::abi::ZonePortal::AbdicationScheduled {
+                    capability: crate::abi::ZonePortal::Capability::PausePortal,
+                    effectiveAt: 0,
+                }
+                .encode_log_data(),
+            },
+            ..Default::default()
+        },
+    ];
+    let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
+
+    let (_, invalidated) = subscriber.extract_events(1, &[receipt]).unwrap();
+    assert!(invalidated.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &invalidated);
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .lock()
+            .get(portal, pause_slot, 1),
+        None
+    );
 }
 
 #[tokio::test]

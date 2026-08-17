@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolValue};
+use alloy_sol_types::{SolCall, SolType, SolValue};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     error::TempoPrecompileError,
@@ -56,6 +56,8 @@ pub struct ZoneInbox {
     processed_deposit_number: u64,
     /// Withdrawal bounce-back mints that failed and can be claimed later.
     withdrawal_bounce_backs: Mapping<Address, Mapping<Address, u128>>,
+    /// Append-only token-enablement commitment already applied by this zone.
+    processed_token_enablement_hash: B256,
 }
 
 impl ZoneInbox {
@@ -95,7 +97,23 @@ impl ZoneInbox {
         tempo_state.finalize_checkpoint(l1, call.header)?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
 
+        let has_token_enablements = !call.enabledTokens.is_empty();
+        let mut next_token_enablement_hash = self.processed_token_enablement_hash.read()?;
+        for enabled in &call.enabledTokens {
+            next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
+        }
+
+        if !portal.is_zero()
+            && l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
+        {
+            return Err(ZoneInboxError::invalid_token_enablement_hash().into());
+        }
+
         self.enable_tokens(call.enabledTokens)?;
+        if has_token_enablements {
+            self.processed_token_enablement_hash
+                .write(next_token_enablement_hash)?;
+        }
 
         // Step 2: Process deposits and build hash chain
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
@@ -312,12 +330,27 @@ impl ZoneInbox {
         token: Address,
         owner: Address,
     ) -> ZoneResult<u128> {
-        if msg_sender != owner && !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
+        if msg_sender != owner
+            && !l1.has_portal_role(
+                msg_sender,
+                tempo_zone_contracts::ZonePortal::Role::Sequencer,
+            )?
+        {
             return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
                 IZoneInbox::Unauthorized {},
             )));
         }
         Ok(self.withdrawal_bounce_backs[token][owner].read()?)
+    }
+
+    /// Returns the hash-chain head after the last processed L1 deposit.
+    pub fn processed_deposit_queue_hash(&self) -> tempo_precompiles::Result<B256> {
+        self.processed_deposit_queue_hash.read()
+    }
+
+    /// Returns the number of L1 deposits consumed by the Zone.
+    pub fn processed_deposit_number(&self) -> tempo_precompiles::Result<u64> {
+        self.processed_deposit_number.read()
     }
 }
 
@@ -347,14 +380,23 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
         match queued.depositType {
             DepositType::WithdrawalBounceBack => {
-                WithdrawalBounceBackDeposit::abi_decode(&queued.depositData)
-                    .map(Self::WithdrawalBounceBack)
+                decode_canonical(&queued.depositData).map(Self::WithdrawalBounceBack)
             }
-            DepositType::Deposit => Deposit::abi_decode(&queued.depositData).map(Self::Deposit),
+            DepositType::Deposit => decode_canonical(&queued.depositData).map(Self::Deposit),
             _ => return Err(ZonePrecompileError::MalformedCalldata),
         }
         .map_err(|_| ZonePrecompileError::MalformedCalldata)
     }
+}
+
+fn decode_canonical<T>(encoded: &[u8]) -> alloy_sol_types::Result<T>
+where
+    T: SolValue + From<<T::SolType as SolType>::RustType>,
+{
+    let value = T::abi_decode(encoded)?;
+    (value.abi_encode().as_slice() == encoded)
+        .then_some(value)
+        .ok_or(alloy_sol_types::Error::ReserMismatch)
 }
 
 fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
@@ -385,6 +427,7 @@ fn recover_encrypted_payload(
         &portal,
         &deposit.keyIndex,
         &deposit.encrypted.ephemeralPubkeyX,
+        &deposit.sender,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;

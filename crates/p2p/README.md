@@ -12,15 +12,25 @@ is retained in an activation-indexed `LeadershipSchedule`.
 
 For manual crashed-leader recovery, the operator stops the nodes, selects a canonical tip shared by
 the survivors, adds the same `[forced_recovery]` directive to every manifest, and restarts them.
-Each node verifies that its local canonical head has the configured hash before any role task
-starts. The selected replacement governs from the next Tempo anchor until the first subsequent
-finalized portal transition reaches its activation anchor. Nodes never submit that transition
-automatically: the operator may call the ordinary `zone_setLeader` RPC whenever the zone is ready
-to return to the on-chain schedule.
+Each node verifies that the configured hash remains in its local canonical chain before any role
+task starts. On the initial recovery start it should be the canonical head shared by every
+survivor. On a later restart it may be an ancestor of the local head; the node reconstructs the
+original recovery anchor and epoch instead of starting a new recovery window. The selected
+replacement governs from the next Tempo anchor until the first subsequent finalized portal
+transition reaches its activation anchor. Nodes never submit that transition automatically: the
+operator may call the ordinary `zone_setLeader` RPC whenever the zone is ready to return to the
+on-chain schedule.
 
-The configured hash must be the local canonical head at startup. After a normal portal transition
-ends recovery, the operator must remove the directive before restarting the nodes. Restarting with
-the directive after the replacement has produced past `recovery_block_hash` is unsupported.
+Restarting during recovery assumes every participating node's descendants of
+`recovery_block_hash` belong to the same chain produced by the selected, non-equivocating recovery
+leader. Canonical ancestry is local evidence and cannot prove cross-node convergence; operators
+must compare the survivors' heads before restarting if that assumption is in doubt. The configured
+L1 RPC must also serve historical Portal state at the Tempo block embedded in the recovery
+checkpoint. A node fails closed if the checkpoint is unknown or non-canonical, historical state is
+unavailable, or skipped Portal epochs make the recovery boundary ambiguous.
+
+After a normal Portal transition ends recovery, a restart skips the completed stale directive and
+logs a removal warning. Operators should still remove the directive from every manifest promptly.
 
 If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
 behavior.
@@ -58,7 +68,7 @@ Ed25519 public key.
 
 The Commonware Ed25519 identity answers which configured network peer sent a
 message. It is not an on-chain quorum identity. The quorum design will
-also give each node an individual secp256k1 key whose Ethereum address is
+also give each node an individual secp256k1 key whose address is
 registered with `ZonePortal`. 
 
 The authenticated-network namespace includes the P2P wire-protocol version,
@@ -104,9 +114,21 @@ name = "operator-rpc"
 ed25519_public_key = "0xrpc..."
 address = "operator-rpc.zone.internal:9200"
 rpc_only = true
+
+[[historical_leaders]]
+ed25519_public_key = "0xretired-leader..."
+secp256k1_address = "0x4444444444444444444444444444444444444444"
 ```
 
 `rpc_only` defaults to `false`, so existing manifests keep their current meaning.
+
+`historical_leaders` maps a retired Portal sequencer address to the Ed25519 identity that authored
+blocks while that address was leader. Keep an entry while any persisted node checkpoint can still
+precede the leader's removal, or while finalized leadership events that name it may need replay.
+These entries are identity history only: they are excluded from the P2P topology and settlement
+quorum, cannot be selected by `zone_setLeader` or `[forced_recovery]`, and are not checked against
+the Portal's current registered sequencer set. Once every retained checkpoint and replay window is
+past that leader's last epoch, the entry can be removed.
 
 `sequencer_set_version` must exactly match the value reported by `ZonePortal`. Version `0` is
 valid for the initial sequencer set installed atomically by `ZoneFactory`; later
@@ -121,9 +143,11 @@ leader = "follower-a"
 recovery_block_hash = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 ```
 
-`leader` is a manifest node name and must identify a quorum member. Because the configured hash
-must be the current head, the first recovery anchor and portal epoch are taken from the node's
-persisted checkpoint; no independently configured height or epoch can disagree with the hash.
+`leader` is a manifest node name and must identify a quorum member. The hash must be the shared
+canonical head on the first recovery start. On subsequent restarts it may be a canonical ancestor;
+the first recovery anchor and Portal epoch are recovered from the zone state and historical Portal
+state at that checkpoint, so no independently configured height or epoch can disagree with the
+hash.
 
 An `rpc_only` entry declares no `secp256k1_address` and the node is started without
 `--secp256k1.key`. It never signs a settlement attestation, so the key would be dead weight —
@@ -136,15 +160,19 @@ The manifest loader validates that:
 - the leader is not `rpc_only`;
 - `secp256k1_address` is present on every quorum node and absent on every `rpc_only` node;
 - node names, Ed25519 public keys, and secp256k1 addresses are unique;
+- historical leader addresses do not duplicate another historical or active node address, and
+  their Ed25519 identities do not alias an `rpc_only` node;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
 - the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
 
-At startup, once the portal is deployed, the node also checks the manifest against `ZonePortal`
-and refuses to start unless every quorum node's `secp256k1_address` is a registered portal sequencer
-and `sequencerThreshold()` is nonzero and reachable by the manifest quorum. Both would otherwise
-surface as stalled settlement at the next batch boundary.
+At P2P startup, the node requires the configured `ZonePortal` to be deployed at the current L1 tip,
+then checks the manifest against it. The persisted Zone genesis anchor may still precede portal
+deployment so the creation block can be replayed. The node refuses to start unless every quorum
+node's `secp256k1_address` is a registered portal sequencer and `sequencerThreshold()` is nonzero
+and reachable by the manifest quorum. These failures would otherwise surface as stalled settlement
+at the next batch boundary.
 
 Registered sequencers the manifest does not list only warn — a demoted standby whose key was never
 deregistered holds a share of the threshold nobody signs for, but failing on it would make every
@@ -178,13 +206,15 @@ Add these arguments to the node's normal command:
 
 Use each node's own key files and listener address. Quorum followers use their individual
 secp256k1 keys to sign settlement attestations after importing and validating blocks.
+The paths supplied through `--p2p.key`, `--secp256k1.key`, and `--sequencer-key-file` may point
+to either regular files or FIFOs.
 
 An rpc-follower is started with **neither** key: it omits `--secp256k1.key` (it never signs an
-attestation) and `--sequencer-key`/`--sequencer-key-file` (it never produces a block). The shared
+attestation) and `--sequencer-key-file` (it never produces a block). The shared
 sequencer key is also the zone's ECIES private key for encrypted deposits, so provisioning it on
 the internet-facing standby would put deposit recipients and memos within reach of a host
-compromise. Startup rejects either flag on an `rpc_only` node rather than ignoring it.
-This key is independent from the shared `--sequencer-key`; reusing that shared key
+compromise. Startup rejects that key-file flag on an `rpc_only` node rather than ignoring it.
+This key is independent from the shared `--sequencer-key-file`; reusing that shared key
 would collapse several nodes into one recoverable quorum identity.
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.

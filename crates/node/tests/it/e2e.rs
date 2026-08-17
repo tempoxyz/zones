@@ -10,6 +10,7 @@ use std::{net::TcpListener, time::Duration};
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
+use alloy_network::ReceiptResponse;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
@@ -21,6 +22,7 @@ use tempo_zone_contracts::{
     ZONE_OUTBOX_ADDRESS,
 };
 use zone_l1::ChainTempoStateExt;
+use zone_primitives::constants::zone_chain_id;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
@@ -59,6 +61,7 @@ async fn test_sequencer_exposes_simulation_endpoints() -> eyre::Result<()> {
 
 /// A follower imports the leader's executed block and exposes the resulting state over RPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -237,6 +240,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
 /// 4. The follower imports block 2 — only possible if it, too, reads policy at
 ///    height 2 and reproduces the revert, matching the leader's state root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Result<()> {
     use alloy_provider::ProviderBuilder;
     use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
@@ -600,8 +604,8 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     // Start two zones with different chain IDs
-    let zone1 = ZoneTestNode::start_local_with_chain_id(71001).await?;
-    let zone2 = ZoneTestNode::start_local_with_chain_id(71002).await?;
+    let zone1 = ZoneTestNode::start_local_with_chain_id(zone_chain_id(1_337, 1)?).await?;
+    let zone2 = ZoneTestNode::start_local_with_chain_id(zone_chain_id(1_337, 2)?).await?;
 
     // Shared L1 fixture — same header timeline for both zones
     let mut fixture = L1Fixture::new();

@@ -11,8 +11,8 @@ import {
     MAX_WITHDRAWAL_CALLBACK_GAS,
     PORTAL_ACCESS_MODE_SLOT,
     PORTAL_GATEWAY_MODE_SLOT,
-    PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_PAUSE_SLOT,
     PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
     PendingWithdrawal,
@@ -23,7 +23,6 @@ import {
 } from "../interfaces/IZone.sol";
 
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
-import { EMPTY_SENTINEL } from "../libraries/WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
@@ -248,6 +247,8 @@ contract ZoneOutbox is IZoneOutbox {
     )
         internal
     {
+        if (_isPortalPaused()) revert IZonePortal.PortalIsPaused();
+
         // Always require a valid fallback recipient
         if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
@@ -331,6 +332,13 @@ contract ZoneOutbox is IZoneOutbox {
         emit WithdrawalRequested(
             index, msg.sender, token, to, amount, fee, memo, gasLimit, fallbackNonce, data, revealTo
         );
+    }
+
+    /// @dev Read the packed pause expiry from the latest finalized Tempo checkpoint.
+    function _isPortalPaused() internal view returns (bool) {
+        uint256 packed = uint256(tempoState.readTempoStorageSlot(tempoPortal, PORTAL_PAUSE_SLOT));
+        uint64 pauseExpiry = uint64(packed >> 64);
+        return block.timestamp < pauseExpiry;
     }
 
     /// @notice Enqueue a failed-deposit bounce-back withdrawal.
@@ -425,7 +433,7 @@ contract ZoneOutbox is IZoneOutbox {
         // So oldest ends up outermost, matching Tempo expectations.
         // Process the oldest withdrawals first (FIFO).
         if (count > 0) {
-            withdrawalQueueHash = EMPTY_SENTINEL;
+            withdrawalQueueHash = bytes32(0);
 
             for (uint256 i = count; i > 0;) {
                 uint256 index = i - 1;
@@ -560,7 +568,7 @@ contract ZoneOutbox is IZoneOutbox {
     }
 
     function _isSequencer(address account) internal view returns (bool) {
-        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT)))) != 0;
+        return _hasPortalRole(account, Role.Sequencer);
     }
 
     function _isEnabledToken(address token) internal view returns (bool) {
@@ -579,13 +587,16 @@ contract ZoneOutbox is IZoneOutbox {
 
     function _isAllowedAccount(address account) internal view returns (bool) {
         if (uint8(uint256(_readPortal(PORTAL_ACCESS_MODE_SLOT))) == 0) return true;
-        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_ROLE_SLOT))))
-            == uint256(Role.Account);
+        return _hasPortalRole(account, Role.Account);
     }
 
     function _isZoneGateway(address gateway) internal view returns (bool) {
-        return uint256(_readPortal(keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT))))
-            == uint256(Role.CallbackGateway);
+        return _hasPortalRole(gateway, Role.CallbackGateway);
+    }
+
+    function _hasPortalRole(address account, Role role) internal view returns (bool) {
+        return uint8(uint256(_readPortal(keccak256(abi.encode(account, PORTAL_ROLE_SLOT)))))
+            == uint8(role);
     }
 
 }
