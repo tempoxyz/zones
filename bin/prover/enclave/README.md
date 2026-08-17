@@ -25,12 +25,22 @@ Requests use this envelope:
 compiled into Tempo plus custom genesis files configured by the enclave operator through a
 `--tempo-genesis` directory. A request cannot supply its own chain specification. Responses have
 `status: "ok"` with a `zone_spf::BatchOutput`, or `status: "error"` with a stable `code` and a
-diagnostic `message`.
+diagnostic `message`. The requested `tempoChainId` must match the witness's `parentChainId`.
+
+After successful SPF execution, the enclave derives the canonical Zone batch digest and asks the
+Nitro Secure Module to place it in the signed attestation document's `user_data`. A successful
+response includes `proofBundle.verifierConfig = 0x01` and the raw COSE/CBOR document in
+`proofBundle.proof`. The prover returns `attestation_unavailable` when `/dev/nsm` is unavailable or
+the NSM request fails.
 
 Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
 operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
 pass `--port` to change the selected transport's port. The maximum request payload defaults to 512
 MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`.
+
+TCP mode is intended for development of framing, chain validation, and SPF error handling. The
+binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
+outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
 JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
 override a built-in Tempo network.
@@ -45,6 +55,7 @@ To build the same artifacts locally, first load the payload into the local Docke
 
 ```console
 docker buildx bake \
+  -f docker/docker-bake.hcl \
   --load \
   --set tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:local \
   tempo-zone-prover-enclave
@@ -59,6 +70,7 @@ host image:
 
 ```console
 docker buildx bake \
+  -f docker/docker-bake.hcl \
   --load \
   --set tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local \
   tempo-zone-prover-eif-builder
@@ -73,6 +85,7 @@ docker run --rm \
   --output-file /output/tempo-zone-prover.eif \
   | tee target/tempo-zone-prover-eif/measurements.json
 docker buildx bake \
+  -f docker/docker-bake.hcl \
   --load \
   --set tempo-zone-prover.tags=tempo-zone-prover:local \
   tempo-zone-prover

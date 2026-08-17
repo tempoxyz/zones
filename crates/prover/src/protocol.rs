@@ -105,6 +105,8 @@ pub enum ErrorCode {
     UnsupportedChain,
     /// Stateless proof execution rejected the supplied witness.
     VerificationFailed,
+    /// The prover could not obtain an attestation from the Nitro Secure Module.
+    AttestationUnavailable,
     /// The framed request exceeds the configured size limit.
     RequestTooLarge,
     /// The connection ended before the complete frame was received.
