@@ -7,7 +7,8 @@ use crate::{
     generate_p2p_key::GenerateP2pKey, generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory, portal_pause::PausePortal,
     set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits,
-    verify_closed_loop::VerifyClosedLoop, zone_info::ZoneInfoCmd,
+    verify_closed_loop::VerifyClosedLoop, verify_portal_backing::VerifyPortalBacking,
+    zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
@@ -28,6 +29,7 @@ mod portal_pause;
 mod set_encryption_key;
 mod spam_deposits;
 mod verify_closed_loop;
+mod verify_portal_backing;
 mod zone_info;
 mod zone_utils;
 
@@ -70,6 +72,10 @@ async fn main() -> eyre::Result<()> {
         Action::VerifyClosedLoop(args) => {
             args.run().await.wrap_err("closed-loop verification failed")
         }
+        Action::VerifyPortalBacking(args) => args
+            .run()
+            .await
+            .wrap_err("Portal backing verification failed"),
         Action::ZoneInfo(args) => args.run().await.wrap_err("failed to fetch zone info"),
     }
 }
@@ -102,5 +108,6 @@ enum Action {
     SetEncryptionKey(SetEncryptionKey),
     SpamDeposits(SpamDeposits),
     VerifyClosedLoop(VerifyClosedLoop),
+    VerifyPortalBacking(VerifyPortalBacking),
     ZoneInfo(ZoneInfoCmd),
 }
