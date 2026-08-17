@@ -26,7 +26,7 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
-use tracing::{debug, error, info};
+use tracing::{Instrument as _, debug, error, info, info_span};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
@@ -85,6 +85,7 @@ struct ProverJob {
     to: u64,
     batch: BatchData,
     enqueued_at: Instant,
+    queue_span: Option<tracing::Span>,
 }
 
 #[derive(Debug)]
@@ -145,12 +146,23 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     let metrics = ProverMetrics::default();
 
     tokio::spawn(async move {
-        while let Some(job) = receiver.recv().await {
+        while let Some(mut job) = receiver.recv().await {
             metrics
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
+            if let Some(span) = job.queue_span.take() {
+                span.in_scope(|| debug!("Prover job dequeued"));
+            }
             let started = Instant::now();
-            let result = validate_candidate(&context, &job, &metrics).await;
+            let result = validate_candidate(&context, &job, &metrics)
+                .instrument(info_span!(
+                    "prover_validation",
+                    zone_from = job.from,
+                    zone_to = job.to,
+                    prev_block_hash = %job.batch.prev_block_hash,
+                    next_block_hash = %job.batch.next_block_hash,
+                ))
+                .await;
             metrics
                 .validation_duration_seconds
                 .record(started.elapsed().as_secs_f64());
@@ -212,11 +224,19 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
 impl ShadowProver {
     /// Queue a candidate without waiting for validation or queue capacity.
     pub(crate) fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+        let queue_span = info_span!(
+            "prover_queue",
+            zone_from = from,
+            zone_to = to,
+            prev_block_hash = %batch.prev_block_hash,
+            next_block_hash = %batch.next_block_hash,
+        );
         if let Err(err) = self.sender.try_send(ProverJob {
             from,
             to,
             batch: batch.clone(),
             enqueued_at: Instant::now(),
+            queue_span: Some(queue_span),
         }) {
             error!(
                 target: "zone::sequencer::prover",
@@ -268,6 +288,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             expected_next_hash,
         )
     })
+    .instrument(info_span!("zone_inputs"))
     .await
     .context("Zone input worker panicked")??;
     metrics
@@ -276,7 +297,9 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     let (zone_state_witness, tempo_reads) =
-        zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
+        zone_witnesses(context.config.debug_api.as_ref(), from, to)
+            .instrument(info_span!("zone_witness"))
+            .await?;
     metrics
         .zone_witness_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -317,6 +340,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .await?;
         Ok::<_, eyre::Report>((initial_tempo_header, final_tempo_header, anchor))
     }
+    .instrument(info_span!("tempo_headers"))
     .await?;
     metrics
         .tempo_headers_duration_seconds
@@ -327,6 +351,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         let reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
         tempo_state_witness(&context.l1_provider, &initial_tempo_header, reads).await
     }
+    .instrument(info_span!("tempo_witness"))
     .await?;
     metrics
         .tempo_witness_duration_seconds
@@ -349,29 +374,34 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     };
 
     let started = Instant::now();
-    let output = if let Some(address) = &context.config.prover_address {
-        verify_remotely(
-            address,
-            context.config.parent_chain_id,
-            context.config.zone_id,
-            job,
-            &witness,
-        )
-        .await?
-    } else {
-        let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
-        let attempt = witness.clone();
-        tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
+    let output = async {
+        if let Some(address) = &context.config.prover_address {
+            verify_remotely(
+                address,
+                context.config.parent_chain_id,
+                context.config.zone_id,
+                job,
+                &witness,
+            )
             .await
-            .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")?
-    };
+        } else {
+            let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
+            let attempt = witness.clone();
+            tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
+                .await
+                .context("SPF worker panicked")?
+                .context("SPF rejected generated witness")
+        }
+    }
+    .instrument(info_span!("spf_execution"))
+    .await?;
     metrics
         .spf_execution_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
+    info_span!("output_validation")
+        .in_scope(|| compare_output(&output, &job.batch, witness.parent_header.hash_slow()))?;
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());

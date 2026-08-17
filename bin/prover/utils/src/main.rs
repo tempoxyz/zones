@@ -23,7 +23,7 @@ use tempo_zone_contracts::{
     ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use tokio::net::TcpStream;
-use tracing::{debug, info};
+use tracing::{Span, debug, info, info_span};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
@@ -128,13 +128,16 @@ struct GenerateInputArgs {
 struct Timings(Vec<(&'static str, Duration)>);
 
 impl Timings {
-    fn record<T>(&mut self, name: &'static str, started: Instant, value: T) -> T {
+    fn record<T>(&mut self, name: &'static str, phase: (Instant, Span), value: T) -> T {
+        let (started, span) = phase;
         let elapsed = started.elapsed();
-        info!(
-            phase = name,
-            elapsed_ms = elapsed.as_millis(),
-            "phase complete"
-        );
+        span.in_scope(|| {
+            info!(
+                phase = name,
+                elapsed_ms = elapsed.as_millis(),
+                "phase complete"
+            );
+        });
         self.0.push((name, elapsed));
         value
     }
@@ -192,11 +195,6 @@ fn init_tracing(filter: &str) -> Result<()> {
         .map_err(|error| eyre!("initialize tracing: {error}"))
 }
 
-fn start_phase(name: &'static str) -> Instant {
-    info!(phase = name, "starting phase");
-    Instant::now()
-}
-
 async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
@@ -213,7 +211,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         bail!("--zone-block-count must be greater than zero");
     }
 
-    let started = start_phase("discovery");
+    let started = (Instant::now(), info_span!("discovery"));
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
     let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
     let signer = args
@@ -239,7 +237,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     );
     timings.record("discovery", started, ());
 
-    let started = start_phase("batch extraction");
+    let started = (Instant::now(), info_span!("batch_extraction"));
     let (parent_header, parent_number, extracted) = if let Some(block_count) = args.zone_block_count
     {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
@@ -298,17 +296,17 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     );
     timings.record("batch extraction", started, ());
 
-    let started = start_phase("initial checkpoint");
+    let started = (Instant::now(), info_span!("initial_checkpoint"));
     let initial_tempo_header =
         initial_tempo_header(&tempo_provider, &zone_provider, parent_number).await?;
     timings.record("initial checkpoint", started, ());
 
-    let started = start_phase("Zone state witness");
+    let started = (Instant::now(), info_span!("zone_state_witness"));
     let (zone_state_witness, tempo_reads) =
         zone_witnesses(&zone_provider, from_block, to_block).await?;
     timings.record("Zone state witness", started, ());
 
-    let started = start_phase("Tempo state witness");
+    let started = (Instant::now(), info_span!("tempo_state_witness"));
     let checkpoint_by_zone_block = extracted
         .iter()
         .map(|block| (block.input.number, block.checkpoint_number))
@@ -325,7 +323,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .transpose()?
         .unwrap_or_else(|| initial_tempo_header.clone());
 
-    let started = start_phase("Tempo ancestry");
+    let started = (Instant::now(), info_span!("tempo_ancestry"));
     let (anchor_block_number, anchor_block_hash, tempo_ancestry_headers, anchor_mode) =
         tempo_anchor(&tempo_provider, &final_tempo_header).await?;
     timings.record("Tempo ancestry", started, ());
@@ -347,7 +345,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         tempo_ancestry_headers,
     };
 
-    let started = start_phase("SPF validation");
+    let started = (Instant::now(), info_span!("spf_validation"));
     let output = prove_zone_batch(&spf_config, witness.clone())
         .context("generated witness failed SPF validation")?;
     if output.block_transition.nextBlockHash != next_block_hash {
@@ -369,7 +367,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         witness,
     };
 
-    let started = start_phase("output");
+    let started = (Instant::now(), info_span!("output"));
     let output_bytes = if let Some(path) = &args.output {
         let json =
             serde_json::to_vec_pretty(&request.witness).context("serialize batch witness")?;
@@ -382,7 +380,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("output", started, ());
 
     let target_bytes = if let Some(target) = &args.target {
-        let started = start_phase("target prover");
+        let started = (Instant::now(), info_span!("target_prover"));
         let bytes = send_to_prover(target, &request, &output).await?;
         timings.record("target prover", started, ());
         Some(bytes)
