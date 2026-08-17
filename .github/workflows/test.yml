@@ -35,7 +35,7 @@ jobs:
           submodules: recursive
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@183a02178c660ce295e9a262edc5857cb7135f06 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@dd1014bf8244fded7a501e701cafab240a4f9f0e # main
         with:
           scope: tempoxyz/earn
           policy: zones-read
