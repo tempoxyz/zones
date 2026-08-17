@@ -1,4 +1,4 @@
-name: Specs
+name: Contracts
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
       - "crates/contracts/test/**"
       - "crates/contracts/foundry.*"
       - "crates/**"
-      - ".github/workflows/specs.yml"
+      - ".github/workflows/contracts.yml"
   merge_group:
   pull_request:
     branches: [main, dr/validium]
@@ -17,7 +17,7 @@ on:
       - "crates/contracts/test/**"
       - "crates/contracts/foundry.*"
       - "crates/**"
-      - ".github/workflows/specs.yml"
+      - ".github/workflows/contracts.yml"
 
 permissions:
   contents: read
@@ -217,8 +217,8 @@ jobs:
           print("Coverage gate passed.")
           PY
 
-  specs-success:
-    name: specs success
+  contracts-success:
+    name: contracts success
     runs-on: ubuntu-latest
     if: always()
     needs:
