@@ -23,18 +23,15 @@ build binary extra_args="":
     {{cargo_build_binary}} build {{extra_args}} --bin {{binary}}
 
 [group('zone')]
-[doc('Regenerates the bundled zone dev genesis from the current Solidity artifacts')]
+[doc('Regenerates the bundled zone dev genesis')]
 regen-zone-dev-genesis:
     #!/bin/bash
     set -euo pipefail
     rm -rf {{zone_dev_genesis_tmp}}
-    forge build --root crates/contracts --no-lint
     cargo run -p tempo-xtask -- generate-zone-genesis \
         --output {{zone_dev_genesis_tmp}} \
         --chain-id 1337 \
-        --tempo-portal 0x0000000000000000000000000000000000000000 \
         --admin 0xaAaAaAaa00000000000000000000000000000000 \
-        --specs-out crates/contracts/out \
         --with-createx \
         --with-safe-deployer \
         --with-create2-factory
