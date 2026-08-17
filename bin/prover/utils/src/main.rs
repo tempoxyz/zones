@@ -435,6 +435,7 @@ async fn send_to_prover(
             version,
             request_id,
             output,
+            proof_bundle: _,
         } => {
             if version != PROTOCOL_VERSION {
                 bail!(
@@ -447,7 +448,7 @@ async fn send_to_prover(
                     request.request_id
                 );
             }
-            if output != *expected_output {
+            if *output != *expected_output {
                 bail!("target prover output does not match local SPF output");
             }
         }
