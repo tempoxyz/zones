@@ -2849,7 +2849,7 @@ async fn build_l1_anchored_genesis(
             .await?
     };
     let (mut genesis, genesis_block_number) =
-        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+        zone_node::genesis::l1_anchored_genesis(l1_header, default_fee_token)?;
     if !portal_address.is_zero() {
         patch_clean_portal_snapshot(
             &l1_provider,
@@ -2885,7 +2885,7 @@ async fn build_l1_anchored_genesis_at_block(
             .await?
     };
     let (mut genesis, genesis_block_number) =
-        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+        zone_node::genesis::l1_anchored_genesis(l1_header, default_fee_token)?;
     if !portal_address.is_zero()
         && !l1_provider
             .get_code_at(portal_address)
