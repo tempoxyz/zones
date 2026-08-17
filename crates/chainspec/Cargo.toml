@@ -11,6 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# zones
+zone-hardfork.workspace = true
+
 # tempo
 tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-primitives.workspace = true

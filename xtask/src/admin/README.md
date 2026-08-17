@@ -116,4 +116,3 @@ The command:
    local Zone height advanced.
 8. Applies any explicit `--require-*` assertions and, when supplied, compares
    the expected Zone manifest with the Portal and live nodes.
- 

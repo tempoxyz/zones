@@ -34,11 +34,13 @@ use tempo_precompiles::{
     },
     storage_credits::NonCreditableSlots,
 };
+use zone_hardfork::ZoneHardfork;
 
 /// Shared EVM configuration and accounting state installed for every Zone precompile wrapper.
 #[derive(Clone)]
 pub struct ZonePrecompileEnv {
     cfg: revm::context::CfgEnv<TempoHardfork>,
+    zone_hardfork: ZoneHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 }
@@ -47,14 +49,21 @@ impl ZonePrecompileEnv {
     /// Captures the active EVM configuration and transaction-local storage accounting state.
     pub fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
+        zone_hardfork: ZoneHardfork,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
             cfg: cfg.clone(),
+            zone_hardfork,
             actions,
             non_creditable_slots,
         }
+    }
+
+    /// Returns the active Zone-owned protocol revision.
+    pub const fn zone_hardfork(&self) -> ZoneHardfork {
+        self.zone_hardfork
     }
 }
 
@@ -227,6 +236,7 @@ mod tests {
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -267,6 +277,7 @@ mod tests {
         cfg.spec = TempoHardfork::T8;
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -312,6 +323,7 @@ mod tests {
         cfg.spec = TempoHardfork::T8;
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -364,6 +376,7 @@ mod tests {
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );

@@ -70,7 +70,7 @@ use tempo_revm::TempoTxEnv;
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
 };
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_precompiles::create_outbox_precompile;
 
@@ -79,6 +79,7 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 /// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
+    chain_spec: Arc<ZoneChainSpec>,
     l1_reader: L1,
     portal_address: Address,
 }
@@ -87,9 +88,10 @@ impl<L1> ZoneEvmFactory<L1>
 where
     L1: L1StorageReader,
 {
-    /// Create a new factory with the given L1 state reader and Zone portal address.
-    pub fn new(l1_reader: L1, portal_address: Address) -> Self {
+    /// Creates a factory with the canonical Zone chain spec, L1 reader, and portal address.
+    pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_reader: L1, portal_address: Address) -> Self {
         Self {
+            chain_spec,
             l1_reader,
             portal_address,
         }
@@ -99,13 +101,14 @@ where
         &self,
         evm: TempoEvm<L1OverlayDB<DB, L1>, I>,
         l1: L1State<L1>,
+        zone_hardfork: zone_hardfork::ZoneHardfork,
     ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
         let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new());
         let cfg = evm.ctx().cfg.clone();
         let actions = StorageActions::disabled();
         let non_creditable_slots = evm.non_creditable_slots();
         let (_, _, precompiles) = evm.components_mut();
-        let env = ZonePrecompileEnv::new(&cfg, actions, non_creditable_slots);
+        let env = ZonePrecompileEnv::new(&cfg, zone_hardfork, actions, non_creditable_slots);
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
             Some(TempoState::create(l1.clone(), &env))
         });
@@ -177,10 +180,16 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
+        let zone_hardfork = self
+            .chain_spec
+            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(self.register_precompiles(evm, l1))
+        ZoneEvm::new(
+            self.register_precompiles(evm, l1, zone_hardfork),
+            zone_hardfork,
+        )
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -189,10 +198,16 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
+        let zone_hardfork = self
+            .chain_spec
+            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(self.register_precompiles(evm, l1))
+        ZoneEvm::new(
+            self.register_precompiles(evm, l1, zone_hardfork),
+            zone_hardfork,
+        )
     }
 }
 
@@ -284,7 +299,7 @@ where
 {
     /// Creates a Zone EVM config from the node's canonical, composed chain specification.
     pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1, portal_address: Address) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
+        let zone_factory = ZoneEvmFactory::new(chain_spec.clone(), l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
         let block_assembler = ZoneBlockAssembler::new(chain_spec.clone());
@@ -631,7 +646,14 @@ mod tests {
         )
         .unwrap();
 
-        let factory = ZoneEvmFactory::new(reader.clone(), portal);
+        let mut zone_genesis = tempo_chainspec::spec::DEV.genesis().clone();
+        zone_genesis.config.chain_id =
+            zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1).unwrap();
+        let factory = ZoneEvmFactory::new(
+            Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap()),
+            reader.clone(),
+            portal,
+        );
         let mut env = EvmEnv::<TempoHardfork, TempoBlockEnv>::default();
         env.block_env.inner.timestamp = U256::from(child.inner.timestamp);
         env.block_env.timestamp_millis_part = child.timestamp_millis_part;
