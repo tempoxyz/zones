@@ -1303,7 +1303,7 @@ impl ZoneTestNode {
                 .expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
-        let chain_spec = ZoneChainSpec::from_genesis(genesis);
+        let chain_spec = ZoneChainSpec::from_genesis(genesis)?;
 
         let mut zone_node = ZoneNode::new(
             l1_ws_url,
@@ -3408,6 +3408,35 @@ impl ZoneAccount {
         IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
             .requestWithdrawal(
                 ZONE_TOKEN_ADDRESS,
+                to,
+                args.amount,
+                args.memo,
+                args.gas_limit,
+                zone_fallback_recipient,
+                args.data,
+                args.reveal_to,
+            )
+            .from(self.address)
+            .call()
+            .await?;
+        Ok(())
+    }
+
+    /// Approve the ZoneOutbox, then simulate a token withdrawal without submitting it.
+    pub(crate) async fn simulate_withdraw_token_with(
+        &mut self,
+        token: Address,
+        args: WithdrawalArgs,
+    ) -> eyre::Result<()> {
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
+
+        self.approve_outbox(token).await?;
+
+        let to = args.to.unwrap_or(self.address);
+        let zone_fallback_recipient = args.zone_fallback_recipient.unwrap_or(self.address);
+        IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
+            .requestWithdrawal(
+                token,
                 to,
                 args.amount,
                 args.memo,

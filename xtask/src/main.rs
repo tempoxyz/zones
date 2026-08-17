@@ -1,6 +1,6 @@
 //! xtask is a Swiss army knife of tools that help with running and testing tempo.
 use crate::{
-    benchmark_results::BenchmarkResults, check_abi::CheckAbi,
+    admin::Admin, benchmark_results::BenchmarkResults, check_abi::CheckAbi,
     configure_benchmark_fees::ConfigureBenchmarkFees, create_zone::CreateZone,
     demo_blacklist::DemoBlacklist, demo_swap_and_deposit::DemoSwapAndDeposit,
     deploy_neobank_fixtures::DeployNeobankFixtures, deploy_router::DeployRouter, deposit::Deposit,
@@ -12,6 +12,7 @@ use crate::{
 use clap::Parser as _;
 use eyre::Context;
 
+mod admin;
 mod benchmark_results;
 mod check_abi;
 mod configure_benchmark_fees;
@@ -39,6 +40,7 @@ async fn main() -> eyre::Result<()> {
 
     let args = Args::parse();
     match args.action {
+        Action::Admin(args) => args.run().await.wrap_err("admin command failed"),
         Action::BenchmarkResults(args) => args.run().wrap_err("failed to render benchmark results"),
         Action::CheckAbi(args) => args.run().wrap_err("failed ABI alignment check"),
         Action::ConfigureBenchmarkFees(args) => args
@@ -86,6 +88,7 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Action {
+    Admin(Admin),
     BenchmarkResults(BenchmarkResults),
     CheckAbi(CheckAbi),
     ConfigureBenchmarkFees(ConfigureBenchmarkFees),

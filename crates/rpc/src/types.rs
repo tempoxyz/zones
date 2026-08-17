@@ -322,6 +322,31 @@ pub struct SequencerReadiness {
     pub reasons: Vec<String>,
 }
 
+/// Public fingerprint of a configured deposit-decryption key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecryptionKeyCandidate {
+    pub x: B256,
+    pub y_parity: u8,
+}
+
+/// Public fingerprint of a key bound to a finalized Portal key index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundDecryptionKey {
+    pub key_index: U256,
+    pub x: B256,
+    pub y_parity: u8,
+}
+
+/// Public-only view of the node's loaded deposit-decryption key ring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecryptionKeyStatus {
+    pub candidates: Vec<DecryptionKeyCandidate>,
+    pub bound: Vec<BoundDecryptionKey>,
+}
+
 /// Response payload for `zone_getSequencerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -330,6 +355,18 @@ pub struct SequencerInfoResponse {
     pub mode: String,
     /// ZonePortal address on Tempo L1.
     pub portal: Address,
+    /// Zone ID declared by the loaded manifest (multi-sequencer mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_zone_id: Option<U64>,
+    /// Sequencer-set version declared by the loaded manifest (multi-sequencer mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_sequencer_set_version: Option<U64>,
+    /// Digest of the loaded manifest's settlement-relevant membership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_membership_digest: Option<B256>,
+    /// Public fingerprints of loaded deposit-decryption keys (multi-sequencer mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decryption_keys: Option<DecryptionKeyStatus>,
     /// Local node identity and role (multi-sequencer mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalSequencerInfo>,

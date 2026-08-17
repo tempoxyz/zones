@@ -14,6 +14,7 @@ members = [
   "crates/chainspec",
   "crates/contracts",
   "crates/evm",
+  "crates/hardfork",
   "crates/l1",
   "crates/node",
   "crates/p2p",
@@ -124,6 +125,7 @@ tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "9f7
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-chainspec = { path = "crates/chainspec" }
 zone-evm = { path = "crates/evm" }
+zone-hardfork = { path = "crates/hardfork", default-features = false }
 zone-l1 = { path = "crates/l1" }
 zone-node = { path = "crates/node" }
 zone-p2p = { path = "crates/p2p" }
@@ -182,6 +184,7 @@ revm = { version = "42.0.1", features = [
 # alloy
 alloy = { version = "2.3.0", default-features = false }
 alloy-chains = "0.2.36"
+alloy-hardforks = { version = "0.4.7", default-features = false }
 alloy-consensus = { version = "2.3.0", default-features = false }
 alloy-contract = { version = "2.3.0", default-features = false }
 alloy-eips = { version = "2.3.0", default-features = false }
