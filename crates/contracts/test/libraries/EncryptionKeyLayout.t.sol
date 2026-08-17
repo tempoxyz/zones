@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { EncryptionKeyEntry, PORTAL_ENCRYPTION_KEYS_SLOT } from "../../src/runtime/interfaces/IZone.sol";
+import {
+    EncryptionKeyEntry,
+    PORTAL_ENCRYPTION_KEYS_SLOT
+} from "../../src/runtime/interfaces/IZone.sol";
 import { Test } from "forge-std/Test.sol";
 
 /// @notice Minimal harness that mirrors ZonePortal's _encryptionKeys storage layout.
