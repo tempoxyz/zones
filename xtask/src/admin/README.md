@@ -72,6 +72,28 @@ Zone progress. When a manifest is supplied, every manifest identity must be
 queried exactly once. RPC-only nodes are excluded from checks that require
 sequencer keys or promotion readiness.
 
+More specifically, the command:
+
+1. Resolves the ZonePortal through ZoneFactory and reads all Portal state at one
+   finalized Tempo block.
+2. Queries every operator RPC concurrently.
+3. Checks Zone and Portal identity, endpoint labels, live quorum membership,
+   topology, finalized leader agreement, and promotion readiness on
+   non-RPC-only sequencer nodes. RPC-only nodes cannot be promoted and are
+   reported as `N/A` for readiness.
+4. Verifies the active shared decryption key on non-RPC-only sequencer nodes.
+   RPC-only nodes do not hold that key and are reported as `N/A`.
+5. Fails when any node's local Zone height is more than 240 blocks (about two
+   minutes) behind the newest node, or its Tempo anchor is more than 240 blocks
+   behind finalized L1. It then compares block hash and state root across all
+   nodes at their lowest common available Zone height.
+6. Reports the finalized L1 batch index and settled Zone height. A new L1 batch
+   is not required during the short observation window.
+7. Samples the operator nodes again after `--observe-for` and verifies that each
+   local Zone height advanced.
+8. Applies any explicit `--require-*` assertions and, when supplied, compares
+   the expected Zone manifest with the Portal and live nodes.
+
 `--wait-ready --node <name>` is the post-restart primitive. It waits for that
 node to become reachable, canonical, and promotion-ready when applicable.
 
