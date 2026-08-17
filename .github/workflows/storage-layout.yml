@@ -3,10 +3,10 @@ name: Storage Layout
 on:
   pull_request:
     paths:
-      - "specs/ref-impls/src/tempo/ZonePortal.sol"
-      - "specs/ref-impls/src/interfaces/IZone.sol"
-      - "specs/ref-impls/foundry.toml"
-      - "specs/ref-impls/storage-layouts/ZonePortal.json"
+      - "crates/contracts/src/runtime/tempo/ZonePortal.sol"
+      - "crates/contracts/src/runtime/interfaces/IZone.sol"
+      - "crates/contracts/foundry.toml"
+      - "crates/contracts/storage-layouts/ZonePortal.json"
       - ".github/workflows/storage-layout.yml"
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
           version: nightly
 
       - name: Check storage layout
-        working-directory: specs/ref-impls
+        working-directory: crates/contracts
         run: |
           set -o pipefail
           normalizer='

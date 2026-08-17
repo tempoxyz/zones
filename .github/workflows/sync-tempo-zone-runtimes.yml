@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "specs/ref-impls/**"
+      - "crates/contracts/**"
       - ".github/workflows/sync-tempo-zone-runtimes.yml"
   workflow_dispatch:
 
@@ -34,7 +34,7 @@ jobs:
           version: nightly
 
       - name: Compile Zone runtimes
-        working-directory: zones/specs/ref-impls
+        working-directory: zones/crates/contracts
         run: |
           forge inspect ZonePortal deployedBytecode > "$RUNNER_TEMP/ZonePortal"
           forge inspect ZoneMessenger deployedBytecode > "$RUNNER_TEMP/ZoneMessenger"

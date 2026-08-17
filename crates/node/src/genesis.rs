@@ -1,6 +1,6 @@
 //! Zone genesis template and L1 anchoring.
 //!
-//! The bundled template ships the zone predeploys compiled from `specs/ref-impls`.
+//! The bundled template ships the zone predeploys compiled from `crates/contracts`.
 //! It is standalone: TempoState is anchored at block 0 with a zero block hash and the
 //! `tempoPortal` immutables are `Address::ZERO`. [`l1_anchored_genesis`] patches the
 //! template so the zone follows a real L1.

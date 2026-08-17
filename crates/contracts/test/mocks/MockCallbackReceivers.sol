@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IWithdrawalReceiver } from "../../src/interfaces/IZone.sol";
+import { IWithdrawalReceiver } from "../../src/runtime/interfaces/IZone.sol";
 
 // Withdrawal callback response word that `ZoneMessenger` accepts.
 bytes32 constant ACCEPTED_CALLBACK_WORD =

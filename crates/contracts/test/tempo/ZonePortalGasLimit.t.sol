@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfaces/IZone.sol";
-import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
+import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/runtime/interfaces/IZone.sol";
+import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";

@@ -6,7 +6,7 @@ import {
     PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
     Role
-} from "../../src/interfaces/IZone.sol";
+} from "../../src/runtime/interfaces/IZone.sol";
 
 /// @title MockTempoState
 /// @notice Mock TempoState for testing ZoneInbox

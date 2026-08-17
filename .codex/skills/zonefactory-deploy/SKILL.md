@@ -10,7 +10,7 @@ Use this skill when a shared Moderato `ZoneFactory` must be redeployed because t
 ## Workflow
 
 1. Read `xtask/src/zone_utils.rs` and `docs/ZONES.md` to confirm the current `MODERATO_ZONE_FACTORY` address and docs table entry.
-2. Build the Foundry reference contracts from `specs/ref-impls`.
+2. Build the Foundry contracts from `crates/contracts`.
 3. Deploy `src/l1/ZoneFactory.sol:ZoneFactory` to Moderato.
 4. Verify the new factory has code, `zoneCount()` returns `0`, and `verifier()` returns a non-zero address.
 5. Update `MODERATO_ZONE_FACTORY`, its explorer comment, `docs/ZONES.md`, and any other `rg` hits for the old address.
@@ -19,7 +19,7 @@ Use this skill when a shared Moderato `ZoneFactory` must be redeployed because t
 ## Commands
 
 ```bash
-cd specs/ref-impls
+cd crates/contracts
 export ETH_RPC_URL=https://rpc.moderato.tempo.xyz
 export PRIVATE_KEY=<deployer_private_key>
 

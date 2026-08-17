@@ -9,8 +9,8 @@ import {
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
     ZoneInfo
-} from "../../src/interfaces/IZone.sol";
-import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
+} from "../../src/runtime/interfaces/IZone.sol";
+import { ZoneMessenger } from "../../src/runtime/tempo/ZoneMessenger.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import {
     ACCEPTED_CALLBACK_WORD,

@@ -578,7 +578,7 @@ jobs:
           earn_sha="$(git -C earn rev-parse HEAD)"
           {
             echo "forge-sha=$(forge --version | sed -n 's/^Commit SHA: //p')"
-            echo "specs-tree=$(git rev-parse HEAD:specs/ref-impls)"
+            echo "contracts-tree=$(git rev-parse HEAD:crates/contracts)"
             echo "earn-sha=$earn_sha"
           } >> "$GITHUB_OUTPUT"
           echo "ZONES_BENCH_EARN_REVISION=$earn_sha" >> "$GITHUB_ENV"
@@ -588,10 +588,10 @@ jobs:
         with:
           path: |
             earn/cache
-            specs/ref-impls/cache
-            specs/ref-impls/out
-            specs/ref-impls/benchmark-out
-          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
+            crates/contracts/cache
+            crates/contracts/out
+            crates/contracts/benchmark-out
+          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
       - name: Add file-backed mnemonic support to pinned Tempo xtask
         run: |
@@ -691,23 +691,23 @@ jobs:
       - name: Build neobank fixture contracts
         run: |
           set -euo pipefail
-          forge build --root specs/ref-impls --no-lint
-          mkdir -p specs/ref-impls/benchmark-out
-          cp -a specs/ref-impls/out/. specs/ref-impls/benchmark-out/
+          forge build --root crates/contracts --no-lint
+          mkdir -p crates/contracts/benchmark-out
+          cp -a crates/contracts/out/. crates/contracts/benchmark-out/
           forge build \
             --root earn \
             --skip test \
             --skip script \
             --no-lint \
-            --out "$GITHUB_WORKSPACE/specs/ref-impls/benchmark-out"
-          test -s specs/ref-impls/benchmark-out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json
-          test -s specs/ref-impls/benchmark-out/EarnVault.sol/EarnVault.json
-          test -s specs/ref-impls/benchmark-out/EarnFees.sol/EarnFees.json
-          test -s specs/ref-impls/benchmark-out/EarnFactory.sol/EarnFactory.json
-          test -s specs/ref-impls/benchmark-out/EarnContributionController.sol/EarnContributionController.json
-          test -s specs/ref-impls/benchmark-out/ERC4626Engine.sol/ERC4626Engine.json
-          test -s specs/ref-impls/benchmark-out/Simple4626Vault.sol/Simple4626Vault.json
-          test -s specs/ref-impls/benchmark-out/DemoTokenAuthority.sol/DemoTokenAuthority.json
+            --out "$GITHUB_WORKSPACE/crates/contracts/benchmark-out"
+          test -s crates/contracts/benchmark-out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json
+          test -s crates/contracts/benchmark-out/EarnVault.sol/EarnVault.json
+          test -s crates/contracts/benchmark-out/EarnFees.sol/EarnFees.json
+          test -s crates/contracts/benchmark-out/EarnFactory.sol/EarnFactory.json
+          test -s crates/contracts/benchmark-out/EarnContributionController.sol/EarnContributionController.json
+          test -s crates/contracts/benchmark-out/ERC4626Engine.sol/ERC4626Engine.json
+          test -s crates/contracts/benchmark-out/Simple4626Vault.sol/Simple4626Vault.json
+          test -s crates/contracts/benchmark-out/DemoTokenAuthority.sol/DemoTokenAuthority.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |

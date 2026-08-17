@@ -28,13 +28,13 @@ regen-zone-dev-genesis:
     #!/bin/bash
     set -euo pipefail
     rm -rf {{zone_dev_genesis_tmp}}
-    forge build --root specs/ref-impls --no-lint
+    forge build --root crates/contracts --no-lint
     cargo run -p tempo-xtask -- generate-zone-genesis \
         --output {{zone_dev_genesis_tmp}} \
         --chain-id 1337 \
         --tempo-portal 0x0000000000000000000000000000000000000000 \
         --admin 0xaAaAaAaa00000000000000000000000000000000 \
-        --specs-out specs/ref-impls/out \
+        --specs-out crates/contracts/out \
         --with-createx \
         --with-safe-deployer \
         --with-create2-factory
@@ -141,8 +141,8 @@ create-zone name token="" access_enforced="false" gateway_enforced="false":
     SEQUENCER_ADDR=$(cast wallet address "$SEQ_KEY")
     OUTPUT="generated/{{name}}"
     mkdir -p "$OUTPUT"
-    echo "Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    echo "Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
@@ -195,8 +195,8 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
         exit 1
     fi
-    echo "Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    echo "Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- deploy-router \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
@@ -805,9 +805,9 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     echo "  Sequencer funded: https://explore.moderato.tempo.xyz/address/$SEQUENCER_ADDR"
     echo ""
 
-    # Step 3: Build Solidity specs
-    echo "Step 3: Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    # Step 3: Build Solidity contracts
+    echo "Step 3: Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     echo ""
 
     # Step 4: Create zone on L1 and generate genesis
@@ -957,11 +957,11 @@ docs-check:
     cd docs && bun run check && bun run check:types
 
 [group('docs')]
-[doc('Run Solidity specs tests')]
+[doc('Run Solidity contract tests')]
 docs-specs-test:
-    cd specs/ref-impls && forge test -vvv
+    cd crates/contracts && forge test -vvv
 
 [group('docs')]
-[doc('Build Solidity specs')]
+[doc('Build Solidity contracts')]
 docs-specs-build:
-    cd specs/ref-impls && forge build --sizes
+    cd crates/contracts && forge build --sizes

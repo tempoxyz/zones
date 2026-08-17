@@ -82,7 +82,7 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long)]
     pub(crate) sequencer: Option<Address>,
 
-    #[arg(long, default_value = "specs/ref-impls/out")]
+    #[arg(long, default_value = "crates/contracts/out")]
     pub(crate) specs_out: PathBuf,
 
     /// Include CreateX factory in genesis.

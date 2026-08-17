@@ -8,8 +8,8 @@ import {
     IZonePortal,
     ZONE_MESSENGER_ADDRESS,
     ZoneInfo
-} from "../../src/interfaces/IZone.sol";
-import { SwapAndDepositRouter } from "../../src/tempo/SwapAndDepositRouter.sol";
+} from "../../src/runtime/interfaces/IZone.sol";
+import { SwapAndDepositRouter } from "../../src/runtime/tempo/SwapAndDepositRouter.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";

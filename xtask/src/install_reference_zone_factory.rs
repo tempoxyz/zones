@@ -42,7 +42,7 @@ pub(crate) struct InstallReferenceZoneFactory {
     owner: Address,
 
     /// Foundry output directory containing the shared Zone runtime artifacts.
-    #[arg(long, default_value = "specs/ref-impls/out")]
+    #[arg(long, default_value = "crates/contracts/out")]
     specs_out: PathBuf,
 }
 
@@ -153,7 +153,7 @@ fn load_runtime(specs_out: &Path, contract: &str) -> eyre::Result<Bytes> {
         .join(format!("{contract}.json"));
     let json = fs::read_to_string(&path).wrap_err_with(|| {
         format!(
-            "failed reading {contract} artifact `{}`; run `forge build --root specs/ref-impls`",
+            "failed reading {contract} artifact `{}`; run `forge build --root crates/contracts`",
             path.display()
         )
     })?;

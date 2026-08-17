@@ -35,12 +35,12 @@ import {
     ZONE_MESSENGER_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS,
     ZONE_VERIFIER_ADDRESS
-} from "../../src/interfaces/IZone.sol";
-import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
-import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
-import { NO_QUEUE_INDEX, WithdrawalQueueLib } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
-import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
+} from "../../src/runtime/interfaces/IZone.sol";
+import { getBlockHash } from "../../src/runtime/libraries/BlockHashHistory.sol";
+import { DepositQueueLib } from "../../src/runtime/libraries/DepositQueueLib.sol";
+import { NO_QUEUE_INDEX, WithdrawalQueueLib } from "../../src/runtime/libraries/WithdrawalQueueLib.sol";
+import { ZoneMessenger } from "../../src/runtime/tempo/ZoneMessenger.sol";
+import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockRevertingReceiver } from "../mocks/MockCallbackReceivers.sol";
 import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
@@ -4222,7 +4222,7 @@ contract ZonePortalTest is BaseTest {
         );
 
         // Exactly what the sequencer's planner budgets for this pair, per its own allowances in
-        // crates/sequencer/src/withdrawals.rs. The bomb must not push the batch past it.
+        // crates/sequenc../src/runtime/withdrawals.rs. The bomb must not push the batch past it.
         uint256 plannedGas = 500_000 + (1_750_000 + uint256(bombGasLimit)) + 1_000_000;
 
         uint256 bobBefore = pathUSD.balanceOf(bob);

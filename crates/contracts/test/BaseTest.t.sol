@@ -14,11 +14,11 @@ import {
     ZONE_TX_CONTEXT,
     ZONE_VERIFIER_ADDRESS,
     ZoneInfo
-} from "../src/interfaces/IZone.sol";
-import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
-import { Verifier } from "../src/tempo/Verifier.sol";
-import { ZoneMessenger } from "../src/tempo/ZoneMessenger.sol";
-import { ZonePortal } from "../src/tempo/ZonePortal.sol";
+} from "../src/runtime/interfaces/IZone.sol";
+import { EIP2935 } from "../src/runtime/libraries/BlockHashHistory.sol";
+import { Verifier } from "../src/runtime/tempo/Verifier.sol";
+import { ZoneMessenger } from "../src/runtime/tempo/ZoneMessenger.sol";
+import { ZonePortal } from "../src/runtime/tempo/ZonePortal.sol";
 import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";

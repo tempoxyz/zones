@@ -6,7 +6,7 @@ import {
     IWithdrawalReceiver,
     IZonePortal,
     Role
-} from "../../src/interfaces/IZone.sol";
+} from "../../src/runtime/interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 enum GatewayFlow {

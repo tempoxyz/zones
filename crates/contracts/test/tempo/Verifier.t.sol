@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { BlockTransition, DepositQueueTransition } from "../../src/interfaces/IZone.sol";
-import { Verifier } from "../../src/tempo/Verifier.sol";
+import { BlockTransition, DepositQueueTransition } from "../../src/runtime/interfaces/IZone.sol";
+import { Verifier } from "../../src/runtime/tempo/Verifier.sol";
 import { Test } from "forge-std/Test.sol";
 
 contract VerifierTest is Test {
