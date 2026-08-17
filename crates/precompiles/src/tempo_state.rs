@@ -88,7 +88,7 @@ impl TempoState {
     ///
     /// IMPORTANT: this operation only enforces local continuity and Zone-time alignment: the
     /// decoded block number must increment by one, its parent hash must match the previously stored
-    /// Tempo hash, and its timestamp must exactly match the executing Zone block.
+    /// Tempo hash, and its timestamp must not exceed the executing Zone block's timestamp.
     ///
     /// Canonicality is a separate proof obligation: the batch proof must bind the imported header
     /// hash and state root to the canonical settlement anchor and authenticate every Tempo storage
@@ -110,9 +110,7 @@ impl TempoState {
             return Err(TempoStateError::invalid_rlp_data().into());
         }
         self.storage.with_block_env(|zone_block| {
-            if zone_block.inner.timestamp != U256::from(header.timestamp())
-                || zone_block.timestamp_millis_part != header.timestamp_millis_part
-            {
+            if zone_block.timestamp_millis() < U256::from(header.timestamp_millis()) {
                 return Err(TempoStateError::invalid_timestamp());
             }
             Ok(())
@@ -361,13 +359,27 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_timestamp_seconds_mismatch() -> eyre::Result<()> {
+    fn finalize_tempo_accepts_zone_timestamp_after_anchor() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
         harness.ctx.block.inner.timestamp += U256::ONE;
+
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_success());
+        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_when_zone_timestamp_precedes_anchor_seconds() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 1);
+        harness.set_block_timestamp(&child);
+        harness.ctx.block.inner.timestamp -= U256::ONE;
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_revert());
@@ -380,13 +392,13 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_timestamp_millis_mismatch() -> eyre::Result<()> {
+    fn finalize_tempo_reverts_when_zone_timestamp_precedes_anchor_millis() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
-        harness.ctx.block.timestamp_millis_part += 1;
+        harness.ctx.block.timestamp_millis_part -= 1;
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_revert());
