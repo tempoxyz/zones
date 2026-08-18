@@ -1,4 +1,4 @@
-//! Verifies the settled token-backing invariant for a ZonePortal.
+//! Verifies the token-backing invariant for a ZonePortal, including queued flows.
 
 use alloy::{
     primitives::{Address, U256},
@@ -13,6 +13,14 @@ use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZonePortal};
 use crate::zone_utils::normalize_http_rpc;
 
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
+
+#[derive(Clone, Copy)]
+struct EventRanges {
+    l1_from: u64,
+    l1_to: u64,
+    zone_from: u64,
+    zone_to: u64,
+}
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct VerifyPortalBacking {
@@ -100,18 +108,9 @@ impl VerifyPortalBacking {
             .wrap_err("failed reading backing state")?;
 
         ensure!(
-            withdrawal_head == withdrawal_tail,
-            "withdrawal queue is not settled: head={withdrawal_head}, tail={withdrawal_tail}"
-        );
-        ensure!(
-            deposit_count == l1_processed_deposits,
-            "L1 deposit queue is not settled: depositCount={deposit_count}, \
-             lastProcessedDepositNumber={l1_processed_deposits}"
-        );
-        ensure!(
-            zone_processed_deposits == l1_processed_deposits,
-            "Zone and L1 deposit counters disagree: ZoneInbox={zone_processed_deposits}, \
-             ZonePortal={l1_processed_deposits}"
+            zone_processed_deposits <= deposit_count,
+            "Zone processed more deposits than the Portal has recorded: ZoneInbox={zone_processed_deposits}, \
+             ZonePortal={deposit_count}"
         );
 
         let portal_refunds = portal_refund_liability(
@@ -124,10 +123,34 @@ impl VerifyPortalBacking {
         .await?;
         let inbox_refunds =
             inbox_refund_liability(&zone, self.token, self.zone_from_block, zone_snapshot).await?;
+        let pending_deposits = pending_deposit_liability(
+            &l1,
+            self.portal,
+            self.token,
+            zone_processed_deposits,
+            self.l1_from_block,
+            l1_snapshot,
+        )
+        .await?;
+        let pending_withdrawals = withdrawal_liability(
+            &l1,
+            &zone,
+            self.portal,
+            self.token,
+            EventRanges {
+                l1_from: self.l1_from_block,
+                l1_to: l1_snapshot,
+                zone_from: self.zone_from_block,
+                zone_to: zone_snapshot,
+            },
+        )
+        .await?;
 
         let required_backing = zone_supply
             .checked_add(portal_refunds)
             .and_then(|total| total.checked_add(inbox_refunds))
+            .and_then(|total| total.checked_add(pending_deposits))
+            .and_then(|total| total.checked_add(pending_withdrawals))
             .ok_or_else(|| eyre::eyre!("required backing overflow"))?;
 
         println!("Portal backing audit");
@@ -145,6 +168,12 @@ impl VerifyPortalBacking {
         println!("  Token:                   {}", self.token);
         println!("  Portal balance:          {portal_balance}");
         println!("  Zone total supply:       {zone_supply}");
+        println!(
+            "  Deposit queue:           portal={deposit_count}, l1-settled={l1_processed_deposits}, zone={zone_processed_deposits}"
+        );
+        println!("  Withdrawal queue:        head={withdrawal_head}, tail={withdrawal_tail}");
+        println!("  Pending deposit liability: {pending_deposits}");
+        println!("  Pending withdrawal liability: {pending_withdrawals}");
         println!("  Portal refund liability: {portal_refunds}");
         println!("  Inbox refund liability:  {inbox_refunds}");
         println!("  Required backing:        {required_backing}");
@@ -161,6 +190,176 @@ impl VerifyPortalBacking {
             Err(eyre::eyre!("Portal is underbacked by {deficit} base units"))
         }
     }
+}
+
+/// Deposits after the Zone snapshot's processed-deposit watermark have reached the Portal but
+/// have not yet been minted on the Zone. `WithdrawalBounceBack` entries are intentionally not
+/// counted here: they remain represented by their original outstanding withdrawal until the
+/// Inbox either re-mints them or turns them into an Inbox refund.
+async fn pending_deposit_liability<P: Provider<TempoNetwork>>(
+    provider: &P,
+    portal_address: Address,
+    token: Address,
+    zone_processed_deposits: u64,
+    from_block: u64,
+    to_block: u64,
+) -> eyre::Result<U256> {
+    let portal = ZonePortal::new(portal_address, provider);
+    let deposits = portal
+        .DepositMade_filter()
+        .from_block(from_block)
+        .to_block(to_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZonePortal DepositMade events")?;
+
+    deposits
+        .into_iter()
+        .filter(|(event, _)| event.token == token && event.depositNumber > zone_processed_deposits)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.netAmount))
+                .ok_or_else(|| eyre::eyre!("pending deposit total overflow"))
+        })
+}
+
+/// Tracks every burned withdrawal until it is paid on L1, re-minted on the Zone, or moved into a
+/// Portal or Inbox refund registry. This covers both finalized Portal queue entries and
+/// withdrawals still waiting in the Zone outbox.
+async fn withdrawal_liability<P: Provider<TempoNetwork>>(
+    l1: &P,
+    zone: &P,
+    portal_address: Address,
+    token: Address,
+    ranges: EventRanges,
+) -> eyre::Result<U256> {
+    let portal = ZonePortal::new(portal_address, l1);
+    let inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, zone);
+    let outbox =
+        tempo_zone_contracts::IZoneOutbox::new(tempo_zone_contracts::ZONE_OUTBOX_ADDRESS, zone);
+
+    let requested_filter = outbox
+        .WithdrawalRequested_filter()
+        .from_block(ranges.zone_from)
+        .to_block(ranges.zone_to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK);
+    let paid_filter = portal
+        .WithdrawalProcessed_filter()
+        .from_block(ranges.l1_from)
+        .to_block(ranges.l1_to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK);
+    let reminted_filter = inbox
+        .WithdrawalBounceBackProcessed_filter()
+        .from_block(ranges.zone_from)
+        .to_block(ranges.zone_to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK);
+    let refunded_filter = inbox
+        .WithdrawalBounceBackPending_filter()
+        .from_block(ranges.zone_from)
+        .to_block(ranges.zone_to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK);
+    let deposit_bounce_back_filter = portal
+        .DepositBounceBack_filter()
+        .from_block(ranges.l1_from)
+        .to_block(ranges.l1_to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK);
+    let portal_refund_filter = portal
+        .DepositBounceBackPending_filter()
+        .from_block(ranges.l1_from)
+        .to_block(ranges.l1_to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK);
+    let (requested, paid, deposit_bounce_backs, portal_refunds, reminted, refunded) =
+        tokio::try_join!(
+            requested_filter.query(),
+            paid_filter.query(),
+            deposit_bounce_back_filter.query(),
+            portal_refund_filter.query(),
+            reminted_filter.query(),
+            refunded_filter.query(),
+        )
+        .wrap_err("failed scanning withdrawal lifecycle events")?;
+
+    let requested = requested
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("requested withdrawal total overflow"))
+        })?;
+    let paid = paid
+        .into_iter()
+        .filter(|(event, _)| event.token == token && event.callbackSuccess)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("paid withdrawal total overflow"))
+        })?;
+    let deposit_bounce_backs = deposit_bounce_backs
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("paid deposit bounce-back total overflow"))
+        })?;
+    let paid = paid
+        .checked_add(deposit_bounce_backs)
+        .ok_or_else(|| eyre::eyre!("paid withdrawal total overflow"))?;
+    let reminted = reminted
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("re-minted withdrawal bounce-back total overflow"))
+        })?;
+    let portal_refunds = portal_refunds
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("Portal refund transition total overflow"))
+        })?;
+    let refunded = refunded
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("refunded withdrawal bounce-back total overflow"))
+        })?
+        .checked_add(portal_refunds)
+        .ok_or_else(|| eyre::eyre!("refunded withdrawal total overflow"))?;
+
+    outstanding_withdrawals(requested, paid, reminted, refunded)
+}
+
+fn outstanding_withdrawals(
+    requested: U256,
+    paid: U256,
+    reminted: U256,
+    refunded: U256,
+) -> eyre::Result<U256> {
+    requested
+        .checked_sub(paid)
+        .and_then(|total| total.checked_sub(reminted))
+        .and_then(|total| total.checked_sub(refunded))
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "withdrawal event history is incomplete: requested={requested}, paid={paid}, \
+                 reminted={reminted}, refunded={refunded}"
+            )
+        })
 }
 
 async fn portal_refund_liability<P: Provider<TempoNetwork>>(
@@ -279,5 +478,27 @@ mod tests {
     #[test]
     fn outstanding_refunds_rejects_incomplete_history() {
         assert!(outstanding_refunds("test", U256::from(10), U256::from(11)).is_err());
+    }
+
+    #[test]
+    fn outstanding_withdrawals_tracks_all_terminal_paths() {
+        assert_eq!(
+            outstanding_withdrawals(
+                U256::from(100),
+                U256::from(25),
+                U256::from(30),
+                U256::from(20),
+            )
+            .unwrap(),
+            U256::from(25)
+        );
+    }
+
+    #[test]
+    fn outstanding_withdrawals_rejects_incomplete_history() {
+        assert!(
+            outstanding_withdrawals(U256::from(10), U256::from(11), U256::ZERO, U256::ZERO,)
+                .is_err()
+        );
     }
 }
