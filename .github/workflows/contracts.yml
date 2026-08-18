@@ -49,14 +49,14 @@ jobs:
           version: nightly
 
       - name: Build Solidity artifacts
-        working-directory: specs/ref-impls
+        working-directory: crates/contracts
         run: forge build --sizes
 
       - name: Check Solidity and Rust ABIs
         run: cargo run -p tempo-xtask -- check-abi
 
       - name: Check Solidity and Rust storage layouts
-        run: cargo test -p zone-precompiles storage_layout_tests
+        run: cargo test -p zone-precompiles --test storage --features test-utils
 
   build:
     name: Forge Build

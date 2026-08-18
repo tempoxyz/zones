@@ -47,8 +47,8 @@ const INTERFACES: &[InterfaceSpec] = &[
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct CheckAbi {
-    /// Foundry output directory produced from `specs/ref-impls`.
-    #[arg(long, default_value = "specs/ref-impls/out")]
+    /// Foundry output directory produced from `crates/contracts`.
+    #[arg(long, default_value = "crates/contracts/out")]
     artifacts: PathBuf,
 }
 
