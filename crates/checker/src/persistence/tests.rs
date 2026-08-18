@@ -1,0 +1,94 @@
+use alloy_primitives::{Address, B256, U256};
+
+use crate::accounting::{AccountKey, Effect};
+
+use super::{BlockRef, Finding, Identity, Status, Store};
+
+fn block(number: u64, byte: u8) -> BlockRef {
+    BlockRef {
+        number,
+        hash: B256::repeat_byte(byte),
+    }
+}
+
+fn identity() -> Identity {
+    Identity {
+        l1_chain_id: 1,
+        zone_chain_id: 2,
+        zone_id: 3,
+        portal: Address::repeat_byte(4),
+        creation: block(5, 5),
+    }
+}
+
+#[test]
+fn rows_survive_restart_and_unwind() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checker");
+    let genesis = block(0, 10);
+    let tempo = block(20, 20);
+    let initial =
+        Store::create_atomic(&path, identity(), genesis, tempo, Default::default()).unwrap();
+    let (store, reopened) = Store::open(&path, identity()).unwrap();
+    assert_eq!(reopened, initial);
+
+    let token = Address::repeat_byte(30);
+    let account = AccountKey::new(token, Address::repeat_byte(31));
+    let one = store
+        .apply(
+            &reopened,
+            block(1, 11),
+            genesis,
+            block(21, 21),
+            tempo,
+            &[Effect::Credit {
+                key: account,
+                amount: U256::from(100),
+            }],
+        )
+        .unwrap();
+    drop(store);
+
+    let (store, loaded) = Store::open(&path, identity()).unwrap();
+    assert_eq!(loaded, one);
+    assert_eq!(loaded.state.account(account), Some(U256::from(100)));
+
+    let genesis = store.reorg(&loaded, genesis).unwrap();
+    assert_eq!(genesis.metadata.verified_zone, block(0, 10));
+    assert_eq!(genesis.state.account(account), None);
+}
+
+#[test]
+fn finding_freezes_verified_tip() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checker");
+    let genesis = block(0, 10);
+    Store::create_atomic(
+        &path,
+        identity(),
+        genesis,
+        block(20, 20),
+        Default::default(),
+    )
+    .unwrap();
+    let (store, snapshot) = Store::open(&path, identity()).unwrap();
+    let failed = block(1, 11);
+    let diverged = store
+        .record_finding(
+            &snapshot,
+            Finding {
+                zone: failed,
+                summary: "balance mismatch".into(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(diverged.metadata.verified_zone, genesis);
+    assert_eq!(
+        diverged.metadata.status,
+        Status::Diverged {
+            first_unchecked: failed,
+            observed_through: failed,
+        }
+    );
+}
