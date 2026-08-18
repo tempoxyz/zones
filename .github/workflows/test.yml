@@ -35,7 +35,7 @@ jobs:
           submodules: recursive
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@183a02178c660ce295e9a262edc5857cb7135f06 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@dd1014bf8244fded7a501e701cafab240a4f9f0e # main
         with:
           scope: tempoxyz/earn
           policy: zones-read
@@ -64,7 +64,7 @@ jobs:
         run: |
           {
             echo "forge-sha=$(forge --version | sed -n 's/^Commit SHA: //p')"
-            echo "specs-tree=$(git rev-parse HEAD:specs/ref-impls)"
+            echo "contracts-tree=$(git rev-parse HEAD:crates/contracts)"
             echo "earn-sha=$(git -C earn rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
@@ -73,19 +73,19 @@ jobs:
         with:
           path: |
             earn/cache
-            specs/ref-impls/cache
-            specs/ref-impls/out
-          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
+            crates/contracts/cache
+            crates/contracts/out
+          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.contracts-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
       - name: Build Solidity artifacts
         run: |
-          forge build --root specs/ref-impls --no-lint
+          forge build --root crates/contracts --no-lint
           forge build \
             --root earn \
             --skip test \
             --skip script \
             --no-lint \
-            --out "$GITHUB_WORKSPACE/specs/ref-impls/out"
+            --out "$GITHUB_WORKSPACE/crates/contracts/out"
 
       - name: Build and archive tests
         run: cargo nextest archive --profile ci --archive-file nextest-archive.tar.zst
@@ -96,7 +96,7 @@ jobs:
           name: nextest-archive
           path: |
             nextest-archive.tar.zst
-            specs/ref-impls/out
+            crates/contracts/out
           if-no-files-found: error
           retention-days: 1
           # The nextest archive is already zstd-compressed; recompressing it is

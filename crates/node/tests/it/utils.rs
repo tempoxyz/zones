@@ -193,15 +193,15 @@ alloy_sol_types::sol! {
     }
 }
 
-/// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
+/// Read a Foundry artifact from `crates/contracts/out` and return its deployment bytecode.
 ///
-/// Requires `forge build` to have been run in `specs/ref-impls`.
+/// Requires `forge build` to have been run in `crates/contracts`.
 pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
+        format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
     let hex_str = artifact["bytecode"]["object"]
@@ -214,10 +214,10 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 
 fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
+        format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
     let hex_str = artifact["deployedBytecode"]["object"]
@@ -2849,7 +2849,7 @@ async fn build_l1_anchored_genesis(
             .await?
     };
     let (mut genesis, genesis_block_number) =
-        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+        zone_node::genesis::l1_anchored_genesis(l1_header, default_fee_token)?;
     if !portal_address.is_zero() {
         patch_clean_portal_snapshot(
             &l1_provider,
@@ -2885,7 +2885,7 @@ async fn build_l1_anchored_genesis_at_block(
             .await?
     };
     let (mut genesis, genesis_block_number) =
-        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+        zone_node::genesis::l1_anchored_genesis(l1_header, default_fee_token)?;
     if !portal_address.is_zero()
         && !l1_provider
             .get_code_at(portal_address)
