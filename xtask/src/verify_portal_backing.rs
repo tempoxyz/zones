@@ -35,6 +35,10 @@ pub(crate) struct VerifyPortalBacking {
     /// First L1 block to scan. Must include the Portal's complete event history.
     #[arg(long, default_value_t = 0)]
     l1_from_block: u64,
+
+    /// First Zone block to scan. Must include the ZoneInbox's complete event history.
+    #[arg(long, default_value_t = 0)]
+    zone_from_block: u64,
 }
 
 impl VerifyPortalBacking {
@@ -57,6 +61,11 @@ impl VerifyPortalBacking {
             self.l1_from_block <= l1_snapshot,
             "L1 scan start {} is after snapshot block {l1_snapshot}",
             self.l1_from_block
+        );
+        ensure!(
+            self.zone_from_block <= zone_snapshot,
+            "Zone scan start {} is after snapshot block {zone_snapshot}",
+            self.zone_from_block
         );
         let l1_block = BlockId::number(l1_snapshot);
         let zone_block = BlockId::number(zone_snapshot);
@@ -113,9 +122,12 @@ impl VerifyPortalBacking {
             l1_snapshot,
         )
         .await?;
+        let inbox_refunds =
+            inbox_refund_liability(&zone, self.token, self.zone_from_block, zone_snapshot).await?;
 
         let required_backing = zone_supply
             .checked_add(portal_refunds)
+            .and_then(|total| total.checked_add(inbox_refunds))
             .ok_or_else(|| eyre::eyre!("required backing overflow"))?;
 
         println!("Portal backing audit");
@@ -125,11 +137,16 @@ impl VerifyPortalBacking {
             "  L1 refund scan:          {}..={l1_snapshot}",
             self.l1_from_block
         );
+        println!(
+            "  Zone refund scan:        {}..={zone_snapshot}",
+            self.zone_from_block
+        );
         println!("  Portal:                  {}", self.portal);
         println!("  Token:                   {}", self.token);
         println!("  Portal balance:          {portal_balance}");
         println!("  Zone total supply:       {zone_supply}");
         println!("  Portal refund liability: {portal_refunds}");
+        println!("  Inbox refund liability:  {inbox_refunds}");
         println!("  Required backing:        {required_backing}");
 
         if portal_balance >= required_backing {
@@ -190,13 +207,59 @@ async fn portal_refund_liability<P: Provider<TempoNetwork>>(
                 .ok_or_else(|| eyre::eyre!("Portal claimed refund total overflow"))
         })?;
 
-    outstanding_refunds(pending_total, claimed_total)
+    outstanding_refunds("Portal", pending_total, claimed_total)
 }
 
-fn outstanding_refunds(pending: U256, claimed: U256) -> eyre::Result<U256> {
+async fn inbox_refund_liability<P: Provider<TempoNetwork>>(
+    provider: &P,
+    token: Address,
+    from_block: u64,
+    to_block: u64,
+) -> eyre::Result<U256> {
+    let inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, provider);
+    let pending = inbox
+        .WithdrawalBounceBackPending_filter()
+        .from_block(from_block)
+        .to_block(to_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZoneInbox WithdrawalBounceBackPending events")?;
+    let claimed = inbox
+        .RefundClaimed_filter()
+        .from_block(from_block)
+        .to_block(to_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZoneInbox RefundClaimed events")?;
+
+    let pending_total = pending
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("Inbox pending refund total overflow"))
+        })?;
+    let claimed_total = claimed
+        .into_iter()
+        .filter(|(event, _)| event.token == token)
+        .try_fold(U256::ZERO, |total, (event, _)| {
+            total
+                .checked_add(U256::from(event.amount))
+                .ok_or_else(|| eyre::eyre!("Inbox claimed refund total overflow"))
+        })?;
+
+    outstanding_refunds("Inbox", pending_total, claimed_total)
+}
+
+fn outstanding_refunds(scope: &str, pending: U256, claimed: U256) -> eyre::Result<U256> {
     pending.checked_sub(claimed).ok_or_else(|| {
         eyre::eyre!(
-            "Portal refund event history is incomplete: claimed {claimed}, pending {pending}"
+            "{scope} refund event history is incomplete: claimed {claimed}, pending {pending}"
         )
     })
 }
@@ -208,13 +271,13 @@ mod tests {
     #[test]
     fn outstanding_refunds_subtracts_claims() {
         assert_eq!(
-            outstanding_refunds(U256::from(100), U256::from(35)).unwrap(),
+            outstanding_refunds("test", U256::from(100), U256::from(35)).unwrap(),
             U256::from(65)
         );
     }
 
     #[test]
     fn outstanding_refunds_rejects_incomplete_history() {
-        assert!(outstanding_refunds(U256::from(10), U256::from(11)).is_err());
+        assert!(outstanding_refunds("test", U256::from(10), U256::from(11)).is_err());
     }
 }
