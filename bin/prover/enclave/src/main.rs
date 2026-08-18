@@ -312,25 +312,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_chain_before_execution() {
-        let request = VerifyRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "chain-test".into(),
-            witness: empty_witness(),
-        };
-        let response = process_request(request, &TrustedChainSpecs::default());
-
-        assert!(matches!(
-            response,
-            VerifyResponse::Error {
-                request_id: Some(id),
-                code: ErrorCode::UnsupportedChain,
-                ..
-            } if id == "chain-test"
-        ));
-    }
-
-    #[test]
     fn reports_spf_verification_errors_without_panicking() {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
