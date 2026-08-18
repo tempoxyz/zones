@@ -271,7 +271,7 @@ The shared portal runtime MUST preserve the native factory's constructor-equival
 | 16 | 29 | `sequencerThreshold` |
 | 17 | 0 | `zoneHeight` |
 | 18 | 0 | `_sequencers` |
-| 19 | 0 | `isSequencer` |
+| 19 | 0 | `_reservedSlot19` |
 | 20 | 0 | `role` |
 | 21 | 0 | `_isAccessEnforced` |
 | 21 | 1 | `_isGatewayEnforced` |
@@ -283,6 +283,7 @@ The shared portal runtime MUST preserve the native factory's constructor-equival
 | 24 | 16 | `_depositsInCurrentBlock` |
 | 24 | 24 | `_tokenEnableCountBlock` |
 | 25 | 0 | `_tokensEnabledInCurrentBlock` |
+| 25 | 8 | `pauseExpiry` |
 | 26 | 0 | `tokenEnablementHash` |
 
 The factory performs this initialization natively in the portal account; the Solidity
@@ -327,9 +328,38 @@ Each zone has four system contracts deployed at genesis at fixed addresses:
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
+The three stateful Zone predeploys use the following Solidity-compatible storage layout. These
+slots are consensus-critical because the prover reads the Inbox and Outbox transition outputs
+directly from Zone state. Integer fields are stored in the low-order bytes at the listed offset.
+
+| Contract | Slot | Offset | Value |
+|----------|-----:|-------:|-------|
+| `TempoState` | 0 | 0 | `tempoBlockHash` (`bytes32`) |
+| `TempoState` | 1 | 0 | `tempoBlockNumber` (`uint64`) |
+| `ZoneInbox` | 0 | 0 | `processedDepositQueueHash` (`bytes32`) |
+| `ZoneInbox` | 1 | 0 | `processedDepositNumber` (`uint64`) |
+| `ZoneInbox` | 2 | 0 | withdrawal bounce-back refunds (`mapping(address => mapping(address => uint128))`) |
+| `ZoneInbox` | 3 | 0 | `processedTokenEnablementHash` (`bytes32`) |
+| `ZoneOutbox` | 0 | 0 | `tempoGasRate` (`uint128`) |
+| `ZoneOutbox` | 0 | 16 | `nextWithdrawalIndex` (`uint64`) |
+| `ZoneOutbox` | 1 | 0 | `withdrawalQueueHash` (`bytes32`) |
+| `ZoneOutbox` | 2 | 0 | `withdrawalBatchIndex` (`uint64`) |
+| `ZoneOutbox` | 3 | 0 | `maxWithdrawalsPerBlock` (`uint32`) |
+| `ZoneOutbox` | 3 | 4 | `withdrawalsThisBlock` (`uint32`) |
+| `ZoneOutbox` | 3 | 8 | `currentBlockNumber` (`uint64`) |
+| `ZoneOutbox` | 3 | 16 | `lastFinalizedTimestamp` (`uint64`) |
+| `ZoneOutbox` | 4 | 0 | pending withdrawals (dynamic array) |
+| `ZoneOutbox` | 5 | 0 | `lastFallbackNonce` (`uint64`) |
+| `ZoneOutbox` | 6 | 0 | fallback recipients (`mapping(uint64 => address)`) |
+
+Each element of the Outbox's slot-4 array is stored in this order: `token`, `sender`, `txHash`,
+`to`, `amount`, `fee`, `memo`, `gasLimit`, `fallbackNonce`, `callbackData`, `revealTo`. The internal
+`fee` is retained in state even though `getPendingWithdrawals` omits it from its returned ABI
+struct. Dynamic-array and mapping locations use the standard Solidity storage derivation.
+
 ### Zone Token Model
 
-Contract creation is disabled on zones (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the admin enables a token on the portal, `ZoneInbox` directly initializes the corresponding TIP-20 state and bridge roles during `advanceTempo` after authenticating the enablement against Tempo state. The TIP-20 factory is disabled on zones.
+Contract creation is disabled on zones (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the admin enables a token on the portal, `ZoneInbox` directly initializes the corresponding TIP-20 state and bridge roles during `advanceTempo` after authenticating the enablement against Tempo state. It calls the TIP-20 initializer with `ZoneInbox` as both `admin` and `policyAdmin`, pathUSD (`0x20C0000000000000000000000000000000000000`) as the quote token, and the committed name, symbol, and currency. It grants the token's `ISSUER_ROLE` to both `ZoneInbox` and `ZoneOutbox`. Because initialization writes a default TIP-403 policy, the Inbox reads the token's Tempo-mirrored policy before initialization and restores that exact value afterward. The TIP-20 factory is disabled on zones.
 
 Token supply on the zone is controlled exclusively by the system contracts:
 
@@ -495,6 +525,11 @@ keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
 
 `DepositType.WithdrawalBounceBack` is reserved for portal-created withdrawal bounce-backs; it is not a user deposit API. Entries are processed in their exact queue order.
 
+The nested `depositData` encoding is canonical: the Inbox ABI-decodes it as the struct selected by
+`depositType`, re-encodes that value, and requires byte-for-byte equality with the supplied bytes.
+An unknown enum value, malformed encoding, non-canonical padding, or trailing bytes makes the
+complete `advanceTempo` system transaction revert.
+
 | Field | Visibility | Reason |
 |-------|------------|--------|
 | `token` | Public | Required for onchain accounting and zone-side minting |
@@ -512,7 +547,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 1. **Chaum-Pedersen proof.** The sequencer provides a zero-knowledge proof that the shared secret was correctly derived: "I know `privSeq` such that `pubSeq = privSeq * G` AND `sharedSecretPoint = privSeq * ephemeralPub`." The [Chaum-Pedersen Verify](#chaum-pedersen-verify) precompile checks this proof. The sequencer's public key is looked up from the onchain key history, not supplied by the sequencer, preventing key substitution.
 
-2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, `ephemeralPubkeyX`, and the public deposit `sender` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint. Binding the sender means replaying a payload from another account derives a different AES key and fails authentication, causing the deposit to bounce back instead of minting to the hidden recipient.
+2. **AES-GCM decryption.** The zone derives an AES-256 key from the 32-byte ECDH shared-secret X coordinate using HKDF-SHA256. The salt is the ASCII byte string `ecies-aes-key`; the info is the exact 104-byte concatenation `[tempoPortal (20) || uint256_be(keyIndex) (32) || ephemeralPubkeyX (32) || sender (20)]`. HKDF-Extract is `HMAC-SHA256(salt, sharedSecret)`, and the single-block Expand is `HMAC-SHA256(PRK, info || 0x01)`. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts with the supplied 12-byte nonce, 16-byte tag, and empty AAD. The plaintext must be exactly 64 bytes, packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]`; the zone reads the address and memo and does not otherwise interpret the padding. Binding the sender means replaying a payload from another account derives a different AES key and fails authentication, causing the deposit to bounce back instead of minting to the hidden recipient.
 
 If any step fails (invalid proof, GCM tag mismatch, or invalid decrypted plaintext length), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `tempoRefundRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `deposit` requires a non-zero `tempoRefundRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
@@ -565,7 +600,7 @@ Because the deposit entry point requires a non-zero `tempoRefundRecipient`, ever
 The portal's internal withdrawal-bounce-back deposits are the only `DepositType.WithdrawalBounceBack` entries. Their canonical payload contains only `token`, the fallback nonce encoded in `to`, and `amount`. They are introduced by `_enqueueWithdrawalBounceBack` after a withdrawal callback fails, and their zone-side mint failure path is the symmetric refund-registry described in [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back), preserving the terminal-bounce invariant.
 
 
-**Zone-side handling.** When an encrypted deposit fails, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. Invalid encryption skips the mint; a mint revert is caught; and a sequencer-rejected encrypted deposit skips both verification and minting. `enqueueDepositBounceBack` records a zero-callback, zero-`fallbackNonce` withdrawal in the outbox's pending list with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `DepositFailed` for verification or mint failure, or `DepositRejected` for a sequencer rejection. The deposit queue hash chain advances normally; no retries are performed on the zone.
+**Zone-side handling.** When an encrypted deposit fails, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. Invalid encryption skips the mint and an ordinary mint or TIP-403 policy failure is caught. Fatal system failures and out-of-gas abort the complete `advanceTempo` call rather than becoming a bounce-back. `enqueueDepositBounceBack` records a zero-callback, zero-`fallbackNonce` withdrawal in the outbox's pending list with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `DepositFailed`, the deposit queue hash chain advances normally, and no retries are performed on the zone.
 
 
 **Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawals` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fallbackNonce == 0`), it computes `bouncebackFee = min(ceil(bouncebackGas * block.basefee / 1e12), amount)` and attempts to pay it to the portal admin. The effective `collectedFee` is `bouncebackFee` only when that transfer succeeds, otherwise it is zero; the portal then attempts to deliver `amount - collectedFee` from its escrow, wrapped in `try/catch`. Before delivery, the portal validates the recipient's TIP-1028 receive policy using the portal as the transfer sender; a blocked policy is treated as failed delivery without invoking TIP-20, so funds cannot be redirected to `ReceivePolicyGuard`.
@@ -664,13 +699,13 @@ flowchart LR
 
 ### Withdrawal Request
 
-A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token, and `amount` must be non-zero. The token must be enabled, and the `zoneFallbackRecipient` must be non-zero but need not be a Tempo allowed account. For a plain withdrawal (`gasLimit == 0`), closed access mode requires `to` to have the `Account` role; open access mode does not. Enforced gateway mode prevents accounts with the `CallbackGateway` role from receiving plain withdrawals and requires callback targets (`gasLimit > 0`) to have that role. Open gateway mode skips both role checks.
+A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo)` on the `ZoneOutbox`, and `amount` must be non-zero. The token must be enabled, and the `zoneFallbackRecipient` must be non-zero but need not be a Tempo allowed account. For a plain withdrawal (`gasLimit == 0`), closed access mode requires `to` to have the `Account` role; open access mode does not. Enforced gateway mode prevents accounts with the `CallbackGateway` role from receiving plain withdrawals and requires callback targets (`gasLimit > 0`) to have that role. Open gateway mode skips both role checks.
 
 Withdrawal requests are bounded before they enter the pending queue. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` or the request reverts with `GasLimitTooHigh`; `data.length` must be less than or equal to `MAX_CALLBACK_DATA_SIZE` (1,024 bytes) or the request reverts with `CallbackDataTooLarge`; and `revealTo`, when non-empty, must be a valid 33-byte compressed secp256k1 public key or the request reverts with `InvalidRevealTo`. The outbox reads the current zone transaction hash from `ZoneTxContext`; if it is zero, the request reverts with `InvalidCurrentTxHash`, because the transaction hash is part of the authenticated-withdrawal sender tag.
 
 The sequencer can additionally configure `maxWithdrawalsPerBlock` on the outbox. A value of `0` means unlimited. When nonzero, only that many `requestWithdrawal` calls can be accepted in a single zone block; further requests in the same block revert with `TooManyWithdrawalsThisBlock` before any token transfer or burn. The outbox tracks the last block number counted and resets the per-block counter when `block.number` changes.
 
-Before transferring or burning tokens, the outbox reads the packed pause expiry from the portal at the latest finalized Tempo checkpoint. An active pause reverts the request with `PortalIsPaused`. Otherwise the outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
+Before transferring or burning tokens, the outbox reads the packed pause expiry from the portal at the latest finalized Tempo checkpoint. An active pause reverts the request with `PortalIsPaused`. The withdrawal principal is charged to `msg.sender`, while the fee follows Tempo transaction fee-payer semantics. If the transaction sender is also the fee payer, that account must approve `amount + fee` and the outbox performs one transfer and burn. If they differ, the sender must approve `amount`, the fee payer must approve `fee`, and the outbox separately transfers and burns those amounts from the two accounts; a zero fee requires no fee-payer transfer. The sender, not the fee payer, is committed into `senderTag`. The outbox then assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
 
 Keeping the recipient in zone state prevents the L1-visible withdrawal and any later bounce-back from revealing the user's private zone address. A monotonic nonce is deterministic under the zone's canonical transaction ordering, including multi-sequencer execution, while remaining collision-free; it reveals only relative withdrawal order and count, not the mapped recipient.
 
@@ -735,7 +770,7 @@ Callback data is opaque to the zone protocol. In enforced gateway mode, accounts
 
 An over-limit callback withdrawal also bounces back and advances the queue.
 
-For closed access mode, a successful callback must synchronously append a deposit to the source zone, subject to the limitation above. Open access mode deliberately permits arbitrary open-loop routing, including callbacks that deposit into another zone or do not deposit into any zone. The reference implementation contains only test routing implementations; production gateway/vault token-conversion behavior is outside this repository.
+For closed access mode, a successful callback must synchronously append a deposit to the source zone, subject to the limitation above. Open access mode deliberately permits arbitrary open-loop routing, including callbacks that deposit into another zone or do not deposit into any zone. Production gateway and vault token-conversion behavior is outside this protocol.
 
 ### Withdrawal Failures and Bounce-Back
 
@@ -783,7 +818,20 @@ Unlike user-created encrypted deposits, authenticated-withdrawal sender reveals 
 withdrawalHmacKey = HMAC-SHA256(uint256_be(sequencerEncryptionPrivKey), "tempo-zone-authenticated-withdrawal-derivation-key-v1")
 ```
 
-Here, `uint256_be` is the 32-byte big-endian encoding of the private scalar. Using `withdrawalHmacKey`, the sequencer derives the ECIES ephemeral scalar deterministically from the zone id, `revealTo`, `sender`, `txHash`, and the 8-byte big-endian `fallbackNonce`, retrying with a counter if the derived value is not a valid secp256k1 scalar. It derives the AES-GCM nonce from the same context plus the resulting ephemeral public key. The same withdrawal is therefore byte-for-byte reproducible, while distinct withdrawals from one private transaction use different encryption material.
+Here, `uint256_be` is the 32-byte big-endian encoding of the private scalar. Define the common context as:
+
+```
+context(domain) =
+    domain ||
+    uint32_be(zoneId) ||
+    uint32_be(revealTo.length) || revealTo ||
+    sender || txHash || uint64_be(fallbackNonce)
+```
+
+The sequencer derives the ECIES ephemeral scalar by iterating `counter` from zero and computing
+`candidate = HMAC-SHA256(withdrawalHmacKey, context("tempo-zone-authenticated-withdrawal-ephemeral-v2") || uint32_be(counter))`; the first candidate that is a valid nonzero secp256k1 private scalar is used. Let `ephemeralPubKey` be its 33-byte compressed SEC1 public key. The AES-GCM nonce is the first 12 bytes of `HMAC-SHA256(withdrawalHmacKey, context("tempo-zone-authenticated-withdrawal-nonce-v2") || ephemeralPubKey)`.
+
+ECDH between the ephemeral scalar and `revealTo` yields a 32-byte shared-secret X coordinate. The AES-256 key is HKDF-SHA256 with that coordinate as IKM, ASCII `authenticated-withdrawal-aes-key` as salt, and `authenticated-withdrawal || ephemeralPubKey` as info. The plaintext is exactly `sender (20) || txHash (32)` and AES-GCM uses empty AAD. The output is `ephemeralPubKey (33) || nonce (12) || ciphertext (52) || tag (16)`. The same withdrawal is therefore byte-for-byte reproducible, while distinct withdrawals from one private transaction use different encryption material.
 
 Two disclosure modes are available:
 
@@ -852,9 +900,9 @@ The zone reads all of its configuration from Tempo: the sequencer address, the t
 
 `TempoState` is deployed at `0x1c00000000000000000000000000000000000000`. It stores the finalized Tempo checkpoint that anchors the zone's Tempo L1 state view.
 
-The durable onchain checkpoint is `tempoBlockHash` and `tempoBlockNumber`. Before the first Tempo import both are zero. Once initialized, `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, committing to the complete header contents without persisting every decoded header field.
+The durable onchain checkpoint is `tempoBlockHash` and `tempoBlockNumber`. Canonical genesis initializes both from the finalized pre-portal Tempo header: the number is the decoded header number and the hash is `keccak256(RLP(TempoHeader))`. They are therefore nonzero before the first post-genesis Tempo import. A zero checkpoint is only an unanchored local-development state and is not valid for a deployed portal.
 
-Tempo headers are RLP-encoded as `rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])`, where `inner` is a standard Ethereum header.
+Tempo headers are canonically RLP-encoded with no trailing bytes as `rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner, consensus_context?])`. The inner header fields are, in order, `parentHash`, `ommersHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `logsBloom`, `difficulty`, `number`, `gasLimit`, `gasUsed`, `timestamp`, `extraData`, `mixHash`, `nonce`, followed by the fork-active optional fields `baseFeePerGas`, `withdrawalsRoot`, `blobGasUsed`, `excessBlobGas`, `parentBeaconBlockRoot`, `requestsHash`, `blockAccessListHash`, and `slotNumber`. The optional trailing consensus context is omitted for pre-activation blocks. When present, `consensus_context` is `rlp([epoch, view, parent_view, proposer])`, with the first three fields encoded as `uint64` values and `proposer` as a valid 32-byte Ed25519 public key. Optional fields may have no gaps: a later optional field cannot appear when an earlier one is absent.
 
 ### Tempo Follower Mode
 
@@ -872,7 +920,7 @@ Every non-genesis zone block must call `advanceTempo` exactly once as its first 
 
 ### L1 Storage Reads
 
-`ZoneInbox`, `ZoneOutbox`, and TIP-403 execution read Tempo account storage from the block selected by the finalized checkpoint. Each read identifies a Tempo account and storage slot, and the zone node resolves the value through its finalized Tempo L1 provider.
+`ZoneInbox`, `ZoneOutbox`, and TIP-403 execution read Tempo account storage from the block selected by the finalized checkpoint. Each native read identifies a Tempo account and storage slot, and the zone node resolves the value through its finalized Tempo L1 provider. This is a host operation used internally by the native precompiles, not a public `TempoState` ABI method.
 
 The prover validates each read against the Tempo state root from the corresponding finalized header witness and includes Merkle proofs for every account and storage slot accessed by system precompiles during the batch.
 
@@ -1241,7 +1289,7 @@ pub struct ZoneBlock {
 
     /// Sequencer-only: finalize a batch (only in final block, must be last)
     /// Required for the final block in a batch; must be absent in intermediate blocks.
-    /// Uses U256 to match Solidity `finalizeWithdrawalBatch(uint256 count)`.
+    /// Uses U256 to match the `finalizeWithdrawalBatch(uint256 count)` ABI.
     pub finalize_withdrawal_batch_count: Option<U256>,
 
     /// Exact calldata array passed to
@@ -1255,7 +1303,7 @@ pub struct ZoneBlock {
     pub transactions: Vec<Transaction>,
 }
 
-/// Mirrors the Solidity `QueuedDeposit` struct from IZone.sol
+/// Mirrors the canonical `IZoneInbox.QueuedDeposit` ABI struct.
 pub struct QueuedDeposit {
     pub deposit_type: DepositType,
     pub deposit_data: Vec<u8>, // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
@@ -1266,7 +1314,7 @@ pub enum DepositType {
     Deposit,
 }
 
-/// Mirrors the Solidity `EnabledToken` struct from IZone.sol
+/// Mirrors the canonical `IZoneInbox.EnabledToken` ABI struct.
 pub struct EnabledToken {
     pub token: Address,
     pub name: String,
@@ -1274,7 +1322,7 @@ pub struct EnabledToken {
     pub currency: String,
 }
 
-/// Mirrors the Solidity `DecryptionData` struct from IZone.sol
+/// Mirrors the canonical `IZoneInbox.DecryptionData` ABI struct.
 /// Provided by the sequencer for each encrypted deposit
 pub struct DecryptionData {
     pub shared_secret: B256,        // ECDH shared secret (x-coordinate)
@@ -1349,7 +1397,7 @@ The stateless execution function must reject the witness on any failed check, mi
    In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `(public_inputs.parent_chain_id, public_inputs.zone_id)`, including `chain_id = zone_chain_id(parent_chain_id, zone_id)` under the rules in [Chain ID](#chain-id); its parent hash is zero and it contains no user or system transactions. Apply the ordinary block rules to every remaining bootstrap block and to every block in an ordinary batch: require `block.parent_hash == prev_block_hash`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlp` to be present. Require `finalize_withdrawal_batch_count` to be absent in the genesis block and all intermediate blocks, and present in the final block of a batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
 
 5. **Execute `advanceTempo` if the block imports a Tempo header.**
-   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This requires the imported Tempo header's timestamp and millisecond component to exactly match the zone block, validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
+   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This requires the imported Tempo header's timestamp and millisecond component to exactly match the zone block, validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent native Tempo-storage reads in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
 
 6. **Authenticate token enablements inside `advanceTempo`.**
    Using the now-bound Tempo root for this block, verify the portal's `tokenEnablementHash`. Execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order. Starting from the pre-state `ZoneInbox.processedTokenEnablementHash`, apply the [token enablement commitment](#token-enablement-commitment) transition to each entry and require the result to equal the portal's `tokenEnablementHash` proven against the imported Tempo root. Reject omitted, extra, reordered, or modified entries. After equality is established, initialize each enabled token and its bridge roles, then update `processedTokenEnablementHash`. Token activation must complete before processing any deposit in the call.
@@ -1382,7 +1430,7 @@ System contracts read Tempo state during execution (deposit queue hash, token-en
 - The RLP-encoded header for the initially bound Tempo checkpoint. Its hash and block number must match the `TempoState` values in the initial zone state.
 - A deduplicated `node_pool` of raw RLP-encoded MPT nodes. The prover computes `keccak256(rlp(node))` for each entry and builds a hash-to-node index.
 
-Reads are derived, verified, and decoded on demand during execution: the `TempoState.readTempoStorageSlot` invocation supplies the account and storage slot, and the active Tempo header supplies the bound root. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is rooted once at `parent_header.state_root` for the initial state, while `TempoStateWitness` reads are verified against the Tempo root bound by the active Tempo checkpoint at the moment of each read.
+Reads are derived, verified, and decoded on demand during execution: the native precompile operation supplies the account and storage slot, and the active Tempo header supplies the bound root. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is rooted once at `parent_header.state_root` for the initial state, while `TempoStateWitness` reads are verified against the Tempo root bound by the active Tempo checkpoint at the moment of each read.
 
 Anchor validation ensures the zone's view of Tempo is correct. If `anchor_block_number` equals `tempo_block_number`, the zone's `tempoBlockHash` must match `anchor_block_hash` directly. If `anchor_block_number` is greater (for zones that have been offline longer than the EIP-2935 window), the proof verifies the parent-hash chain from `tempo_block_number` to `anchor_block_number` using the ancestry headers in the witness.
 
@@ -1479,6 +1527,8 @@ For the first proof, requirement 1 specifically means a transition from `prevBlo
 
 Zones have three categories of precompiles: TIP-20 token precompiles (one per enabled token) and two cryptographic precompiles for encrypted deposit verification.
 
+All native Zone precompiles, including `TempoState`, `ZoneInbox`, and `ZoneOutbox`, accept only direct calls. `DELEGATECALL` and `CALLCODE` revert with `DelegateCallNotAllowed`. Every call first charges `6 * ceil(calldata.length / 32)` gas for input decoding, before its method-specific execution and storage charges. State-changing methods reject static execution; view methods remain callable through `STATICCALL`.
+
 ### TIP-20 Token Precompile
 
 Each enabled TIP-20 token is deployed as a precompile at the same address as on Tempo. The precompile implements the standard TIP-20 interface with privacy modifications:
@@ -1492,7 +1542,7 @@ Each enabled TIP-20 token is deployed as a precompile at the same address as on 
 | | |
 |---|---|
 | **Address** | `0x1c00000000000000000000000000000000000100` |
-| **Gas** | ~8,000 |
+| **Gas** | 6,000 verification gas, plus common calldata input cost |
 
 ```solidity
 interface IChaumPedersenVerify {
@@ -1524,7 +1574,7 @@ Here, `uint256_be` and `uint32_be` are fixed-width big-endian encodings, `sec1_c
 | | |
 |---|---|
 | **Address** | `0x1c00000000000000000000000000000000000101` |
-| **Gas** | ~1,000 base + ~500 per 32 bytes of ciphertext |
+| **Gas** | `1,000 + 3 * (ciphertext.length + aad.length)`, plus common calldata input cost |
 
 ```solidity
 interface IAesGcmDecrypt {
@@ -1540,13 +1590,13 @@ interface IAesGcmDecrypt {
 
 Performs AES-256-GCM decryption and authentication tag verification. Returns the decrypted plaintext and `true` if the tag validates, or empty bytes and `false` otherwise. Used during [onchain decryption verification](#onchain-decryption-verification) of encrypted deposits.
 
-HKDF-SHA256 key derivation (used to derive the AES key from the ECDH shared secret) is implemented in Solidity using the SHA256 precompile at `0x02`, keeping this precompile minimal.
+HKDF-SHA256 key derivation is performed by `ZoneInbox`; it is not part of the AES-GCM precompile ABI.
 
 <br>
 
 ## Contracts and Interfaces
 
-This section lists the key types and contract interfaces referenced throughout the spec. Only the essential functions are shown. Implementations may include additional view functions and events.
+This section lists the key types and contract interfaces referenced throughout the spec. The three stateful Zone predeploy interfaces below are normative and complete; Tempo-side contracts may include additional non-protocol convenience views.
 
 ### Common Types
 
@@ -1567,6 +1617,19 @@ struct Withdrawal {
     uint64 fallbackNonce;
     bytes callbackData;         // max 1KB
     bytes encryptedSender;      // ECDH-encrypted (sender, txHash), or empty
+}
+
+struct PendingWithdrawal {
+    address token;
+    address sender;
+    bytes32 txHash;
+    address to;
+    uint128 amount;
+    bytes32 memo;
+    uint64 gasLimit;
+    uint64 fallbackNonce;
+    bytes callbackData;
+    bytes revealTo;
 }
 
 struct Deposit {
@@ -1957,7 +2020,11 @@ Address: `0x1c00000000000000000000000000000000000000`
 interface ITempoState {
     event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
+    error InvalidParentHash();
+    error InvalidBlockNumber();
     error InvalidTimestamp();
+    error InvalidRlpData();
+    error OnlyZoneInbox();
 
     function tempoBlockHash() external view returns (bytes32);
     function tempoBlockNumber() external view returns (uint64);
@@ -1992,6 +2059,12 @@ interface IZoneInbox {
     event DepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
+    /// @notice Reserved in the ABI for compatibility. The current state transition has no
+    ///         sequencer-rejection input and never emits this event.
+    event DepositRejected(
+        bytes32 indexed depositHash, address indexed sender, DepositType depositType,
+        address token, uint128 amount, address tempoRefundRecipient
+    );
     /// @notice Emitted when a withdrawal-bounce-back deposit (synthesized by the portal
     ///         with `tempoRefundRecipient == address(0)`) was minted successfully to the
     ///         original `zoneFallbackRecipient` on the zone.
@@ -2009,11 +2082,19 @@ interface IZoneInbox {
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
+    error OnlySequencer();
+    error InvalidDepositQueueHash();
     error InvalidTokenEnablementHash();
+    error MissingDecryptionData();
+    error ExtraDecryptionData();
+    error InvalidSharedSecretProof();
+    error Unauthorized();
 
     function processedDepositQueueHash() external view returns (bytes32);
     function processedDepositNumber() external view returns (uint64);
     function processedTokenEnablementHash() external view returns (bytes32);
+    function tempoPortal() external view returns (address);
+    function tempoState() external view returns (address);
     function advanceTempo(
         bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
@@ -2041,6 +2122,8 @@ interface IZoneOutbox {
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
     function WITHDRAWAL_BASE_GAS() external view returns (uint64);
+    function REVEAL_TO_KEY_LENGTH() external view returns (uint256);
+    function AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH() external view returns (uint256);
 
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex, address indexed sender, address token, address to,
@@ -2048,16 +2131,16 @@ interface IZoneOutbox {
         uint64 fallbackNonce, bytes data, bytes revealTo
     );
     event TempoGasRateUpdated(uint128 tempoGasRate);
-    event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
+    event MaxWithdrawalsPerBlockUpdated(uint32 maxWithdrawalsPerBlock);
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
     error InvalidFallbackRecipient();
     error CallbackDataTooLarge();
     error GasFeeRateTooHigh();
-    error TokenNotEnabled();
     error TransferFailed();
     error OnlySequencer();
     error InvalidBlockNumber();
+    error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
@@ -2065,12 +2148,16 @@ interface IZoneOutbox {
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
     error GasLimitTooHigh();
     error OnlyZoneInbox();
+    error ZeroAmountWithdrawal();
+    error StaticCallNotAllowed();
 
     function tempoGasRate() external view returns (uint128);
     function nextWithdrawalIndex() external view returns (uint64);
     function lastFallbackNonce() external view returns (uint64);
     function lastBatch() external view returns (LastBatch memory);
+    function lastFinalizedTimestamp() external view returns (uint64);
     function pendingWithdrawalsCount() external view returns (uint256);
+    function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory);
     function maxWithdrawalsPerBlock() external view returns (uint32);
 
     function setTempoGasRate(uint128 _tempoGasRate) external;
@@ -2079,11 +2166,6 @@ interface IZoneOutbox {
     ///         zone-side `tempoGasRate` and snapshots it onto the queued withdrawal
     ///         at request time.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
-
-    function requestWithdrawal(
-        address token, address to, uint128 amount, bytes32 memo,
-        uint64 gasLimit, address zoneFallbackRecipient, bytes calldata data
-    ) external;
 
     function requestWithdrawal(
         address token, address to, uint128 amount, bytes32 memo,
