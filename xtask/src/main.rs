@@ -1,6 +1,8 @@
 //! xtask is a Swiss army knife of tools that help with running and testing tempo.
+#[cfg(feature = "abi-check")]
+use crate::check_abi::CheckAbi;
 use crate::{
-    admin::Admin, benchmark_results::BenchmarkResults, check_abi::CheckAbi,
+    admin::Admin, benchmark_results::BenchmarkResults,
     configure_benchmark_fees::ConfigureBenchmarkFees, create_zone::CreateZone,
     demo_blacklist::DemoBlacklist, demo_swap_and_deposit::DemoSwapAndDeposit,
     deploy_neobank_fixtures::DeployNeobankFixtures, deploy_router::DeployRouter, deposit::Deposit,
@@ -14,6 +16,7 @@ use eyre::Context;
 
 mod admin;
 mod benchmark_results;
+#[cfg(feature = "abi-check")]
 mod check_abi;
 mod configure_benchmark_fees;
 mod create_zone;
@@ -42,6 +45,7 @@ async fn main() -> eyre::Result<()> {
     match args.action {
         Action::Admin(args) => args.run().await.wrap_err("admin command failed"),
         Action::BenchmarkResults(args) => args.run().wrap_err("failed to render benchmark results"),
+        #[cfg(feature = "abi-check")]
         Action::CheckAbi(args) => args.run().wrap_err("failed ABI alignment check"),
         Action::ConfigureBenchmarkFees(args) => args
             .run()
@@ -90,6 +94,7 @@ struct Args {
 enum Action {
     Admin(Admin),
     BenchmarkResults(BenchmarkResults),
+    #[cfg(feature = "abi-check")]
     CheckAbi(CheckAbi),
     ConfigureBenchmarkFees(ConfigureBenchmarkFees),
     CreateZone(CreateZone),
