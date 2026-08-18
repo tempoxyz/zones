@@ -50,10 +50,8 @@ fn zone_portal_slot_constants_match_solidity() {
 #[test]
 fn tempo_state_layout_matches_solidity() {
     use zone_precompiles::tempo_state::slots;
-    assert_native_layout(
-        "tempo_state.sol",
-        &layout_fields!(tempo_block_hash, tempo_block_number),
-    );
+    let fields = layout_fields!(tempo_block_hash, tempo_block_number);
+    assert_native_layout("tempo_state.sol", &fields);
 }
 
 #[test]
