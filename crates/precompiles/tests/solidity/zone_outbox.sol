@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+// Must remain identical to PendingWithdrawal in the deleted ZoneOutbox reference contract's
+// IZone.sol dependency (removed in zones#1198).
 struct PendingWithdrawal {
     address token;
+    address sender;
+    bytes32 txHash;
     address to;
     uint128 amount;
     bytes32 memo;
     uint64 gasLimit;
-    address fallbackRecipient;
+    uint64 fallbackNonce;
     bytes callbackData;
-    bytes32 txHash;
-    address feePayer;
+    bytes revealTo;
 }
 
 /// Storage-only schema for the native ZoneOutbox precompile.
