@@ -169,16 +169,17 @@ pub(crate) fn create_precompile(
     })
 }
 
-fn add_input_cost(mut s: StorageCtx, data: &[u8], mut res: PrecompileResult) -> PrecompileResult {
+fn add_input_cost(mut s: StorageCtx, data: &[u8], res: PrecompileResult) -> PrecompileResult {
+    // Fatal errors must be propagated to abort execution.
+    let mut output = res?;
+
     let gas_before = s.gas_used();
     if let Some(err) = charge_input_cost(&mut s, data) {
         return err;
     }
-    if let Ok(output) = &mut res {
-        let input_gas = s.gas_used().saturating_sub(gas_before);
-        output.gas_used = output.gas_used.saturating_add(input_gas);
-    }
-    res
+    let input_gas = s.gas_used().saturating_sub(gas_before);
+    output.gas_used = output.gas_used.saturating_add(input_gas);
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -415,5 +416,38 @@ mod tests {
         assert!(!executed.get());
         assert_eq!(rejected.gas_used, FIXED_GAS);
         assert_eq!(rejected.bytes, Bytes::from_static(b"denied"));
+    }
+
+    struct FatalRules;
+
+    impl CallRules for FatalRules {
+        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+            StorageCtx::default().deduct_gas(10).unwrap();
+            CallCheck::Error(TempoPrecompileError::Fatal("boom".into()))
+        }
+    }
+
+    #[test]
+    fn input_cost_does_not_replace_fatal_admission_error() {
+        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let precompile = create_precompile("FatalAdmissionTest", &env, FatalRules, |_, _| {
+            panic!("fatal admission must not execute the precompile")
+        });
+        let mut ctx = test_context();
+        let calldata = [1, 2, 3, 4];
+
+        let error = precompile
+            .call(input(&mut ctx, &calldata, Address::ZERO, 10))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            revm::precompile::PrecompileError::Fatal(message) if message == "boom"
+        ));
     }
 }
