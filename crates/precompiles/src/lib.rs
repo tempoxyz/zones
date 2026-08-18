@@ -121,9 +121,7 @@ use zone_hardfork::ZoneHardfork;
 /// Sharing those values is important: the database overlay and the L1-backed precompiles must use
 /// the same Tempo anchor and the same storage-credit accounting state during a transaction.
 ///
-/// Existing Tempo precompiles that are not supported by Zones are explicitly removed here. TIP-20
-/// instances are resolved lazily because their addresses are derived from the token address rather
-/// than known when the EVM is created.
+/// Existing Tempo precompiles that are not supported by Zones are explicitly removed here.
 pub fn extend_zone_precompiles<P>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
@@ -172,30 +170,31 @@ pub fn extend_zone_precompiles<P>(
 
     precompiles.set_precompile_lookup(move |address: &Address| {
         if is_tip20_prefix(*address) {
-            return Some(create_tip20_precompile(*address, &env));
-        }
-
-        match *address {
-            STABLECOIN_DEX_ADDRESS => None,
-            NONCE_PRECOMPILE_ADDRESS => {
-                Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
-            }
-            ACCOUNT_KEYCHAIN_ADDRESS => Some(zone_precompile!(
+            Some(create_tip20_precompile(*address, &env))
+        } else if *address == STABLECOIN_DEX_ADDRESS {
+            None
+        } else if *address == NONCE_PRECOMPILE_ADDRESS {
+            Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
+        } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+            Some(zone_precompile!(
                 env,
                 AccountKeychain,
                 account_keychain::AccountKeychainRules
-            )),
-            RECEIVE_POLICY_GUARD_ADDRESS => Some(zone_precompile!(
+            ))
+        } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
+            Some(zone_precompile!(
                 env,
                 ReceivePolicyGuard,
                 receive_policy_guard::ReceivePolicyGuardRules
-            )),
-            STORAGE_CREDITS_ADDRESS => Some(zone_precompile!(
+            ))
+        } else if *address == STORAGE_CREDITS_ADDRESS {
+            Some(zone_precompile!(
                 env,
                 StorageCredits,
                 storage_credits::StorageCreditsRules
-            )),
-            _ => None,
+            ))
+        } else {
+            None
         }
     });
 }
