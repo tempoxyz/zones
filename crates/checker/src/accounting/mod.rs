@@ -1,11 +1,13 @@
 //! Durable bridge accounting derived from authenticated protocol effects.
 
+pub(crate) mod effects;
+
 use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 
-pub(crate) mod effects;
+use crate::l2::TokenAccountingEvidence;
 
 /// One user's independently derived entitlement to one Zone token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -27,8 +29,11 @@ pub(crate) struct TokenState {
     pub(crate) enabled: bool,
     /// Sum of all nonzero account entitlements.
     pub(crate) account_total: U256,
+    /// Liability from deposits authenticated on Tempo but not yet reflected on the Zone.
     pub(crate) pending_deposits: U256,
+    /// Liability from withdrawals accepted on the Zone but not yet settled on Tempo.
     pub(crate) pending_withdrawals: U256,
+    /// Liability from refunds parked on Tempo but not yet claimed.
     pub(crate) pending_refunds: U256,
 }
 
@@ -71,16 +76,19 @@ pub(crate) enum Effect {
         to: Address,
         amount: U256,
     },
+    /// `increase` grows `pending_deposits` when true, otherwise settles it.
     PendingDeposit {
         token: Address,
         amount: U256,
         increase: bool,
     },
+    /// `increase` grows `pending_withdrawals` when true, otherwise settles it.
     PendingWithdrawal {
         token: Address,
         amount: U256,
         increase: bool,
     },
+    /// `increase` grows `pending_refunds` when true, otherwise settles it.
     PendingRefund {
         token: Address,
         amount: U256,
@@ -119,6 +127,7 @@ impl State {
         self.tokens.get(&token).copied()
     }
 
+    /// Build state from raw rows, dropping zero entries and asserting aggregate consistency.
     pub(crate) fn from_rows(
         accounts: impl IntoIterator<Item = (AccountKey, U256)>,
         tokens: impl IntoIterator<Item = (Address, TokenState)>,
@@ -138,17 +147,30 @@ impl State {
     }
 
     /// Apply ordered effects atomically and return their undo delta.
+    ///
+    /// Mutates in place and tracks each touched entry's prior value; on any
+    /// failure that same tracked delta is used to roll the mutation back
+    /// before returning the error, so no upfront full-state clone is needed
+    /// to guarantee `self` is unchanged when this returns `Err`.
     pub(crate) fn apply(&mut self, effects: &[Effect]) -> Result<BlockDelta, AccountingError> {
-        let mut next = self.clone();
         let mut accounts = BTreeMap::new();
         let mut tokens = BTreeMap::new();
 
-        for effect in effects {
-            next.apply_effect(*effect, &mut accounts, &mut tokens)?;
-        }
-        next.validate_aggregates()?;
+        let result = effects
+            .iter()
+            .try_for_each(|effect| self.apply_effect(*effect, &mut accounts, &mut tokens))
+            .and_then(|()| self.validate_aggregates());
 
-        *self = next;
+        if let Err(error) = result {
+            for (&key, &previous) in &accounts {
+                write_optional(&mut self.accounts, key, previous);
+            }
+            for (&token, &previous) in &tokens {
+                write_optional(&mut self.tokens, token, previous);
+            }
+            return Err(error);
+        }
+
         Ok(BlockDelta {
             accounts: accounts.into_iter().collect(),
             tokens: tokens.into_iter().collect(),
@@ -169,30 +191,30 @@ impl State {
     /// Verify exact post-state balances and supplies for the supplied observations.
     pub(crate) fn verify_zone_state(
         &self,
-        balances: impl IntoIterator<Item = (AccountKey, U256)>,
-        supplies: impl IntoIterator<Item = (Address, U256)>,
+        observed: &[TokenAccountingEvidence],
     ) -> Result<(), AccountingError> {
-        for (key, actual) in balances {
-            let expected = self.accounts.get(&key).copied().unwrap_or_default();
-            if actual != expected {
-                return Err(AccountingError::BalanceMismatch {
-                    key,
-                    expected,
-                    actual,
-                });
+        for evidence in observed {
+            for (&account, &actual) in &evidence.balances {
+                let key = AccountKey::new(evidence.token, account);
+                let expected = self.accounts.get(&key).copied().unwrap_or_default();
+                if actual != expected {
+                    return Err(AccountingError::BalanceMismatch {
+                        key,
+                        expected,
+                        actual,
+                    });
+                }
             }
-        }
-        for (token, actual) in supplies {
             let expected = self
                 .tokens
-                .get(&token)
+                .get(&evidence.token)
                 .map(|state| state.account_total)
                 .unwrap_or_default();
-            if actual != expected {
+            if evidence.total_supply != expected {
                 return Err(AccountingError::SupplyMismatch {
-                    token,
+                    token: evidence.token,
                     expected,
-                    actual,
+                    actual: evidence.total_supply,
                 });
             }
         }

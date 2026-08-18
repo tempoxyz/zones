@@ -1,9 +1,22 @@
 use alloy_primitives::{Address, U256};
 
 use super::{AccountKey, AccountingError, Effect, State};
+use crate::l2::TokenAccountingEvidence;
 
 fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
+}
+
+fn evidence(
+    token: Address,
+    total_supply: U256,
+    balances: &[(Address, U256)],
+) -> TokenAccountingEvidence {
+    TokenAccountingEvidence {
+        token,
+        total_supply,
+        balances: balances.iter().copied().collect(),
+    }
 }
 
 #[test]
@@ -29,10 +42,14 @@ fn applies_transfers_and_unwinds_exactly() {
         }])
         .unwrap();
     state
-        .verify_zone_state(
-            [(alice, U256::from(60)), (bob, U256::from(40))],
-            [(token, U256::from(100))],
-        )
+        .verify_zone_state(&[evidence(
+            token,
+            U256::from(100),
+            &[
+                (alice.account, U256::from(60)),
+                (bob.account, U256::from(40)),
+            ],
+        )])
         .unwrap();
 
     state.unwind(delta).unwrap();
@@ -105,11 +122,19 @@ fn detects_balance_and_supply_mismatches() {
         .unwrap();
 
     assert!(matches!(
-        state.verify_zone_state([(key, U256::from(9))], [(token, U256::from(10))]),
+        state.verify_zone_state(&[evidence(
+            token,
+            U256::from(10),
+            &[(key.account, U256::from(9))]
+        )]),
         Err(AccountingError::BalanceMismatch { .. })
     ));
     assert!(matches!(
-        state.verify_zone_state([(key, U256::from(10))], [(token, U256::from(11))]),
+        state.verify_zone_state(&[evidence(
+            token,
+            U256::from(11),
+            &[(key.account, U256::from(10))]
+        )]),
         Err(AccountingError::SupplyMismatch { .. })
     ));
 }

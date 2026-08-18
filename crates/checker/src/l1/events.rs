@@ -21,14 +21,8 @@ pub(crate) enum L1PortalEvent {
         deposit_number: u64,
         deposit_queue_hash: B256,
     },
-    /// A TIP-20 token newly enabled for bridging, with metadata.
-    TokenEnabled {
-        token: Address,
-        name: String,
-        symbol: String,
-        currency: String,
-    },
-    /// A finalized withdrawal batch submitted to L1.
+    /// A TIP-20 token newly enabled for bridging.
+    TokenEnabled { token: Address },
     BatchSubmitted {
         withdrawal_batch_index: u64,
         withdrawal_queue_index: U256,
@@ -36,7 +30,6 @@ pub(crate) enum L1PortalEvent {
         next_block_hash: B256,
         last_processed_deposit_number: u64,
     },
-    /// A withdrawal paid out on L1.
     WithdrawalProcessed {
         to: Address,
         sender_tag: B256,
@@ -67,7 +60,6 @@ pub(crate) enum L1PortalEvent {
         amount: u128,
         bounceback_fee: u128,
     },
-    /// A Zone refund claimed on L1.
     RefundClaimed {
         recipient: Address,
         token: Address,
@@ -83,37 +75,71 @@ pub(crate) struct L1EventEvidence {
     pub(crate) transaction_index: u32,
     pub(crate) transaction_log_index: u32,
     pub(crate) block_log_index: u32,
-    pub(crate) raw_log: Log,
     pub(crate) event: L1PortalEvent,
 }
 
 /// Ordered recognized Portal events for one L1 block.
 #[derive(Debug)]
 pub(super) struct L1Events {
-    pub(super) portal: Address,
     pub(super) events: Vec<L1EventEvidence>,
 }
 
-impl L1Events {
-    /// Return token specs from `TokenEnabled` events in canonical event order.
-    pub(crate) fn token_enabled_specs(&self) -> Vec<crate::model::TokenSpec> {
-        self.events
-            .iter()
-            .filter_map(|evidence| match &evidence.event {
-                L1PortalEvent::TokenEnabled {
-                    token,
-                    name,
-                    symbol,
-                    currency,
-                } => Some(crate::model::TokenSpec {
-                    token: *token,
-                    name: name.clone(),
-                    symbol: symbol.clone(),
-                    currency: currency.clone(),
-                }),
-                _ => None,
-            })
-            .collect()
+/// Builds ordered event evidence while receipts are visited once.
+#[derive(Default)]
+pub(super) struct EventCollector {
+    portal: Address,
+    events: Vec<L1EventEvidence>,
+    block_log_index: u32,
+}
+
+impl EventCollector {
+    /// Create a collector that only decodes logs from `portal`.
+    pub(super) fn new(portal: Address) -> Self {
+        Self {
+            portal,
+            ..Default::default()
+        }
+    }
+
+    /// Decode recognized Portal logs from one canonical receipt.
+    ///
+    /// Failed receipts are skipped but their logs still count toward the
+    /// block-global log index. Only logs from `portal` are decoded.
+    /// Recognized-but-irrelevant topics (pausing, admin, gas-rate updates,
+    /// etc.) are ignored; a truly unrecognized topic fails closed. A known
+    /// event that fails ABI decoding returns a contextual error.
+    pub(super) fn extract_receipt(
+        &mut self,
+        transaction_index: usize,
+        transaction_hash: B256,
+        receipt: &TempoTransactionReceipt,
+        block: u64,
+    ) -> eyre::Result<()> {
+        if !receipt.status() {
+            self.block_log_index += receipt.logs().len() as u32;
+            return Ok(());
+        }
+        for (transaction_log_index, log) in receipt.logs().iter().enumerate() {
+            if log.address() == self.portal
+                && let Some(event) = decode_portal_event(&log.inner, block)?
+            {
+                self.events.push(L1EventEvidence {
+                    transaction_hash,
+                    transaction_index: transaction_index as u32,
+                    transaction_log_index: transaction_log_index as u32,
+                    block_log_index: self.block_log_index,
+                    event,
+                });
+            }
+            self.block_log_index += 1;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> L1Events {
+        L1Events {
+            events: self.events,
+        }
     }
 }
 
@@ -146,12 +172,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         }
         ZonePortal::TokenEnabled::SIGNATURE_HASH => {
             let e = decode_event::<ZonePortal::TokenEnabled>(log, "TokenEnabled", block)?;
-            L1PortalEvent::TokenEnabled {
-                token: e.token,
-                name: e.name,
-                symbol: e.symbol,
-                currency: e.currency,
-            }
+            L1PortalEvent::TokenEnabled { token: e.token }
         }
         ZonePortal::BatchSubmitted::SIGNATURE_HASH => {
             let e = decode_event::<ZonePortal::BatchSubmitted>(log, "BatchSubmitted", block)?;
@@ -268,67 +289,6 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         }
         _ => eyre::bail!("unsupported Portal event {topic} in block {block}"),
     }))
-}
-
-/// Builds ordered event evidence while receipts are visited once.
-#[derive(Default)]
-pub(super) struct EventCollector {
-    portal: Address,
-    events: Vec<L1EventEvidence>,
-    block_log_index: u32,
-}
-
-impl EventCollector {
-    /// Create a collector that only decodes logs from `portal`.
-    pub(super) fn new(portal: Address) -> Self {
-        Self {
-            portal,
-            ..Default::default()
-        }
-    }
-
-    /// Decode recognized Portal logs from one canonical receipt.
-    ///
-    /// Failed receipts are skipped but their logs still count toward the
-    /// block-global log index. Only logs from `portal` are decoded. Unknown
-    /// Portal topics are ignored. A known event that fails ABI decoding
-    /// returns a contextual error.
-    pub(super) fn extract_receipt(
-        &mut self,
-        transaction_index: usize,
-        transaction_hash: B256,
-        receipt: &TempoTransactionReceipt,
-        block: u64,
-    ) -> eyre::Result<()> {
-        if !receipt.status() {
-            self.block_log_index += receipt.logs().len() as u32;
-            return Ok(());
-        }
-        for (transaction_log_index, log) in receipt.logs().iter().enumerate() {
-            if log.address() == self.portal
-                && let Some(event) = decode_portal_event(&log.inner, block)?
-            {
-                self.events.push(L1EventEvidence {
-                    transaction_hash,
-                    transaction_index: transaction_index as u32,
-                    transaction_log_index: transaction_log_index as u32,
-                    block_log_index: self.block_log_index,
-                    raw_log: log.inner.clone(),
-                    event,
-                });
-            }
-            self.block_log_index += 1;
-        }
-        Ok(())
-    }
-
-    /// Finish the ordered event bundle.
-    pub(super) fn finish(self) -> L1Events {
-        L1Events {
-            portal: self.portal,
-            events: self.events,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -533,45 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_order_across_transactions() {
-        let events = collect(&[
-            receipt(true, B256::ZERO, vec![deposit()]),
-            receipt(true, B256::ZERO, vec![withdrawal(), token()]),
-        ])
-        .unwrap();
-        assert!(matches!(
-            events.events[0].event,
-            L1PortalEvent::DepositMade { .. }
-        ));
-        assert!(matches!(
-            events.events[1].event,
-            L1PortalEvent::WithdrawalProcessed { .. }
-        ));
-        assert!(matches!(
-            events.events[2].event,
-            L1PortalEvent::TokenEnabled { .. }
-        ));
-    }
-
-    #[test]
-    fn withdrawal_bounce_back_distinct_from_deposit_made() {
-        let events = collect(&[receipt(
-            true,
-            B256::ZERO,
-            vec![deposit(), withdrawal_bounce()],
-        )])
-        .unwrap();
-        assert!(matches!(
-            events.events[0].event,
-            L1PortalEvent::DepositMade { .. }
-        ));
-        assert!(matches!(
-            events.events[1].event,
-            L1PortalEvent::WithdrawalBounceBack { .. }
-        ));
-    }
-
-    #[test]
     fn rejects_unknown_topics_and_ignores_non_protocol_logs() {
         let unknown = log(alloy_primitives::LogData::new_unchecked(
             vec![B256::repeat_byte(0xff)],
@@ -632,53 +553,64 @@ mod tests {
     }
 
     #[test]
-    fn token_enabled_retains_metadata_and_provenance() {
-        let receipt_hash = B256::repeat_byte(0x42);
-        let canonical_hash = B256::repeat_byte(0x43);
-        let receipt = receipt(true, receipt_hash, vec![token()]);
-        let mut collector = EventCollector::new(PORTAL);
-        collector
-            .extract_receipt(0, canonical_hash, &receipt, BLOCK)
-            .unwrap();
-        let events = collector.finish();
-        let evidence = &events.events[0];
-        assert_eq!(evidence.transaction_hash, canonical_hash);
-        assert_eq!(evidence.transaction_index, 0);
-        assert_eq!(evidence.transaction_log_index, 0);
-        assert_eq!(evidence.block_log_index, 0);
-        assert_eq!(evidence.raw_log.address, PORTAL);
-        assert!(
-            matches!(&evidence.event, L1PortalEvent::TokenEnabled { token, name, symbol, currency } if *token == Address::repeat_byte(5) && name == "Test" && symbol == "TST" && currency == "USD")
-        );
-    }
-
-    #[test]
-    fn log_indices_are_correct() {
-        let mut unknown = log(alloy_primitives::LogData::new_unchecked(
+    fn retains_canonical_order_and_provenance_across_receipts() {
+        let mut noise = log(alloy_primitives::LogData::new_unchecked(
             vec![B256::repeat_byte(0xff)],
             Default::default(),
         ));
-        unknown.inner.address = Address::repeat_byte(99);
-        let events = collect(&[
-            receipt(false, B256::ZERO, vec![unknown.clone()]),
-            receipt(true, B256::ZERO, vec![unknown, deposit(), token()]),
-        ])
-        .unwrap();
+        noise.inner.address = Address::repeat_byte(99);
+        let receipts = [
+            receipt(false, B256::ZERO, vec![deposit()]),
+            receipt(true, B256::repeat_byte(1), vec![deposit()]),
+            receipt(
+                true,
+                B256::repeat_byte(2),
+                vec![noise, withdrawal(), token()],
+            ),
+        ];
+        let hashes = [
+            B256::repeat_byte(10),
+            B256::repeat_byte(11),
+            B256::repeat_byte(12),
+        ];
+        let mut collector = EventCollector::new(PORTAL);
+        for (index, (receipt, hash)) in receipts.iter().zip(hashes).enumerate() {
+            collector
+                .extract_receipt(index, hash, receipt, BLOCK)
+                .unwrap();
+        }
+        let events = collector.finish();
+
+        assert_eq!(events.events.len(), 3);
+        assert!(matches!(
+            events.events[0].event,
+            L1PortalEvent::DepositMade { .. }
+        ));
+        assert!(matches!(
+            events.events[1].event,
+            L1PortalEvent::WithdrawalProcessed { .. }
+        ));
+        assert!(matches!(
+            events.events[2].event,
+            L1PortalEvent::TokenEnabled { token } if token == Address::repeat_byte(5)
+        ));
         assert_eq!(
             (
                 events.events[0].transaction_index,
                 events.events[0].transaction_log_index,
-                events.events[0].block_log_index
+                events.events[0].block_log_index,
+                events.events[0].transaction_hash,
             ),
-            (1, 1, 2)
+            (1, 0, 1, hashes[1])
         );
         assert_eq!(
             (
-                events.events[1].transaction_index,
-                events.events[1].transaction_log_index,
-                events.events[1].block_log_index
+                events.events[2].transaction_index,
+                events.events[2].transaction_log_index,
+                events.events[2].block_log_index,
+                events.events[2].transaction_hash,
             ),
-            (1, 2, 3)
+            (2, 2, 4, hashes[2])
         );
     }
 }

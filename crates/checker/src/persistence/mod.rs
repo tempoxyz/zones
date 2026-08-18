@@ -19,7 +19,7 @@ use reth_db::{
 use crate::accounting::{Effect, State};
 
 use model::DeltaRecord;
-pub(crate) use model::{BlockRef, Finding, Identity, Metadata, Status};
+pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
 use schema::{
     AccountValue, Accounts, Deltas, Findings, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens,
 };
@@ -42,6 +42,28 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    /// Open an existing database or atomically create it from an authenticated checkpoint.
+    pub(crate) fn open_or_create(
+        path: &Path,
+        checkpoint: &Checkpoint,
+    ) -> Result<(Self, Snapshot), PersistenceError> {
+        if path.exists() {
+            return Self::open(path, checkpoint.identity);
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| PersistenceError::Invalid(error.to_string()))?;
+        }
+        Self::create_atomic(
+            path,
+            checkpoint.identity,
+            checkpoint.zone,
+            checkpoint.tempo,
+            checkpoint.state.clone(),
+        )?;
+        Self::open(path, checkpoint.identity)
+    }
+
     /// Create, verify, and atomically publish a genesis checkpoint.
     pub(crate) fn create_atomic(
         target: &Path,
@@ -183,6 +205,8 @@ impl Store {
     }
 
     /// Atomically apply one contiguous verified block.
+    ///
+    /// Requires `prior` to still be verifying. Coordinate mismatches return `StaleSnapshot`.
     pub(crate) fn apply(
         &self,
         prior: &Snapshot,
@@ -210,6 +234,7 @@ impl Store {
             imported_tempo_parent,
             delta: delta.clone(),
         };
+        codec::validate(&record).map_err(PersistenceError::Invalid)?;
         let mut metadata = prior.metadata.clone();
         metadata.verified_zone = zone;
         metadata.imported_tempo = imported_tempo;
@@ -289,17 +314,15 @@ impl Store {
     }
 
     /// Atomically discard derived rows and restart from authenticated genesis.
-    pub(crate) fn reset(
-        &self,
-        zone: BlockRef,
-        tempo: BlockRef,
-        state: State,
-    ) -> Result<Snapshot, PersistenceError> {
+    pub(crate) fn reset(&self, checkpoint: &Checkpoint) -> Result<Snapshot, PersistenceError> {
+        if checkpoint.identity != self.identity {
+            return Err(PersistenceError::Identity);
+        }
         let metadata = Metadata {
             identity: self.identity,
-            verified_zone: zone,
-            imported_tempo: tempo,
-            observed_zone: zone,
+            verified_zone: checkpoint.zone,
+            imported_tempo: checkpoint.tempo,
+            observed_zone: checkpoint.zone,
             status: Status::Verifying,
         };
         let tx = self.db.tx_mut()?;
@@ -307,10 +330,10 @@ impl Store {
         tx.clear::<Tokens>()?;
         tx.clear::<Deltas>()?;
         tx.clear::<Findings>()?;
-        for (key, value) in state.accounts() {
+        for (key, value) in checkpoint.state.accounts() {
             tx.put::<Accounts>(key, AccountValue(value))?;
         }
-        for (token, value) in state.tokens() {
+        for (token, value) in checkpoint.state.tokens() {
             tx.put::<Tokens>(token, TokenValue(value))?;
         }
         tx.put::<Meta>(
@@ -320,7 +343,7 @@ impl Store {
         tx.commit()?;
         Ok(Snapshot {
             metadata,
-            state: Arc::new(state),
+            state: Arc::new(checkpoint.state.clone()),
         })
     }
 
@@ -330,6 +353,7 @@ impl Store {
         prior: &Snapshot,
         finding: Finding,
     ) -> Result<Snapshot, PersistenceError> {
+        codec::validate(&finding).map_err(PersistenceError::Invalid)?;
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, prior)?;
         let mut metadata = prior.metadata.clone();
@@ -387,6 +411,8 @@ impl Store {
     }
 
     /// Persist the latest delivered canonical tip before potentially slow acquisition.
+    ///
+    /// Requires `prior` to still be verifying; errors if the checker has diverged.
     pub(crate) fn observe(
         &self,
         prior: &Snapshot,

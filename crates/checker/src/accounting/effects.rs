@@ -3,7 +3,10 @@
 use alloy_primitives::{Address, U256};
 
 use super::{AccountKey, Effect};
-use crate::{l1::L1PortalEvent, l2::L2BridgeEvent};
+use crate::{
+    l1::{L1BlockEvidence, L1PortalEvent},
+    l2::L2BridgeEvent,
+};
 
 /// Convert canonical transfers after their protocol provenance has been authenticated.
 pub(crate) fn from_transfers(
@@ -37,12 +40,20 @@ pub(crate) fn from_transfers(
         .collect()
 }
 
+/// Derive liability changes from a contiguous span of authenticated Tempo history.
+pub(crate) fn from_tempo_history(history: &[L1BlockEvidence]) -> Vec<Effect> {
+    history
+        .iter()
+        .flat_map(|block| from_tempo(block.portal_events()))
+        .collect()
+}
+
 /// Derive liability changes from authenticated Tempo Portal events.
 pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Effect> {
     let mut effects = Vec::new();
     for event in events {
         match *event {
-            L1PortalEvent::TokenEnabled { token, .. } => {
+            L1PortalEvent::TokenEnabled { token } => {
                 effects.push(Effect::EnableToken { token });
             }
             L1PortalEvent::DepositMade {
@@ -52,7 +63,12 @@ pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>
                 amount: U256::from(net_amount),
                 increase: true,
             }),
-            L1PortalEvent::WithdrawalProcessed { token, amount, .. } => {
+            L1PortalEvent::WithdrawalProcessed {
+                token,
+                amount,
+                callback_success: true,
+                ..
+            } => {
                 effects.push(Effect::PendingWithdrawal {
                     token,
                     amount: U256::from(amount),
@@ -93,7 +109,9 @@ pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>
                     increase: false,
                 });
             }
-            L1PortalEvent::BatchSubmitted { .. } | L1PortalEvent::WithdrawalBounceBack { .. } => {}
+            L1PortalEvent::BatchSubmitted { .. }
+            | L1PortalEvent::WithdrawalProcessed { .. }
+            | L1PortalEvent::WithdrawalBounceBack { .. } => {}
         }
     }
     effects
@@ -127,7 +145,10 @@ pub(crate) fn from_zone<'a>(
                 increase: false,
             }),
             L2BridgeEvent::WithdrawalRequested {
-                token, principal, ..
+                token,
+                principal,
+                is_deposit_bounce_back: false,
+                ..
             } => effects.push(Effect::PendingWithdrawal {
                 token,
                 amount: U256::from(principal),
@@ -148,9 +169,10 @@ pub(crate) fn from_zone<'a>(
             }
             L2BridgeEvent::TempoAdvanced(_)
             | L2BridgeEvent::DepositOutcome { .. }
+            | L2BridgeEvent::WithdrawalRequested { .. }
             | L2BridgeEvent::WithdrawalBounceBack { .. }
             | L2BridgeEvent::Transfer { .. }
-            | L2BridgeEvent::TokenEnabled { .. }
+            | L2BridgeEvent::TokenBurn { .. }
             | L2BridgeEvent::BatchFinalized { .. } => {}
         }
     }
@@ -211,6 +233,7 @@ fn authenticate_mints(events: &[&L2BridgeEvent]) -> Result<(), EffectError> {
     Ok(())
 }
 
+/// Bridge-event evidence that could not be reconciled into effects.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EffectError {
     #[error("missing authenticated mint of {amount} {token} to {recipient}")]
@@ -301,5 +324,68 @@ mod tests {
             amount: U256::from(10),
         };
         assert!(from_zone([&mint]).is_err());
+    }
+
+    #[test]
+    fn deposit_bounce_back_does_not_create_withdrawal_liability() {
+        let event = L2BridgeEvent::WithdrawalRequested {
+            withdrawal_index: 0,
+            sender: Address::ZERO,
+            token: Address::repeat_byte(1),
+            principal: 10,
+            fee: 0,
+            fallback_nonce: 0,
+            is_deposit_bounce_back: true,
+        };
+
+        assert!(from_zone([&event]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_withdrawal_stays_pending_until_zone_bounce_back() {
+        let token = Address::repeat_byte(1);
+        let recipient = Address::repeat_byte(2);
+        let amount = U256::from(10);
+        let mut state = crate::accounting::State::default();
+        state
+            .apply(&[Effect::PendingWithdrawal {
+                token,
+                amount,
+                increase: true,
+            }])
+            .unwrap();
+        let failed = L1PortalEvent::WithdrawalProcessed {
+            to: recipient,
+            sender_tag: Default::default(),
+            token,
+            amount: 10,
+            callback_success: false,
+        };
+        state.apply(&from_tempo([&failed])).unwrap();
+        assert_eq!(state.token(token).unwrap().pending_withdrawals, amount);
+
+        let mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: recipient,
+            amount,
+        };
+        let bounce_back = L2BridgeEvent::WithdrawalBounceBack {
+            recipient,
+            token,
+            amount: 10,
+            processed: true,
+        };
+        state
+            .apply(&from_zone([&mint, &bounce_back]).unwrap())
+            .unwrap();
+
+        let token_state = state.token(token).unwrap();
+        assert_eq!(token_state.pending_withdrawals, U256::ZERO);
+        assert_eq!(token_state.account_total, amount);
+        assert_eq!(
+            state.account(AccountKey::new(token, recipient)),
+            Some(amount)
+        );
     }
 }

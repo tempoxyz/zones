@@ -14,6 +14,14 @@ fn options() -> impl bincode::Options {
         .with_limit(MAX_VALUE_SIZE - 1)
 }
 
+/// Validate a dynamic value before passing it to MDBX's infallible codec interface.
+pub(super) fn validate<T: Serialize>(value: &T) -> Result<(), String> {
+    options()
+        .serialized_size(value)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
     let mut encoded = vec![VERSION];
     options().serialize_into(&mut encoded, value).map_err(map)?;

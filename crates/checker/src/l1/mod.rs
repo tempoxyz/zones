@@ -2,19 +2,21 @@
 
 mod events;
 
-use std::fmt;
-
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockId, BlockNumHash, NumHash};
 use alloy_network::{BlockResponse as _, ReceiptResponse as _, primitives::HeaderResponse as _};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider};
 use eyre::WrapErr as _;
+use futures::{StreamExt as _, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_contracts::precompiles::ITIP20;
 
 pub(crate) use events::L1PortalEvent;
 use events::{EventCollector, L1Events};
+
+/// Bound on concurrent Portal balance reads for one token set.
+const BALANCE_CONCURRENCY: usize = 8;
 
 /// Recognized Portal events for one exact anchored L1 block.
 #[derive(Debug)]
@@ -24,58 +26,13 @@ pub(crate) struct L1BlockEvidence {
 }
 
 impl L1BlockEvidence {
-    /// Return token specs from `TokenEnabled` events in canonical L1 event order.
-    pub(crate) fn token_enabled_specs(&self) -> Vec<crate::model::TokenSpec> {
-        self.events.token_enabled_specs()
+    pub(crate) const fn block(&self) -> BlockNumHash {
+        self.block
     }
 
     /// Return authenticated Portal events in receipt order.
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
         self.events.events.iter().map(|evidence| &evidence.event)
-    }
-}
-
-impl fmt::Display for L1BlockEvidence {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut deposit_made = 0u64;
-        let mut token_enabled = 0u64;
-        let mut batch_submitted = 0u64;
-        let mut withdrawal_processed = 0u64;
-        let mut withdrawal_bounce_back = 0u64;
-        let mut deposit_bounce_back = 0u64;
-        let mut deposit_bounce_back_pending = 0u64;
-        let mut refund_claimed = 0u64;
-
-        for evidence in &self.events.events {
-            match &evidence.event {
-                L1PortalEvent::DepositMade { .. } => deposit_made += 1,
-                L1PortalEvent::TokenEnabled { .. } => token_enabled += 1,
-                L1PortalEvent::BatchSubmitted { .. } => batch_submitted += 1,
-                L1PortalEvent::WithdrawalProcessed { .. } => withdrawal_processed += 1,
-                L1PortalEvent::WithdrawalBounceBack { .. } => withdrawal_bounce_back += 1,
-                L1PortalEvent::DepositBounceBack { .. } => deposit_bounce_back += 1,
-                L1PortalEvent::DepositBounceBackPending { .. } => deposit_bounce_back_pending += 1,
-                L1PortalEvent::RefundClaimed { .. } => refund_claimed += 1,
-            }
-        }
-        write!(
-            f,
-            "L1 Portal facts extracted l1_block_number={} l1_block_hash={} portal={} \
-             deposit_made={} token_enabled={} batch_submitted={} withdrawal_processed={} \
-             withdrawal_bounce_back={} deposit_bounce_back={} deposit_bounce_back_pending={} \
-             refund_claimed={}",
-            self.block.number,
-            self.block.hash,
-            self.events.portal,
-            deposit_made,
-            token_enabled,
-            batch_submitted,
-            withdrawal_processed,
-            withdrawal_bounce_back,
-            deposit_bounce_back,
-            deposit_bounce_back_pending,
-            refund_claimed,
-        )
     }
 }
 
@@ -116,7 +73,7 @@ pub(crate) async fn portal_balance(
     token: Address,
     portal: Address,
     block: B256,
-) -> eyre::Result<alloy_primitives::U256> {
+) -> eyre::Result<U256> {
     Ok(ITIP20::new(token, provider)
         .balanceOf(portal)
         .block(BlockId::hash_canonical(block))
@@ -124,6 +81,26 @@ pub(crate) async fn portal_balance(
         .await?)
 }
 
+/// Read Portal custody for every token, concurrently, at one exact canonical Tempo block.
+pub(crate) async fn portal_balances(
+    provider: &DynProvider<TempoNetwork>,
+    portal: Address,
+    tokens: impl IntoIterator<Item = Address>,
+    block: B256,
+) -> eyre::Result<Vec<(Address, U256)>> {
+    stream::iter(tokens.into_iter().map(|token| async move {
+        portal_balance(provider, token, portal, block)
+            .await
+            .map(|balance| (token, balance))
+    }))
+    .buffer_unordered(BALANCE_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect()
+}
+
+/// Fetch and authenticate one L1 block and its Portal events.
 async fn collect_l1_block_at(
     provider: &DynProvider<TempoNetwork>,
     portal: Address,

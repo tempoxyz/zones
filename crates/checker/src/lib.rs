@@ -1,16 +1,14 @@
 //! Durable observe-only solvency checker for one Tempo Zone.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
-#![allow(clippy::needless_borrows_for_generic_args)]
 
 mod accounting;
 mod bootstrap;
 mod l1;
 mod l2;
-mod metrics;
-mod model;
 mod persistence;
 mod runtime;
+mod telemetry;
 
 use std::{fmt, path::PathBuf, str::FromStr};
 

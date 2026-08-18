@@ -12,35 +12,29 @@ use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
 
 use crate::{
+    CheckerConfig,
     accounting::{State, effects},
     decode_event,
-    l1::{collect_l1_history, portal_balance},
+    l1::{collect_l1_history, portal_balances},
     l2::read_zone_genesis,
-    persistence,
+    persistence::{self, Checkpoint},
 };
 
 const GENESIS_BLOCK: u64 = 0;
 const LOG_QUERY_BLOCKS: u64 = 10_000;
 
-/// Authenticated coordinates needed to create or open one checker database.
-pub(crate) struct Checkpoint {
-    pub(crate) identity: persistence::Identity,
-    pub(crate) zone: persistence::BlockRef,
-    pub(crate) tempo: persistence::BlockRef,
-    pub(crate) state: State,
-}
-
 /// Discover and authenticate the checkpoint encoded by local Zone genesis.
-pub(crate) async fn checkpoint<P>(
+pub(crate) async fn build<P>(
     provider: &P,
     l1: &DynProvider<TempoNetwork>,
-    portal: Address,
-    zone_id: u32,
-    zone_chain_id: u64,
+    config: &CheckerConfig,
 ) -> eyre::Result<Checkpoint>
 where
     P: BlockNumReader + StateProviderFactory + ?Sized,
 {
+    let portal = config.portal_address;
+    let zone_id = config.zone_id;
+    let zone_chain_id = config.zone_chain_id;
     eyre::ensure!(zone_id != 0, "Zone ID must not be zero");
     let l1_chain_id = l1.get_chain_id().await?;
     let expected_chain_id = zone_primitives::constants::zone_chain_id(l1_chain_id, zone_id)?;
@@ -52,12 +46,12 @@ where
     let zone_hash = provider
         .block_hash(GENESIS_BLOCK)?
         .ok_or_else(|| eyre::eyre!("local Zone genesis is unavailable"))?;
-    let genesis = read_genesis(provider, zone_hash)?;
-    let creation = discover_creation(l1, portal, zone_id, genesis.initial_token).await?;
+    let (tempo, initial_token) = read_genesis(provider, zone_hash)?;
+    let creation = discover_creation(l1, portal, zone_id, initial_token).await?;
     ensure_canonical(l1, creation, "Portal creation").await?;
-    ensure_canonical(l1, genesis.tempo, "Zone genesis anchor").await?;
+    ensure_canonical(l1, tempo, "Zone genesis anchor").await?;
 
-    let state = initial_state(l1, portal, creation, genesis.tempo, genesis.initial_token).await?;
+    let state = initial_state(l1, portal, creation, tempo, initial_token).await?;
     Ok(Checkpoint {
         identity: persistence::Identity {
             l1_chain_id,
@@ -67,59 +61,13 @@ where
             creation: creation.into(),
         },
         zone: persistence::BlockRef::new(GENESIS_BLOCK, zone_hash),
-        tempo: persistence::BlockRef::from(genesis.tempo),
+        tempo: persistence::BlockRef::from(tempo),
         state,
     })
 }
 
-async fn initial_state(
-    provider: &DynProvider<TempoNetwork>,
-    portal: Address,
-    creation: BlockNumHash,
-    anchor: BlockNumHash,
-    initial_token: Address,
-) -> eyre::Result<State> {
-    let mut state = State::default();
-    state.apply(&[crate::accounting::Effect::EnableToken {
-        token: initial_token,
-    }])?;
-    if anchor.number < creation.number {
-        return Ok(state);
-    }
-    let block = provider
-        .get_block_by_hash(creation.hash)
-        .await?
-        .ok_or_else(|| eyre::eyre!("Portal creation block is unavailable"))?;
-    let parent = BlockNumHash::new(
-        creation
-            .number
-            .checked_sub(1)
-            .ok_or_else(|| eyre::eyre!("Portal cannot be created in Tempo genesis"))?,
-        block.header().parent_hash(),
-    );
-    let history = collect_l1_history(provider, portal, parent, anchor).await?;
-    let effects = history
-        .iter()
-        .flat_map(|block| effects::from_tempo(block.portal_events()))
-        .collect::<Vec<_>>();
-    state.apply(&effects)?;
-    let mut balances = Vec::new();
-    for (token, _) in state.tokens() {
-        balances.push((
-            token,
-            portal_balance(provider, token, portal, anchor.hash).await?,
-        ));
-    }
-    state.verify_portal_balances(balances)?;
-    Ok(state)
-}
-
-struct Genesis {
-    tempo: BlockNumHash,
-    initial_token: Address,
-}
-
-fn read_genesis<P>(provider: &P, hash: B256) -> eyre::Result<Genesis>
+/// Read and validate Zone genesis, returning its Tempo anchor and initial token.
+fn read_genesis<P>(provider: &P, hash: B256) -> eyre::Result<(BlockNumHash, Address)>
 where
     P: StateProviderFactory + ?Sized,
 {
@@ -143,10 +91,10 @@ where
         snapshot.initial_token_supply.is_zero(),
         "Zone genesis initial token has nonzero supply"
     );
-    Ok(Genesis {
-        tempo: BlockNumHash::new(snapshot.tempo_block_number, snapshot.tempo_block_hash),
-        initial_token: snapshot.default_fee_token,
-    })
+    Ok((
+        BlockNumHash::new(snapshot.tempo_block_number, snapshot.tempo_block_hash),
+        snapshot.default_fee_token,
+    ))
 }
 
 /// Use the RPC log index for discovery, then authenticate the matching receipt.
@@ -191,6 +139,7 @@ async fn discover_creation(
     authenticate_creation(provider, *hash, portal, zone_id, initial_token).await
 }
 
+/// Require one matching `ZoneCreated` event with authenticated receipt provenance.
 async fn authenticate_creation(
     provider: &DynProvider<TempoNetwork>,
     hash: B256,
@@ -235,6 +184,7 @@ async fn authenticate_creation(
     Ok(BlockNumHash::new(number, hash))
 }
 
+/// Require each receipt's provenance to match the block it was fetched from.
 fn authenticate_receipts(
     hash: B256,
     number: u64,
@@ -271,4 +221,37 @@ async fn ensure_canonical(
         "{name} block changed during bootstrap"
     );
     Ok(())
+}
+
+async fn initial_state(
+    provider: &DynProvider<TempoNetwork>,
+    portal: Address,
+    creation: BlockNumHash,
+    anchor: BlockNumHash,
+    initial_token: Address,
+) -> eyre::Result<State> {
+    let mut state = State::default();
+    state.apply(&[crate::accounting::Effect::EnableToken {
+        token: initial_token,
+    }])?;
+    if anchor.number < creation.number {
+        return Ok(state);
+    }
+    let block = provider
+        .get_block_by_hash(creation.hash)
+        .await?
+        .ok_or_else(|| eyre::eyre!("Portal creation block is unavailable"))?;
+    let parent = BlockNumHash::new(
+        creation
+            .number
+            .checked_sub(1)
+            .ok_or_else(|| eyre::eyre!("Portal cannot be created in Tempo genesis"))?,
+        block.header().parent_hash(),
+    );
+    let history = collect_l1_history(provider, portal, parent, anchor).await?;
+    state.apply(&effects::from_tempo_history(&history))?;
+    let tokens = state.tokens().map(|(token, _)| token).collect::<Vec<_>>();
+    let balances = portal_balances(provider, portal, tokens, anchor.hash).await?;
+    state.verify_portal_balances(balances)?;
+    Ok(state)
 }

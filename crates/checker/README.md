@@ -5,6 +5,8 @@ extension (ExEx) inside a Tempo Zone node. It independently derives token
 balances and bridge liabilities from authenticated protocol activity, then
 compares them with exact Zone and Tempo state.
 
+See [DESIGN.md](DESIGN.md) for the accounting model and block invariants.
+
 ## What it verifies
 
 For every canonical Zone block, the checker independently derives:
@@ -16,7 +18,14 @@ For every canonical Zone block, the checker independently derives:
   withdrawals, and pending refunds.
 - The recipient and amount of every Inbox mint from its authenticated bridge
   lifecycle event.
-- Token enablement calldata, events, metadata, and Inbox/Outbox issuer roles.
+- Every user withdrawal's exact TIP-20 debit and burn, including sponsored
+  fees.
+
+Canonical Portal creation and enablement events establish which tokens the
+checker tracks.
+
+Token enablement is not otherwise modeled: the checker does not compare L1 and
+L2 enablement calldata or validate token metadata and Inbox/Outbox issuer roles.
 
 It then reads affected balances and every enabled token's supply from the exact
 Zone post-state and reads Portal custody at the exact imported Tempo block. The
@@ -115,9 +124,8 @@ directory. No checker-specific anchor, Portal, or database argument is needed.
 src/
   bootstrap.rs       genesis identity and authenticated Portal discovery
   l1/                exact Tempo blocks, receipts, and Portal events
-  l2/                Zone calldata, events, and exact post-state reads
+  l2/                Zone events and exact post-state reads
   accounting/        pure account and liability transitions
-  model/             pure token-enablement consistency checks
   persistence/       row-oriented MDBX state and bounded reorg deltas
   runtime.rs         recovery, verification, retry, and divergence handling
   metrics.rs         operational progress and alert metrics
@@ -129,3 +137,35 @@ src/
 cargo test -p zone-checker
 cargo clippy -p zone-checker --all-targets -- -D warnings
 ```
+
+## Local verification lab
+
+The disposable lab starts a pinned Tempo development chain and a
+checker-enabled Zone, then waits for the checker to verify the blocks containing
+token enablement, deposit, and withdrawal activity:
+
+```bash
+just checker-lab-up
+just checker-lab-trigger token
+just checker-lab-trigger deposit
+just checker-lab-trigger withdrawal
+just checker-lab-trigger all
+just checker-lab-status
+just checker-lab-logs zone
+just checker-lab-restart-zone
+```
+
+Each trigger waits until the checker has verified the Zone block containing the
+corresponding activity and fails if a divergence becomes active. The token
+scenario confirms that the Portal event adds the token to accounting coverage;
+it does not validate token metadata or issuer roles. The `all` scenario runs
+token enablement, deposit, and withdrawal sequentially.
+
+The lab uses a 10-block withdrawal batch interval, prints periodic head
+progress, and fails after three minutes instead of waiting indefinitely.
+Override these defaults with `ZONE_BATCH_INTERVAL_BLOCKS` and
+`WITHDRAWAL_WAIT_TIMEOUT_SECS` when needed.
+
+State and logs are kept under `target/checker-lab`. Use
+`just checker-lab-down` to preserve them or `just checker-lab-reset` to remove
+the complete environment.

@@ -12,6 +12,7 @@ use crate::accounting::{AccountKey, TokenState};
 
 use super::model::{DeltaRecord, Finding, Metadata};
 
+/// Fixed single-byte key discriminating schema metadata rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum MetaKey {
     Version,
@@ -39,15 +40,18 @@ impl Decode for MetaKey {
     }
 }
 
+/// Versioned payload stored under a `MetaKey`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MetaValue {
     Version(u32),
     Metadata(Box<Metadata>),
 }
 
+/// Durable row wrapper for one token's aggregate state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TokenValue(pub(crate) TokenState);
 
+/// Big-endian `U256` balance row, compressed without the version/bincode envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AccountValue(pub(crate) U256);
 
@@ -123,6 +127,7 @@ table!(Tokens, Address, TokenValue, "CheckerTokens");
 table!(Deltas, u64, DeltaRecord, "CheckerDeltas");
 table!(Findings, u8, Finding, "CheckerFindings");
 
+/// All MDBX tables owned by the checker database.
 pub(crate) struct Tables;
 
 impl TableSet for Tables {
