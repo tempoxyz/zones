@@ -383,6 +383,9 @@ pub struct L1SubscriberConfig {
     pub encryption_keys: Option<crate::EncryptionKeyRing>,
     /// Whether to retain authenticated Portal logs for external observers.
     pub retain_portal_evidence: bool,
+    /// First L1 block whose portal work was crossed by canonical checkpoint-only Zone blocks.
+    /// Startup reconstructs this suffix before following new finalized blocks.
+    pub deferred_work_start: Option<u64>,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
@@ -872,12 +875,57 @@ impl L1Subscriber {
     /// ingestion failures as fatal.
     pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
+        self.recover_deferred_work(&provider).await?;
         let triggers = self.head_triggers(&provider).await?;
         info!(
             portal = %self.config.portal_address,
             "Following finalized L1 blocks"
         );
         self.follow_finalized(&provider, triggers).await
+    }
+
+    async fn recover_deferred_work(
+        &self,
+        l1_provider: &impl Provider<TempoNetwork>,
+    ) -> eyre::Result<()> {
+        let Some(from) = self.config.deferred_work_start else {
+            return Ok(());
+        };
+        if self.deposit_queue.last_enqueued().is_some() {
+            return Ok(());
+        }
+        let checkpoint = self.local_state.latest_tempo_checkpoint()?;
+        if from > checkpoint.number {
+            return Ok(());
+        }
+
+        let mut blocks = Vec::with_capacity((checkpoint.number - from + 1) as usize);
+        for block_number in from..=checkpoint.number {
+            let header = l1_provider
+                .get_header_by_number(block_number.into())
+                .await?
+                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+            let block_hash = header.hash();
+            let receipts = fetch_and_verify_receipts_for_header(
+                l1_provider,
+                NumHash::new(block_number, block_hash),
+                header.receipts_root(),
+                header.logs_bloom(),
+            )
+            .await?;
+            let (events, _, _) = self.extract_events(block_number, &receipts)?;
+            blocks.push(L1BlockDeposits {
+                header: SealedHeader::seal_slow(header.inner.inner),
+                events,
+            });
+        }
+        self.deposit_queue.seed_deferred(blocks)?;
+        info!(
+            from,
+            to = checkpoint.number,
+            "Recovered portal work crossed by checkpoint-only Zone blocks"
+        );
+        Ok(())
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.

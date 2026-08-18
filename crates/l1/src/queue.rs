@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 pub(crate) struct PendingDeposits {
     /// Pending L1 blocks with their portal events, not yet processed by the Zone.
     pending: VecDeque<L1BlockDeposits>,
+    /// Portal work crossed by checkpoint-only Zone blocks and owed by the next full block.
+    deferred: Vec<L1BlockDeposits>,
     /// Highest L1 block ever enqueued (number + hash). Survives `confirm` /
     /// `drain` so that reconnecting subscribers know where the queue left off,
     /// even if the engine has already consumed the blocks.
@@ -83,6 +85,14 @@ impl PendingDeposits {
         self.pending.front()
     }
 
+    pub(crate) fn peek_headers(&self, maximum: usize) -> Vec<SealedHeader<TempoHeader>> {
+        self.pending
+            .iter()
+            .take(maximum)
+            .map(|block| block.header.clone())
+            .collect()
+    }
+
     /// Confirm the next pending L1 block was successfully processed and remove it.
     ///
     /// The caller must pass the [`NumHash`] returned by [`Self::peek`]. A
@@ -102,6 +112,81 @@ impl PendingDeposits {
             .pending
             .pop_front()
             .expect("front was checked immediately before pop"))
+    }
+
+    pub(crate) fn defer(&mut self, expected: NumHash) -> eyre::Result<()> {
+        let block = self.confirm(expected)?;
+        self.deferred.push(block);
+        Ok(())
+    }
+
+    /// Defer every pending block through a canonical checkpoint anchor.
+    ///
+    /// This is idempotent so follower imports can replay their post-forkchoice bookkeeping after
+    /// an interruption. Entries older than `expected` are also deferred because they belong to
+    /// the same checkpoint-only range.
+    pub(crate) fn defer_through(&mut self, expected: NumHash) -> eyre::Result<()> {
+        while let Some(front) = self.pending.front().map(|entry| entry.header.num_hash()) {
+            if front.number > expected.number {
+                break;
+            }
+            eyre::ensure!(
+                front.number < expected.number || front.hash == expected.hash,
+                "deposit queue holds L1 block {} with hash {}, but the checkpoint consumed {}",
+                front.number,
+                front.hash,
+                expected.hash,
+            );
+            self.defer(front)?;
+        }
+        if let Some(found) = self
+            .deferred
+            .iter()
+            .find(|entry| entry.header.number() == expected.number)
+        {
+            eyre::ensure!(
+                found.header.hash() == expected.hash,
+                "deferred L1 block {} has hash {}, but the checkpoint consumed {}",
+                expected.number,
+                found.header.hash(),
+                expected.hash,
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn operational_work(
+        &self,
+        current: &L1BlockDeposits,
+    ) -> eyre::Result<Vec<L1BlockDeposits>> {
+        let front = self
+            .pending
+            .front()
+            .ok_or_else(|| eyre::eyre!("cannot prepare work from an empty finalized L1 queue"))?;
+        eyre::ensure!(
+            front.header.num_hash() == current.header.num_hash(),
+            "operational L1 work does not match the queue front"
+        );
+        let mut work = self.deferred.clone();
+        work.push(current.clone());
+        Ok(work)
+    }
+
+    pub(crate) fn confirm_operational(&mut self, expected: NumHash) -> eyre::Result<()> {
+        self.confirm(expected)?;
+        self.deferred.clear();
+        Ok(())
+    }
+
+    /// Reconcile an already-canonical full import, including after its exact-front bookkeeping
+    /// was interrupted.
+    pub(crate) fn confirm_operational_through(&mut self, expected: NumHash) -> eyre::Result<()> {
+        self.confirm_through(expected)?;
+        // A delayed duplicate of an older full block must not erase checkpoint work deferred by
+        // newer canonical blocks. Only release work at or before the full block's anchor.
+        self.deferred
+            .retain(|entry| entry.header.number() > expected.number);
+        Ok(())
     }
 
     /// Confirm every pending L1 block up to and including `expected`.
@@ -225,10 +310,67 @@ impl DepositQueue {
         self.inner.lock().peek().cloned()
     }
 
+    /// Return up to `maximum` consecutive queued headers without consuming portal work.
+    pub fn peek_headers(&self, maximum: usize) -> Vec<SealedHeader<TempoHeader>> {
+        self.inner.lock().peek_headers(maximum)
+    }
+
     /// Confirm the next L1 block was successfully processed and remove it.
     ///
     pub fn confirm(&self, expected: NumHash) -> eyre::Result<L1BlockDeposits> {
         self.inner.lock().confirm(expected)
+    }
+
+    /// Move checkpointed portal work out of the header queue while retaining it for the next full
+    /// operational import. This state is shared across leadership-engine instances.
+    pub fn defer(&self, expected: NumHash) -> eyre::Result<()> {
+        self.inner.lock().defer(expected)
+    }
+
+    /// Idempotently move every pending block through a canonical checkpoint anchor to deferred
+    /// portal work.
+    pub fn defer_through(&self, expected: NumHash) -> eyre::Result<()> {
+        self.inner.lock().defer_through(expected)
+    }
+
+    /// Return deferred portal work followed by the current operational L1 block.
+    pub fn operational_work(
+        &self,
+        current: &L1BlockDeposits,
+    ) -> eyre::Result<Vec<L1BlockDeposits>> {
+        self.inner.lock().operational_work(current)
+    }
+
+    /// Restore portal work crossed by already-canonical checkpoint-only blocks after restart.
+    pub fn seed_deferred(&self, blocks: Vec<L1BlockDeposits>) -> eyre::Result<()> {
+        let mut recovered = PendingDeposits::default();
+        for block in blocks {
+            recovered.try_enqueue(block.header, block.events)?;
+        }
+        while let Some(front) = recovered
+            .pending
+            .front()
+            .map(|block| block.header.num_hash())
+        {
+            recovered.defer(front)?;
+        }
+        let mut queue = self.inner.lock();
+        eyre::ensure!(
+            queue.pending.is_empty() && queue.deferred.is_empty() && queue.last_enqueued.is_none(),
+            "cannot seed deferred portal work into a nonempty queue"
+        );
+        *queue = recovered;
+        Ok(())
+    }
+
+    /// Confirm a full operational import and release all deferred work it consumed.
+    pub fn confirm_operational(&self, expected: NumHash) -> eyre::Result<()> {
+        self.inner.lock().confirm_operational(expected)
+    }
+
+    /// Idempotently reconcile a canonical full import and release the deferred work it consumed.
+    pub fn confirm_operational_through(&self, expected: NumHash) -> eyre::Result<()> {
+        self.inner.lock().confirm_operational_through(expected)
     }
 
     /// Advance the queue past a canonical follower anchor.

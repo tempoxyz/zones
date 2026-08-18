@@ -54,8 +54,8 @@ use tempo_primitives::TempoHeader;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
+use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
+use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
@@ -314,15 +314,6 @@ impl ZoneEngine {
         }
     }
 
-    /// Decrypt deposits and ABI-encode them into a [`PreparedL1Block`] ready for
-    /// the payload builder. Mint-recipient policy is enforced during upstream TIP-20 execution
-    /// against the finalized L1 anchor.
-    async fn prepare_l1_block(&self, l1_block: L1BlockDeposits) -> eyre::Result<PreparedL1Block> {
-        l1_block
-            .prepare(&self.encryption_keys, self.portal_address)
-            .await
-    }
-
     /// Advance the chain by one block.
     ///
     /// Wraps the given L1 block into [`ZonePayloadAttributes`], sends FCU
@@ -330,24 +321,52 @@ impl ZoneEngine {
     /// via `newPayload`. Only confirms (removes) the L1 block from the
     /// deposit queue after `newPayload` succeeds.
     async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
-        let l1_num_hash = l1_block.header.num_hash();
+        let queued_headers = self
+            .deposit_queue
+            .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
+        // Do not checkpoint across the Z1 activation boundary. A pre-Z1 queue front must be
+        // imported operationally before a later Z1 header can enable advanceTempoHeaders.
+        let checkpoint_count = checkpoint_header_count(&self.chain_spec, &queued_headers);
+        let checkpoint_headers = &queued_headers[..checkpoint_count];
+        let checkpoint_only = !checkpoint_headers.is_empty();
+        let final_header = checkpoint_headers.last().unwrap_or(&l1_block.header);
+        let l1_num_hash = final_header.num_hash();
 
-        // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
-        // fork cannot predate it. Use wall-clock time to avoid backdating transactions during
-        // catch-up, and advance by at least one millisecond to keep consecutive blocks monotonic.
-        let wall_clock_timestamp_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        let timestamp_millis = zone_timestamp_millis(
-            l1_block.header.timestamp_millis(),
-            self.last_header.timestamp_millis(),
-            wall_clock_timestamp_millis,
-        );
-        let timestamp_secs = timestamp_millis / 1000;
-        let timestamp_millis_part = timestamp_millis % 1000;
+        let (timestamp_secs, timestamp_millis_part) = if self
+            .chain_spec
+            .zone_hardfork_at(final_header.timestamp())
+            .is_z1()
+        {
+            // Z1 locks the Zone block timestamp to the final imported Tempo header.
+            (final_header.timestamp(), final_header.timestamp_millis_part)
+        } else {
+            // Before Z1, the L1 timestamp remains a lower bound. Use wall-clock time to avoid
+            // backdating transactions during catch-up, and keep consecutive blocks monotonic.
+            let wall_clock_timestamp_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?;
+            let timestamp_millis = zone_timestamp_millis(
+                l1_block.header.timestamp_millis(),
+                self.last_header.timestamp_millis(),
+                wall_clock_timestamp_millis,
+            );
+            (timestamp_millis / 1000, timestamp_millis % 1000)
+        };
 
-        let l1_block = self.prepare_l1_block(l1_block).await?;
+        let tempo_import = if checkpoint_only {
+            TempoImport::CheckpointOnly(checkpoint_headers.to_vec())
+        } else {
+            let portal_work = self.deposit_queue.operational_work(&l1_block)?;
+            TempoImport::Full(Box::new(
+                L1BlockDeposits::prepare_many(
+                    portal_work,
+                    &self.encryption_keys,
+                    self.portal_address,
+                )
+                .await?,
+            ))
+        };
 
         let attributes = ZonePayloadAttributes {
             inner: EthPayloadAttributes {
@@ -366,7 +385,7 @@ impl ZoneEngine {
                 target_gas_limit: None,
             },
             timestamp_millis_part,
-            tempo_import: TempoImport::Full(Box::new(l1_block)),
+            tempo_import,
         };
 
         // Send FCU with payload attributes through the engine API to trigger
@@ -401,7 +420,13 @@ impl ZoneEngine {
 
         // newPayload succeeded — remove the exact finalized L1 block that
         // produced it. A mismatch indicates an internal consumer-ordering bug.
-        self.deposit_queue.confirm(l1_num_hash)?;
+        if checkpoint_only {
+            for header in checkpoint_headers {
+                self.deposit_queue.defer(header.num_hash())?;
+            }
+        } else {
+            self.deposit_queue.confirm_operational(l1_num_hash)?;
+        }
         self.l1_block_tracker.prune_through(l1_num_hash.number);
         if let Some(permit) = &self.production_permit {
             permit.record_applied_anchor(l1_num_hash.number);
@@ -420,6 +445,22 @@ impl ZoneEngine {
     }
 }
 
+fn checkpoint_header_count(
+    chain_spec: &ZoneChainSpec,
+    queued_headers: &[SealedHeader<TempoHeader>],
+) -> usize {
+    if !queued_headers
+        .first()
+        .is_some_and(|header| chain_spec.zone_hardfork_at(header.timestamp()).is_z1())
+    {
+        return 0;
+    }
+    queued_headers
+        .len()
+        .saturating_sub(1)
+        .min(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK)
+}
+
 impl AvailableBlockDrain for ZoneEngine {
     type Block = L1BlockDeposits;
 
@@ -428,7 +469,6 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
-        // No permit is legacy single-sequencer mode: production is always authorized.
         self.production_permit
             .as_ref()
             .and_then(|permit| permit.check(block.header.number()))
@@ -469,6 +509,45 @@ mod tests {
     #[test]
     fn zone_timestamp_advances_past_parent_when_catching_up_in_same_millisecond() {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_001);
+    }
+
+    fn z1_spec(activation: u64) -> ZoneChainSpec {
+        use reth_chainspec::EthChainSpec as _;
+        let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
+        genesis.config.chain_id =
+            zone_primitives::constants::zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1)
+                .unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("z1Time".into(), activation)
+            .unwrap();
+        ZoneChainSpec::from_genesis(genesis).unwrap()
+    }
+
+    fn header(number: u64, timestamp: u64) -> SealedHeader<TempoHeader> {
+        SealedHeader::seal_slow(TempoHeader {
+            inner: alloy_consensus::Header {
+                number,
+                timestamp,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn checkpoint_batching_does_not_cross_z1_activation() {
+        let spec = z1_spec(100);
+        assert_eq!(
+            checkpoint_header_count(&spec, &[header(1, 99), header(2, 100)]),
+            0
+        );
+        assert_eq!(
+            checkpoint_header_count(&spec, &[header(2, 100), header(3, 101)]),
+            1
+        );
+        assert_eq!(checkpoint_header_count(&spec, &[header(2, 100)]), 0);
     }
 
     struct PausedDrain {
