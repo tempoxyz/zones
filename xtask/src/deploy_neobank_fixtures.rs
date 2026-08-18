@@ -155,7 +155,7 @@ pub(crate) struct DeployNeobankFixtures {
     private_asset: Address,
 
     /// Directory containing Foundry artifacts from the external Earn checkout and local fixtures.
-    #[arg(long, default_value = "specs/ref-impls/benchmark-out")]
+    #[arg(long, default_value = "crates/contracts/benchmark-out")]
     specs_out: PathBuf,
 
     /// Exact revision of the external Earn checkout used to build the Foundry artifacts.
