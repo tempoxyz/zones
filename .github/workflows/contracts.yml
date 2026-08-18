@@ -53,7 +53,7 @@ jobs:
         run: forge build --sizes
 
       - name: Check Solidity and Rust ABIs
-        run: cargo run -p tempo-xtask --features abi-check -- check-abi
+        run: cargo run -p tempo-xtask -- check-abi
 
       - name: Check Solidity and Rust storage layouts
         run: cargo test -p zone-precompiles --test storage --features test-utils
