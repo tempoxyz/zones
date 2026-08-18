@@ -356,8 +356,7 @@ where
         return Err(fail(eyre::eyre!("Zone block did not advance Tempo")));
     }
     let mut block_effects = effects::from_tempo_history(&history);
-    block_effects
-        .extend(effects::from_zone(l2.bridge_events()).map_err(|error| fail(error.into()))?);
+    block_effects.extend(effects::from_zone(&l2));
     let mut candidate = prior.state.as_ref().clone();
     candidate
         .apply(&block_effects)

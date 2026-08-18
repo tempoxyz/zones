@@ -5,11 +5,11 @@ use alloy_primitives::{Address, U256};
 use super::{AccountKey, Effect};
 use crate::{
     l1::{L1BlockEvidence, L1PortalEvent},
-    l2::L2BridgeEvent,
+    l2::{L2BlockEvidence, L2BridgeEvent},
 };
 
 /// Convert canonical transfers after their protocol provenance has been authenticated.
-pub(crate) fn from_transfers(
+fn from_transfers(
     transfers: impl IntoIterator<Item = (Address, Address, Address, U256)>,
 ) -> Vec<Effect> {
     transfers
@@ -49,7 +49,7 @@ pub(crate) fn from_tempo_history(history: &[L1BlockEvidence]) -> Vec<Effect> {
 }
 
 /// Derive liability changes from authenticated Tempo Portal events.
-pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Effect> {
+fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Effect> {
     let mut effects = Vec::new();
     for event in events {
         match *event {
@@ -115,13 +115,14 @@ pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>
     effects
 }
 
+/// Derive account and liability changes from authenticated Zone evidence.
+pub(crate) fn from_zone(block: &L2BlockEvidence) -> Vec<Effect> {
+    from_zone_events(block.bridge_events())
+}
+
 /// Derive account and liability changes from authenticated Zone events.
-pub(crate) fn from_zone<'a>(
-    events: impl IntoIterator<Item = &'a L2BridgeEvent>,
-) -> Result<Vec<Effect>, EffectError> {
-    let events = events.into_iter().collect::<Vec<_>>();
-    authenticate_mints(&events)?;
-    let mut effects = from_transfers(events.iter().filter_map(|event| match **event {
+fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone) -> Vec<Effect> {
+    let mut effects = from_transfers(events.clone().filter_map(|event| match *event {
         L2BridgeEvent::Transfer {
             token,
             from,
@@ -174,78 +175,7 @@ pub(crate) fn from_zone<'a>(
             | L2BridgeEvent::BatchFinalized { .. } => {}
         }
     }
-    Ok(effects)
-}
-
-/// Require every Inbox mint to name the recipient authenticated by its bridge event.
-fn authenticate_mints(events: &[&L2BridgeEvent]) -> Result<(), EffectError> {
-    let mut mints = events
-        .iter()
-        .filter_map(|event| match **event {
-            L2BridgeEvent::Transfer {
-                token,
-                from,
-                to,
-                amount,
-            } if from.is_zero() => Some((token, to, amount)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for expected in events.iter().filter_map(|event| match **event {
-        L2BridgeEvent::DepositOutcome {
-            recipient: Some(recipient),
-            token,
-            amount,
-            processed: true,
-            ..
-        }
-        | L2BridgeEvent::WithdrawalBounceBack {
-            recipient,
-            token,
-            amount,
-            processed: true,
-        }
-        | L2BridgeEvent::RefundClaimed {
-            recipient,
-            token,
-            amount,
-        } => Some((token, recipient, U256::from(amount))),
-        _ => None,
-    }) {
-        let Some(index) = mints.iter().position(|mint| *mint == expected) else {
-            return Err(EffectError::MissingMint {
-                token: expected.0,
-                recipient: expected.1,
-                amount: expected.2,
-            });
-        };
-        mints.swap_remove(index);
-    }
-    if let Some((token, recipient, amount)) = mints.into_iter().next() {
-        return Err(EffectError::UnexpectedMint {
-            token,
-            recipient,
-            amount,
-        });
-    }
-    Ok(())
-}
-
-/// Bridge-event evidence that could not be reconciled into effects.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum EffectError {
-    #[error("missing authenticated mint of {amount} {token} to {recipient}")]
-    MissingMint {
-        token: Address,
-        recipient: Address,
-        amount: U256,
-    },
-    #[error("unexpected mint of {amount} {token} to {recipient}")]
-    UnexpectedMint {
-        token: Address,
-        recipient: Address,
-        amount: U256,
-    },
+    effects
 }
 
 #[cfg(test)]
@@ -285,46 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn authenticates_encrypted_deposit_recipient() {
-        let token = Address::repeat_byte(1);
-        let recipient = Address::repeat_byte(2);
-        let amount = 10;
-        let outcome = L2BridgeEvent::DepositOutcome {
-            deposit_hash: Default::default(),
-            recipient: Some(recipient),
-            token,
-            amount,
-            processed: true,
-        };
-        let mint = L2BridgeEvent::Transfer {
-            token,
-            from: Address::ZERO,
-            to: recipient,
-            amount: U256::from(amount),
-        };
-        assert!(from_zone([&outcome, &mint]).is_ok());
-
-        let wrong_mint = L2BridgeEvent::Transfer {
-            token,
-            from: Address::ZERO,
-            to: Address::repeat_byte(3),
-            amount: U256::from(amount),
-        };
-        assert!(from_zone([&outcome, &wrong_mint]).is_err());
-    }
-
-    #[test]
-    fn rejects_unexplained_mint() {
-        let mint = L2BridgeEvent::Transfer {
-            token: Address::repeat_byte(1),
-            from: Address::ZERO,
-            to: Address::repeat_byte(2),
-            amount: U256::from(10),
-        };
-        assert!(from_zone([&mint]).is_err());
-    }
-
-    #[test]
     fn deposit_bounce_back_does_not_create_withdrawal_liability() {
         let event = L2BridgeEvent::WithdrawalRequested {
             withdrawal_index: 0,
@@ -336,7 +226,7 @@ mod tests {
             is_deposit_bounce_back: true,
         };
 
-        assert!(from_zone([&event]).unwrap().is_empty());
+        assert!(from_zone_events([&event].into_iter()).is_empty());
     }
 
     #[test]
@@ -374,7 +264,7 @@ mod tests {
             processed: true,
         };
         state
-            .apply(&from_zone([&mint, &bounce_back]).unwrap())
+            .apply(&from_zone_events([&mint, &bounce_back].into_iter()))
             .unwrap();
 
         let token_state = state.token(token).unwrap();

@@ -42,7 +42,7 @@ impl L2BlockEvidence {
     }
 
     /// Return authenticated bridge events in block-log order.
-    pub(crate) fn bridge_events(&self) -> impl Iterator<Item = &L2BridgeEvent> {
+    pub(crate) fn bridge_events(&self) -> impl Iterator<Item = &L2BridgeEvent> + Clone {
         self.events.events.iter().map(|evidence| &evidence.event)
     }
 }
