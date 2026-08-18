@@ -3,12 +3,14 @@
 use super::artifact;
 use tempo_precompiles::{
     test_util::storage_conformance::{
-        RustStorageField, RustStorageSlot, assert_foundry_slots, compare_layouts, load_solc_layout,
-        panic_layout_mismatch,
+        RustStorageField, RustStorageSlot, assert_foundry_slots, compare_layouts,
+        compare_struct_members, load_solc_layout, panic_layout_mismatch,
     },
     zone_factory::portal,
 };
-use tempo_precompiles_macros::gen_test_fields_layout as layout_fields;
+use tempo_precompiles_macros::{
+    gen_test_fields_layout as layout_fields, gen_test_fields_struct as struct_fields,
+};
 
 fn assert_native_layout(schema: &str, rust: &[RustStorageField]) {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -100,4 +102,25 @@ fn zone_outbox_layout_matches_solidity() {
     })
     .collect::<Vec<_>>();
     assert_native_layout("zone_outbox.sol", &fields);
+
+    use zone_precompiles::outbox::__packing_pending_withdrawal::*;
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/solidity/zone_outbox.sol");
+    let solidity = load_solc_layout(&path);
+    let pending = struct_fields!(
+        slots::PENDING_WITHDRAWALS,
+        token,
+        sender,
+        tx_hash,
+        to,
+        amount,
+        memo,
+        gas_limit,
+        fallback_nonce,
+        callback_data,
+        reveal_to
+    );
+    if let Err(errors) = compare_struct_members(&solidity, "_pendingWithdrawals", &pending) {
+        panic_layout_mismatch("PendingWithdrawal layout", errors, &path);
+    }
 }
