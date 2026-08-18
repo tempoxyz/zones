@@ -144,14 +144,14 @@ pub fn extend_zone_precompiles<P>(
             return Some(create_outbox_precompile(l1.clone(), &env));
         }
 
-        if *address == TIP20_FACTORY_ADDRESS
+        if is_tip20_prefix(*address) {
+            Some(create_tip20_precompile(*address, &env))
+        } else if *address == TIP20_FACTORY_ADDRESS
             || *address == TIP_FEE_MANAGER_ADDRESS
             || *address == TIP20_CHANNEL_RESERVE_ADDRESS
             || *address == STABLECOIN_DEX_ADDRESS
         {
             None
-        } else if is_tip20_prefix(*address) {
-            Some(create_tip20_precompile(*address, &env))
         } else if *address == TEMPO_STATE_ADDRESS {
             Some(TempoState::create(l1.clone(), &env))
         } else if *address == ZONE_INBOX_ADDRESS {
