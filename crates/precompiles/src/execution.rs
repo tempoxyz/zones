@@ -75,13 +75,7 @@ pub(crate) enum CallCheck {
     /// Revert with ABI-encoded data. The execution wrapper MUST apply input gas and reservoir.
     Revert(Bytes),
     /// Return an error raised while evaluating an admission rule.
-    Error(CallRuleError),
-}
-
-/// Error raised while evaluating zone-specific pre-execution rules.
-pub(crate) enum CallRuleError {
-    /// An error originating in the upstream Tempo precompiles crate.
-    Tempo(TempoPrecompileError),
+    Error(TempoPrecompileError),
 }
 
 /// Selector and caller dependent precompile call rules evaluated after storage setup.
@@ -162,9 +156,7 @@ pub(crate) fn create_precompile(
             }
             CallCheck::Error(error) => {
                 let s = StorageCtx::default();
-                let result = match error {
-                    CallRuleError::Tempo(error) => s.error_result(error),
-                };
+                let result = s.error_result(error);
                 add_input_cost(s, data, result)
             }
         });

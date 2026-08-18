@@ -5,7 +5,7 @@
 //! the return value as a receipt-existence and amount oracle.
 
 use crate::{
-    execution::{CallCheck, CallRuleError, CallRules},
+    execution::{CallCheck, CallRules},
     ztip20::TIP20_FIXED_TRANSFER_GAS,
 };
 use alloy_primitives::Address;
@@ -49,7 +49,7 @@ impl CallRules for ReceivePolicyGuardRules {
         match AddressRegistry::new().resolve_recipient(receipt.recipient) {
             Ok(receiver) if caller == receiver => CallCheck::Continue,
             Ok(_) => CallCheck::Revert(Unauthorized {}.abi_encode().into()),
-            Err(error) => CallCheck::Error(CallRuleError::Tempo(error)),
+            Err(error) => CallCheck::Error(error),
         }
     }
 }
@@ -183,9 +183,7 @@ mod tests {
         StorageCtx::enter(&mut storage, || {
             assert!(matches!(
                 rules.admit(&balance_call(&receipt), OUTSIDER),
-                CallCheck::Error(CallRuleError::Tempo(
-                    tempo_precompiles::error::TempoPrecompileError::OutOfGas
-                ))
+                CallCheck::Error(tempo_precompiles::error::TempoPrecompileError::OutOfGas)
             ));
         });
         Ok(())
