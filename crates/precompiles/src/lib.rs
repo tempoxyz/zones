@@ -134,45 +134,40 @@ pub fn extend_zone_precompiles<P>(
 {
     let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
 
-    precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
-        Some(TempoState::create(l1.clone(), &env))
-    });
-    #[cfg(feature = "std")]
-    precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| {
-        Some(tx_context::ZoneTxContext::create())
-    });
-    precompiles.apply_precompile(&ZONE_INBOX_ADDRESS, |_| {
-        Some(ZoneInbox::create(l1.clone(), &env))
-    });
-    #[cfg(feature = "std")]
-    precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, |_| {
-        Some(create_outbox_precompile(l1.clone(), &env))
-    });
-    precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
-        Some(zone_precompile!(env, ChaumPedersenVerify))
-    });
-    precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
-        Some(zone_precompile!(env, AesGcmDecrypt))
-    });
-    precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, |_| {
-        Some(zone_precompile!(env, ZoneFeeManager))
-    });
-    precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, |_| {
-        Some(zone_precompile!(
-            env,
-            TIP403Registry,
-            tip403_proxy::Tip403Rules
-        ))
-    });
-    precompiles.apply_precompile(&TIP20_FACTORY_ADDRESS, |_| None);
-    precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
-    precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
-
     precompiles.set_precompile_lookup(move |address: &Address| {
-        if is_tip20_prefix(*address) {
-            Some(create_tip20_precompile(*address, &env))
-        } else if *address == STABLECOIN_DEX_ADDRESS {
+        #[cfg(feature = "std")]
+        if *address == ZONE_TX_CONTEXT_ADDRESS {
+            return Some(tx_context::ZoneTxContext::create());
+        }
+        #[cfg(feature = "std")]
+        if *address == ZONE_OUTBOX_ADDRESS {
+            return Some(create_outbox_precompile(l1.clone(), &env));
+        }
+
+        if *address == TIP20_FACTORY_ADDRESS
+            || *address == TIP_FEE_MANAGER_ADDRESS
+            || *address == TIP20_CHANNEL_RESERVE_ADDRESS
+            || *address == STABLECOIN_DEX_ADDRESS
+        {
             None
+        } else if is_tip20_prefix(*address) {
+            Some(create_tip20_precompile(*address, &env))
+        } else if *address == TEMPO_STATE_ADDRESS {
+            Some(TempoState::create(l1.clone(), &env))
+        } else if *address == ZONE_INBOX_ADDRESS {
+            Some(ZoneInbox::create(l1.clone(), &env))
+        } else if *address == CHAUM_PEDERSEN_VERIFY_ADDRESS {
+            Some(zone_precompile!(env, ChaumPedersenVerify))
+        } else if *address == AES_GCM_DECRYPT_ADDRESS {
+            Some(zone_precompile!(env, AesGcmDecrypt))
+        } else if *address == ZONE_FEE_MANAGER_ADDRESS {
+            Some(zone_precompile!(env, ZoneFeeManager))
+        } else if *address == TIP403_REGISTRY_ADDRESS {
+            Some(zone_precompile!(
+                env,
+                TIP403Registry,
+                tip403_proxy::Tip403Rules
+            ))
         } else if *address == NONCE_PRECOMPILE_ADDRESS {
             Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
         } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
