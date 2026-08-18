@@ -171,6 +171,7 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
             retry_connection_interval: Duration::from_secs(1),
             leadership_sink: None,
             encryption_keys: None,
+            deferred_work_start: None,
         },
         local_state,
         deposit_queue: DepositQueue::default(),
@@ -1273,6 +1274,111 @@ fn confirm_through_is_idempotent_and_drains_stale_entries() {
     queue.confirm_through(anchor).unwrap();
     assert!(queue.peek().is_none());
     queue.confirm_through(anchor).unwrap();
+}
+
+#[test]
+fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_blocks() {
+    let queue = DepositQueue::new();
+    let first = SealedHeader::seal_slow(make_test_header(1));
+    let second = SealedHeader::seal_slow(make_chained_header(2, first.hash()));
+    let third = SealedHeader::seal_slow(make_chained_header(3, second.hash()));
+    for header in [&first, &second, &third] {
+        queue
+            .try_enqueue_sealed(header.clone(), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    queue.defer_through(second.num_hash()).unwrap();
+    queue.defer_through(second.num_hash()).unwrap();
+    assert_eq!(queue.peek().unwrap().header.num_hash(), third.num_hash());
+    assert_eq!(
+        queue
+            .operational_work(&queue.peek().unwrap())
+            .unwrap()
+            .len(),
+        3
+    );
+
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    assert!(queue.peek().is_none());
+
+    let fourth = SealedHeader::seal_slow(make_chained_header(4, third.hash()));
+    let fifth = SealedHeader::seal_slow(make_chained_header(5, fourth.hash()));
+    queue
+        .try_enqueue_sealed(fourth.clone(), L1PortalEvents::default())
+        .unwrap();
+    queue.defer_through(fourth.num_hash()).unwrap();
+    queue
+        .try_enqueue_sealed(fifth, L1PortalEvents::default())
+        .unwrap();
+
+    // A late replay of block 3 must preserve block 4's newer deferred work.
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    assert_eq!(
+        queue
+            .operational_work(&queue.peek().unwrap())
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn deferred_checkpoint_work_survives_until_operational_confirmation() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let h12 = make_chained_header(12, header_hash(&h11));
+    for header in [h10, h11, h12] {
+        queue
+            .try_enqueue_sealed(seal(header), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    let first = queue.peek().unwrap();
+    queue.defer(first.header.num_hash()).unwrap();
+    let second = queue.peek().unwrap();
+    queue.defer(second.header.num_hash()).unwrap();
+    let current = queue.peek().unwrap();
+    let work = queue.operational_work(&current).unwrap();
+    assert_eq!(
+        work.iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+
+    queue
+        .confirm_operational(current.header.num_hash())
+        .unwrap();
+    assert!(queue.peek().is_none());
+}
+
+#[test]
+fn restart_can_seed_deferred_checkpoint_work() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    queue
+        .seed_deferred(vec![
+            L1BlockDeposits {
+                header: seal(h10),
+                events: L1PortalEvents::default(),
+            },
+            L1BlockDeposits {
+                header: seal(h11),
+                events: L1PortalEvents::default(),
+            },
+        ])
+        .unwrap();
+
+    let h12 = make_chained_header(12, queue.last_enqueued().unwrap().hash);
+    queue
+        .try_enqueue_sealed(seal(h12), L1PortalEvents::default())
+        .unwrap();
+    let current = queue.peek().unwrap();
+    assert_eq!(queue.operational_work(&current).unwrap().len(), 3);
 }
 
 #[test]

@@ -20,11 +20,12 @@ use crate::{
     },
 };
 use alloy_chains::Chain;
-use alloy_consensus::BlockHeader as _;
-use alloy_eips::BlockNumberOrTag;
+use alloy_consensus::{BlockHeader as _, TxReceipt as _};
+use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::SolEvent as _;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
@@ -49,7 +50,8 @@ use reth_rpc_api::Web3ApiServer as _;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
-    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
+    BlockNumReader, EmptyBodyStorage, HeaderProvider, ReceiptProvider, StateProvider,
+    StateProviderFactory,
 };
 use reth_transaction_pool::{
     Pool, PoolTransaction, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
@@ -72,7 +74,7 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -115,6 +117,35 @@ fn validate_configured_zone_id(
         "zone ID mismatch: {source} has {configured_zone_id}, but portal has {portal_zone_id}"
     );
     Ok(())
+}
+
+fn latest_operational_tempo_block<P>(provider: &P) -> eyre::Result<u64>
+where
+    P: BlockNumReader + ReceiptProvider + StateProviderFactory,
+{
+    let best = provider.best_block_number()?;
+    for number in (1..=best).rev() {
+        let Some(receipts) = provider.receipts_by_block(BlockHashOrNumber::Number(number))? else {
+            continue;
+        };
+        for receipt in receipts {
+            for log in receipt.logs() {
+                if log.address == ZONE_INBOX_ADDRESS
+                    && log.topics().first() == Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
+                {
+                    return Ok(IZoneInbox::TempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                }
+            }
+        }
+    }
+
+    let genesis_hash = provider
+        .block_hash(0)?
+        .ok_or_else(|| eyre::eyre!("zone genesis block hash is unavailable"))?;
+    Ok(provider
+        .state_by_block_hash(genesis_hash)?
+        .tempo_num_hash()?
+        .number)
 }
 
 /// Network primitives for Zone Nodes
@@ -258,6 +289,7 @@ impl ZoneNode {
             retry_connection_interval,
             leadership_sink: None,
             encryption_keys: None,
+            deferred_work_start: None,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -506,6 +538,11 @@ where
         );
 
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
+        let last_operational_tempo_block = latest_operational_tempo_block(ctx.node.provider())?;
+        if last_operational_tempo_block < tempo_block_number {
+            self.l1_config.deferred_work_start =
+                Some(last_operational_tempo_block.saturating_add(1));
+        }
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
