@@ -297,7 +297,6 @@ mod tests {
         let request = VerifyRequest {
             version: 2,
             request_id: "version-test".into(),
-            tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
         let response = process_request(request, &TrustedChainSpecs::default());
@@ -317,7 +316,6 @@ mod tests {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
             request_id: "chain-test".into(),
-            tempo_chain_id: 99,
             witness: empty_witness(),
         };
         let response = process_request(request, &TrustedChainSpecs::default());
@@ -337,7 +335,6 @@ mod tests {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
             request_id: "spf-test".into(),
-            tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
         let response = process_request(request, &TrustedChainSpecs::default());
@@ -364,7 +361,6 @@ mod tests {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
             request_id: "custom-chain-test".into(),
-            tempo_chain_id: chain_id,
             witness: empty_witness(),
         };
 
