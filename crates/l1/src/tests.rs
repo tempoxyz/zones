@@ -333,6 +333,17 @@ async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
 }
 
 #[test]
+fn l1_block_tracker_finalized_target_is_monotonic() {
+    let tracker = L1BlockTracker::default();
+    assert_eq!(tracker.finalized_target(), None);
+
+    tracker.record_finalized_target(200);
+    tracker.record_finalized_target(199);
+
+    assert_eq!(tracker.finalized_target(), Some(200));
+}
+
+#[test]
 fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
     let tracker = L1BlockTracker::default();
     tracker.initialize_consumed_through(10);
@@ -805,6 +816,7 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
         .unwrap();
 
     assert_eq!(next, 11);
+    assert_eq!(subscriber.config.block_tracker.finalized_target(), Some(10));
     assert!(subscriber.deposit_queue.drain().is_empty());
     assert!(asserter.read_q().is_empty());
 }

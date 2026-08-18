@@ -15,6 +15,7 @@ struct L1BlockTrackerState {
     observed: BTreeMap<u64, L1BlockObservation>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
+    finalized_target: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,23 @@ impl Default for L1BlockTracker {
 }
 
 impl L1BlockTracker {
+    /// Record the highest finalized L1 height the subscriber has been asked to ingest.
+    ///
+    /// This is published before backfill starts so the Zone engine does not mistake a partially
+    /// filled queue for the end of the finalized range. The watermark remains monotonic across
+    /// reconnects so a lagging RPC endpoint cannot move the target backwards.
+    pub fn record_finalized_target(&self, number: u64) {
+        let mut state = self.state.write();
+        state.finalized_target = Some(state.finalized_target.map_or(number, |old| old.max(number)));
+        drop(state);
+        self.changed.send_replace(());
+    }
+
+    /// Return the highest finalized L1 height announced by the subscriber.
+    pub fn finalized_target(&self) -> Option<u64> {
+        self.state.read().finalized_target
+    }
+
     /// Initialize the last L1 height already represented by canonical local zone state.
     pub fn initialize_consumed_through(&self, number: u64) {
         let mut state = self.state.write();
@@ -546,6 +564,7 @@ impl L1Subscriber {
         next_block: u64,
     ) -> eyre::Result<u64> {
         let finalized = self.finalized_block_number(l1_provider).await?;
+        self.config.block_tracker.record_finalized_target(finalized);
         if next_block > finalized {
             self.record_seen_block(finalized, 0);
             return Ok(next_block);
