@@ -144,9 +144,9 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn enqueue(&mut self, pending: PendingWithdrawal) -> ZoneResult<()> {
+    fn enqueue(&mut self, pending: PendingWithdrawal, fee: u128) -> ZoneResult<()> {
         let index = self.next_withdrawal_index.read()?;
-        self.emit_event(pending.requested_event(index))?;
+        self.emit_event(pending.requested_event(index, fee))?;
 
         self.pending_withdrawals.push(pending)?;
         self.next_withdrawal_index.write(
@@ -213,13 +213,10 @@ impl ZoneOutbox {
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.last_fallback_nonce.write(fallback_nonce)?;
         self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
-        self.enqueue(PendingWithdrawal::from_request(
-            caller,
-            current_tx_hash,
+        self.enqueue(
+            PendingWithdrawal::from_request(caller, current_tx_hash, fallback_nonce, call),
             fee,
-            fallback_nonce,
-            call,
-        ))
+        )
     }
 
     fn transfer_and_burn(
@@ -252,7 +249,7 @@ impl ZoneOutbox {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
 
-        self.enqueue(PendingWithdrawal::from_bounce_back(call))
+        self.enqueue(PendingWithdrawal::from_bounce_back(call), 0)
     }
 
     pub(crate) fn consume_fallback_recipient(
@@ -411,7 +408,6 @@ struct PendingWithdrawal {
     tx_hash: B256,
     to: Address,
     amount: u128,
-    fee: u128,
     memo: B256,
     gas_limit: u64,
     fallback_nonce: u64,
@@ -423,7 +419,6 @@ impl PendingWithdrawal {
     fn from_request(
         sender: Address,
         tx_hash: B256,
-        fee: u128,
         fallback_nonce: u64,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> Self {
@@ -433,7 +428,6 @@ impl PendingWithdrawal {
             tx_hash,
             to: call.to,
             amount: call.amount,
-            fee,
             memo: call.memo,
             gas_limit: call.gasLimit,
             fallback_nonce,
@@ -451,14 +445,14 @@ impl PendingWithdrawal {
         }
     }
 
-    fn requested_event(&self, index: u64) -> ZoneOutboxEvent {
+    fn requested_event(&self, index: u64, fee: u128) -> ZoneOutboxEvent {
         ZoneOutboxEvent::withdrawal_requested(
             index,
             self.sender,
             self.token,
             self.to,
             self.amount,
-            self.fee,
+            fee,
             self.memo,
             self.gas_limit,
             self.fallback_nonce,

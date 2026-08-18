@@ -26,8 +26,8 @@ use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
-use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
+use zone_precompiles::{outbox, tempo_state};
+use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
 };
@@ -365,7 +365,6 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
         request_id,
-        tempo_chain_id: discovery.tempo_chain_id,
         witness,
     };
 
@@ -926,12 +925,12 @@ async fn initial_tempo_header(
     let (hash_word, number_word) = tokio::try_join!(
         zone.get_storage_at(
             TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state_slots::TEMPO_BLOCK_HASH)
+            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH)
         )
         .block_id(block_id),
         zone.get_storage_at(
             TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state_slots::TEMPO_BLOCK_NUMBER)
+            U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER)
         )
         .block_id(block_id),
     )?;
@@ -952,7 +951,7 @@ async fn withdrawal_batch_index_at(
     block_number: u64,
 ) -> Result<u64> {
     let index = zone
-        .get_storage_at(ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT)
+        .get_storage_at(ZONE_OUTBOX_ADDRESS, outbox::slots::WITHDRAWAL_BATCH_INDEX)
         .block_id(BlockId::number(block_number))
         .await?;
     Ok(index.as_limbs()[0])

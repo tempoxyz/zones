@@ -230,18 +230,16 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
         };
     }
 
-    let Some(tempo_spec) = specs.resolve(request.tempo_chain_id) else {
+    let tempo_chain_id = request.witness.public_inputs.parent_chain_id;
+    let Some(tempo_spec) = specs.resolve(tempo_chain_id) else {
         return VerifyResponse::Error {
             version: PROTOCOL_VERSION,
             request_id: Some(request.request_id),
             code: ErrorCode::UnsupportedChain,
-            message: format!("unsupported Tempo chain ID {}", request.tempo_chain_id),
+            message: format!("unsupported Tempo chain ID {tempo_chain_id}"),
         };
     };
-    let zone_chain_id = match zone_chain_id(
-        request.tempo_chain_id,
-        request.witness.public_inputs.zone_id,
-    ) {
+    let zone_chain_id = match zone_chain_id(tempo_chain_id, request.witness.public_inputs.zone_id) {
         Ok(chain_id) => chain_id,
         Err(error) => {
             return VerifyResponse::Error {
@@ -299,7 +297,6 @@ mod tests {
         let request = VerifyRequest {
             version: 2,
             request_id: "version-test".into(),
-            tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
         let response = process_request(request, &TrustedChainSpecs::default());
@@ -315,31 +312,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_chain_before_execution() {
-        let request = VerifyRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "chain-test".into(),
-            tempo_chain_id: 99,
-            witness: empty_witness(),
-        };
-        let response = process_request(request, &TrustedChainSpecs::default());
-
-        assert!(matches!(
-            response,
-            VerifyResponse::Error {
-                request_id: Some(id),
-                code: ErrorCode::UnsupportedChain,
-                ..
-            } if id == "chain-test"
-        ));
-    }
-
-    #[test]
     fn reports_spf_verification_errors_without_panicking() {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
             request_id: "spf-test".into(),
-            tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
         let response = process_request(request, &TrustedChainSpecs::default());
@@ -366,7 +342,6 @@ mod tests {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
             request_id: "custom-chain-test".into(),
-            tempo_chain_id: chain_id,
             witness: empty_witness(),
         };
 

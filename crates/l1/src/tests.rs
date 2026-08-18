@@ -58,7 +58,7 @@ struct MalformedTempoHeadersFixture {
 fn deposit_hash_fixture() -> DepositHashFixture {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../specs/ref-impls/test/fixtures/depositHashChain.json"
+        "/testdata/depositHashChain.json"
     )))
     .expect("deposit hash fixture JSON should decode")
 }
@@ -66,7 +66,7 @@ fn deposit_hash_fixture() -> DepositHashFixture {
 fn malformed_tempo_headers_fixture() -> MalformedTempoHeadersFixture {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../specs/ref-impls/test/fixtures/malformedTempoHeaders.json"
+        "/testdata/malformedTempoHeaders.json"
     )))
     .expect("malformed Tempo headers fixture JSON should decode")
 }

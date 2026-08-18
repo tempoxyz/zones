@@ -31,6 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider};
@@ -51,6 +52,14 @@ use crate::{
 use tempo_alloy::rpc::TempoCallBuilderExt;
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn bound_l1_fees(fees: Eip1559Estimation) -> Eip1559Estimation {
+    let max_fee_per_gas = fees.max_fee_per_gas.min(crate::TEMPO_L1_MAX_FEE_PER_GAS);
+    Eip1559Estimation {
+        max_fee_per_gas,
+        max_priority_fee_per_gas: fees.max_priority_fee_per_gas.min(max_fee_per_gas),
+    }
+}
 
 // These planner allowances were calibrated against the current ZonePortal/ZoneMessenger bytecode.
 // Pre-refund T1 dev-L1 traces used 553,703, 1,068,088, and 1,348,063 gas for one, two, and four
@@ -649,6 +658,7 @@ impl WithdrawalProcessor {
         let mut in_flight = FuturesUnordered::new();
         let mut submitted = 0usize;
         let mut retry = false;
+        let fees = bound_l1_fees(self.provider.estimate_eip1559_fees().await?);
 
         loop {
             while !retry
@@ -693,8 +703,8 @@ impl WithdrawalProcessor {
                     .from(self.config.sequencer_address)
                     .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY)
                     .nonce(nonce)
-                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
-                    .max_priority_fee_per_gas(0)
+                    .max_fee_per_gas(fees.max_fee_per_gas)
+                    .max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
                     .gas(batch.gas_limit);
 
                 in_flight.push(async move {
@@ -939,13 +949,14 @@ mod tests {
     use super::*;
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_provider::{Provider, ProviderBuilder};
+    use alloy_rpc_types_eth::FeeHistory;
     use alloy_sol_types::SolValue;
     use alloy_transport::mock::Asserter;
     use tempo_alloy::TempoNetwork;
     use tokio::time::timeout;
 
     fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
+        ProviderBuilder::<_, _, TempoNetwork>::default()
             .connect_mocked_client(asserter)
             .erased()
     }
@@ -978,6 +989,15 @@ mod tests {
         })
     }
 
+    fn fee_history() -> FeeHistory {
+        FeeHistory {
+            base_fee_per_gas: vec![1, 1],
+            gas_used_ratio: vec![0.5],
+            reward: Some(vec![vec![1]]),
+            ..Default::default()
+        }
+    }
+
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
             token: address!("0x0000000000000000000000000000000000001000"),
@@ -995,6 +1015,20 @@ mod tests {
     #[test]
     fn empty_queue_hash_is_zero() {
         assert_eq!(abi::Withdrawal::queue_hash(&[]), B256::ZERO);
+    }
+
+    #[test]
+    fn bounds_l1_fee_estimate() {
+        let fees = bound_l1_fees(Eip1559Estimation {
+            max_fee_per_gas: u128::MAX,
+            max_priority_fee_per_gas: u128::MAX,
+        });
+
+        assert_eq!(fees.max_fee_per_gas, crate::TEMPO_L1_MAX_FEE_PER_GAS);
+        assert_eq!(
+            fees.max_priority_fee_per_gas,
+            crate::TEMPO_L1_MAX_FEE_PER_GAS
+        );
     }
 
     #[test]
@@ -1342,7 +1376,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_stops_refill_but_drains_submitted_batches() {
         let l1 = Asserter::new();
-        l1.push_success(&1_u64);
+        l1.push_success(&fee_history());
 
         let mut processor = test_processor(
             l1.clone(),

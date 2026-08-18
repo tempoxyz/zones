@@ -146,7 +146,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     register_encryption_key(&provider, portal, &dev_key).await?;
 
     let (mut genesis, anchor_block_number) =
-        crate::genesis::l1_anchored_genesis(&anchor_header, portal, initial_token)?;
+        crate::genesis::l1_anchored_genesis(&anchor_header, initial_token)?;
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {

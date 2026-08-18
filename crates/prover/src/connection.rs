@@ -140,7 +140,6 @@ mod tests {
         let request = VerifyRequest {
             version: PROTOCOL_VERSION,
             request_id: "round-trip".into(),
-            tempo_chain_id: 42_431,
             witness: empty_witness(),
         };
         let sent_bytes = client.send(&request).await.unwrap();
@@ -148,7 +147,6 @@ mod tests {
 
         assert_eq!(received.version, PROTOCOL_VERSION);
         assert_eq!(received.request_id, "round-trip");
-        assert_eq!(received.tempo_chain_id, 42_431);
         assert_eq!(server.last_received_bytes(), Some(sent_bytes));
 
         let response = VerifyResponse::Error {

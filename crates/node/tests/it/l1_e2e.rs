@@ -19,13 +19,12 @@ use alloy_consensus::Transaction;
 use eyre::WrapErr as _;
 use futures::future::try_join_all;
 use std::{collections::HashMap, time::Duration};
-use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_precompiles::{PATH_USD_ADDRESS, zone_factory::portal};
 use tempo_zone_contracts::{
     IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
     ZonePortal, ZonePortal::Role as PortalRole,
 };
 use zone_node::dev::{ProvisionConfig, provision_zone};
-use zone_primitives::constants::PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT;
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
@@ -394,13 +393,13 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     let divergent_anchor = cluster.l1.provider().get_block_number().await? + 2;
     cluster.nodes[1].l1_state_cache().lock().set(
         cluster.portal_address,
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into(),
         divergent_anchor,
         B256::repeat_byte(0xD1),
     );
     cluster.nodes[2].l1_state_cache().lock().set(
         cluster.portal_address,
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into(),
         divergent_anchor,
         B256::repeat_byte(0xD2),
     );
@@ -523,7 +522,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
 /// 8. Wait for the batch to be submitted and the withdrawal to be processed on L1.
 ///
 /// NOTE: This test requires the Foundry-compiled shared runtime artifacts.
-/// Run `forge build` in `specs/ref-impls/` first.
+/// Run `forge build` in `crates/contracts/` first.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_deposit_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1299,7 +1298,7 @@ async fn test_queued_callback_bounces_after_gateway_revocation() -> eyre::Result
 ///    |<-- deposit 0.2 ----|                 |
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
+/// NOTE: Requires `forge build` in `crates/contracts/` for shared runtime and router artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1899,7 +1898,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_payload
 ///    |<-- withdraw ZoneUSD --------|  ✓ ZoneUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
+/// NOTE: Requires `forge build` in `crates/contracts/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -2053,7 +2052,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///   │            → tokens to L1              │
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
+/// NOTE: Requires `forge build` in `crates/contracts/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

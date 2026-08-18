@@ -56,10 +56,11 @@ use tempo_precompiles::{
         ALLOW_ALL_POLICY_ID, AuthRole, CompoundPolicyData as RawCompoundPolicyData, PolicyData,
         PolicyType, TIP403Registry, tip403_registry_slots,
     },
+    zone_factory::portal,
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -72,11 +73,7 @@ use zone_l1::{
 use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::{
-    PORTAL_ACCESS_MODE_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_PAUSE_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT, ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
-    zone_chain_id as derive_zone_chain_id,
-};
+use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id as derive_zone_chain_id};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -193,15 +190,15 @@ alloy_sol_types::sol! {
     }
 }
 
-/// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
+/// Read a Foundry artifact from `crates/contracts/out` and return its deployment bytecode.
 ///
-/// Requires `forge build` to have been run in `specs/ref-impls`.
+/// Requires `forge build` to have been run in `crates/contracts`.
 pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
+        format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
     let hex_str = artifact["bytecode"]["object"]
@@ -214,10 +211,10 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 
 fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
+        format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
     let hex_str = artifact["deployedBytecode"]["object"]
@@ -2819,7 +2816,7 @@ async fn patch_clean_portal_snapshot<P: Provider<TempoNetwork>>(
         .storage
         .get_or_insert_with(Default::default)
         .insert(
-            ZONE_INBOX_PROCESSED_TOKEN_ENABLEMENT_HASH_SLOT,
+            zone_precompiles::inbox::slots::PROCESSED_TOKEN_ENABLEMENT_HASH.into(),
             token_enablement_hash,
         );
     Ok(())
@@ -2849,7 +2846,7 @@ async fn build_l1_anchored_genesis(
             .await?
     };
     let (mut genesis, genesis_block_number) =
-        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+        zone_node::genesis::l1_anchored_genesis(l1_header, default_fee_token)?;
     if !portal_address.is_zero() {
         patch_clean_portal_snapshot(
             &l1_provider,
@@ -2885,7 +2882,7 @@ async fn build_l1_anchored_genesis_at_block(
             .await?
     };
     let (mut genesis, genesis_block_number) =
-        zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)?;
+        zone_node::genesis::l1_anchored_genesis(l1_header, default_fee_token)?;
     if !portal_address.is_zero()
         && !l1_provider
             .get_code_at(portal_address)
@@ -4804,11 +4801,11 @@ impl L1Fixture {
         num_blocks: u64,
     ) {
         let mut cache = cache_handle.lock();
-        let deposit_queue_hash_slot = B256::with_last_byte(3);
-        let refunds_slot = B256::with_last_byte(8);
-        let sequencer_membership_slot = keccak256((sequencer, PORTAL_ROLE_SLOT).abi_encode());
+        let deposit_queue_hash_slot = portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into();
+        let refunds_slot = portal::slots::REFUNDS.into();
+        let sequencer_membership_slot = keccak256((sequencer, portal::slots::ROLE).abi_encode());
         let path_usd_config_slot: B256 = PATH_USD_ADDRESS
-            .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
+            .mapping_slot(portal::slots::TOKEN_CONFIGS)
             .into();
         let enabled_token_config = enabled_deposits_active_token_config();
         let max_tempo_gas_rate = B256::from(U256::from(1_000_000_000_000_000_000_u128));
@@ -4816,7 +4813,7 @@ impl L1Fixture {
         let encoded_key = encryption_key.public_key().to_encoded_point(true);
         let encryption_key_x = B256::from_slice(&encoded_key.as_bytes()[1..]);
         let encryption_key_y_parity = encoded_key.as_bytes()[0];
-        let encryption_entries_base = keccak256(PORTAL_ENCRYPTION_KEYS_SLOT);
+        let encryption_entries_base = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS));
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -4843,7 +4840,7 @@ impl L1Fixture {
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(
                 portal_address,
-                PORTAL_ENCRYPTION_KEYS_SLOT,
+                portal::slots::ENCRYPTION_KEYS.into(),
                 block,
                 B256::with_last_byte(1),
             );
@@ -4862,15 +4859,25 @@ impl L1Fixture {
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
             // Synthetic fixtures use open account and gateway modes so their tests do not need
             // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
-            cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            cache.set(
+                portal_address,
+                portal::slots::IS_ACCESS_ENFORCED.into(),
+                block,
+                B256::ZERO,
+            );
             // The Portal is unpaused in synthetic fixtures. Seed the packed pause slot so
             // withdrawal validation does not fall back to an unavailable L1 RPC endpoint.
-            cache.set(portal_address, PORTAL_PAUSE_SLOT, block, B256::ZERO);
+            cache.set(
+                portal_address,
+                portal::slots::PAUSE_EXPIRY.into(),
+                block,
+                B256::ZERO,
+            );
             // Permit the protocol-wide maximum in synthetic fixtures. Production values are
             // imported from the finalized ZonePortal storage slot.
             cache.set(
                 portal_address,
-                PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+                portal::slots::MAX_TEMPO_GAS_RATE.into(),
                 block,
                 max_tempo_gas_rate,
             );

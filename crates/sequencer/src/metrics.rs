@@ -38,6 +38,18 @@ pub(crate) struct ProverMetrics {
     /// Time spent verifying a generated batch witness locally or remotely.
     pub(crate) spf_execution_duration_seconds: Histogram,
 
+    /// Time spent establishing a TCP connection to the remote prover.
+    pub(crate) spf_remote_connect_duration_seconds: Histogram,
+
+    /// Time spent serializing and sending a request to the remote prover.
+    pub(crate) spf_remote_request_send_duration_seconds: Histogram,
+
+    /// Time from sending a remote prover request until the first response byte arrives.
+    pub(crate) spf_remote_response_wait_duration_seconds: Histogram,
+
+    /// Time from the first response byte until the response is fully read and decoded.
+    pub(crate) spf_remote_response_receive_duration_seconds: Histogram,
+
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,
 

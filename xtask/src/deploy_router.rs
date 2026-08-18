@@ -42,7 +42,7 @@ pub(crate) struct DeployRouter {
     stablecoin_dex: Address,
 
     /// Path to the Foundry compiled output directory containing contract artifacts.
-    #[arg(long, default_value = "specs/ref-impls/out")]
+    #[arg(long, default_value = "crates/contracts/out")]
     specs_out: PathBuf,
 }
 

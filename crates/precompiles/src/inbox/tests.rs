@@ -13,7 +13,7 @@ use tempo_precompiles::{
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
     tip403_registry::{ALLOW_ALL_POLICY_ID, ITIP403Registry, REJECT_ALL_POLICY_ID, TIP403Registry},
-    zone_factory::{ZonePortalStorage, zone_portal_slots},
+    zone_factory::portal::{self, ZonePortalStorage},
 };
 use tempo_primitives::TempoHeader;
 use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
@@ -286,7 +286,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
     let plaintext = build_plaintext(&BOB, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
-    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
+    let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
@@ -328,6 +328,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
         head = keccak256((DepositType::Deposit, deposit.clone(), head).abi_encode_params());
         queued_deposits.push(QueuedDeposit {
             depositType: DepositType::Deposit,
+            rejected: false,
             depositData: deposit.abi_encode().into(),
         });
         decryptions.push(decryption.clone());
@@ -513,6 +514,7 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: first_data.into(),
                 }],
                 Vec::new(),
@@ -618,6 +620,7 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: Bytes::from_static(b"malformed"),
                 }],
                 Vec::new(),
@@ -654,6 +657,7 @@ fn non_canonical_encrypted_deposit_is_rejected() {
     assert!(
         decode_deposits(vec![QueuedDeposit {
             depositType: DepositType::Deposit,
+            rejected: false,
             depositData: canonical.into(),
         }])
         .is_ok()
@@ -661,6 +665,7 @@ fn non_canonical_encrypted_deposit_is_rejected() {
     assert!(
         decode_deposits(vec![QueuedDeposit {
             depositType: DepositType::Deposit,
+            rejected: false,
             depositData: non_canonical.into(),
         }])
         .is_err()
@@ -679,7 +684,7 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
 
-    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
+    let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
@@ -715,6 +720,7 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: deposit.abi_encode().into(),
                 }],
                 vec![DecryptionData {
@@ -754,7 +760,7 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
 
-    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
+    let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
@@ -803,6 +809,7 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: deposit.abi_encode().into(),
                 }],
                 vec![DecryptionData {
@@ -832,7 +839,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     let fixture = EncryptedDepositFixture::new();
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
     let portal = PORTAL;
-    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
+    let base: U256 = keccak256(B256::from(portal::slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
@@ -867,6 +874,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: deposit.abi_encode().into(),
                 }],
                 vec![DecryptionData {
@@ -913,6 +921,7 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: deposit.abi_encode().into(),
                 }],
                 Vec::new(),
@@ -1053,6 +1062,7 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: deposit.abi_encode().into(),
                 }],
                 Vec::new(),
@@ -1101,6 +1111,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: deposit.abi_encode().into(),
                 }],
                 Vec::new(),

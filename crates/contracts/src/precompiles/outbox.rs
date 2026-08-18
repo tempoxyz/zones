@@ -6,6 +6,7 @@ pub use IZoneOutbox::{
 };
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract IZoneOutbox {
         struct LastBatch {
