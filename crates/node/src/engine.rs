@@ -326,7 +326,11 @@ impl ZoneEngine {
             .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
         // Do not checkpoint across the Z1 activation boundary. A pre-Z1 queue front must be
         // imported operationally before a later Z1 header can enable advanceTempoHeaders.
-        let checkpoint_count = checkpoint_header_count(&self.chain_spec, &queued_headers);
+        let checkpoint_count = checkpoint_header_count(
+            &self.chain_spec,
+            &queued_headers,
+            self.l1_block_tracker.finalized_target(),
+        );
         let checkpoint_headers = &queued_headers[..checkpoint_count];
         let checkpoint_only = !checkpoint_headers.is_empty();
         let final_header = checkpoint_headers.last().unwrap_or(&l1_block.header);
@@ -448,6 +452,7 @@ impl ZoneEngine {
 fn checkpoint_header_count(
     chain_spec: &ZoneChainSpec,
     queued_headers: &[SealedHeader<TempoHeader>],
+    finalized_target: Option<u64>,
 ) -> usize {
     if !queued_headers
         .first()
@@ -455,9 +460,18 @@ fn checkpoint_header_count(
     {
         return 0;
     }
+    // During backfill, the subscriber announces its finalized target before filling the queue.
+    // Until that target is visible, every queued header may be checkpointed because a later header
+    // is known to exist for the required full block. Once the target is queued (or no target is
+    // known), reserve the final visible header for the operational import.
+    let reserve_for_full = finalized_target.is_none_or(|target| {
+        queued_headers
+            .last()
+            .is_some_and(|header| header.number() >= target)
+    });
     queued_headers
         .len()
-        .saturating_sub(1)
+        .saturating_sub(usize::from(reserve_for_full))
         .min(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK)
 }
 
@@ -540,14 +554,36 @@ mod tests {
     fn checkpoint_batching_does_not_cross_z1_activation() {
         let spec = z1_spec(100);
         assert_eq!(
-            checkpoint_header_count(&spec, &[header(1, 99), header(2, 100)]),
+            checkpoint_header_count(&spec, &[header(1, 99), header(2, 100)], Some(2)),
             0
         );
         assert_eq!(
-            checkpoint_header_count(&spec, &[header(2, 100), header(3, 101)]),
+            checkpoint_header_count(&spec, &[header(2, 100), header(3, 101)], Some(3)),
             1
         );
-        assert_eq!(checkpoint_header_count(&spec, &[header(2, 100)]), 0);
+        assert_eq!(
+            checkpoint_header_count(&spec, &[header(2, 100)], Some(2)),
+            0
+        );
+    }
+
+    #[test]
+    fn checkpoint_batching_uses_announced_finalized_target() {
+        let spec = z1_spec(100);
+
+        // Backfill has announced 100 missing blocks, but only the first is verified and queued.
+        // It must remain a checkpoint-only import instead of becoming a premature full block.
+        assert_eq!(
+            checkpoint_header_count(&spec, &[header(100, 100)], Some(199)),
+            1
+        );
+
+        // Once all 100 are queued, reserve the target header for the full operational import and
+        // fold the preceding 99 headers into one checkpoint-only block.
+        let headers = (100..=199)
+            .map(|number| header(number, number))
+            .collect::<Vec<_>>();
+        assert_eq!(checkpoint_header_count(&spec, &headers, Some(199)), 99);
     }
 
     struct PausedDrain {
