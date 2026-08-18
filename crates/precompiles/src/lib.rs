@@ -32,6 +32,22 @@
 
 extern crate alloc;
 
+macro_rules! zone_precompile {
+    ($env:expr, $precompile:path) => {
+        zone_precompile!($env, $precompile, $crate::execution::NoCallRules)
+    };
+    ($env:expr, $precompile:path, $rules:expr) => {
+        $crate::execution::create_precompile(
+            stringify!($precompile),
+            &$env,
+            $rules,
+            |data, caller| {
+                tempo_precompiles::Precompile::call(&mut <$precompile>::new(), data, caller)
+            },
+        )
+    };
+}
+
 pub mod error;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
 
@@ -88,7 +104,7 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
-    receive_policy_guard::ReceivePolicyGuard as TempoReceivePolicyGuard,
+    receive_policy_guard::ReceivePolicyGuard,
     storage::actions::StorageActions,
     storage_credits::{NonCreditableSlots, StorageCredits},
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token, is_tip20_prefix},
@@ -135,52 +151,53 @@ pub fn extend_zone_precompiles<P>(
         Some(create_outbox_precompile(l1.clone(), &env))
     });
     precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
-        Some(ChaumPedersenVerify::create(&env))
+        Some(zone_precompile!(env, ChaumPedersenVerify))
     });
     precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
-        Some(AesGcmDecrypt::create(&env))
+        Some(zone_precompile!(env, AesGcmDecrypt))
+    });
+    precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, |_| {
+        Some(zone_precompile!(env, ZoneFeeManager))
+    });
+    precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, |_| {
+        Some(zone_precompile!(
+            env,
+            TIP403Registry,
+            tip403_proxy::Tip403Rules
+        ))
     });
     precompiles.apply_precompile(&TIP20_FACTORY_ADDRESS, |_| None);
     precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
     precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
 
-    let fee_env = env.clone();
-    precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, move |_| {
-        Some(create_zone_fee_manager_precompile(&fee_env))
-    });
-
-    let tip403_env = env.clone();
-    precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
-        Some(create_tip403_precompile(&tip403_env))
-    });
-
     precompiles.set_precompile_lookup(move |address: &Address| {
         if is_tip20_prefix(*address) {
-            Some(create_tip20_precompile(*address, &env))
-        } else if *address == STABLECOIN_DEX_ADDRESS {
-            None
-        } else if *address == NONCE_PRECOMPILE_ADDRESS {
-            Some(create_nonce_manager_precompile(&env))
-        } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-            Some(create_account_keychain_precompile(&env))
-        } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
-            Some(create_receive_policy_guard_precompile(&env))
-        } else if *address == STORAGE_CREDITS_ADDRESS {
-            Some(create_storage_credits_precompile(&env))
-        } else {
-            None
+            return Some(create_tip20_precompile(*address, &env));
+        }
+
+        match *address {
+            STABLECOIN_DEX_ADDRESS => None,
+            NONCE_PRECOMPILE_ADDRESS => {
+                Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
+            }
+            ACCOUNT_KEYCHAIN_ADDRESS => Some(zone_precompile!(
+                env,
+                AccountKeychain,
+                account_keychain::AccountKeychainRules
+            )),
+            RECEIVE_POLICY_GUARD_ADDRESS => Some(zone_precompile!(
+                env,
+                ReceivePolicyGuard,
+                receive_policy_guard::ReceivePolicyGuardRules
+            )),
+            STORAGE_CREDITS_ADDRESS => Some(zone_precompile!(
+                env,
+                StorageCredits,
+                storage_credits::StorageCreditsRules
+            )),
+            _ => None,
         }
     });
-}
-
-/// Creates the zone-native fee manager precompile.
-pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "ZoneFeeManager",
-        env,
-        execution::NoCallRules,
-        |data, caller| ZoneFeeManager::new().call(data, caller),
-    )
 }
 
 /// Creates the native ZoneOutbox over ordinary Zone storage and the L1-mirrored portal account.
@@ -198,53 +215,6 @@ where
                 tx_context::current_transaction().unwrap_or((Default::default(), caller));
             ZoneOutbox::new().call_with_transaction(&l1, data, caller, tx_hash, fee_payer)
         },
-    )
-}
-
-/// Creates upstream TIP-403 execution with zone read-only rules and adapter-backed L1 reads.
-pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "ZoneTip403Registry",
-        env,
-        tip403_proxy::Tip403Rules,
-        |data, caller| TIP403Registry::new().call(data, caller),
-    )
-}
-
-/// Creates upstream receive-policy guard execution with Zone receipt-read privacy rules.
-pub fn create_receive_policy_guard_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "ReceivePolicyGuard",
-        env,
-        receive_policy_guard::ReceivePolicyGuardRules,
-        |data, caller| TempoReceivePolicyGuard::new().call(data, caller),
-    )
-}
-
-/// Creates upstream NonceManager execution with Zone account-scoped read rules.
-pub fn create_nonce_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile("NonceManager", env, nonce::NonceRules, |data, caller| {
-        NonceManager::new().call(data, caller)
-    })
-}
-
-/// Creates upstream AccountKeychain execution with Zone account-scoped read rules.
-pub fn create_account_keychain_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "AccountKeychain",
-        env,
-        account_keychain::AccountKeychainRules,
-        |data, caller| AccountKeychain::new().call(data, caller),
-    )
-}
-
-/// Creates upstream StorageCredits execution with Zone account-scoped read rules.
-pub fn create_storage_credits_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "StorageCredits",
-        env,
-        storage_credits::StorageCreditsRules,
-        |data, caller| StorageCredits::new().call(data, caller),
     )
 }
 

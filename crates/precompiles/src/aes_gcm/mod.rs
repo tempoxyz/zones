@@ -12,9 +12,8 @@ use alloc::vec::Vec;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInPlace};
 mod dispatch;
 
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
-use tempo_precompiles::{Precompile as _, error::TempoPrecompileError, storage::StorageCtx};
+use tempo_precompiles::{error::TempoPrecompileError, storage::StorageCtx};
 
 /// AES-256-GCM Decrypt precompile address on Zone L2.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
@@ -45,17 +44,13 @@ pub use IAesGcmDecrypt::{decryptCall, decryptReturn};
 /// Decrypts ciphertext using the provided key, nonce, and AAD, and verifies
 /// the GCM authentication tag. Returns `(plaintext, true)` on success or
 /// `(empty, false)` if tag verification fails.
+#[derive(Default)]
 pub struct AesGcmDecrypt;
 
 impl AesGcmDecrypt {
-    /// Creates the AES-GCM precompile with the shared zone execution environment.
-    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
-        crate::execution::create_precompile(
-            "AesGcmDecrypt",
-            env,
-            crate::execution::NoCallRules,
-            |data, caller| Self.call(data, caller),
-        )
+    /// Creates the stateless AES-GCM implementation.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Charge the native gas cost for AES-GCM authenticated input.
@@ -128,7 +123,8 @@ mod tests {
 
     fn call_precompile(calldata: Bytes) -> PrecompileOutput {
         let mut ctx = test_context();
-        let precompile = AesGcmDecrypt::create(&test_env(&ctx));
+        let env = test_env(&ctx);
+        let precompile = zone_precompile!(env, AesGcmDecrypt);
         crate::test_utils::call_precompile(
             &mut ctx,
             &precompile,

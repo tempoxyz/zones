@@ -75,9 +75,8 @@ mod tests {
         tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID, TIP403Registry},
     };
 
-    use crate::{
-        create_receive_policy_guard_precompile,
-        test_utils::{TestContext, call_precompile, test_context, test_env, test_storage_provider},
+    use crate::test_utils::{
+        TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
 
     const ADMIN: Address = address!("0x00000000000000000000000000000000000000a1");
@@ -243,7 +242,11 @@ mod tests {
             let receipt = receipt(RECEIVER, RECEIVER);
             assert_eq!(receipt.version, BLOCKED_RECEIPT_VERSION);
             let env = test_env(&ctx);
-            let precompile = create_receive_policy_guard_precompile(&env);
+            let precompile = zone_precompile!(
+                env,
+                tempo_precompiles::receive_policy_guard::ReceivePolicyGuard,
+                ReceivePolicyGuardRules
+            );
             Ok(Self {
                 ctx,
                 precompile,

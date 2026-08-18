@@ -10,7 +10,6 @@
 
 mod dispatch;
 
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Keccak256, address};
 use k256::{
     AffinePoint, FieldBytes, ProjectivePoint, Scalar,
@@ -19,7 +18,7 @@ use k256::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
-use tempo_precompiles::{Precompile as _, storage::StorageCtx};
+use tempo_precompiles::storage::StorageCtx;
 
 /// Chaum-Pedersen Verify precompile address on Zone L2.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
@@ -62,17 +61,13 @@ pub use IChaumPedersenVerify::verifyProofCall;
 /// - `R2 = s*ephemeralPub - c*sharedSecretPoint`
 /// - `c' = keccak256(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
 /// - Check: `c == c'`
+#[derive(Default)]
 pub struct ChaumPedersenVerify;
 
 impl ChaumPedersenVerify {
-    /// Creates the Chaum-Pedersen precompile with the shared zone execution environment.
-    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
-        crate::execution::create_precompile(
-            "ChaumPedersenVerify",
-            env,
-            crate::execution::NoCallRules,
-            |data, caller| Self.call(data, caller),
-        )
+    /// Creates the stateless Chaum-Pedersen implementation.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Charge the gas cost for Chaum-Pedersen proof verification.

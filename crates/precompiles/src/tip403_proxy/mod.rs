@@ -47,7 +47,6 @@ mod tests {
     use tempo_precompiles::{DelegateCallNotAllowed, storage::PrecompileStorageProvider};
 
     use crate::{
-        create_tip403_precompile,
         tempo_state::slots::TEMPO_BLOCK_NUMBER,
         test_utils::{TestContext, call_precompile, test_context, test_env, test_storage_provider},
     };
@@ -74,7 +73,11 @@ mod tests {
             let env = test_env(&ctx);
             Self {
                 ctx,
-                precompile: create_tip403_precompile(&env),
+                precompile: zone_precompile!(
+                    env,
+                    tempo_precompiles::tip403_registry::TIP403Registry,
+                    Tip403Rules
+                ),
             }
         }
 
