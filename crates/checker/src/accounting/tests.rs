@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
+
 use alloy_primitives::{Address, U256};
 
 use super::{AccountKey, AccountingError, Effect, State};
-use crate::l2::TokenAccountingEvidence;
 
 fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
@@ -11,12 +12,8 @@ fn evidence(
     token: Address,
     total_supply: U256,
     balances: &[(Address, U256)],
-) -> TokenAccountingEvidence {
-    TokenAccountingEvidence {
-        token,
-        total_supply,
-        balances: balances.iter().copied().collect(),
-    }
+) -> (Address, U256, BTreeMap<Address, U256>) {
+    (token, total_supply, balances.iter().copied().collect())
 }
 
 #[test]
@@ -42,7 +39,7 @@ fn applies_transfers_and_unwinds_exactly() {
         }])
         .unwrap();
     state
-        .verify_zone_state(&[evidence(
+        .verify_zone_state([evidence(
             token,
             U256::from(100),
             &[
@@ -50,6 +47,59 @@ fn applies_transfers_and_unwinds_exactly() {
                 (bob.account, U256::from(40)),
             ],
         )])
+        .unwrap();
+
+    state.unwind(delta).unwrap();
+    assert_eq!(state, before);
+}
+
+#[test]
+fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
+    let token_a = address(1);
+    let token_b = address(2);
+    let token_c = address(3);
+    let account = address(10);
+
+    let mut state = State::default();
+    state
+        .apply(&[
+            Effect::Credit {
+                key: AccountKey::new(token_a, account),
+                amount: U256::from(100),
+            },
+            Effect::Credit {
+                key: AccountKey::new(token_b, account),
+                amount: U256::from(50),
+            },
+            Effect::Credit {
+                key: AccountKey::new(token_c, account),
+                amount: U256::from(200),
+            },
+        ])
+        .unwrap();
+    let before = state.clone();
+
+    // Touch only token_a and token_c; token_b's aggregate must stay valid
+    // without appearing in this batch's delta at all.
+    let delta = state
+        .apply(&[
+            Effect::Credit {
+                key: AccountKey::new(token_a, account),
+                amount: U256::from(25),
+            },
+            Effect::Credit {
+                key: AccountKey::new(token_c, account),
+                amount: U256::from(75),
+            },
+        ])
+        .unwrap();
+
+    state
+        .verify_zone_state([
+            evidence(token_a, U256::from(125), &[(account, U256::from(125))]),
+            evidence(token_b, U256::from(50), &[(account, U256::from(50))]),
+            evidence(token_c, U256::from(275), &[(account, U256::from(275))]),
+        ])
         .unwrap();
 
     state.unwind(delta).unwrap();
@@ -122,7 +172,7 @@ fn detects_balance_and_supply_mismatches() {
         .unwrap();
 
     assert!(matches!(
-        state.verify_zone_state(&[evidence(
+        state.verify_zone_state([evidence(
             token,
             U256::from(10),
             &[(key.account, U256::from(9))]
@@ -130,7 +180,7 @@ fn detects_balance_and_supply_mismatches() {
         Err(AccountingError::BalanceMismatch { .. })
     ));
     assert!(matches!(
-        state.verify_zone_state(&[evidence(
+        state.verify_zone_state([evidence(
             token,
             U256::from(11),
             &[(key.account, U256::from(10))]

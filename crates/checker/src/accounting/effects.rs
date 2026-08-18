@@ -79,7 +79,6 @@ pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>
                 token,
                 amount,
                 bounceback_fee,
-                ..
             } => effects.push(Effect::PendingDeposit {
                 token,
                 amount: U256::from(amount) + U256::from(bounceback_fee),
@@ -89,7 +88,6 @@ pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>
                 token,
                 amount,
                 bounceback_fee,
-                ..
             } => {
                 effects.push(Effect::PendingDeposit {
                     token,
@@ -109,7 +107,7 @@ pub(crate) fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>
                     increase: false,
                 });
             }
-            L1PortalEvent::BatchSubmitted { .. }
+            L1PortalEvent::BatchSubmitted
             | L1PortalEvent::WithdrawalProcessed { .. }
             | L1PortalEvent::WithdrawalBounceBack { .. } => {}
         }
@@ -356,7 +354,6 @@ mod tests {
             .unwrap();
         let failed = L1PortalEvent::WithdrawalProcessed {
             to: recipient,
-            sender_tag: Default::default(),
             token,
             amount: 10,
             callback_success: false,

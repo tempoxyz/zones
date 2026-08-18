@@ -8,7 +8,7 @@ use alloy_network::{BlockResponse as _, ReceiptResponse as _, primitives::Header
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider};
 use eyre::WrapErr as _;
-use futures::{StreamExt as _, stream};
+use futures::{StreamExt as _, TryStreamExt as _, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_contracts::precompiles::ITIP20;
 
@@ -32,7 +32,7 @@ impl L1BlockEvidence {
 
     /// Return authenticated Portal events in receipt order.
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
-        self.events.events.iter().map(|evidence| &evidence.event)
+        self.events.events.iter()
     }
 }
 
@@ -94,10 +94,8 @@ pub(crate) async fn portal_balances(
             .map(|balance| (token, balance))
     }))
     .buffer_unordered(BALANCE_CONCURRENCY)
-    .collect::<Vec<_>>()
+    .try_collect()
     .await
-    .into_iter()
-    .collect()
 }
 
 /// Fetch and authenticate one L1 block and its Portal events.
@@ -129,9 +127,8 @@ async fn collect_l1_block_at(
     validate_l1_receipts(NumHash::new(number, hash), transaction_hashes, &receipts)?;
 
     let mut event_collector = EventCollector::new(portal);
-    for (index, (receipt, transaction_hash)) in receipts.iter().zip(transaction_hashes).enumerate()
-    {
-        event_collector.extract_receipt(index, *transaction_hash, receipt, number)?;
+    for receipt in &receipts {
+        event_collector.extract_receipt(receipt, number)?;
     }
     let events = event_collector.finish();
     Ok(L1BlockEvidence {

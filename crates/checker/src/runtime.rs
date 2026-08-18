@@ -373,7 +373,11 @@ where
     let observed = read_accounting_state(provider, &accounts, BlockNumHash::new(number, hash))
         .map_err(BlockError::Retry)?;
     candidate
-        .verify_zone_state(&observed)
+        .verify_zone_state(
+            observed
+                .into_iter()
+                .map(|evidence| (evidence.token, evidence.total_supply, evidence.balances)),
+        )
         .map_err(|error| fail(error.into()))?;
 
     let balances = portal_balances(l1, config.portal_address, tokens, tempo.hash)

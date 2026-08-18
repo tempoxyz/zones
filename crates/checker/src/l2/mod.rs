@@ -12,7 +12,7 @@ use alloy_primitives::{Address, Log};
 use events::{EventCollector, L2Events};
 
 pub(crate) use events::{L1Anchor, L2BridgeEvent};
-pub(crate) use state::{TokenAccountingEvidence, read_accounting_state, read_zone_genesis};
+pub(crate) use state::{read_accounting_state, read_zone_genesis};
 
 /// Recognized protocol events from one L2 block.
 #[derive(Debug)]

@@ -2,12 +2,10 @@
 
 pub(crate) mod effects;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
-
-use crate::l2::TokenAccountingEvidence;
 
 /// One user's independently derived entitlement to one Zone token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -142,7 +140,13 @@ impl State {
                 .filter(|(_, value)| !value.is_empty())
                 .collect(),
         };
-        state.validate_aggregates()?;
+        let all_tokens: BTreeSet<Address> = state
+            .tokens
+            .keys()
+            .copied()
+            .chain(state.accounts.keys().map(|key| key.token))
+            .collect();
+        state.validate_aggregates(all_tokens)?;
         Ok(state)
     }
 
@@ -159,15 +163,11 @@ impl State {
         let result = effects
             .iter()
             .try_for_each(|effect| self.apply_effect(*effect, &mut accounts, &mut tokens))
-            .and_then(|()| self.validate_aggregates());
+            .and_then(|()| self.validate_aggregates(tokens.keys().copied()));
 
         if let Err(error) = result {
-            for (&key, &previous) in &accounts {
-                write_optional(&mut self.accounts, key, previous);
-            }
-            for (&token, &previous) in &tokens {
-                write_optional(&mut self.tokens, token, previous);
-            }
+            restore(&mut self.accounts, accounts.iter().map(|(&k, &v)| (k, v)));
+            restore(&mut self.tokens, tokens.iter().map(|(&k, &v)| (k, v)));
             return Err(error);
         }
 
@@ -179,23 +179,25 @@ impl State {
 
     /// Restore the state that preceded an applied block.
     pub(crate) fn unwind(&mut self, delta: BlockDelta) -> Result<(), AccountingError> {
-        for (key, previous) in delta.accounts {
-            write_optional(&mut self.accounts, key, previous);
-        }
-        for (token, previous) in delta.tokens {
-            write_optional(&mut self.tokens, token, previous);
-        }
-        self.validate_aggregates()
+        let touched_tokens = delta
+            .accounts
+            .iter()
+            .map(|(key, _)| key.token)
+            .chain(delta.tokens.iter().map(|(token, _)| *token))
+            .collect::<BTreeSet<_>>();
+        restore(&mut self.accounts, delta.accounts);
+        restore(&mut self.tokens, delta.tokens);
+        self.validate_aggregates(touched_tokens)
     }
 
     /// Verify exact post-state balances and supplies for the supplied observations.
     pub(crate) fn verify_zone_state(
         &self,
-        observed: &[TokenAccountingEvidence],
+        observed: impl IntoIterator<Item = (Address, U256, BTreeMap<Address, U256>)>,
     ) -> Result<(), AccountingError> {
-        for evidence in observed {
-            for (&account, &actual) in &evidence.balances {
-                let key = AccountKey::new(evidence.token, account);
+        for (token, total_supply, balances) in observed {
+            for (account, actual) in balances {
+                let key = AccountKey::new(token, account);
                 let expected = self.accounts.get(&key).copied().unwrap_or_default();
                 if actual != expected {
                     return Err(AccountingError::BalanceMismatch {
@@ -207,14 +209,14 @@ impl State {
             }
             let expected = self
                 .tokens
-                .get(&evidence.token)
+                .get(&token)
                 .map(|state| state.account_total)
                 .unwrap_or_default();
-            if evidence.total_supply != expected {
+            if total_supply != expected {
                 return Err(AccountingError::SupplyMismatch {
-                    token: evidence.token,
+                    token,
                     expected,
-                    actual: evidence.total_supply,
+                    actual: total_supply,
                 });
             }
         }
@@ -356,30 +358,36 @@ impl State {
         }
     }
 
-    fn validate_aggregates(&self) -> Result<(), AccountingError> {
-        let mut totals = BTreeMap::<Address, U256>::new();
-        for (key, balance) in &self.accounts {
-            let total = totals.entry(key.token).or_default();
-            *total = total
-                .checked_add(*balance)
-                .ok_or(AccountingError::Overflow)?;
-        }
-        for (&token, state) in &self.tokens {
-            let actual = totals.remove(&token).unwrap_or_default();
-            if state.account_total != actual {
+    /// Validate that every one of `tokens`' cached aggregate matches the sum
+    /// of its accounts.
+    fn validate_aggregates(
+        &self,
+        tokens: impl IntoIterator<Item = Address>,
+    ) -> Result<(), AccountingError> {
+        for token in tokens {
+            let start = AccountKey::new(token, Address::ZERO);
+            let mut total = U256::ZERO;
+            for (_, balance) in self
+                .accounts
+                .range(start..)
+                .take_while(|(key, _)| key.token == token)
+            {
+                total = total
+                    .checked_add(*balance)
+                    .ok_or(AccountingError::Overflow)?;
+            }
+            let cached = self
+                .tokens
+                .get(&token)
+                .map(|state| state.account_total)
+                .unwrap_or_default();
+            if cached != total {
                 return Err(AccountingError::AggregateMismatch {
                     token,
-                    expected: actual,
-                    actual: state.account_total,
+                    expected: total,
+                    actual: cached,
                 });
             }
-        }
-        if let Some((token, expected)) = totals.into_iter().next() {
-            return Err(AccountingError::AggregateMismatch {
-                token,
-                expected,
-                actual: U256::ZERO,
-            });
         }
         Ok(())
     }
@@ -409,6 +417,13 @@ fn write_optional<K: Ord, V>(values: &mut BTreeMap<K, V>, key: K, value: Option<
         None => {
             values.remove(&key);
         }
+    }
+}
+
+/// Restore each entry's prior value, undoing whatever changed it.
+fn restore<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: impl IntoIterator<Item = (K, Option<V>)>) {
+    for (key, previous) in entries {
+        write_optional(map, key, previous);
     }
 }
 

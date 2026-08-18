@@ -1,7 +1,7 @@
 //! Decoded L1 Portal events with their canonical receipt provenance.
 
 use alloy_network::ReceiptResponse as _;
-use alloy_primitives::{Address, B256, Log, U256};
+use alloy_primitives::{Address, Log};
 use alloy_sol_types::SolEvent;
 use tempo_alloy::rpc::TempoTransactionReceipt;
 use tempo_zone_contracts::ZonePortal;
@@ -9,30 +9,21 @@ use tempo_zone_contracts::ZonePortal;
 use crate::decode_event;
 
 /// Semantic value of one recognized Zone Portal event.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum L1PortalEvent {
     /// A user deposit escrowed on L1 — new external backing entering the bridge.
     DepositMade {
         token: Address,
         net_amount: u128,
-        fee: u128,
-        tempo_refund_recipient: Address,
         deposit_number: u64,
-        deposit_queue_hash: B256,
     },
     /// A TIP-20 token newly enabled for bridging.
-    TokenEnabled { token: Address },
-    BatchSubmitted {
-        withdrawal_batch_index: u64,
-        withdrawal_queue_index: U256,
-        withdrawal_queue_hash: B256,
-        next_block_hash: B256,
-        last_processed_deposit_number: u64,
+    TokenEnabled {
+        token: Address,
     },
+    BatchSubmitted,
     WithdrawalProcessed {
         to: Address,
-        sender_tag: B256,
         token: Address,
         amount: u128,
         callback_success: bool,
@@ -42,20 +33,15 @@ pub(crate) enum L1PortalEvent {
     WithdrawalBounceBack {
         token: Address,
         amount: u128,
-        fallback_nonce: u64,
-        deposit_number: u64,
-        deposit_queue_hash: B256,
     },
     /// A deposit bounce-back processed on L1 (fee deducted, refund sent).
     DepositBounceBack {
-        tempo_refund_recipient: Address,
         token: Address,
         amount: u128,
         bounceback_fee: u128,
     },
     /// A deposit bounce-back still pending on L1.
     DepositBounceBackPending {
-        tempo_refund_recipient: Address,
         token: Address,
         amount: u128,
         bounceback_fee: u128,
@@ -67,29 +53,17 @@ pub(crate) enum L1PortalEvent {
     },
 }
 
-/// One decoded Portal event and its canonical receipt provenance.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct L1EventEvidence {
-    pub(crate) transaction_hash: B256,
-    pub(crate) transaction_index: u32,
-    pub(crate) transaction_log_index: u32,
-    pub(crate) block_log_index: u32,
-    pub(crate) event: L1PortalEvent,
-}
-
 /// Ordered recognized Portal events for one L1 block.
 #[derive(Debug)]
 pub(super) struct L1Events {
-    pub(super) events: Vec<L1EventEvidence>,
+    pub(super) events: Vec<L1PortalEvent>,
 }
 
 /// Builds ordered event evidence while receipts are visited once.
 #[derive(Default)]
 pub(super) struct EventCollector {
     portal: Address,
-    events: Vec<L1EventEvidence>,
-    block_log_index: u32,
+    events: Vec<L1PortalEvent>,
 }
 
 impl EventCollector {
@@ -103,35 +77,24 @@ impl EventCollector {
 
     /// Decode recognized Portal logs from one canonical receipt.
     ///
-    /// Failed receipts are skipped but their logs still count toward the
-    /// block-global log index. Only logs from `portal` are decoded.
-    /// Recognized-but-irrelevant topics (pausing, admin, gas-rate updates,
-    /// etc.) are ignored; a truly unrecognized topic fails closed. A known
-    /// event that fails ABI decoding returns a contextual error.
+    /// Failed receipts are skipped entirely. Only logs from `portal` are
+    /// decoded. Recognized-but-irrelevant topics (pausing, admin, gas-rate
+    /// updates, etc.) are ignored; a truly unrecognized topic fails closed. A
+    /// known event that fails ABI decoding returns a contextual error.
     pub(super) fn extract_receipt(
         &mut self,
-        transaction_index: usize,
-        transaction_hash: B256,
         receipt: &TempoTransactionReceipt,
         block: u64,
     ) -> eyre::Result<()> {
         if !receipt.status() {
-            self.block_log_index += receipt.logs().len() as u32;
             return Ok(());
         }
-        for (transaction_log_index, log) in receipt.logs().iter().enumerate() {
+        for log in receipt.logs() {
             if log.address() == self.portal
                 && let Some(event) = decode_portal_event(&log.inner, block)?
             {
-                self.events.push(L1EventEvidence {
-                    transaction_hash,
-                    transaction_index: transaction_index as u32,
-                    transaction_log_index: transaction_log_index as u32,
-                    block_log_index: self.block_log_index,
-                    event,
-                });
+                self.events.push(event);
             }
-            self.block_log_index += 1;
         }
         Ok(())
     }
@@ -164,10 +127,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             L1PortalEvent::DepositMade {
                 token: e.token,
                 net_amount: e.netAmount,
-                fee: e.fee,
-                tempo_refund_recipient: e.tempoRefundRecipient,
                 deposit_number: e.depositNumber,
-                deposit_queue_hash: e.newCurrentDepositQueueHash,
             }
         }
         ZonePortal::TokenEnabled::SIGNATURE_HASH => {
@@ -175,21 +135,14 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             L1PortalEvent::TokenEnabled { token: e.token }
         }
         ZonePortal::BatchSubmitted::SIGNATURE_HASH => {
-            let e = decode_event::<ZonePortal::BatchSubmitted>(log, "BatchSubmitted", block)?;
-            L1PortalEvent::BatchSubmitted {
-                withdrawal_batch_index: e.withdrawalBatchIndex,
-                withdrawal_queue_index: e.withdrawalQueueIndex,
-                withdrawal_queue_hash: e.withdrawalQueueHash,
-                next_block_hash: e.nextBlockHash,
-                last_processed_deposit_number: e.lastProcessedDepositNumber,
-            }
+            decode_event::<ZonePortal::BatchSubmitted>(log, "BatchSubmitted", block)?;
+            L1PortalEvent::BatchSubmitted
         }
         ZonePortal::WithdrawalProcessed::SIGNATURE_HASH => {
             let e =
                 decode_event::<ZonePortal::WithdrawalProcessed>(log, "WithdrawalProcessed", block)?;
             L1PortalEvent::WithdrawalProcessed {
                 to: e.to,
-                sender_tag: e.senderTag,
                 token: e.token,
                 amount: e.amount,
                 callback_success: e.callbackSuccess,
@@ -204,15 +157,11 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             L1PortalEvent::WithdrawalBounceBack {
                 token: e.token,
                 amount: e.amount,
-                fallback_nonce: e.fallbackNonce,
-                deposit_number: e.depositNumber,
-                deposit_queue_hash: e.newCurrentDepositQueueHash,
             }
         }
         ZonePortal::DepositBounceBack::SIGNATURE_HASH => {
             let e = decode_event::<ZonePortal::DepositBounceBack>(log, "DepositBounceBack", block)?;
             L1PortalEvent::DepositBounceBack {
-                tempo_refund_recipient: e.tempoRefundRecipient,
                 token: e.token,
                 amount: e.amount,
                 bounceback_fee: e.bouncebackFee,
@@ -225,7 +174,6 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
                 block,
             )?;
             L1PortalEvent::DepositBounceBackPending {
-                tempo_refund_recipient: e.tempoRefundRecipient,
                 token: e.token,
                 amount: e.amount,
                 bounceback_fee: e.bouncebackFee,
@@ -295,7 +243,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
 mod tests {
     use super::*;
     use alloy_consensus::ReceiptWithBloom;
-    use alloy_primitives::{Bloom, U256, address};
+    use alloy_primitives::{B256, Bloom, U256, address};
     use alloy_rpc_types_eth::TransactionReceipt;
     use tempo_alloy::rpc::TempoTransactionReceipt;
     use tempo_primitives::{TempoReceipt, TempoTxType};
@@ -432,8 +380,8 @@ mod tests {
 
     fn collect(receipts: &[TempoTransactionReceipt]) -> eyre::Result<L1Events> {
         let mut collector = EventCollector::new(PORTAL);
-        for (index, receipt) in receipts.iter().enumerate() {
-            collector.extract_receipt(index, receipt.transaction_hash(), receipt, BLOCK)?;
+        for receipt in receipts {
+            collector.extract_receipt(receipt, BLOCK)?;
         }
         Ok(collector.finish())
     }
@@ -456,38 +404,35 @@ mod tests {
         )])
         .unwrap();
         assert!(matches!(
-            events.events[0].event,
+            events.events[0],
             L1PortalEvent::DepositMade {
                 deposit_number: 7,
                 ..
             }
         ));
         assert!(matches!(
-            events.events[1].event,
+            events.events[1],
             L1PortalEvent::TokenEnabled { .. }
         ));
+        assert!(matches!(events.events[2], L1PortalEvent::BatchSubmitted));
         assert!(matches!(
-            events.events[2].event,
-            L1PortalEvent::BatchSubmitted { .. }
-        ));
-        assert!(matches!(
-            events.events[3].event,
+            events.events[3],
             L1PortalEvent::WithdrawalProcessed { .. }
         ));
         assert!(matches!(
-            events.events[4].event,
+            events.events[4],
             L1PortalEvent::WithdrawalBounceBack { .. }
         ));
         assert!(matches!(
-            events.events[5].event,
+            events.events[5],
             L1PortalEvent::DepositBounceBack { .. }
         ));
         assert!(matches!(
-            events.events[6].event,
+            events.events[6],
             L1PortalEvent::DepositBounceBackPending { .. }
         ));
         assert!(matches!(
-            events.events[7].event,
+            events.events[7],
             L1PortalEvent::RefundClaimed { amount: 42, .. }
         ));
     }
@@ -541,19 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_submitted_preserves_no_queue_index() {
-        let events = collect(&[receipt(true, B256::ZERO, vec![batch(U256::MAX)])]).unwrap();
-        assert!(matches!(
-            events.events[0].event,
-            L1PortalEvent::BatchSubmitted {
-                withdrawal_queue_index: U256::MAX,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn retains_canonical_order_and_provenance_across_receipts() {
+    fn retains_canonical_order_across_receipts() {
         let mut noise = log(alloy_primitives::LogData::new_unchecked(
             vec![B256::repeat_byte(0xff)],
             Default::default(),
@@ -568,49 +501,24 @@ mod tests {
                 vec![noise, withdrawal(), token()],
             ),
         ];
-        let hashes = [
-            B256::repeat_byte(10),
-            B256::repeat_byte(11),
-            B256::repeat_byte(12),
-        ];
         let mut collector = EventCollector::new(PORTAL);
-        for (index, (receipt, hash)) in receipts.iter().zip(hashes).enumerate() {
-            collector
-                .extract_receipt(index, hash, receipt, BLOCK)
-                .unwrap();
+        for receipt in &receipts {
+            collector.extract_receipt(receipt, BLOCK).unwrap();
         }
         let events = collector.finish();
 
         assert_eq!(events.events.len(), 3);
         assert!(matches!(
-            events.events[0].event,
+            events.events[0],
             L1PortalEvent::DepositMade { .. }
         ));
         assert!(matches!(
-            events.events[1].event,
+            events.events[1],
             L1PortalEvent::WithdrawalProcessed { .. }
         ));
         assert!(matches!(
-            events.events[2].event,
+            events.events[2],
             L1PortalEvent::TokenEnabled { token } if token == Address::repeat_byte(5)
         ));
-        assert_eq!(
-            (
-                events.events[0].transaction_index,
-                events.events[0].transaction_log_index,
-                events.events[0].block_log_index,
-                events.events[0].transaction_hash,
-            ),
-            (1, 0, 1, hashes[1])
-        );
-        assert_eq!(
-            (
-                events.events[2].transaction_index,
-                events.events[2].transaction_log_index,
-                events.events[2].block_log_index,
-                events.events[2].transaction_hash,
-            ),
-            (2, 2, 4, hashes[2])
-        );
     }
 }

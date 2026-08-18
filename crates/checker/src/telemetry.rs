@@ -76,7 +76,6 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
             token,
             net_amount,
             deposit_number,
-            ..
         } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
@@ -98,7 +97,6 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
             token,
             amount,
             callback_success,
-            ..
         } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
@@ -109,7 +107,7 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
             callback_success,
             "accounted authenticated Portal withdrawal"
         ),
-        L1PortalEvent::WithdrawalBounceBack { token, amount, .. } => tracing::info!(
+        L1PortalEvent::WithdrawalBounceBack { token, amount } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
             tempo_block,
@@ -146,7 +144,7 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
             amount,
             "accounted authenticated Portal refund"
         ),
-        L1PortalEvent::BatchSubmitted { .. } => {}
+        L1PortalEvent::BatchSubmitted => {}
     }
 }
 
