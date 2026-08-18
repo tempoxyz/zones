@@ -130,70 +130,130 @@ impl L2Events {
 
     /// Require every user withdrawal to have its exact debit-and-burn sequence.
     fn authenticate_withdrawals(&self) -> eyre::Result<()> {
-        for (index, evidence) in self.events.iter().enumerate() {
-            let L2BridgeEvent::WithdrawalRequested {
-                sender,
-                token,
-                principal,
-                fee,
-                is_deposit_bounce_back: false,
-                ..
-            } = evidence.event
-            else {
-                continue;
-            };
-
-            let principal = U256::from(principal);
-            let fee = U256::from(fee);
-            let total = principal + fee;
-            let transaction = evidence.transaction_index;
-            let combined = WithdrawalBurn {
-                transaction,
-                token,
-                owner: sender,
-                amount: total,
-            };
-            let combined = index
-                .checked_sub(3)
-                .and_then(|start| self.withdrawal_burn(start))
-                == Some(combined);
-            let sponsored = !fee.is_zero()
-                && index.checked_sub(6).is_some_and(|start| {
-                    let principal = WithdrawalBurn {
-                        transaction,
-                        token,
-                        owner: sender,
-                        amount: principal,
-                    };
-                    let Some(observed_fee) = self.withdrawal_burn(start + 3) else {
-                        return false;
-                    };
-                    self.withdrawal_burn(start) == Some(principal)
-                        && observed_fee.transaction == transaction
-                        && observed_fee.token == token
-                        && !observed_fee.owner.is_zero()
-                        && observed_fee.amount == fee
-                });
-
-            eyre::ensure!(
-                combined || sponsored,
-                "withdrawal in transaction {} has no matching debit and burn of {total} {token}",
-                evidence.transaction_hash
-            );
+        for receipt in self
+            .events
+            .chunk_by(|left, right| left.transaction_index == right.transaction_index)
+        {
+            authenticate_receipt_withdrawals(receipt)?;
         }
         Ok(())
     }
+}
 
+/// Reconcile every withdrawal in one receipt with distinct preceding debit-and-burn groups.
+fn authenticate_receipt_withdrawals(receipt: &[L2EventEvidence]) -> eyre::Result<()> {
+    let Some(first) = receipt.first() else {
+        return Ok(());
+    };
+    let burns = receipt
+        .windows(3)
+        .enumerate()
+        .filter_map(|(start, events)| WithdrawalBurn::from_events(start + events.len(), events))
+        .collect::<Vec<_>>();
+    let mut consumed = vec![false; burns.len()];
+
+    for (request_index, evidence) in receipt.iter().enumerate() {
+        let L2BridgeEvent::WithdrawalRequested {
+            sender,
+            token,
+            principal,
+            fee,
+            is_deposit_bounce_back: false,
+            ..
+        } = evidence.event
+        else {
+            continue;
+        };
+
+        let principal = U256::from(principal);
+        let fee = U256::from(fee);
+        let total = principal + fee;
+        if let Some(index) = matching_burn(&burns, &consumed, request_index, token, sender, total) {
+            consumed[index] = true;
+            continue;
+        }
+
+        let principal_burn =
+            matching_burn(&burns, &consumed, request_index, token, sender, principal);
+        let fee_burn = if fee.is_zero() {
+            None
+        } else {
+            matching_fee_burn(&burns, &consumed, request_index, token, fee, principal_burn)
+        };
+        if let (Some(principal_burn), Some(fee_burn)) = (principal_burn, fee_burn) {
+            consumed[principal_burn] = true;
+            consumed[fee_burn] = true;
+            continue;
+        }
+
+        eyre::bail!(
+            "withdrawal in transaction {} has no matching debit and burn of {total} {token}",
+            evidence.transaction_hash
+        );
+    }
+
+    if burns.iter().enumerate().any(|(index, _)| !consumed[index]) {
+        eyre::bail!(
+            "transaction {} has an unexplained withdrawal debit and burn",
+            first.transaction_hash
+        );
+    }
+    Ok(())
+}
+
+/// Find one unconsumed debit-and-burn group preceding a withdrawal request.
+fn matching_burn(
+    burns: &[WithdrawalBurn],
+    consumed: &[bool],
+    request_index: usize,
+    token: Address,
+    owner: Address,
+    amount: U256,
+) -> Option<usize> {
+    burns.iter().enumerate().find_map(|(index, observed)| {
+        (!consumed[index]
+            && observed.end_index <= request_index
+            && observed.token == token
+            && observed.owner == owner
+            && observed.amount == amount)
+            .then_some(index)
+    })
+}
+
+/// Find an unconsumed sponsored-fee burn preceding a withdrawal request.
+fn matching_fee_burn(
+    burns: &[WithdrawalBurn],
+    consumed: &[bool],
+    request_index: usize,
+    token: Address,
+    amount: U256,
+    excluded: Option<usize>,
+) -> Option<usize> {
+    burns.iter().enumerate().find_map(|(index, observed)| {
+        (Some(index) != excluded
+            && !consumed[index]
+            && observed.end_index <= request_index
+            && observed.token == token
+            && observed.amount == amount
+            && !observed.owner.is_zero())
+        .then_some(index)
+    })
+}
+
+/// One debit, transfer-to-zero, and burn sequence within a receipt.
+struct WithdrawalBurn {
+    end_index: usize,
+    token: Address,
+    owner: Address,
+    amount: U256,
+}
+
+impl WithdrawalBurn {
     /// Decode one adjacent transfer, zero transfer, and burn sequence.
-    fn withdrawal_burn(&self, start: usize) -> Option<WithdrawalBurn> {
-        let [debit, transfer, burn] = self.events.get(start..start + 3)? else {
+    fn from_events(end_index: usize, events: &[L2EventEvidence]) -> Option<Self> {
+        let [debit, transfer, burn] = events else {
             return None;
         };
-        if transfer.transaction_index != debit.transaction_index
-            || burn.transaction_index != debit.transaction_index
-        {
-            return None;
-        }
         let L2BridgeEvent::Transfer {
             token: debit_token,
             from: owner,
@@ -228,22 +288,13 @@ impl L2Events {
             && burn_from == ZONE_OUTBOX_ADDRESS
             && debit_amount == transfer_amount
             && debit_amount == burn_amount)
-            .then_some(WithdrawalBurn {
-                transaction: debit.transaction_index,
+            .then_some(Self {
+                end_index,
                 token: debit_token,
                 owner,
                 amount: debit_amount,
             })
     }
-}
-
-/// One complete TIP-20 debit and burn within a receipt.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct WithdrawalBurn {
-    transaction: u32,
-    token: Address,
-    owner: Address,
-    amount: U256,
 }
 
 /// Builds ordered event evidence while receipts are visited once.
@@ -1016,6 +1067,43 @@ mod tests {
         events.extend(burn(1, token, sender, 205));
         events.push(withdrawal(1, token, sender, 200, 5));
         authenticate(events).unwrap();
+    }
+
+    #[test]
+    fn authenticates_withdrawal_after_unrelated_receipt_events() {
+        let token = Address::repeat_byte(1);
+        let sender = Address::repeat_byte(2);
+        let mut events = burn(1, token, sender, 100);
+        events.push(evidence(
+            1,
+            L2BridgeEvent::RefundClaimed {
+                recipient: sender,
+                token,
+                amount: 1,
+            },
+        ));
+        events.push(withdrawal(1, token, sender, 100, 0));
+
+        authenticate(events).unwrap();
+    }
+
+    #[test]
+    fn rejects_reusing_one_burn_for_multiple_withdrawals() {
+        let token = Address::repeat_byte(1);
+        let sender = Address::repeat_byte(2);
+        let mut events = burn(1, token, sender, 100);
+        events.push(withdrawal(1, token, sender, 100, 0));
+        events.push(withdrawal(1, token, sender, 100, 0));
+
+        assert!(authenticate(events).is_err());
+    }
+
+    #[test]
+    fn rejects_unexplained_withdrawal_burn() {
+        let token = Address::repeat_byte(1);
+        let sender = Address::repeat_byte(2);
+
+        assert!(authenticate(burn(1, token, sender, 100)).is_err());
     }
 
     #[test]
