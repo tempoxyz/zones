@@ -54,6 +54,22 @@ impl TokenState {
     }
 }
 
+/// Direction and amount of one account or liability change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum BalanceChange {
+    Credit(U256),
+    Debit(U256),
+}
+
+impl BalanceChange {
+    fn apply(self, value: U256) -> Result<U256, AccountingError> {
+        match self {
+            Self::Credit(amount) => value.checked_add(amount).ok_or(AccountingError::Overflow),
+            Self::Debit(amount) => value.checked_sub(amount).ok_or(AccountingError::Underflow),
+        }
+    }
+}
+
 /// One independently authenticated accounting change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Effect {
@@ -74,23 +90,17 @@ pub(crate) enum Effect {
         to: Address,
         amount: U256,
     },
-    /// `increase` grows `pending_deposits` when true, otherwise settles it.
     PendingDeposit {
         token: Address,
-        amount: U256,
-        increase: bool,
+        change: BalanceChange,
     },
-    /// `increase` grows `pending_withdrawals` when true, otherwise settles it.
     PendingWithdrawal {
         token: Address,
-        amount: U256,
-        increase: bool,
+        change: BalanceChange,
     },
-    /// `increase` grows `pending_refunds` when true, otherwise settles it.
     PendingRefund {
         token: Address,
-        amount: U256,
-        increase: bool,
+        change: BalanceChange,
     },
 }
 
@@ -263,10 +273,10 @@ impl State {
                 Ok(())
             }
             Effect::Credit { key, amount } => {
-                self.change_account(key, amount, true, accounts, tokens)
+                self.change_account(key, BalanceChange::Credit(amount), accounts, tokens)
             }
             Effect::Debit { key, amount } => {
-                self.change_account(key, amount, false, accounts, tokens)
+                self.change_account(key, BalanceChange::Debit(amount), accounts, tokens)
             }
             Effect::Transfer {
                 token,
@@ -276,42 +286,35 @@ impl State {
             } => {
                 self.change_account(
                     AccountKey::new(token, from),
-                    amount,
-                    false,
+                    BalanceChange::Debit(amount),
                     accounts,
                     tokens,
                 )?;
-                self.change_account(AccountKey::new(token, to), amount, true, accounts, tokens)
+                self.change_account(
+                    AccountKey::new(token, to),
+                    BalanceChange::Credit(amount),
+                    accounts,
+                    tokens,
+                )
             }
-            Effect::PendingDeposit {
-                token,
-                amount,
-                increase,
-            } => self.change_liability(token, amount, increase, tokens, |state| {
-                &mut state.pending_deposits
-            }),
-            Effect::PendingWithdrawal {
-                token,
-                amount,
-                increase,
-            } => self.change_liability(token, amount, increase, tokens, |state| {
-                &mut state.pending_withdrawals
-            }),
-            Effect::PendingRefund {
-                token,
-                amount,
-                increase,
-            } => self.change_liability(token, amount, increase, tokens, |state| {
-                &mut state.pending_refunds
-            }),
+            Effect::PendingDeposit { token, change } => {
+                self.change_liability(token, change, tokens, |state| &mut state.pending_deposits)
+            }
+            Effect::PendingWithdrawal { token, change } => {
+                self.change_liability(token, change, tokens, |state| {
+                    &mut state.pending_withdrawals
+                })
+            }
+            Effect::PendingRefund { token, change } => {
+                self.change_liability(token, change, tokens, |state| &mut state.pending_refunds)
+            }
         }
     }
 
     fn change_account(
         &mut self,
         key: AccountKey,
-        amount: U256,
-        increase: bool,
+        change: BalanceChange,
         accounts: &mut BTreeMap<AccountKey, Option<U256>>,
         tokens: &mut BTreeMap<Address, Option<TokenState>>,
     ) -> Result<(), AccountingError> {
@@ -323,11 +326,11 @@ impl State {
             .or_insert_with(|| self.tokens.get(&key.token).copied());
 
         let current = self.accounts.get(&key).copied().unwrap_or_default();
-        let next = checked_change(current, amount, increase)?;
+        let next = change.apply(current)?;
         write_nonzero(&mut self.accounts, key, next);
 
         let mut token = self.tokens.get(&key.token).copied().unwrap_or_default();
-        token.account_total = checked_change(token.account_total, amount, increase)?;
+        token.account_total = change.apply(token.account_total)?;
         self.write_token(key.token, token);
         Ok(())
     }
@@ -335,8 +338,7 @@ impl State {
     fn change_liability(
         &mut self,
         token: Address,
-        amount: U256,
-        increase: bool,
+        change: BalanceChange,
         previous: &mut BTreeMap<Address, Option<TokenState>>,
         field: impl FnOnce(&mut TokenState) -> &mut U256,
     ) -> Result<(), AccountingError> {
@@ -345,7 +347,7 @@ impl State {
             .or_insert_with(|| self.tokens.get(&token).copied());
         let mut state = self.tokens.get(&token).copied().unwrap_or_default();
         let value = field(&mut state);
-        *value = checked_change(*value, amount, increase)?;
+        *value = change.apply(*value)?;
         self.write_token(token, state);
         Ok(())
     }
@@ -390,14 +392,6 @@ impl State {
             }
         }
         Ok(())
-    }
-}
-
-fn checked_change(value: U256, amount: U256, increase: bool) -> Result<U256, AccountingError> {
-    if increase {
-        value.checked_add(amount).ok_or(AccountingError::Overflow)
-    } else {
-        value.checked_sub(amount).ok_or(AccountingError::Underflow)
     }
 }
 

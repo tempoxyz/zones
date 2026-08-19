@@ -2,7 +2,7 @@
 
 use alloy_primitives::{Address, U256};
 
-use super::{AccountKey, Effect};
+use super::{AccountKey, BalanceChange, Effect};
 use crate::{
     l1::{L1BlockEvidence, L1PortalEvent},
     l2::{L2BlockEvidence, L2BridgeEvent},
@@ -60,8 +60,7 @@ fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Ef
                 token, net_amount, ..
             } => effects.push(Effect::PendingDeposit {
                 token,
-                amount: U256::from(net_amount),
-                increase: true,
+                change: BalanceChange::Credit(U256::from(net_amount)),
             }),
             L1PortalEvent::WithdrawalProcessed {
                 token,
@@ -71,8 +70,7 @@ fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Ef
             } => {
                 effects.push(Effect::PendingWithdrawal {
                     token,
-                    amount: U256::from(amount),
-                    increase: false,
+                    change: BalanceChange::Debit(U256::from(amount)),
                 });
             }
             L1PortalEvent::DepositBounceBack {
@@ -81,8 +79,7 @@ fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Ef
                 bounceback_fee,
             } => effects.push(Effect::PendingDeposit {
                 token,
-                amount: U256::from(amount) + U256::from(bounceback_fee),
-                increase: false,
+                change: BalanceChange::Debit(U256::from(amount) + U256::from(bounceback_fee)),
             }),
             L1PortalEvent::DepositBounceBackPending {
                 token,
@@ -91,20 +88,17 @@ fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Ef
             } => {
                 effects.push(Effect::PendingDeposit {
                     token,
-                    amount: U256::from(amount) + U256::from(bounceback_fee),
-                    increase: false,
+                    change: BalanceChange::Debit(U256::from(amount) + U256::from(bounceback_fee)),
                 });
                 effects.push(Effect::PendingRefund {
                     token,
-                    amount: U256::from(amount),
-                    increase: true,
+                    change: BalanceChange::Credit(U256::from(amount)),
                 });
             }
             L1PortalEvent::RefundClaimed { token, amount, .. } => {
                 effects.push(Effect::PendingRefund {
                     token,
-                    amount: U256::from(amount),
-                    increase: false,
+                    change: BalanceChange::Debit(U256::from(amount)),
                 });
             }
             L1PortalEvent::BatchSubmitted
@@ -140,8 +134,7 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
                 ..
             } => effects.push(Effect::PendingDeposit {
                 token,
-                amount: U256::from(amount),
-                increase: false,
+                change: BalanceChange::Debit(U256::from(amount)),
             }),
             L2BridgeEvent::WithdrawalRequested {
                 token,
@@ -150,8 +143,7 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
                 ..
             } => effects.push(Effect::PendingWithdrawal {
                 token,
-                amount: U256::from(principal),
-                increase: true,
+                change: BalanceChange::Credit(U256::from(principal)),
             }),
             L2BridgeEvent::WithdrawalBounceBack {
                 token,
@@ -162,8 +154,7 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
             | L2BridgeEvent::RefundClaimed { token, amount, .. } => {
                 effects.push(Effect::PendingWithdrawal {
                     token,
-                    amount: U256::from(amount),
-                    increase: false,
+                    change: BalanceChange::Debit(U256::from(amount)),
                 });
             }
             L2BridgeEvent::TempoAdvanced(_)
@@ -238,8 +229,7 @@ mod tests {
         state
             .apply(&[Effect::PendingWithdrawal {
                 token,
-                amount,
-                increase: true,
+                change: BalanceChange::Credit(amount),
             }])
             .unwrap();
         let failed = L1PortalEvent::WithdrawalProcessed {

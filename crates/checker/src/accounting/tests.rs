@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, U256};
 
-use super::{AccountKey, AccountingError, Effect, State};
+use super::{AccountKey, AccountingError, BalanceChange, Effect, State};
 
 fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
@@ -134,18 +134,15 @@ fn checks_full_portal_liability() {
             },
             Effect::PendingDeposit {
                 token,
-                amount: U256::from(20),
-                increase: true,
+                change: BalanceChange::Credit(U256::from(20)),
             },
             Effect::PendingWithdrawal {
                 token,
-                amount: U256::from(30),
-                increase: true,
+                change: BalanceChange::Credit(U256::from(30)),
             },
             Effect::PendingRefund {
                 token,
-                amount: U256::from(5),
-                increase: true,
+                change: BalanceChange::Credit(U256::from(5)),
             },
         ])
         .unwrap();
