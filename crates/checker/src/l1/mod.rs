@@ -50,14 +50,28 @@ pub(crate) async fn collect_l1_history(
         let block = provider
             .get_block_by_number(number.into())
             .hashes()
-            .await?
+            .await
+            .wrap_err_with(|| format!("failed to fetch Tempo block {number}"))?
             .ok_or_else(|| eyre::eyre!("Tempo block {number} is unavailable"))?;
+        eyre::ensure!(
+            block.header().number() == number,
+            "Tempo RPC returned block {} for requested block {number}",
+            block.header().number()
+        );
         eyre::ensure!(
             block.header().parent_hash() == previous.hash,
             "Tempo history is not contiguous at block {number}"
         );
         let coordinate = BlockNumHash::new(number, block.header().hash());
-        history.push(collect_l1_block_at(provider, portal, coordinate).await?);
+        let transaction_hashes = block.transactions().as_hashes().ok_or_else(|| {
+            eyre::eyre!(
+                "Tempo block {number} ({}) did not contain transaction hashes",
+                coordinate.hash
+            )
+        })?;
+        history.push(
+            collect_l1_block_evidence(provider, portal, coordinate, transaction_hashes).await?,
+        );
         previous = coordinate;
     }
     eyre::ensure!(
@@ -98,27 +112,15 @@ pub(crate) async fn portal_balances(
     .await
 }
 
-/// Fetch and authenticate one L1 block and its Portal events.
-async fn collect_l1_block_at(
+/// Fetch receipts and collect Portal events for one authenticated L1 block.
+async fn collect_l1_block_evidence(
     provider: &DynProvider<TempoNetwork>,
     portal: Address,
     block: BlockNumHash,
+    transaction_hashes: &[B256],
 ) -> eyre::Result<L1BlockEvidence> {
     let hash = block.hash;
     let number = block.number;
-    let block = provider
-        .get_block_by_hash(hash)
-        .hashes()
-        .await
-        .wrap_err_with(|| format!("failed to fetch L1 block {number} ({hash})"))?
-        .ok_or_else(|| eyre::eyre!("L1 block {number} ({hash}) not found"))?;
-
-    authenticate_l1_block(hash, number, block.header().hash(), block.header().number())?;
-
-    let transaction_hashes = block.transactions().as_hashes().ok_or_else(|| {
-        eyre::eyre!("L1 block {number} ({hash}) did not contain transaction hashes")
-    })?;
-
     let receipts = provider
         .get_block_receipts(BlockId::hash(hash))
         .await
@@ -131,30 +133,7 @@ async fn collect_l1_block_at(
         event_collector.extract_receipt(receipt, number)?;
     }
     let events = event_collector.finish();
-    Ok(L1BlockEvidence {
-        block: BlockNumHash::new(number, hash),
-        events,
-    })
-}
-
-/// Verify that a fetched L1 block matches the exact hash and number from the
-/// `TempoAdvanced` anchor.  This prevents using a latest/head lookup or a
-/// different fork after the anchor is obtained.
-fn authenticate_l1_block(
-    anchor_hash: B256,
-    anchor_number: u64,
-    rpc_hash: B256,
-    block_number: u64,
-) -> eyre::Result<()> {
-    eyre::ensure!(
-        rpc_hash == anchor_hash,
-        "L1 block hash mismatch: anchor {anchor_hash}, RPC returned {rpc_hash}"
-    );
-    eyre::ensure!(
-        block_number == anchor_number,
-        "L1 block number mismatch: anchor {anchor_number}, fetched {block_number}"
-    );
-    Ok(())
+    Ok(L1BlockEvidence { block, events })
 }
 
 /// Validate transaction and receipt correspondence from the trusted L1 RPC.
@@ -197,11 +176,11 @@ fn validate_l1_receipts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Header, ReceiptWithBloom, Sealable as _};
+    use alloy_consensus::ReceiptWithBloom;
     use alloy_primitives::{B256, Bloom};
-    use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
-    use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
-    use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
+    use alloy_rpc_types_eth::TransactionReceipt;
+    use tempo_alloy::rpc::TempoTransactionReceipt;
+    use tempo_primitives::{TempoReceipt, TempoTxType};
 
     const BLOCK: u64 = 100;
     const HASH: B256 = B256::repeat_byte(0x10);
@@ -234,31 +213,6 @@ mod tests {
             fee_token: None,
             fee_payer: Address::ZERO,
         }
-    }
-
-    #[test]
-    fn authenticate_l1_block_validates_hash_and_number() {
-        let header = TempoHeader {
-            inner: Header {
-                number: BLOCK,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let hash = header.hash_slow();
-        let response = TempoHeaderResponse {
-            inner: RpcHeader {
-                hash,
-                inner: header,
-                total_difficulty: None,
-                size: None,
-            },
-            timestamp_millis: 0,
-        };
-
-        assert!(authenticate_l1_block(hash, BLOCK, response.inner.hash, BLOCK).is_ok());
-        assert!(authenticate_l1_block(hash, BLOCK, HASH, BLOCK).is_err());
-        assert!(authenticate_l1_block(hash, BLOCK, hash, BLOCK + 1).is_err());
     }
 
     #[test]
