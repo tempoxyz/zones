@@ -16,7 +16,7 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
 };
 
-use crate::accounting::{Effect, State};
+use crate::accounting::{AccountingError, BlockDelta, Effect, State};
 
 use model::DeltaRecord;
 pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
@@ -33,6 +33,41 @@ const ACTIVE_FINDING: u8 = 0;
 pub(crate) struct Snapshot {
     pub(crate) metadata: Metadata,
     pub(crate) state: Arc<State>,
+}
+
+/// Post-block accounting state and its durable undo data.
+pub(crate) struct CandidateTransition {
+    zone: BlockRef,
+    parent: BlockRef,
+    imported_tempo: BlockRef,
+    state: State,
+    delta: BlockDelta,
+}
+
+impl CandidateTransition {
+    /// Derive one transition from the current verified state.
+    pub(crate) fn derive(
+        prior: &Snapshot,
+        zone: BlockRef,
+        parent: BlockRef,
+        imported_tempo: BlockRef,
+        effects: &[Effect],
+    ) -> Result<Self, AccountingError> {
+        let mut state = prior.state.as_ref().clone();
+        let delta = state.apply(effects)?;
+        Ok(Self {
+            zone,
+            parent,
+            imported_tempo,
+            state,
+            delta,
+        })
+    }
+
+    /// Return the derived post-block accounting state.
+    pub(crate) const fn state(&self) -> &State {
+        &self.state
+    }
 }
 
 /// Sole-writer checker database.
@@ -210,29 +245,28 @@ impl Store {
     pub(crate) fn apply(
         &self,
         prior: &Snapshot,
-        zone: BlockRef,
-        parent: BlockRef,
-        imported_tempo: BlockRef,
-        imported_tempo_parent: BlockRef,
-        effects: &[Effect],
+        candidate: CandidateTransition,
     ) -> Result<Snapshot, PersistenceError> {
+        let CandidateTransition {
+            zone,
+            parent,
+            imported_tempo,
+            state,
+            delta,
+        } = candidate;
         if prior.metadata.status != Status::Verifying {
             return Err(PersistenceError::Invalid("checker is not verifying".into()));
         }
-        if parent != prior.metadata.verified_zone
-            || imported_tempo_parent != prior.metadata.imported_tempo
-            || zone.number != parent.number.saturating_add(1)
+        if parent != prior.metadata.verified_zone || zone.number != parent.number.saturating_add(1)
         {
             return Err(PersistenceError::StaleSnapshot);
         }
-        let mut state = prior.state.as_ref().clone();
-        let delta = state.apply(effects)?;
         let record = DeltaRecord {
             zone,
             parent,
             imported_tempo,
-            imported_tempo_parent,
-            delta: delta.clone(),
+            imported_tempo_parent: prior.metadata.imported_tempo,
+            delta,
         };
         codec::validate(&record).map_err(PersistenceError::Invalid)?;
         let mut metadata = prior.metadata.clone();
@@ -244,7 +278,7 @@ impl Store {
 
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, prior)?;
-        write_changed_rows(&tx, &state, &delta)?;
+        write_changed_rows(&tx, &state, &record.delta)?;
         tx.put::<Deltas>(zone.number, record)?;
         tx.put::<Meta>(
             MetaKey::Metadata,

@@ -2,7 +2,7 @@ use alloy_primitives::{Address, B256, U256};
 
 use crate::accounting::{AccountKey, BalanceChange, Effect};
 
-use super::{BlockRef, Finding, Identity, Status, Store};
+use super::{BlockRef, CandidateTransition, Finding, Identity, Status, Store};
 
 fn block(number: u64, byte: u8) -> BlockRef {
     BlockRef {
@@ -34,29 +34,28 @@ fn rows_survive_restart_and_unwind() {
 
     let token = Address::repeat_byte(30);
     let account = AccountKey::new(token, Address::repeat_byte(31));
-    let one = store
-        .apply(
-            &reopened,
-            block(1, 11),
-            genesis,
-            block(21, 21),
-            tempo,
-            &[
-                Effect::Credit {
-                    key: account,
-                    amount: U256::from(100),
-                },
-                Effect::PendingTempoRefund {
-                    token,
-                    change: BalanceChange::Credit(U256::from(5)),
-                },
-                Effect::PendingZoneRefund {
-                    token,
-                    change: BalanceChange::Credit(U256::from(7)),
-                },
-            ],
-        )
-        .unwrap();
+    let candidate = CandidateTransition::derive(
+        &reopened,
+        block(1, 11),
+        genesis,
+        block(21, 21),
+        &[
+            Effect::Credit {
+                key: account,
+                amount: U256::from(100),
+            },
+            Effect::PendingTempoRefund {
+                token,
+                change: BalanceChange::Credit(U256::from(5)),
+            },
+            Effect::PendingZoneRefund {
+                token,
+                change: BalanceChange::Credit(U256::from(7)),
+            },
+        ],
+    )
+    .unwrap();
+    let one = store.apply(&reopened, candidate).unwrap();
     drop(store);
 
     let (store, loaded) = Store::open(&path, identity()).unwrap();

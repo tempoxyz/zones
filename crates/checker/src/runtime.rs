@@ -18,7 +18,10 @@ use crate::{
     bootstrap,
     l1::{collect_l1_history, portal_balances},
     l2::{collect_l2_block_evidence, read_accounting_state},
-    persistence::{AppliedStatus, BlockRef, Finding, PersistenceError, Snapshot, Status, Store},
+    persistence::{
+        AppliedStatus, BlockRef, CandidateTransition, Finding, PersistenceError, Snapshot, Status,
+        Store,
+    },
     telemetry::{self, CheckerMetrics},
 };
 
@@ -357,12 +360,17 @@ where
     }
     let mut block_effects = effects::from_tempo_history(&history);
     block_effects.extend(effects::from_zone(&l2));
-    let mut candidate = prior.state.as_ref().clone();
-    candidate
-        .apply(&block_effects)
-        .map_err(|error| fail(error.into()))?;
+    let candidate = CandidateTransition::derive(
+        prior,
+        zone,
+        BlockRef::new(number.saturating_sub(1), parent_hash),
+        tempo.into(),
+        &block_effects,
+    )
+    .map_err(|error| fail(error.into()))?;
+    let state = candidate.state();
     let mut accounts = l2.accounting_candidates();
-    let tokens = candidate
+    let tokens = state
         .tokens()
         .map(|(token, _)| token)
         .collect::<BTreeSet<_>>();
@@ -371,7 +379,7 @@ where
     }
     let observed = read_accounting_state(provider, &accounts, BlockNumHash::new(number, hash))
         .map_err(BlockError::Retry)?;
-    candidate
+    state
         .verify_zone_state(
             observed
                 .into_iter()
@@ -382,19 +390,12 @@ where
     let balances = portal_balances(l1, config.portal_address, tokens, tempo.hash)
         .await
         .map_err(BlockError::Retry)?;
-    candidate
+    state
         .verify_portal_balances(balances)
         .map_err(|error| fail(error.into()))?;
 
     let next = store
-        .apply(
-            prior,
-            zone,
-            BlockRef::new(number.saturating_sub(1), parent_hash),
-            tempo.into(),
-            prior.metadata.imported_tempo,
-            &block_effects,
-        )
+        .apply(prior, candidate)
         .map_err(|error| BlockError::Retry(error.into()))?;
     telemetry::log_verified_activity(&history, &l2, zone);
     Ok(next)
