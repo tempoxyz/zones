@@ -14,6 +14,8 @@ use tempo_precompiles::{
 use tempo_revm::TempoStateAccess as _;
 use zone_precompiles::zone_state::ZoneStateSnapshot;
 
+use crate::AttemptError;
+
 /// Protocol checkpoint embedded in local Zone genesis.
 pub(crate) struct ZoneGenesisEvidence {
     pub(crate) tempo_block_hash: B256,
@@ -66,8 +68,17 @@ pub(crate) struct TokenAccountingEvidence {
 pub(crate) enum AccountingStateError {
     /// The requested block state is not currently available.
     Unavailable(eyre::Report),
-    /// Available state could not be interpreted as valid TIP-20 accounting.
-    Invalid(eyre::Report),
+    /// Deterministic provider or checker failure prevents verification.
+    Disable(eyre::Report),
+}
+
+impl From<AttemptError> for AccountingStateError {
+    fn from(error: AttemptError) -> Self {
+        match error {
+            AttemptError::Retry(error) => Self::Unavailable(error),
+            AttemptError::Disable(error) => Self::Disable(error),
+        }
+    }
 }
 
 /// Read exact balances and supply for affected accounts at one Zone block.
@@ -103,10 +114,10 @@ pub(crate) fn read_accounting_state<P: StateProviderFactory>(
                 .collect::<tempo_precompiles::Result<Vec<_>>>()
         })
         .wrap_err_with(|| format!("failed to read accounting state for block {}", block.hash))
-        .map_err(AccountingStateError::Invalid)
+        .map_err(AccountingStateError::Disable)
 }
 
-fn classify_provider_error(error: ProviderError, block: B256) -> AccountingStateError {
+fn classify_provider_error(error: ProviderError, block: B256) -> AttemptError {
     let report = |error| {
         eyre::Report::new(error).wrap_err(format!("failed to obtain state for block {block}"))
     };
@@ -116,10 +127,8 @@ fn classify_provider_error(error: ProviderError, block: B256) -> AccountingState
         | ProviderError::UnknownBlockHash(_)
         | ProviderError::StateForHashNotFound(_)
         | ProviderError::StateForNumberNotFound(_)
-        | ProviderError::BlockNotExecuted { .. }) => {
-            AccountingStateError::Unavailable(report(error))
-        }
-        error => AccountingStateError::Invalid(report(error)),
+        | ProviderError::BlockNotExecuted { .. }) => AttemptError::retry(report(error)),
+        error => AttemptError::disable(report(error)),
     }
 }
 
@@ -132,12 +141,12 @@ mod tests {
         let block = B256::repeat_byte(1);
         assert!(matches!(
             classify_provider_error(ProviderError::StateForHashNotFound(block), block),
-            AccountingStateError::Unavailable(_)
+            AttemptError::Retry(_)
         ));
 
         assert!(matches!(
             classify_provider_error(ProviderError::StateAtBlockPruned(1), block),
-            AccountingStateError::Invalid(_)
+            AttemptError::Disable(_)
         ));
     }
 }

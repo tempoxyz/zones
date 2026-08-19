@@ -124,7 +124,7 @@ where
             Status::Verifying => false,
         };
         if matches!(&snapshot.metadata.status, Status::Diverged { .. }) && !recoverable_finding {
-            snapshot = store.observe_diverged(&snapshot, delivered_tip.into())?;
+            snapshot = store.observe(&snapshot, delivered_tip.into())?;
             metrics.update(&snapshot);
             ctx.send_finished_height(delivered_tip)?;
             continue;
@@ -285,7 +285,7 @@ impl From<AccountingStateError> for BlockError {
     fn from(error: AccountingStateError) -> Self {
         match error {
             AccountingStateError::Unavailable(error) => Self::Retry(error),
-            AccountingStateError::Invalid(error) => Self::Disable(error),
+            AccountingStateError::Disable(error) => Self::Disable(error),
         }
     }
 }

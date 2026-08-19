@@ -362,38 +362,12 @@ impl Store {
         })
     }
 
-    /// Extend the durable unchecked range while verification remains stopped.
-    pub(crate) fn observe_diverged(
-        &self,
-        prior: &Snapshot,
-        observed: BlockRef,
-    ) -> Result<Snapshot, PersistenceError> {
-        if !matches!(&prior.metadata.status, Status::Diverged { .. }) {
-            return Err(PersistenceError::Invalid("checker has not diverged".into()));
-        }
-        let mut metadata = prior.metadata.clone();
-        metadata.observed_zone = observed;
-        let tx = self.db.tx_mut()?;
-        ensure_current(&tx, &prior.metadata)?;
-        write_metadata(&tx, &metadata)?;
-        tx.commit()?;
-        Ok(Snapshot {
-            metadata,
-            state: Arc::clone(&prior.state),
-        })
-    }
-
-    /// Persist the latest delivered canonical tip before potentially slow acquisition.
-    ///
-    /// Requires `prior` to still be verifying; errors if the checker has diverged.
+    /// Persist the latest delivered canonical tip, whether verifying or diverged.
     pub(crate) fn observe(
         &self,
         prior: &Snapshot,
         observed: BlockRef,
     ) -> Result<Snapshot, PersistenceError> {
-        if prior.metadata.status != Status::Verifying {
-            return Err(PersistenceError::Invalid("checker is not verifying".into()));
-        }
         let mut metadata = prior.metadata.clone();
         metadata.observed_zone = observed;
         let tx = self.db.tx_mut()?;

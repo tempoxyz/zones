@@ -122,7 +122,7 @@ fn finding_survives_restart_and_clears_on_reorg() {
     assert_eq!(reopened, diverged);
 
     let observed = block(2, 12);
-    let extended = store.observe_diverged(&reopened, observed).unwrap();
+    let extended = store.observe(&reopened, observed).unwrap();
     assert_eq!(extended.metadata.verified_zone, genesis);
     assert_eq!(extended.metadata.observed_zone, observed);
     assert_eq!(extended.metadata.status, Status::Diverged { finding });

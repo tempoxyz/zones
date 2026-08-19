@@ -40,6 +40,15 @@ impl From<AttemptError> for L1ReadError {
     }
 }
 
+impl From<L1ReadError> for AttemptError {
+    fn from(error: L1ReadError) -> Self {
+        match error {
+            L1ReadError::Unavailable(error) => Self::Retry(error),
+            L1ReadError::Finding(error) | L1ReadError::Disable(error) => Self::Disable(error),
+        }
+    }
+}
+
 /// Recognized Portal events for one exact anchored L1 block.
 #[derive(Debug)]
 pub(crate) struct L1BlockEvidence {

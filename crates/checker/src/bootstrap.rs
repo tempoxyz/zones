@@ -17,9 +17,7 @@ use crate::{
     AttemptError, CheckerConfig,
     accounting::{State, effects},
     decode_event,
-    l1::{
-        L1ReadError, classify_rpc_error, collect_l1_block, portal_balances, validate_l1_receipts,
-    },
+    l1::{classify_rpc_error, collect_l1_block, portal_balances, validate_l1_receipts},
     l2::read_zone_genesis,
     persistence::{self, Checkpoint},
 };
@@ -60,7 +58,7 @@ where
         .ok_or_else(|| AttemptError::disable(eyre::eyre!("local Zone genesis is unavailable")))?;
     let (tempo, initial_token) =
         read_genesis(provider, zone_hash).map_err(AttemptError::disable)?;
-    let creation = discover_creation(l1, portal, zone_id, initial_token, tempo.number).await?;
+    let creation = discover_creation(l1, config, initial_token, tempo.number).await?;
     if !is_canonical(l1, creation, "Portal creation").await? {
         return Err(AttemptError::retry(eyre::eyre!(
             "Portal creation changed during bootstrap"
@@ -72,7 +70,7 @@ where
         )));
     }
 
-    let state = initial_state(l1, portal, creation, tempo, initial_token).await?;
+    let state = initial_state(l1, config, creation, tempo, initial_token).await?;
     Ok(Checkpoint {
         identity: persistence::Identity {
             l1_chain_id,
@@ -124,8 +122,7 @@ where
 /// Use the RPC log index for discovery, then authenticate the matching receipt.
 async fn discover_creation(
     provider: &DynProvider<TempoNetwork>,
-    portal: Address,
-    zone_id: u32,
+    config: &CheckerConfig,
     initial_token: Address,
     anchor_number: u64,
 ) -> Result<BlockNumHash, AttemptError> {
@@ -140,8 +137,8 @@ async fn discover_creation(
         let filter = Filter::new()
             .address(ZONE_FACTORY_ADDRESS)
             .event_signature(ZoneFactory::ZoneCreated::SIGNATURE_HASH)
-            .topic1(B256::from(U256::from(zone_id)))
-            .topic2(portal.into_word())
+            .topic1(B256::from(U256::from(config.zone_id)))
+            .topic2(config.portal_address.into_word())
             .from_block(start)
             .to_block(end);
         for log in provider
@@ -173,27 +170,28 @@ async fn discover_creation(
         }
         [] => {
             return Err(AttemptError::disable(eyre::eyre!(
-                "no creation block found for Zone {zone_id} and Portal {portal}"
+                "no creation block found for Zone {} and Portal {}",
+                config.zone_id,
+                config.portal_address
             )));
         }
         _ => {
             return Err(AttemptError::disable(eyre::eyre!(
                 "expected one creation block for Zone {} and Portal {}, found {}",
-                zone_id,
-                portal,
+                config.zone_id,
+                config.portal_address,
                 candidates.len()
             )));
         }
     };
-    authenticate_creation(provider, hash, portal, zone_id, initial_token).await
+    authenticate_creation(provider, hash, config, initial_token).await
 }
 
 /// Require one matching `ZoneCreated` event with authenticated receipt provenance.
 async fn authenticate_creation(
     provider: &DynProvider<TempoNetwork>,
     hash: B256,
-    portal: Address,
-    zone_id: u32,
+    config: &CheckerConfig,
     initial_token: Address,
 ) -> Result<BlockNumHash, AttemptError> {
     let block = provider
@@ -228,7 +226,7 @@ async fn authenticate_creation(
         .collect::<eyre::Result<Vec<_>>>()
         .map_err(AttemptError::disable)?
         .into_iter()
-        .filter(|event| event.zoneId == zone_id && event.portal == portal);
+        .filter(|event| event.zoneId == config.zone_id && event.portal == config.portal_address);
     let event = creations.next().ok_or_else(|| {
         AttemptError::disable(eyre::eyre!(
             "authenticated block has no matching ZoneCreated event"
@@ -262,7 +260,7 @@ async fn is_canonical(
 
 async fn initial_state(
     provider: &DynProvider<TempoNetwork>,
-    portal: Address,
+    config: &CheckerConfig,
     creation: BlockNumHash,
     anchor: BlockNumHash,
     initial_token: Address,
@@ -289,9 +287,7 @@ async fn initial_state(
     );
     let mut previous = parent;
     while previous.number < anchor.number {
-        let block = collect_l1_block(provider, portal, previous)
-            .await
-            .map_err(classify_bootstrap_l1_error)?;
+        let block = collect_l1_block(provider, config.portal_address, previous).await?;
         state
             .apply(&effects::from_tempo(&block))
             .map_err(AttemptError::disable)?;
@@ -303,18 +299,9 @@ async fn initial_state(
         )));
     }
     let tokens = state.tokens().map(|(token, _)| token).collect::<Vec<_>>();
-    let balances = portal_balances(provider, portal, tokens, anchor.hash)
-        .await
-        .map_err(classify_bootstrap_l1_error)?;
+    let balances = portal_balances(provider, config.portal_address, tokens, anchor.hash).await?;
     state
         .verify_portal_balances(balances)
         .map_err(AttemptError::disable)?;
     Ok(state)
-}
-
-fn classify_bootstrap_l1_error(error: L1ReadError) -> AttemptError {
-    match error {
-        L1ReadError::Unavailable(error) => AttemptError::Retry(error),
-        L1ReadError::Finding(error) | L1ReadError::Disable(error) => AttemptError::Disable(error),
-    }
 }
