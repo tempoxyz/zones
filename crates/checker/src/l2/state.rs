@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{Address, B256, U256};
 use eyre::WrapErr as _;
-use reth_storage_api::{StateProviderFactory, errors::provider::ProviderError};
+use reth_storage_api::{BlockNumReader, StateProviderFactory, errors::provider::ProviderError};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     storage::{ContractStorage, StorageActions},
@@ -82,14 +82,34 @@ impl From<AttemptError> for AccountingStateError {
 }
 
 /// Read exact balances and supply for affected accounts at one Zone block.
-pub(crate) fn read_accounting_state<P: StateProviderFactory>(
+pub(crate) fn read_accounting_state<P: StateProviderFactory + BlockNumReader>(
     provider: &P,
     accounts: &BTreeMap<Address, BTreeSet<Address>>,
     block: BlockNumHash,
     spec: TempoHardfork,
 ) -> Result<Vec<TokenAccountingEvidence>, AccountingStateError> {
+    let canonical_hash = provider
+        .block_hash(block.number)
+        .map_err(|error| classify_provider_error(error, block.hash))?;
+    match canonical_hash {
+        Some(hash) if hash == block.hash => {}
+        Some(_) => {
+            return Err(AccountingStateError::Disable(eyre::eyre!(
+                "Zone block {} ({}) is not canonical",
+                block.number,
+                block.hash
+            )));
+        }
+        None => {
+            return Err(AccountingStateError::Unavailable(eyre::eyre!(
+                "Zone block {} ({}) is not yet available in local canonical history",
+                block.number,
+                block.hash
+            )));
+        }
+    }
     let mut state = provider
-        .state_by_block_hash(block.hash)
+        .history_by_block_number(block.number)
         .map_err(|error| classify_provider_error(error, block.hash))?;
     state
         .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
@@ -128,6 +148,9 @@ fn classify_provider_error(error: ProviderError, block: B256) -> AttemptError {
         | ProviderError::StateForHashNotFound(_)
         | ProviderError::StateForNumberNotFound(_)
         | ProviderError::BlockNotExecuted { .. }) => AttemptError::retry(report(error)),
+        error @ ProviderError::StateAtBlockPruned(_) => AttemptError::disable(
+            report(error).wrap_err("checker requires unpruned historical Zone state"),
+        ),
         error => AttemptError::disable(report(error)),
     }
 }

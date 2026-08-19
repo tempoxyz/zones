@@ -25,6 +25,7 @@ use crate::{
 };
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_STATE_ATTEMPTS: u32 = 30;
 
 /// `NodePrimitives` whose transaction and receipt types the checker can process.
 pub(crate) trait CheckedPrimitives: NodePrimitives {}
@@ -143,6 +144,7 @@ where
         snapshot = store.observe(&snapshot, delivered_tip.into())?;
         metrics.update(&snapshot);
 
+        let mut state_retry = None;
         loop {
             let previous_verified = snapshot.metadata.verified_zone.number;
             match process_notification(
@@ -187,6 +189,23 @@ where
                     metrics.acquisition_retries_total.increment(1);
                     metrics.update(&snapshot);
                     tracing::warn!(target: "zone::checker", %error, "checker block processing failed; retrying");
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+                Err(BlockError::StateUnavailable { zone, error }) => {
+                    metrics.acquisition_retries_total.increment(1);
+                    let attempts = state_attempts_for_block(&mut state_retry, zone);
+                    record_state_attempt(attempts, error)?;
+                    let attempt = *attempts;
+                    snapshot = store.load()?;
+                    metrics.update(&snapshot);
+                    tracing::warn!(
+                        target: "zone::checker",
+                        zone_block = zone.number,
+                        zone_hash = %zone.hash,
+                        attempt,
+                        max_attempts = MAX_STATE_ATTEMPTS,
+                        "checker local state unavailable; retrying"
+                    );
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
                 Err(BlockError::Disable(error)) => return Err(error),
@@ -250,19 +269,29 @@ fn notification_tip<N: NodePrimitives>(notification: &ExExNotification<N>) -> Op
 enum BlockError {
     /// Transient failure; retry without advancing.
     Retry(eyre::Report),
+    /// Local state is temporarily unavailable; retry only up to the configured safety bound.
+    StateUnavailable { zone: BlockRef, error: eyre::Report },
     /// Authenticated divergence to persist as a finding.
     Finding { zone: BlockRef, error: eyre::Report },
     /// Deterministic checker failure that cannot be resolved by retrying.
     Disable(eyre::Report),
 }
 
-impl From<AccountingStateError> for BlockError {
-    fn from(error: AccountingStateError) -> Self {
-        match error {
-            AccountingStateError::Unavailable(error) => Self::Retry(error),
-            AccountingStateError::Disable(error) => Self::Disable(error),
-        }
+fn state_attempts_for_block(retry: &mut Option<(BlockRef, u32)>, zone: BlockRef) -> &mut u32 {
+    if !matches!(retry, Some((failed, _)) if *failed == zone) {
+        *retry = Some((zone, 0));
     }
+    &mut retry.as_mut().expect("retry state was initialized").1
+}
+
+fn record_state_attempt(attempts: &mut u32, error: eyre::Report) -> eyre::Result<()> {
+    *attempts = attempts.saturating_add(1);
+    if *attempts >= MAX_STATE_ATTEMPTS {
+        return Err(eyre::eyre!(
+            "local Zone state remained unavailable after {attempts} attempts; checker requires unpruned state for notified blocks: {error:#}"
+        ));
+    }
+    Ok(())
 }
 
 /// Verify one append-only notification's blocks.
@@ -276,7 +305,7 @@ async fn process_notification<N, P>(
 ) -> Result<Box<Snapshot>, BlockError>
 where
     N: CheckedPrimitives,
-    P: ChainSpecProvider + StateProviderFactory,
+    P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
     let mut current = snapshot;
@@ -326,7 +355,7 @@ async fn verify_block<N, P>(
 ) -> Result<Snapshot, BlockError>
 where
     N: CheckedPrimitives,
-    P: ChainSpecProvider + StateProviderFactory,
+    P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
     let number = block.number();
@@ -365,8 +394,14 @@ where
     let spec = provider
         .chain_spec()
         .tempo_hardfork_at(block.header().timestamp());
-    let observed =
-        read_accounting_state(provider, &accounts, zone.into(), spec).map_err(BlockError::from)?;
+    let observed = read_accounting_state(provider, &accounts, zone.into(), spec).map_err(
+        |error| match error {
+            AccountingStateError::Unavailable(error) => {
+                BlockError::StateUnavailable { zone, error }
+            }
+            AccountingStateError::Disable(error) => BlockError::Disable(error),
+        },
+    )?;
     state
         .verify_zone_state(
             observed
@@ -437,5 +472,33 @@ mod tests {
             assert!(validate_tempo_advance(10, tip).is_err());
         }
         assert!(validate_tempo_advance(u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn local_state_retries_are_bounded() {
+        let block_a = BlockRef::new(1, alloy_primitives::B256::repeat_byte(1));
+        let block_b = BlockRef::new(2, alloy_primitives::B256::repeat_byte(2));
+        let mut retry = None;
+        for _ in 0..20 {
+            record_state_attempt(
+                state_attempts_for_block(&mut retry, block_a),
+                eyre::eyre!("state unavailable"),
+            )
+            .unwrap();
+        }
+        for _ in 1..MAX_STATE_ATTEMPTS {
+            record_state_attempt(
+                state_attempts_for_block(&mut retry, block_b),
+                eyre::eyre!("state unavailable"),
+            )
+            .unwrap();
+        }
+        let error = record_state_attempt(
+            state_attempts_for_block(&mut retry, block_b),
+            eyre::eyre!("state unavailable"),
+        )
+        .expect_err("the final attempt must disable the checker");
+        assert_eq!(retry, Some((block_b, MAX_STATE_ATTEMPTS)));
+        assert!(error.to_string().contains("remained unavailable"));
     }
 }
