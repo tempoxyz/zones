@@ -7,7 +7,10 @@ use reth_metrics::{
 
 use crate::{
     l1::{L1BlockEvidence, L1PortalEvent},
-    l2::{L2BlockEvidence, L2BridgeEvent},
+    l2::{
+        DepositResult, L2BlockEvidence, L2BridgeAction, WithdrawalBounceBackStatus,
+        WithdrawalOrigin,
+    },
     persistence::{BlockRef, Snapshot, Status},
 };
 
@@ -59,8 +62,8 @@ pub(crate) fn log_verified_activity(tempo: &L1BlockEvidence, l2: &L2BlockEvidenc
     for event in tempo.portal_events() {
         log_tempo_event(event, zone, tempo_block);
     }
-    for event in l2.bridge_events() {
-        log_zone_event(event, zone);
+    for action in l2.bridge_actions() {
+        log_zone_action(action, zone);
     }
 }
 
@@ -141,90 +144,84 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
     }
 }
 
-fn log_zone_event(event: &L2BridgeEvent, zone: BlockRef) {
-    match event {
-        L2BridgeEvent::DepositOutcome {
-            recipient,
+fn log_zone_action(action: &L2BridgeAction, zone: BlockRef) {
+    match action {
+        L2BridgeAction::Deposit {
             token,
             amount,
-            processed: true,
-            ..
+            result: DepositResult::Processed { recipient },
         } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
             %token,
-            recipient = ?recipient,
-            amount,
+            %recipient,
+            %amount,
             "verified Zone deposit mint"
         ),
-        L2BridgeEvent::DepositOutcome {
+        L2BridgeAction::Deposit {
             token,
             amount,
-            processed: false,
-            ..
+            result: DepositResult::Failed,
         } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
             %token,
-            amount,
+            %amount,
             "verified Zone deposit failure"
         ),
-        L2BridgeEvent::WithdrawalRequested {
+        L2BridgeAction::WithdrawalRequested {
             withdrawal_index,
-            sender,
+            origin,
             token,
             principal,
             fee,
-        } => {
-            if sender.is_zero() {
-                tracing::info!(
-                    target: "zone::checker",
-                    zone_block = zone.number,
-                    %token,
-                    amount = principal,
-                    withdrawal_index,
-                    "accounted authenticated Zone deposit bounce-back request"
-                );
-            } else {
-                tracing::info!(
-                    target: "zone::checker",
-                    zone_block = zone.number,
-                    %token,
-                    %sender,
-                    principal,
-                    fee,
-                    withdrawal_index,
-                    "verified Zone withdrawal debit and burn"
-                );
-            }
-        }
-        L2BridgeEvent::WithdrawalBounceBack {
+        } => match origin {
+            WithdrawalOrigin::DepositBounceBack => tracing::info!(
+                target: "zone::checker",
+                zone_block = zone.number,
+                %token,
+                amount = %principal,
+                withdrawal_index,
+                "accounted authenticated Zone deposit bounce-back request"
+            ),
+            WithdrawalOrigin::User { sender } => tracing::info!(
+                target: "zone::checker",
+                zone_block = zone.number,
+                %token,
+                %sender,
+                %principal,
+                %fee,
+                withdrawal_index,
+                "verified Zone withdrawal debit and burn"
+            ),
+        },
+        L2BridgeAction::WithdrawalBounceBack {
             recipient,
             token,
             amount,
-            processed: true,
+            status: WithdrawalBounceBackStatus::Processed,
         } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
             %token,
             %recipient,
-            amount,
+            %amount,
             "verified Zone withdrawal bounce-back mint"
         ),
-        L2BridgeEvent::WithdrawalBounceBack {
+        L2BridgeAction::WithdrawalBounceBack {
             recipient,
             token,
             amount,
-            processed: false,
+            status: WithdrawalBounceBackStatus::Pending,
         } => tracing::info!(
             target: "zone::checker",
             zone_block = zone.number,
             %token,
             %recipient,
-            amount,
+            %amount,
             "verified pending Zone withdrawal bounce-back"
         ),
-        L2BridgeEvent::RefundClaimed {
+        L2BridgeAction::RefundClaimed {
             recipient,
             token,
             amount,
@@ -233,11 +230,8 @@ fn log_zone_event(event: &L2BridgeEvent, zone: BlockRef) {
             zone_block = zone.number,
             %token,
             %recipient,
-            amount,
+            %amount,
             "verified Zone refund mint"
         ),
-        L2BridgeEvent::TempoAdvanced(_)
-        | L2BridgeEvent::Transfer { .. }
-        | L2BridgeEvent::TokenBurn { .. } => {}
     }
 }

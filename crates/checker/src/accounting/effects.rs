@@ -1,41 +1,42 @@
 //! Converts authenticated TIP-20 movements into account-ledger effects.
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::U256;
 
 use super::{AccountKey, BalanceChange, Effect};
 use crate::{
     l1::{L1BlockEvidence, L1PortalEvent},
-    l2::{L2BlockEvidence, L2BridgeEvent},
+    l2::{
+        DepositResult, L2BlockEvidence, L2BridgeAction, TokenTransfer, WithdrawalBounceBackStatus,
+        WithdrawalOrigin,
+    },
 };
 
 /// Convert canonical transfers after their protocol provenance has been authenticated.
-fn from_transfers(
-    transfers: impl IntoIterator<Item = (Address, Address, Address, U256)>,
-) -> Vec<Effect> {
+fn from_transfers(transfers: impl IntoIterator<Item = TokenTransfer>) -> Vec<Effect> {
     transfers
         .into_iter()
-        .filter_map(|(token, from, to, amount)| {
-            if amount.is_zero() || from == to {
+        .filter_map(|transfer| {
+            if transfer.amount.is_zero() || transfer.from == transfer.to {
                 return None;
             }
-            Some(if from.is_zero() {
-                Effect::Credit {
-                    key: AccountKey::new(token, to),
-                    amount,
-                }
-            } else if to.is_zero() {
-                Effect::Debit {
-                    key: AccountKey::new(token, from),
-                    amount,
-                }
-            } else {
-                Effect::Transfer {
-                    token,
-                    from,
-                    to,
-                    amount,
-                }
-            })
+
+            match (transfer.from.is_zero(), transfer.to.is_zero()) {
+                (true, false) => Some(Effect::Credit {
+                    key: AccountKey::new(transfer.token, transfer.to),
+                    amount: transfer.amount,
+                }),
+                (false, true) => Some(Effect::Debit {
+                    key: AccountKey::new(transfer.token, transfer.from),
+                    amount: transfer.amount,
+                }),
+                (false, false) => Some(Effect::Transfer {
+                    token: transfer.token,
+                    from: transfer.from,
+                    to: transfer.to,
+                    amount: transfer.amount,
+                }),
+                (true, true) => None,
+            }
         })
         .collect()
 }
@@ -117,63 +118,53 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
 
 /// Derive account and liability changes from authenticated Zone evidence.
 pub(crate) fn from_zone(block: &L2BlockEvidence) -> Vec<Effect> {
-    from_zone_events(block.bridge_events())
+    let mut effects = from_transfers(block.token_transfers());
+    effects.extend(from_zone_actions(block.bridge_actions()));
+    effects
 }
 
-/// Derive account and liability changes from authenticated Zone events.
-fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone) -> Vec<Effect> {
-    let mut effects = from_transfers(events.clone().filter_map(|event| match *event {
-        L2BridgeEvent::Transfer {
-            token,
-            from,
-            to,
-            amount,
-        } => Some((token, from, to, amount)),
-        _ => None,
-    }));
-    for event in events {
-        match *event {
-            L2BridgeEvent::DepositOutcome {
+/// Derive liability changes from authenticated Zone actions.
+fn from_zone_actions<'a>(actions: impl Iterator<Item = &'a L2BridgeAction>) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for action in actions {
+        match *action {
+            L2BridgeAction::Deposit {
                 token,
                 amount,
-                processed: true,
-                ..
+                result: DepositResult::Processed { .. },
             } => effects.push(Effect::PendingDeposit {
                 token,
-                change: BalanceChange::Debit(U256::from(amount)),
+                change: BalanceChange::Debit(amount),
             }),
-            L2BridgeEvent::WithdrawalRequested {
-                sender,
+            L2BridgeAction::WithdrawalRequested {
+                origin: WithdrawalOrigin::User { .. },
                 token,
                 principal,
                 ..
-            } if !sender.is_zero() => effects.push(Effect::PendingWithdrawal {
+            } => effects.push(Effect::PendingWithdrawal {
                 token,
-                change: BalanceChange::Credit(U256::from(principal)),
+                change: BalanceChange::Credit(principal),
             }),
-            L2BridgeEvent::WithdrawalBounceBack {
+            L2BridgeAction::WithdrawalBounceBack {
                 token,
                 amount,
-                processed: true,
+                status: WithdrawalBounceBackStatus::Processed,
                 ..
             } => {
                 effects.push(Effect::PendingZoneRefund {
                     token,
-                    change: BalanceChange::Debit(U256::from(amount)),
+                    change: BalanceChange::Debit(amount),
                 });
             }
-            L2BridgeEvent::RefundClaimed { token, amount, .. } => {
+            L2BridgeAction::RefundClaimed { token, amount, .. } => {
                 effects.push(Effect::PendingZoneRefund {
                     token,
-                    change: BalanceChange::Debit(U256::from(amount)),
+                    change: BalanceChange::Debit(amount),
                 });
             }
-            L2BridgeEvent::TempoAdvanced(_)
-            | L2BridgeEvent::DepositOutcome { .. }
-            | L2BridgeEvent::WithdrawalRequested { .. }
-            | L2BridgeEvent::WithdrawalBounceBack { .. }
-            | L2BridgeEvent::Transfer { .. }
-            | L2BridgeEvent::TokenBurn { .. } => {}
+            L2BridgeAction::Deposit { .. }
+            | L2BridgeAction::WithdrawalRequested { .. }
+            | L2BridgeAction::WithdrawalBounceBack { .. } => {}
         }
     }
     effects
@@ -182,6 +173,13 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
+
+    fn zone_effects(transfers: &[TokenTransfer], actions: &[L2BridgeAction]) -> Vec<Effect> {
+        let mut effects = from_transfers(transfers.iter().copied());
+        effects.extend(from_zone_actions(actions.iter()));
+        effects
+    }
 
     fn state_with_token(token: Address) -> crate::accounting::State {
         let mut state = crate::accounting::State::default();
@@ -198,9 +196,24 @@ mod tests {
 
         assert_eq!(
             from_transfers([
-                (token, Address::ZERO, alice, amount),
-                (token, alice, Address::ZERO, amount),
-                (token, alice, bob, amount),
+                TokenTransfer {
+                    token,
+                    from: Address::ZERO,
+                    to: alice,
+                    amount,
+                },
+                TokenTransfer {
+                    token,
+                    from: alice,
+                    to: Address::ZERO,
+                    amount,
+                },
+                TokenTransfer {
+                    token,
+                    from: alice,
+                    to: bob,
+                    amount,
+                },
             ]),
             vec![
                 Effect::Credit {
@@ -223,15 +236,15 @@ mod tests {
 
     #[test]
     fn deposit_bounce_back_does_not_create_withdrawal_liability() {
-        let event = L2BridgeEvent::WithdrawalRequested {
+        let action = L2BridgeAction::WithdrawalRequested {
             withdrawal_index: 0,
-            sender: Address::ZERO,
+            origin: WithdrawalOrigin::DepositBounceBack,
             token: Address::repeat_byte(1),
-            principal: 10,
-            fee: 0,
+            principal: U256::from(10),
+            fee: U256::ZERO,
         };
 
-        assert!(from_zone_events([&event].into_iter()).is_empty());
+        assert!(from_zone_actions([&action].into_iter()).is_empty());
     }
 
     #[test]
@@ -261,20 +274,22 @@ mod tests {
         assert_eq!(token_state.pending_zone_refunds, amount);
         assert_eq!(token_state.liability().unwrap(), amount);
 
-        let mint = L2BridgeEvent::Transfer {
-            token,
-            from: Address::ZERO,
-            to: recipient,
-            amount,
-        };
-        let bounce_back = L2BridgeEvent::WithdrawalBounceBack {
+        let bounce_back = L2BridgeAction::WithdrawalBounceBack {
             recipient,
             token,
-            amount: 10,
-            processed: true,
+            amount,
+            status: WithdrawalBounceBackStatus::Processed,
         };
         state
-            .apply(&from_zone_events([&mint, &bounce_back].into_iter()))
+            .apply(&zone_effects(
+                &[TokenTransfer {
+                    token,
+                    from: Address::ZERO,
+                    to: recipient,
+                    amount,
+                }],
+                &[bounce_back],
+            ))
             .unwrap();
 
         let token_state = state.token(token).unwrap();
@@ -310,32 +325,34 @@ mod tests {
             .apply(&from_tempo_events([&enqueued, &failed]))
             .unwrap();
 
-        let pending = L2BridgeEvent::WithdrawalBounceBack {
+        let pending = L2BridgeAction::WithdrawalBounceBack {
             recipient,
             token,
-            amount: 10,
-            processed: false,
+            amount,
+            status: WithdrawalBounceBackStatus::Pending,
         };
         state
-            .apply(&from_zone_events([&pending].into_iter()))
+            .apply(&from_zone_actions([&pending].into_iter()))
             .unwrap();
         let token_state = state.token(token).unwrap();
         assert_eq!(token_state.pending_zone_refunds, amount);
         assert_eq!(token_state.liability().unwrap(), amount);
 
-        let mint = L2BridgeEvent::Transfer {
-            token,
-            from: Address::ZERO,
-            to: recipient,
-            amount,
-        };
-        let claimed = L2BridgeEvent::RefundClaimed {
+        let claimed = L2BridgeAction::RefundClaimed {
             recipient,
             token,
-            amount: 10,
+            amount,
         };
         state
-            .apply(&from_zone_events([&mint, &claimed].into_iter()))
+            .apply(&zone_effects(
+                &[TokenTransfer {
+                    token,
+                    from: Address::ZERO,
+                    to: recipient,
+                    amount,
+                }],
+                &[claimed],
+            ))
             .unwrap();
 
         let token_state = state.token(token).unwrap();

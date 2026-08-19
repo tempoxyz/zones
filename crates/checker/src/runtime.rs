@@ -350,9 +350,7 @@ where
     let fail = |error| BlockError::Finding { zone, error };
     let l2 = collect_l2_block_evidence(block.body().transactions(), receipts, zone.into())
         .map_err(fail)?;
-    let anchor = l2
-        .l1_anchor()
-        .ok_or_else(|| fail(eyre::eyre!("Zone block is missing its Tempo anchor")))?;
+    let anchor = l2.l1_anchor();
     let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;

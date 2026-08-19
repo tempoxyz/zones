@@ -1,4 +1,4 @@
-//! Decoded L2 Inbox/Outbox events with their canonical receipt provenance.
+//! Receipt-local authentication and normalization of L2 protocol events.
 
 use alloy_consensus::{TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{Address, B256, Log, U256};
@@ -9,7 +9,7 @@ use tempo_zone_contracts::{IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUT
 use crate::decode_event;
 
 /// Exact Tempo/L1 block imported by `TempoAdvanced`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct L1Anchor {
     pub(super) tempo_block_hash: B256,
     pub(super) tempo_block_number: u64,
@@ -25,89 +25,81 @@ impl L1Anchor {
     }
 }
 
-/// Semantic value of one recognized Zone Inbox or Outbox event.
-#[derive(Debug)]
-pub(crate) enum L2BridgeEvent {
-    /// Required link to the imported Tempo/L1 block.
-    TempoAdvanced(L1Anchor),
-    /// Successful or failed deposit execution.
-    DepositOutcome {
-        recipient: Option<Address>,
+/// One canonical TIP-20 ownership movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TokenTransfer {
+    pub(crate) token: Address,
+    pub(crate) from: Address,
+    pub(crate) to: Address,
+    pub(crate) amount: U256,
+}
+
+/// Result of executing one imported deposit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DepositResult {
+    Processed { recipient: Address },
+    Failed,
+}
+
+/// Result of executing one imported withdrawal bounce-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WithdrawalBounceBackStatus {
+    Processed,
+    Pending,
+}
+
+/// Authenticated origin of one Zone withdrawal request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WithdrawalOrigin {
+    User { sender: Address },
+    DepositBounceBack,
+}
+
+/// Semantic bridge activity authenticated from one Zone receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum L2BridgeAction {
+    Deposit {
         token: Address,
-        amount: u128,
-        processed: bool,
+        amount: U256,
+        result: DepositResult,
     },
-    /// Processed or pending withdrawal bounce-back.
     WithdrawalBounceBack {
         recipient: Address,
         token: Address,
-        amount: u128,
-        processed: bool,
+        amount: U256,
+        status: WithdrawalBounceBackStatus,
     },
     RefundClaimed {
         recipient: Address,
         token: Address,
-        amount: u128,
-    },
-    /// Canonical TIP-20 ownership movement used to identify affected accounts.
-    Transfer {
-        token: Address,
-        from: Address,
-        to: Address,
         amount: U256,
     },
-    /// TIP-20 burn corroborating a transfer to the zero address.
+    WithdrawalRequested {
+        withdrawal_index: u64,
+        origin: WithdrawalOrigin,
+        token: Address,
+        principal: U256,
+        fee: U256,
+    },
+}
+
+/// Decoded receipt event retained until receipt authentication completes.
+#[derive(Debug, Clone, Copy)]
+enum ReceiptEvent {
+    Anchor(L1Anchor),
+    Action(L2BridgeAction),
+    Transfer(TokenTransfer),
     TokenBurn {
         token: Address,
         from: Address,
         amount: U256,
     },
-    /// User withdrawal, preserving principal and fee separately.
-    WithdrawalRequested {
-        withdrawal_index: u64,
-        sender: Address,
-        token: Address,
-        principal: u128,
-        fee: u128,
-    },
-}
-
-/// Ordered recognized events and the required L1 anchor position.
-#[derive(Debug)]
-pub(super) struct L2Events {
-    pub(super) events: Vec<L2BridgeEvent>,
-    anchor_index: usize,
-}
-
-impl L2Events {
-    /// Return the block's required `TempoAdvanced` anchor.
-    pub(crate) fn l1_anchor(&self) -> Option<&L1Anchor> {
-        match self.events.get(self.anchor_index)? {
-            L2BridgeEvent::TempoAdvanced(anchor) => Some(anchor),
-            _ => None,
-        }
-    }
-
-    /// Return TIP-20 transfers in canonical block-log order.
-    pub(crate) fn token_transfers(
-        &self,
-    ) -> impl Iterator<Item = (Address, Address, Address, U256)> + '_ {
-        self.events.iter().filter_map(|event| match *event {
-            L2BridgeEvent::Transfer {
-                token,
-                from,
-                to,
-                amount,
-            } => Some((token, from, to, amount)),
-            _ => None,
-        })
-    }
 }
 
 /// Reconcile Inbox mints with their outcome in one receipt.
 fn authenticate_receipt_mints(
     transaction_hash: B256,
-    receipt: &[L2BridgeEvent],
+    receipt: &[ReceiptEvent],
 ) -> eyre::Result<()> {
     let mut index = 0;
 
@@ -163,60 +155,52 @@ struct Mint {
 
 impl Mint {
     /// Decode a zero-address TIP-20 transfer as a mint.
-    fn from_transfer(event: &L2BridgeEvent) -> Option<Self> {
-        let L2BridgeEvent::Transfer {
-            token,
-            from,
-            to,
-            amount,
-        } = event
-        else {
+    fn from_transfer(event: &ReceiptEvent) -> Option<Self> {
+        let ReceiptEvent::Transfer(transfer) = event else {
             return None;
         };
-        from.is_zero().then_some(Self {
-            token: *token,
-            recipient: *to,
-            amount: *amount,
+        transfer.from.is_zero().then_some(Self {
+            token: transfer.token,
+            recipient: transfer.to,
+            amount: transfer.amount,
         })
     }
 
     /// Return whether an event forwards this virtual recipient to its master.
-    fn matches_forward(&self, event: &L2BridgeEvent) -> bool {
+    fn matches_forward(&self, event: &ReceiptEvent) -> bool {
         matches!(
             event,
-            L2BridgeEvent::Transfer { token, from, to, amount }
-                if *token == self.token
-                    && *from == self.recipient
-                    && !to.is_zero()
-                    && *to != self.recipient
-                    && *amount == self.amount
+            ReceiptEvent::Transfer(transfer)
+                if transfer.token == self.token
+                    && transfer.from == self.recipient
+                    && !transfer.to.is_zero()
+                    && transfer.to != self.recipient
+                    && transfer.amount == self.amount
         )
     }
 
     /// Decode the Inbox outcome authenticating a mint.
-    fn from_outcome(event: &L2BridgeEvent) -> Option<Self> {
+    fn from_outcome(event: &ReceiptEvent) -> Option<Self> {
         match event {
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(recipient),
+            ReceiptEvent::Action(L2BridgeAction::Deposit {
                 token,
                 amount,
-                processed: true,
-                ..
-            }
-            | L2BridgeEvent::WithdrawalBounceBack {
+                result: DepositResult::Processed { recipient },
+            })
+            | ReceiptEvent::Action(L2BridgeAction::WithdrawalBounceBack {
                 recipient,
                 token,
                 amount,
-                processed: true,
-            }
-            | L2BridgeEvent::RefundClaimed {
+                status: WithdrawalBounceBackStatus::Processed,
+            })
+            | ReceiptEvent::Action(L2BridgeAction::RefundClaimed {
                 recipient,
                 token,
                 amount,
-            } => Some(Self {
+            }) => Some(Self {
                 token: *token,
                 recipient: *recipient,
-                amount: U256::from(*amount),
+                amount: *amount,
             }),
             _ => None,
         }
@@ -226,7 +210,7 @@ impl Mint {
 /// Reconcile every withdrawal in one receipt with distinct preceding debit-and-burn groups.
 fn authenticate_receipt_withdrawals(
     transaction_hash: B256,
-    receipt: &[L2BridgeEvent],
+    receipt: &[ReceiptEvent],
 ) -> eyre::Result<()> {
     let burns = receipt
         .windows(3)
@@ -236,22 +220,17 @@ fn authenticate_receipt_withdrawals(
     let mut consumed = vec![false; burns.len()];
 
     for (request_index, event) in receipt.iter().enumerate() {
-        let L2BridgeEvent::WithdrawalRequested {
-            sender,
+        let ReceiptEvent::Action(L2BridgeAction::WithdrawalRequested {
+            origin: WithdrawalOrigin::User { sender },
             token,
             principal,
             fee,
             ..
-        } = *event
+        }) = *event
         else {
             continue;
         };
-        if sender.is_zero() {
-            continue;
-        }
 
-        let principal = U256::from(principal);
-        let fee = U256::from(fee);
         let total = principal + fee;
         if let Some(index) = matching_burn(&burns, &consumed, request_index, token, sender, total) {
             consumed[index] = true;
@@ -335,29 +314,17 @@ struct WithdrawalBurn {
 
 impl WithdrawalBurn {
     /// Decode one adjacent transfer, zero transfer, and burn sequence.
-    fn from_events(end_index: usize, events: &[L2BridgeEvent]) -> Option<Self> {
+    fn from_events(end_index: usize, events: &[ReceiptEvent]) -> Option<Self> {
         let [debit, transfer, burn] = events else {
             return None;
         };
-        let L2BridgeEvent::Transfer {
-            token: debit_token,
-            from: owner,
-            to,
-            amount: debit_amount,
-        } = *debit
-        else {
+        let ReceiptEvent::Transfer(debit) = *debit else {
             return None;
         };
-        let L2BridgeEvent::Transfer {
-            token: transfer_token,
-            from,
-            to: recipient,
-            amount: transfer_amount,
-        } = *transfer
-        else {
+        let ReceiptEvent::Transfer(transfer) = *transfer else {
             return None;
         };
-        let L2BridgeEvent::TokenBurn {
+        let ReceiptEvent::TokenBurn {
             token: burn_token,
             from: burn_from,
             amount: burn_amount,
@@ -365,19 +332,19 @@ impl WithdrawalBurn {
         else {
             return None;
         };
-        (debit_token == transfer_token
-            && debit_token == burn_token
-            && to == ZONE_OUTBOX_ADDRESS
-            && from == ZONE_OUTBOX_ADDRESS
-            && recipient.is_zero()
+        (debit.token == transfer.token
+            && debit.token == burn_token
+            && debit.to == ZONE_OUTBOX_ADDRESS
+            && transfer.from == ZONE_OUTBOX_ADDRESS
+            && transfer.to.is_zero()
             && burn_from == ZONE_OUTBOX_ADDRESS
-            && debit_amount == transfer_amount
-            && debit_amount == burn_amount)
+            && debit.amount == transfer.amount
+            && debit.amount == burn_amount)
             .then_some(Self {
                 end_index,
-                token: debit_token,
-                owner,
-                amount: debit_amount,
+                token: debit.token,
+                owner: debit.from,
+                amount: debit.amount,
             })
     }
 }
@@ -385,8 +352,9 @@ impl WithdrawalBurn {
 /// Builds ordered event evidence while receipts are visited once.
 #[derive(Default)]
 pub(super) struct EventCollector {
-    events: Vec<L2BridgeEvent>,
-    anchor_index: Option<usize>,
+    anchor: Option<L1Anchor>,
+    transfers: Vec<TokenTransfer>,
+    actions: Vec<L2BridgeAction>,
 }
 
 impl EventCollector {
@@ -419,33 +387,38 @@ impl EventCollector {
         let transaction_hash = *transaction.tx_hash();
         authenticate_receipt_mints(transaction_hash, &events)?;
         authenticate_receipt_withdrawals(transaction_hash, &events)?;
-        for (index, event) in events.iter().enumerate() {
-            if matches!(event, L2BridgeEvent::TempoAdvanced(_)) {
-                eyre::ensure!(
-                    self.anchor_index.is_none(),
-                    "duplicate TempoAdvanced in block {block}"
-                );
-                self.anchor_index = Some(self.events.len() + index);
+        for event in events {
+            match event {
+                ReceiptEvent::Anchor(anchor) => {
+                    eyre::ensure!(
+                        self.anchor.is_none(),
+                        "duplicate TempoAdvanced in block {block}"
+                    );
+                    self.anchor = Some(anchor);
+                }
+                ReceiptEvent::Action(action) => self.actions.push(action),
+                ReceiptEvent::Transfer(transfer) => self.transfers.push(transfer),
+                ReceiptEvent::TokenBurn { .. } => {}
             }
         }
-        self.events.extend(events);
         Ok(())
     }
 
     /// Require the L1 anchor and finish the ordered event bundle.
-    pub(super) fn finish(self, block: u64) -> eyre::Result<L2Events> {
-        let anchor_index = self
-            .anchor_index
+    pub(super) fn finish(self, block: u64) -> eyre::Result<super::L2BlockEvidence> {
+        let anchor = self
+            .anchor
             .ok_or_else(|| eyre::eyre!("block {block} is missing TempoAdvanced"))?;
-        Ok(L2Events {
-            events: self.events,
-            anchor_index,
+        Ok(super::L2BlockEvidence {
+            anchor,
+            transfers: self.transfers,
+            actions: self.actions,
         })
     }
 }
 
 /// Decode one recognized Zone Inbox log.
-fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
+fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
     let topic = log
         .topics()
         .first()
@@ -453,7 +426,7 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
     Ok(Some(match *topic {
         IZoneInbox::TempoAdvanced::SIGNATURE_HASH => {
             let event = decode_event::<IZoneInbox::TempoAdvanced>(log, "TempoAdvanced", block)?;
-            L2BridgeEvent::TempoAdvanced(L1Anchor {
+            ReceiptEvent::Anchor(L1Anchor {
                 tempo_block_hash: event.tempoBlockHash,
                 tempo_block_number: event.tempoBlockNumber,
             })
@@ -461,21 +434,21 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
         IZoneInbox::DepositProcessed::SIGNATURE_HASH => {
             let event =
                 decode_event::<IZoneInbox::DepositProcessed>(log, "DepositProcessed", block)?;
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(event.to),
+            ReceiptEvent::Action(L2BridgeAction::Deposit {
                 token: event.token,
-                amount: event.amount,
-                processed: true,
-            }
+                amount: U256::from(event.amount),
+                result: DepositResult::Processed {
+                    recipient: event.to,
+                },
+            })
         }
         IZoneInbox::DepositFailed::SIGNATURE_HASH => {
             let event = decode_event::<IZoneInbox::DepositFailed>(log, "DepositFailed", block)?;
-            L2BridgeEvent::DepositOutcome {
-                recipient: None,
+            ReceiptEvent::Action(L2BridgeAction::Deposit {
                 token: event.token,
-                amount: event.amount,
-                processed: false,
-            }
+                amount: U256::from(event.amount),
+                result: DepositResult::Failed,
+            })
         }
         IZoneInbox::WithdrawalBounceBackProcessed::SIGNATURE_HASH => {
             let event = decode_event::<IZoneInbox::WithdrawalBounceBackProcessed>(
@@ -483,12 +456,12 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
                 "WithdrawalBounceBackProcessed",
                 block,
             )?;
-            L2BridgeEvent::WithdrawalBounceBack {
+            ReceiptEvent::Action(L2BridgeAction::WithdrawalBounceBack {
                 recipient: event.zoneFallbackRecipient,
                 token: event.token,
-                amount: event.amount,
-                processed: true,
-            }
+                amount: U256::from(event.amount),
+                status: WithdrawalBounceBackStatus::Processed,
+            })
         }
         IZoneInbox::WithdrawalBounceBackPending::SIGNATURE_HASH => {
             let event = decode_event::<IZoneInbox::WithdrawalBounceBackPending>(
@@ -496,20 +469,20 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
                 "WithdrawalBounceBackPending",
                 block,
             )?;
-            L2BridgeEvent::WithdrawalBounceBack {
+            ReceiptEvent::Action(L2BridgeAction::WithdrawalBounceBack {
                 recipient: event.zoneFallbackRecipient,
                 token: event.token,
-                amount: event.amount,
-                processed: false,
-            }
+                amount: U256::from(event.amount),
+                status: WithdrawalBounceBackStatus::Pending,
+            })
         }
         IZoneInbox::RefundClaimed::SIGNATURE_HASH => {
             let event = decode_event::<IZoneInbox::RefundClaimed>(log, "RefundClaimed", block)?;
-            L2BridgeEvent::RefundClaimed {
+            ReceiptEvent::Action(L2BridgeAction::RefundClaimed {
                 recipient: event.recipient,
                 token: event.token,
-                amount: event.amount,
-            }
+                amount: U256::from(event.amount),
+            })
         }
         IZoneInbox::TokenEnabled::SIGNATURE_HASH => {
             decode_event::<IZoneInbox::TokenEnabled>(log, "TokenEnabled", block)?;
@@ -523,23 +496,23 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
 }
 
 /// Decode accounting evidence emitted by a canonical TIP-20 precompile.
-fn decode_token_event(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
+fn decode_token_event(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
     if TIP20Token::from_address(log.address).is_err() {
         return Ok(None);
     }
     match log.topics().first() {
         Some(topic) if *topic == ITIP20::Transfer::SIGNATURE_HASH => {
             let event = decode_event::<ITIP20::Transfer>(log, "Transfer", block)?;
-            Ok(Some(L2BridgeEvent::Transfer {
+            Ok(Some(ReceiptEvent::Transfer(TokenTransfer {
                 token: log.address,
                 from: event.from,
                 to: event.to,
                 amount: event.amount,
-            }))
+            })))
         }
         Some(topic) if *topic == ITIP20::Burn::SIGNATURE_HASH => {
             let event = decode_event::<ITIP20::Burn>(log, "Burn", block)?;
-            Ok(Some(L2BridgeEvent::TokenBurn {
+            Ok(Some(ReceiptEvent::TokenBurn {
                 token: log.address,
                 from: event.from,
                 amount: event.amount,
@@ -550,7 +523,7 @@ fn decode_token_event(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEven
 }
 
 /// Decode one recognized Zone Outbox log.
-fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
+fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
     let topic = log
         .topics()
         .first()
@@ -562,13 +535,24 @@ fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
                 "WithdrawalRequested",
                 block,
             )?;
-            L2BridgeEvent::WithdrawalRequested {
+            let origin = match (event.sender.is_zero(), event.fallbackNonce == 0) {
+                (true, true) => WithdrawalOrigin::DepositBounceBack,
+                (false, false) => WithdrawalOrigin::User {
+                    sender: event.sender,
+                },
+                _ => eyre::bail!(
+                    "invalid WithdrawalRequested origin in block {block}: sender {}, fallback nonce {}",
+                    event.sender,
+                    event.fallbackNonce,
+                ),
+            };
+            ReceiptEvent::Action(L2BridgeAction::WithdrawalRequested {
                 withdrawal_index: event.withdrawalIndex,
-                sender: event.sender,
+                origin,
                 token: event.token,
-                principal: event.amount,
-                fee: event.fee,
-            }
+                principal: U256::from(event.amount),
+                fee: U256::from(event.fee),
+            })
         }
         IZoneOutbox::BatchFinalized::SIGNATURE_HASH => {
             decode_event::<IZoneOutbox::BatchFinalized>(log, "BatchFinalized", block)?;
@@ -599,21 +583,16 @@ mod tests {
     use alloy_sol_types::SolEvent;
     use reth_ethereum_primitives::Receipt;
 
-    fn anchor_event(events: &L2Events) -> &L2BridgeEvent {
-        &events.events[events.anchor_index]
-    }
-
     fn collect<T, R>(
         transactions: &[T],
         receipts: &[R],
         block: BlockNumHash,
-    ) -> eyre::Result<L2Events>
+    ) -> eyre::Result<super::super::L2BlockEvidence>
     where
         T: TxHashRef,
         R: TxReceipt<Log = Log>,
     {
         crate::l2::collect_l2_block_evidence(transactions, receipts, block)
-            .map(|evidence| evidence.events)
     }
 
     fn transaction() -> alloy_consensus::Signed<TxLegacy> {
@@ -652,6 +631,25 @@ mod tests {
             address,
             data: event.encode_log_data(),
         }
+    }
+
+    fn withdrawal_request_log(sender: Address, fallback_nonce: u64) -> Log {
+        event_log(
+            ZONE_OUTBOX_ADDRESS,
+            IZoneOutbox::WithdrawalRequested {
+                withdrawalIndex: 1,
+                sender,
+                token: address!("20c0000000000000000000000000000000000000"),
+                to: Address::ZERO,
+                amount: 100,
+                fee: 0,
+                memo: B256::ZERO,
+                gasLimit: 0,
+                fallbackNonce: fallback_nonce,
+                data: Default::default(),
+                revealTo: Default::default(),
+            },
+        )
     }
 
     #[test]
@@ -747,10 +745,10 @@ mod tests {
                     token: token_a,
                     to: Address::ZERO,
                     amount: 1000,
-                    fee: 50,
+                    fee: 0,
                     memo: B256::ZERO,
                     gasLimit: 0,
-                    fallbackNonce: 8,
+                    fallbackNonce: 0,
                     data: Default::default(),
                     revealTo: Default::default(),
                 },
@@ -809,39 +807,38 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(events.events.len(), 14);
+        assert_eq!(events.anchor.tempo_block_number, 100);
+        assert_eq!(events.transfers.len(), 5);
+        assert_eq!(events.actions.len(), 7);
+        assert!(matches!(events.actions[0], L2BridgeAction::Deposit {
+            token, amount, result: DepositResult::Processed { .. }
+        } if token == token_a && amount == U256::from(500)));
+        assert!(matches!(events.actions[1], L2BridgeAction::Deposit {
+            token, amount, result: DepositResult::Failed
+        } if token == token_b && amount == U256::from(300)));
         assert!(
-            matches!(events.events[0], L2BridgeEvent::TempoAdvanced(ref anchor)
-            if anchor.tempo_block_number == 100)
-        );
-        assert!(matches!(events.events[2], L2BridgeEvent::DepositOutcome {
-            token, amount: 500, processed: true, ..
-        } if token == token_a));
-        assert!(matches!(events.events[3], L2BridgeEvent::DepositOutcome {
-            token, amount: 300, processed: false, ..
-        } if token == token_b));
-        assert!(
-            matches!(events.events[5], L2BridgeEvent::WithdrawalBounceBack {
-            token, amount: 777, processed: true, ..
-        } if token == token_a)
+            matches!(events.actions[2], L2BridgeAction::WithdrawalBounceBack {
+            token, amount, status: WithdrawalBounceBackStatus::Processed, ..
+        } if token == token_a && amount == U256::from(777))
         );
         assert!(
-            matches!(events.events[6], L2BridgeEvent::WithdrawalBounceBack {
-            token, amount: 888, processed: false, ..
-        } if token == token_b)
+            matches!(events.actions[3], L2BridgeAction::WithdrawalBounceBack {
+            token, amount, status: WithdrawalBounceBackStatus::Pending, ..
+        } if token == token_b && amount == U256::from(888))
         );
-        assert!(matches!(events.events[8], L2BridgeEvent::RefundClaimed {
-            token, amount: 42, ..
-        } if token == token_a));
+        assert!(matches!(events.actions[4], L2BridgeAction::RefundClaimed {
+            token, amount, ..
+        } if token == token_a && amount == U256::from(42)));
         assert!(
-            matches!(events.events[9], L2BridgeEvent::WithdrawalRequested {
-            withdrawal_index: 3, sender, token, principal: 1000, fee: 50,
-        } if sender == Address::ZERO && token == token_a)
+            matches!(events.actions[5], L2BridgeAction::WithdrawalRequested {
+            withdrawal_index: 3, origin: WithdrawalOrigin::DepositBounceBack, token, principal, fee,
+        } if token == token_a && principal == U256::from(1000) && fee.is_zero())
         );
         assert!(
-            matches!(events.events[13], L2BridgeEvent::WithdrawalRequested {
-            withdrawal_index: 4, sender, token, principal: 2000, fee: 75,
-        } if sender == Address::repeat_byte(0x44) && token == token_b)
+            matches!(events.actions[6], L2BridgeAction::WithdrawalRequested {
+            withdrawal_index: 4, origin: WithdrawalOrigin::User { sender }, token, principal, fee,
+        } if sender == Address::repeat_byte(0x44) && token == token_b
+            && principal == U256::from(2000) && fee == U256::from(75))
         );
     }
 
@@ -862,6 +859,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_inconsistent_withdrawal_origins() {
+        for log in [
+            withdrawal_request_log(Address::ZERO, 1),
+            withdrawal_request_log(Address::repeat_byte(1), 0),
+        ] {
+            let error = decode_outbox(&log, 4).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid WithdrawalRequested origin")
+            );
+        }
+    }
+
+    #[test]
     fn decodes_and_ignores_batch_finalized() {
         let batch = event_log(
             ZONE_OUTBOX_ADDRESS,
@@ -876,7 +888,8 @@ mod tests {
             BlockNumHash::new(4, B256::ZERO),
         )
         .unwrap();
-        assert_eq!(events.events.len(), 1);
+        assert!(events.actions.is_empty());
+        assert!(events.transfers.is_empty());
     }
 
     #[test]
@@ -950,8 +963,8 @@ mod tests {
             BlockNumHash::new(4, B256::ZERO),
         )
         .unwrap();
-        assert_eq!(events.events.len(), 1);
-        assert!(matches!(events.events[0], L2BridgeEvent::TempoAdvanced(_)));
+        assert!(events.actions.is_empty());
+        assert!(events.transfers.is_empty());
     }
 
     #[test]
@@ -985,12 +998,9 @@ mod tests {
             BlockNumHash::new(4, B256::repeat_byte(4)),
         )
         .unwrap();
-        assert_eq!(events.events.len(), 1);
-        assert!(matches!(
-            anchor_event(&events),
-            L2BridgeEvent::TempoAdvanced(_)
-        ));
-        assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
+        assert!(events.actions.is_empty());
+        assert!(events.transfers.is_empty());
+        assert_eq!(events.l1_anchor().block_number(), 7);
     }
 
     #[test]
@@ -1013,25 +1023,24 @@ mod tests {
             BlockNumHash::new(4, B256::repeat_byte(4)),
         )
         .unwrap();
-        assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
+        assert_eq!(events.l1_anchor().block_number(), 7);
     }
 
-    fn burn(token: Address, owner: Address, amount: u64) -> Vec<L2BridgeEvent> {
+    fn transfer(token: Address, from: Address, to: Address, amount: U256) -> ReceiptEvent {
+        ReceiptEvent::Transfer(TokenTransfer {
+            token,
+            from,
+            to,
+            amount,
+        })
+    }
+
+    fn burn(token: Address, owner: Address, amount: u64) -> Vec<ReceiptEvent> {
         let amount = U256::from(amount);
         vec![
-            L2BridgeEvent::Transfer {
-                token,
-                from: owner,
-                to: ZONE_OUTBOX_ADDRESS,
-                amount,
-            },
-            L2BridgeEvent::Transfer {
-                token,
-                from: ZONE_OUTBOX_ADDRESS,
-                to: Address::ZERO,
-                amount,
-            },
-            L2BridgeEvent::TokenBurn {
+            transfer(token, owner, ZONE_OUTBOX_ADDRESS, amount),
+            transfer(token, ZONE_OUTBOX_ADDRESS, Address::ZERO, amount),
+            ReceiptEvent::TokenBurn {
                 token,
                 from: ZONE_OUTBOX_ADDRESS,
                 amount,
@@ -1039,21 +1048,26 @@ mod tests {
         ]
     }
 
-    fn withdrawal(token: Address, sender: Address, principal: u128, fee: u128) -> L2BridgeEvent {
-        L2BridgeEvent::WithdrawalRequested {
+    fn withdrawal(token: Address, sender: Address, principal: u128, fee: u128) -> ReceiptEvent {
+        let origin = if sender.is_zero() {
+            WithdrawalOrigin::DepositBounceBack
+        } else {
+            WithdrawalOrigin::User { sender }
+        };
+        ReceiptEvent::Action(L2BridgeAction::WithdrawalRequested {
             withdrawal_index: 0,
-            sender,
+            origin,
             token,
-            principal,
-            fee,
-        }
+            principal: U256::from(principal),
+            fee: U256::from(fee),
+        })
     }
 
-    fn authenticate_withdrawals(events: Vec<L2BridgeEvent>) -> eyre::Result<()> {
+    fn authenticate_withdrawals(events: Vec<ReceiptEvent>) -> eyre::Result<()> {
         authenticate_receipt_withdrawals(B256::repeat_byte(1), &events)
     }
 
-    fn authenticate_mints(events: Vec<L2BridgeEvent>) -> eyre::Result<()> {
+    fn authenticate_mints(events: Vec<ReceiptEvent>) -> eyre::Result<()> {
         authenticate_receipt_mints(B256::repeat_byte(1), &events)
     }
 
@@ -1061,18 +1075,12 @@ mod tests {
     fn authenticates_inbox_mints() {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
-        let outcome = L2BridgeEvent::DepositOutcome {
-            recipient: Some(recipient),
+        let outcome = ReceiptEvent::Action(L2BridgeAction::Deposit {
             token,
-            amount: 10,
-            processed: true,
-        };
-        let mint = L2BridgeEvent::Transfer {
-            token,
-            from: Address::ZERO,
-            to: recipient,
             amount: U256::from(10),
-        };
+            result: DepositResult::Processed { recipient },
+        });
+        let mint = transfer(token, Address::ZERO, recipient, U256::from(10));
 
         authenticate_mints(vec![mint, outcome]).unwrap();
     }
@@ -1080,24 +1088,25 @@ mod tests {
     #[test]
     fn rejects_unmatched_inbox_mints() {
         let token = Address::repeat_byte(1);
-        let outcome = L2BridgeEvent::DepositOutcome {
-            recipient: Some(Address::repeat_byte(2)),
+        let outcome = ReceiptEvent::Action(L2BridgeAction::Deposit {
             token,
-            amount: 10,
-            processed: true,
-        };
-        let wrong_mint = L2BridgeEvent::Transfer {
-            token,
-            from: Address::ZERO,
-            to: Address::repeat_byte(3),
             amount: U256::from(10),
-        };
-        let unexpected_mint = L2BridgeEvent::Transfer {
+            result: DepositResult::Processed {
+                recipient: Address::repeat_byte(2),
+            },
+        });
+        let wrong_mint = transfer(
             token,
-            from: Address::ZERO,
-            to: Address::repeat_byte(4),
-            amount: U256::from(10),
-        };
+            Address::ZERO,
+            Address::repeat_byte(3),
+            U256::from(10),
+        );
+        let unexpected_mint = transfer(
+            token,
+            Address::ZERO,
+            Address::repeat_byte(4),
+            U256::from(10),
+        );
 
         assert!(authenticate_mints(vec![wrong_mint, outcome]).is_err());
         assert!(authenticate_mints(vec![unexpected_mint]).is_err());
@@ -1109,24 +1118,13 @@ mod tests {
         let recipient = Address::repeat_byte(2);
         let master = Address::repeat_byte(3);
         let amount = U256::from(10);
-        let mint = L2BridgeEvent::Transfer {
+        let mint = transfer(token, Address::ZERO, recipient, amount);
+        let forward = transfer(token, recipient, master, amount);
+        let outcome = ReceiptEvent::Action(L2BridgeAction::Deposit {
             token,
-            from: Address::ZERO,
-            to: recipient,
             amount,
-        };
-        let forward = L2BridgeEvent::Transfer {
-            token,
-            from: recipient,
-            to: master,
-            amount,
-        };
-        let outcome = L2BridgeEvent::DepositOutcome {
-            recipient: Some(recipient),
-            token,
-            amount: 10,
-            processed: true,
-        };
+            result: DepositResult::Processed { recipient },
+        });
 
         authenticate_mints(vec![mint, forward, outcome]).unwrap();
     }
@@ -1169,26 +1167,15 @@ mod tests {
     fn rejects_inbox_mints_with_an_intervening_recognized_event() {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
-        let mint = L2BridgeEvent::Transfer {
+        let mint = transfer(token, Address::ZERO, recipient, U256::from(10));
+        let unrelated = transfer(token, recipient, Address::repeat_byte(3), U256::from(1));
+        let outcome = ReceiptEvent::Action(L2BridgeAction::Deposit {
             token,
-            from: Address::ZERO,
-            to: recipient,
             amount: U256::from(10),
-        };
-        let transfer = L2BridgeEvent::Transfer {
-            token,
-            from: recipient,
-            to: Address::repeat_byte(3),
-            amount: U256::from(1),
-        };
-        let outcome = L2BridgeEvent::DepositOutcome {
-            recipient: Some(recipient),
-            token,
-            amount: 10,
-            processed: true,
-        };
+            result: DepositResult::Processed { recipient },
+        });
 
-        assert!(authenticate_mints(vec![mint, transfer, outcome]).is_err());
+        assert!(authenticate_mints(vec![mint, unrelated, outcome]).is_err());
     }
 
     #[test]
@@ -1236,11 +1223,11 @@ mod tests {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
         let mut events = burn(token, sender, 100);
-        events.push(L2BridgeEvent::RefundClaimed {
+        events.push(ReceiptEvent::Action(L2BridgeAction::RefundClaimed {
             recipient: sender,
             token,
-            amount: 1,
-        });
+            amount: U256::from(1),
+        }));
         events.push(withdrawal(token, sender, 100, 0));
 
         authenticate_withdrawals(events).unwrap();
@@ -1277,13 +1264,7 @@ mod tests {
 
     #[test]
     fn deposit_bounce_back_does_not_require_a_burn() {
-        let event = L2BridgeEvent::WithdrawalRequested {
-            withdrawal_index: 0,
-            sender: Address::ZERO,
-            token: Address::repeat_byte(1),
-            principal: 100,
-            fee: 0,
-        };
+        let event = withdrawal(Address::repeat_byte(1), Address::ZERO, 100, 0);
         authenticate_withdrawals(vec![event]).unwrap();
     }
 }
