@@ -111,13 +111,13 @@ async fn collect_l1_block_inner(
         )));
     }
     if block.header().parent_hash() != parent.hash {
-        return Err(unavailable(eyre::eyre!(
+        return Err(finding(eyre::eyre!(
             "Tempo history is not contiguous at block {number}"
         )));
     }
     let coordinate = BlockNumHash::new(number, block.header().hash());
     if expected.is_some_and(|expected| coordinate != expected) {
-        return Err(unavailable(eyre::eyre!(
+        return Err(finding(eyre::eyre!(
             "Tempo history does not end at the Zone anchor"
         )));
     }
