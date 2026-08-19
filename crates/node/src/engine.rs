@@ -59,11 +59,11 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Per-anchor production permit backed by the effective leadership schedule.
+/// Full-block production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
-/// forced-recovery override assigns `N` to this node. An optimistic override is open-ended until
-/// the next finalized portal transition supplies the ordinary-authority boundary.
+/// Full blocks require the leader assigned to their imported Tempo header. Checkpoint-only blocks
+/// are leader-neutral and bypass this permit. An optimistic override is open-ended until the next
+/// finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -79,7 +79,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the zone block embedding `tempo_anchor`.
+    /// Decide whether this node may produce the full zone block embedding `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -483,6 +483,19 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+        let queued_headers = self
+            .deposit_queue
+            .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
+        if checkpoint_header_count(
+            &self.chain_spec,
+            &queued_headers,
+            self.l1_block_tracker.finalized_target(),
+        ) > 0
+        {
+            // TIP-1096 assigns no leader to checkpoint-only blocks. Leader authority resumes at
+            // the final full block, whose single imported Tempo header is checked below.
+            return None;
+        }
         self.production_permit
             .as_ref()
             .and_then(|permit| permit.check(block.header.number()))
