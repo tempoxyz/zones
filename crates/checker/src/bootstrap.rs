@@ -15,7 +15,7 @@ use crate::{
     CheckerConfig,
     accounting::{State, effects},
     decode_event,
-    l1::{collect_l1_history, portal_balances},
+    l1::{collect_l1_block, portal_balances},
     l2::read_zone_genesis,
     persistence::{self, Checkpoint},
 };
@@ -248,8 +248,16 @@ async fn initial_state(
             .ok_or_else(|| eyre::eyre!("Portal cannot be created in Tempo genesis"))?,
         block.header().parent_hash(),
     );
-    let history = collect_l1_history(provider, portal, parent, anchor).await?;
-    state.apply(&effects::from_tempo_history(&history))?;
+    let mut previous = parent;
+    while previous.number < anchor.number {
+        let block = collect_l1_block(provider, portal, previous).await?;
+        state.apply(&effects::from_tempo(&block))?;
+        previous = block.block();
+    }
+    eyre::ensure!(
+        previous == anchor,
+        "Tempo history does not end at the Zone genesis anchor"
+    );
     let tokens = state.tokens().map(|(token, _)| token).collect::<Vec<_>>();
     let balances = portal_balances(provider, portal, tokens, anchor.hash).await?;
     state.verify_portal_balances(balances)?;

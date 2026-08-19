@@ -54,16 +54,10 @@ impl CheckerMetrics {
 }
 
 /// Log authenticated protocol activity after a Zone block is verified.
-pub(crate) fn log_verified_activity(
-    history: &[L1BlockEvidence],
-    l2: &L2BlockEvidence,
-    zone: BlockRef,
-) {
-    for block in history {
-        let tempo_block = block.block().number;
-        for event in block.portal_events() {
-            log_tempo_event(event, zone, tempo_block);
-        }
+pub(crate) fn log_verified_activity(tempo: &L1BlockEvidence, l2: &L2BlockEvidence, zone: BlockRef) {
+    let tempo_block = tempo.block().number;
+    for event in tempo.portal_events() {
+        log_tempo_event(event, zone, tempo_block);
     }
     for event in l2.bridge_events() {
         log_zone_event(event, zone);

@@ -16,7 +16,7 @@ use crate::{
     CheckerConfig,
     accounting::effects,
     bootstrap,
-    l1::{collect_l1_history, portal_balances},
+    l1::{collect_l1_block, portal_balances},
     l2::{collect_l2_block_evidence, read_accounting_state},
     persistence::{
         AppliedStatus, BlockRef, CandidateTransition, Finding, PersistenceError, Snapshot, Status,
@@ -352,13 +352,16 @@ where
         .ok_or_else(|| fail(eyre::eyre!("Zone block is missing its Tempo anchor")))?;
     let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
-    let history = collect_l1_history(l1, config.portal_address, tempo_parent, tempo)
+    validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
+    let tempo_block = collect_l1_block(l1, config.portal_address, tempo_parent)
         .await
         .map_err(BlockError::Retry)?;
-    if history.is_empty() {
-        return Err(fail(eyre::eyre!("Zone block did not advance Tempo")));
+    if tempo_block.block() != tempo {
+        return Err(BlockError::Retry(eyre::eyre!(
+            "Tempo history does not end at the Zone anchor"
+        )));
     }
-    let mut block_effects = effects::from_tempo_history(&history);
+    let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
     let candidate = CandidateTransition::derive(
         prior,
@@ -397,6 +400,31 @@ where
     let next = store
         .apply(prior, candidate)
         .map_err(|error| BlockError::Retry(error.into()))?;
-    telemetry::log_verified_activity(&history, &l2, zone);
+    telemetry::log_verified_activity(&tempo_block, &l2, zone);
     Ok(next)
+}
+
+fn validate_tempo_advance(parent: u64, tip: u64) -> eyre::Result<()> {
+    let expected = parent
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("Tempo block number overflow after {parent}"))?;
+    eyre::ensure!(
+        tip == expected,
+        "Zone advanced Tempo from block {parent} to {tip}; expected {expected}"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tempo_advance_requires_the_exact_successor() {
+        assert!(validate_tempo_advance(10, 11).is_ok());
+        for tip in [9, 10, 12, u64::MAX] {
+            assert!(validate_tempo_advance(10, tip).is_err());
+        }
+        assert!(validate_tempo_advance(u64::MAX, u64::MAX).is_err());
+    }
 }

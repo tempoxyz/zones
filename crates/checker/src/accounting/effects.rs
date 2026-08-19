@@ -40,16 +40,13 @@ fn from_transfers(
         .collect()
 }
 
-/// Derive liability changes from a contiguous span of authenticated Tempo history.
-pub(crate) fn from_tempo_history(history: &[L1BlockEvidence]) -> Vec<Effect> {
-    history
-        .iter()
-        .flat_map(|block| from_tempo(block.portal_events()))
-        .collect()
+/// Derive liability changes from one authenticated Tempo block.
+pub(crate) fn from_tempo(block: &L1BlockEvidence) -> Vec<Effect> {
+    from_tempo_events(block.portal_events())
 }
 
 /// Derive liability changes from authenticated Tempo Portal events.
-fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Effect> {
+fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Effect> {
     let mut effects = Vec::new();
     for event in events {
         match *event {
@@ -253,7 +250,9 @@ mod tests {
             amount: 10,
             callback_success: false,
         };
-        state.apply(&from_tempo([&enqueued, &failed])).unwrap();
+        state
+            .apply(&from_tempo_events([&enqueued, &failed]))
+            .unwrap();
         let token_state = state.token(token).unwrap();
         assert_eq!(token_state.pending_withdrawals, U256::ZERO);
         assert_eq!(token_state.pending_zone_refunds, amount);
@@ -304,7 +303,9 @@ mod tests {
             amount: 10,
             callback_success: false,
         };
-        state.apply(&from_tempo([&enqueued, &failed])).unwrap();
+        state
+            .apply(&from_tempo_events([&enqueued, &failed]))
+            .unwrap();
 
         let pending = L2BridgeEvent::WithdrawalBounceBack {
             recipient,
@@ -361,7 +362,7 @@ mod tests {
             amount: 10,
             bounceback_fee: 1,
         };
-        state.apply(&from_tempo([&pending])).unwrap();
+        state.apply(&from_tempo_events([&pending])).unwrap();
         let token_state = state.token(token).unwrap();
         assert_eq!(token_state.pending_deposits, U256::ZERO);
         assert_eq!(token_state.pending_tempo_refunds, amount);
@@ -372,7 +373,7 @@ mod tests {
             token,
             amount: 10,
         };
-        state.apply(&from_tempo([&claimed])).unwrap();
+        state.apply(&from_tempo_events([&claimed])).unwrap();
         let token_state = state.token(token).unwrap();
         assert_eq!(token_state.pending_tempo_refunds, U256::ZERO);
         assert_eq!(token_state.liability().unwrap(), U256::ZERO);

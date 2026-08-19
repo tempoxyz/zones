@@ -36,49 +36,39 @@ impl L1BlockEvidence {
     }
 }
 
-/// Fetch every canonical Tempo block after `parent` through `tip`.
-pub(crate) async fn collect_l1_history(
+/// Fetch one canonical Tempo block that extends `parent`.
+pub(crate) async fn collect_l1_block(
     provider: &DynProvider<TempoNetwork>,
     portal: Address,
     parent: BlockNumHash,
-    tip: BlockNumHash,
-) -> eyre::Result<Vec<L1BlockEvidence>> {
-    eyre::ensure!(tip.number >= parent.number, "Tempo anchor moved backwards");
-    let mut previous = parent;
-    let mut history = Vec::with_capacity((tip.number - parent.number) as usize);
-    for number in parent.number + 1..=tip.number {
-        let block = provider
-            .get_block_by_number(number.into())
-            .hashes()
-            .await
-            .wrap_err_with(|| format!("failed to fetch Tempo block {number}"))?
-            .ok_or_else(|| eyre::eyre!("Tempo block {number} is unavailable"))?;
-        eyre::ensure!(
-            block.header().number() == number,
-            "Tempo RPC returned block {} for requested block {number}",
-            block.header().number()
-        );
-        eyre::ensure!(
-            block.header().parent_hash() == previous.hash,
-            "Tempo history is not contiguous at block {number}"
-        );
-        let coordinate = BlockNumHash::new(number, block.header().hash());
-        let transaction_hashes = block.transactions().as_hashes().ok_or_else(|| {
-            eyre::eyre!(
-                "Tempo block {number} ({}) did not contain transaction hashes",
-                coordinate.hash
-            )
-        })?;
-        history.push(
-            collect_l1_block_evidence(provider, portal, coordinate, transaction_hashes).await?,
-        );
-        previous = coordinate;
-    }
+) -> eyre::Result<L1BlockEvidence> {
+    let number = parent
+        .number
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("Tempo block number overflow after {}", parent.number))?;
+    let block = provider
+        .get_block_by_number(number.into())
+        .hashes()
+        .await
+        .wrap_err_with(|| format!("failed to fetch Tempo block {number}"))?
+        .ok_or_else(|| eyre::eyre!("Tempo block {number} is unavailable"))?;
     eyre::ensure!(
-        previous == tip,
-        "Tempo history does not end at the Zone anchor"
+        block.header().number() == number,
+        "Tempo RPC returned block {} for requested block {number}",
+        block.header().number()
     );
-    Ok(history)
+    eyre::ensure!(
+        block.header().parent_hash() == parent.hash,
+        "Tempo history is not contiguous at block {number}"
+    );
+    let coordinate = BlockNumHash::new(number, block.header().hash());
+    let transaction_hashes = block.transactions().as_hashes().ok_or_else(|| {
+        eyre::eyre!(
+            "Tempo block {number} ({}) did not contain transaction hashes",
+            coordinate.hash
+        )
+    })?;
+    collect_l1_block_evidence(provider, portal, coordinate, transaction_hashes).await
 }
 
 /// Read Portal custody for one token at an exact canonical Tempo block.
