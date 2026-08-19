@@ -500,10 +500,10 @@ async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
         &expired_root,
         expired_key_id,
         KeyInfoSignatureType::P256,
-        now_secs() + 1,
+        now_secs() + 20,
     )
     .await?;
-    sleep(std::time::Duration::from_secs(2)).await;
+    sleep(std::time::Duration::from_secs(21)).await;
     let (status, _) = ctx
         .call_raw("eth_blockNumber", serde_json::json!([]), &expired_token)
         .await?;
