@@ -708,6 +708,7 @@ jobs:
           test -s crates/contracts/benchmark-out/ERC4626Engine.sol/ERC4626Engine.json
           test -s crates/contracts/benchmark-out/Simple4626Vault.sol/Simple4626Vault.json
           test -s crates/contracts/benchmark-out/DemoTokenAuthority.sol/DemoTokenAuthority.json
+          test -s crates/contracts/benchmark-out/BridgeWalletFixture.sol/BridgeWalletFixture.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |
