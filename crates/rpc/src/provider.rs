@@ -115,7 +115,7 @@ fn build_provider_with_token(
     let mut blob = Vec::with_capacity(65 + fields.len());
     blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
     blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
-    blob.push(sig.v() as u8);
+    blob.push(u8::from(sig.v()));
     blob.extend_from_slice(&fields);
 
     let mut auth_header = reqwest::header::HeaderValue::from_str(&hex::encode(&blob))?;

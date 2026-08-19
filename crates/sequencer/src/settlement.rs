@@ -582,7 +582,7 @@ impl BatchSubmitter {
         let mut encoded = Vec::with_capacity(65);
         encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
         encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        encoded.push(signature.v() as u8 + 27);
+        encoded.push(u8::from(signature.v()) + 27);
         Ok(encoded.into())
     }
 

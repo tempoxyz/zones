@@ -757,7 +757,7 @@ async fn register_sequencer_encryption_key<P: Provider<TempoNetwork>>(
         .sign_hash(&message)
         .await
         .wrap_err("failed to sign the encryption key proof-of-possession")?;
-    let pop_v = sig.v() as u8 + 27;
+    let pop_v = u8::from(sig.v()) + 27;
     let pop_r = B256::from(sig.r().to_be_bytes::<32>());
     let pop_s = B256::from(sig.s().to_be_bytes::<32>());
 

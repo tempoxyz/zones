@@ -29,7 +29,7 @@ pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
 
     let message = keccak256((portal, x, U256::from(y_parity)).abi_encode());
     let signature = signer.sign_hash_sync(&message)?;
-    let pop_v = signature.v() as u8 + 27;
+    let pop_v = u8::from(signature.v()) + 27;
     let pop_r = B256::from(signature.r().to_be_bytes::<32>());
     let pop_s = B256::from(signature.s().to_be_bytes::<32>());
 
