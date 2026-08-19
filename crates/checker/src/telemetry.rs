@@ -138,7 +138,6 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
             amount,
             "accounted authenticated Portal refund"
         ),
-        L1PortalEvent::BatchSubmitted => {}
     }
 }
 
@@ -176,32 +175,29 @@ fn log_zone_event(event: &L2BridgeEvent, zone: BlockRef) {
             token,
             principal,
             fee,
-            is_deposit_bounce_back: false,
-            ..
-        } => tracing::info!(
-            target: "zone::checker",
-            zone_block = zone.number,
-            %token,
-            %sender,
-            principal,
-            fee,
-            withdrawal_index,
-            "verified Zone withdrawal debit and burn"
-        ),
-        L2BridgeEvent::WithdrawalRequested {
-            withdrawal_index,
-            token,
-            principal,
-            is_deposit_bounce_back: true,
-            ..
-        } => tracing::info!(
-            target: "zone::checker",
-            zone_block = zone.number,
-            %token,
-            amount = principal,
-            withdrawal_index,
-            "accounted authenticated Zone deposit bounce-back request"
-        ),
+        } => {
+            if sender.is_zero() {
+                tracing::info!(
+                    target: "zone::checker",
+                    zone_block = zone.number,
+                    %token,
+                    amount = principal,
+                    withdrawal_index,
+                    "accounted authenticated Zone deposit bounce-back request"
+                );
+            } else {
+                tracing::info!(
+                    target: "zone::checker",
+                    zone_block = zone.number,
+                    %token,
+                    %sender,
+                    principal,
+                    fee,
+                    withdrawal_index,
+                    "verified Zone withdrawal debit and burn"
+                );
+            }
+        }
         L2BridgeEvent::WithdrawalBounceBack {
             recipient,
             token,
@@ -242,7 +238,6 @@ fn log_zone_event(event: &L2BridgeEvent, zone: BlockRef) {
         ),
         L2BridgeEvent::TempoAdvanced(_)
         | L2BridgeEvent::Transfer { .. }
-        | L2BridgeEvent::TokenBurn { .. }
-        | L2BridgeEvent::BatchFinalized { .. } => {}
+        | L2BridgeEvent::TokenBurn { .. } => {}
     }
 }

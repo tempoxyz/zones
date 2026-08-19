@@ -18,10 +18,7 @@ pub(crate) enum L1PortalEvent {
         deposit_number: u64,
     },
     /// A TIP-20 token newly enabled for bridging.
-    TokenEnabled {
-        token: Address,
-    },
-    BatchSubmitted,
+    TokenEnabled { token: Address },
     WithdrawalProcessed {
         to: Address,
         token: Address,
@@ -30,10 +27,7 @@ pub(crate) enum L1PortalEvent {
     },
     /// A withdrawal bounce-back — recycles existing Portal backing, not a new
     /// external deposit.  Kept distinct from [`Self::DepositMade`].
-    WithdrawalBounceBack {
-        token: Address,
-        amount: u128,
-    },
+    WithdrawalBounceBack { token: Address, amount: u128 },
     /// A deposit bounce-back processed on L1 (fee deducted, refund sent).
     DepositBounceBack {
         token: Address,
@@ -136,7 +130,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         }
         ZonePortal::BatchSubmitted::SIGNATURE_HASH => {
             decode_event::<ZonePortal::BatchSubmitted>(log, "BatchSubmitted", block)?;
-            L1PortalEvent::BatchSubmitted
+            return Ok(None);
         }
         ZonePortal::WithdrawalProcessed::SIGNATURE_HASH => {
             let e =
@@ -403,6 +397,7 @@ mod tests {
             ],
         )])
         .unwrap();
+        assert_eq!(events.events.len(), 7);
         assert!(matches!(
             events.events[0],
             L1PortalEvent::DepositMade {
@@ -414,25 +409,24 @@ mod tests {
             events.events[1],
             L1PortalEvent::TokenEnabled { .. }
         ));
-        assert!(matches!(events.events[2], L1PortalEvent::BatchSubmitted));
         assert!(matches!(
-            events.events[3],
+            events.events[2],
             L1PortalEvent::WithdrawalProcessed { .. }
         ));
         assert!(matches!(
-            events.events[4],
+            events.events[3],
             L1PortalEvent::WithdrawalBounceBack { .. }
         ));
         assert!(matches!(
-            events.events[5],
+            events.events[4],
             L1PortalEvent::DepositBounceBack { .. }
         ));
         assert!(matches!(
-            events.events[6],
+            events.events[5],
             L1PortalEvent::DepositBounceBackPending { .. }
         ));
         assert!(matches!(
-            events.events[7],
+            events.events[6],
             L1PortalEvent::RefundClaimed { amount: 42, .. }
         ));
     }

@@ -3,19 +3,16 @@
 use alloy_consensus::{TxReceipt, transaction::TxHashRef};
 use alloy_primitives::{Address, B256, Log, U256};
 use alloy_sol_types::SolEvent;
-use eyre::WrapErr as _;
 use tempo_precompiles::tip20::{ITIP20, TIP20Token};
 use tempo_zone_contracts::{IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::decode_event;
 
 /// Exact Tempo/L1 block imported by `TempoAdvanced`.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct L1Anchor {
     pub(super) tempo_block_hash: B256,
     pub(super) tempo_block_number: u64,
-    pub(super) deposits_processed: u64,
 }
 
 impl L1Anchor {
@@ -29,14 +26,12 @@ impl L1Anchor {
 }
 
 /// Semantic value of one recognized Zone Inbox or Outbox event.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum L2BridgeEvent {
     /// Required link to the imported Tempo/L1 block.
     TempoAdvanced(L1Anchor),
     /// Successful or failed deposit execution.
     DepositOutcome {
-        deposit_hash: B256,
         recipient: Option<Address>,
         token: Address,
         amount: u128,
@@ -74,24 +69,14 @@ pub(crate) enum L2BridgeEvent {
         token: Address,
         principal: u128,
         fee: u128,
-        fallback_nonce: u64,
-        is_deposit_bounce_back: bool,
-    },
-    BatchFinalized {
-        withdrawal_queue_hash: B256,
-        withdrawal_batch_index: u64,
     },
 }
 
 /// One decoded bridge event and its canonical receipt provenance.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct L2EventEvidence {
     pub(super) transaction_hash: B256,
     pub(super) transaction_index: u32,
-    pub(super) transaction_log_index: u32,
-    pub(super) block_log_index: u32,
-    pub(super) raw_log: Log,
     pub(super) event: L2BridgeEvent,
 }
 
@@ -291,12 +276,14 @@ fn authenticate_receipt_withdrawals(receipt: &[L2EventEvidence]) -> eyre::Result
             token,
             principal,
             fee,
-            is_deposit_bounce_back: false,
             ..
         } = evidence.event
         else {
             continue;
         };
+        if sender.is_zero() {
+            continue;
+        }
 
         let principal = U256::from(principal);
         let fee = U256::from(fee);
@@ -435,8 +422,6 @@ impl WithdrawalBurn {
 pub(super) struct EventCollector {
     events: Vec<L2EventEvidence>,
     anchor_index: Option<usize>,
-    batch_seen: bool,
-    block_log_index: u32,
 }
 
 impl EventCollector {
@@ -453,11 +438,10 @@ impl EventCollector {
         R: TxReceipt<Log = Log>,
     {
         if !receipt.status() {
-            self.block_log_index += receipt.logs().len() as u32;
             return Ok(());
         }
 
-        for (transaction_log_index, log) in receipt.logs().iter().enumerate() {
+        for log in receipt.logs() {
             let event = match log.address {
                 ZONE_INBOX_ADDRESS => decode_inbox(log, block)?,
                 ZONE_OUTBOX_ADDRESS => decode_outbox(log, block)?,
@@ -471,23 +455,12 @@ impl EventCollector {
                     );
                     self.anchor_index = Some(self.events.len());
                 }
-                if matches!(event, L2BridgeEvent::BatchFinalized { .. }) {
-                    eyre::ensure!(
-                        !self.batch_seen,
-                        "duplicate BatchFinalized in block {block}"
-                    );
-                    self.batch_seen = true;
-                }
                 self.events.push(L2EventEvidence {
                     transaction_hash: *transaction.tx_hash(),
                     transaction_index: transaction_index as u32,
-                    transaction_log_index: transaction_log_index as u32,
-                    block_log_index: self.block_log_index,
-                    raw_log: log.clone(),
                     event,
                 });
             }
-            self.block_log_index += 1;
         }
         Ok(())
     }
@@ -519,15 +492,12 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
             L2BridgeEvent::TempoAdvanced(L1Anchor {
                 tempo_block_hash: event.tempoBlockHash,
                 tempo_block_number: event.tempoBlockNumber,
-                deposits_processed: u64::try_from(event.depositsProcessed)
-                    .wrap_err("depositsProcessed overflows u64")?,
             })
         }
         IZoneInbox::DepositProcessed::SIGNATURE_HASH => {
             let event =
                 decode_event::<IZoneInbox::DepositProcessed>(log, "DepositProcessed", block)?;
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: event.depositHash,
                 recipient: Some(event.to),
                 token: event.token,
                 amount: event.amount,
@@ -537,7 +507,6 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
         IZoneInbox::DepositFailed::SIGNATURE_HASH => {
             let event = decode_event::<IZoneInbox::DepositFailed>(log, "DepositFailed", block)?;
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: event.depositHash,
                 recipient: None,
                 token: event.token,
                 amount: event.amount,
@@ -635,16 +604,11 @@ fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<L2BridgeEvent>> {
                 token: event.token,
                 principal: event.amount,
                 fee: event.fee,
-                fallback_nonce: event.fallbackNonce,
-                is_deposit_bounce_back: event.sender.is_zero(),
             }
         }
         IZoneOutbox::BatchFinalized::SIGNATURE_HASH => {
-            let event = decode_event::<IZoneOutbox::BatchFinalized>(log, "BatchFinalized", block)?;
-            L2BridgeEvent::BatchFinalized {
-                withdrawal_queue_hash: event.withdrawalQueueHash,
-                withdrawal_batch_index: event.withdrawalBatchIndex,
-            }
+            decode_event::<IZoneOutbox::BatchFinalized>(log, "BatchFinalized", block)?;
+            return Ok(None);
         }
         IZoneOutbox::TempoGasRateUpdated::SIGNATURE_HASH => {
             decode_event::<IZoneOutbox::TempoGasRateUpdated>(log, "TempoGasRateUpdated", block)?;
@@ -891,20 +855,20 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(events.events.len(), 15);
+        assert_eq!(events.events.len(), 14);
         assert!(
             matches!(events.events[0].event, L2BridgeEvent::TempoAdvanced(ref anchor)
-            if anchor.tempo_block_number == 100 && anchor.deposits_processed == 2)
+            if anchor.tempo_block_number == 100)
         );
         assert!(
             matches!(events.events[2].event, L2BridgeEvent::DepositOutcome {
-            deposit_hash, token, amount: 500, processed: true, ..
-        } if deposit_hash == B256::repeat_byte(0xd0) && token == token_a)
+            token, amount: 500, processed: true, ..
+        } if token == token_a)
         );
         assert!(
             matches!(events.events[3].event, L2BridgeEvent::DepositOutcome {
-            deposit_hash, token, amount: 300, processed: false, ..
-        } if deposit_hash == B256::repeat_byte(0xd1) && token == token_b)
+            token, amount: 300, processed: false, ..
+        } if token == token_b)
         );
         assert!(
             matches!(events.events[5].event, L2BridgeEvent::WithdrawalBounceBack {
@@ -924,19 +888,12 @@ mod tests {
         assert!(
             matches!(events.events[9].event, L2BridgeEvent::WithdrawalRequested {
             withdrawal_index: 3, sender, token, principal: 1000, fee: 50,
-            fallback_nonce: 8, is_deposit_bounce_back: true
         } if sender == Address::ZERO && token == token_a)
         );
         assert!(
             matches!(events.events[13].event, L2BridgeEvent::WithdrawalRequested {
             withdrawal_index: 4, sender, token, principal: 2000, fee: 75,
-            fallback_nonce: 9, is_deposit_bounce_back: false
         } if sender == Address::repeat_byte(0x44) && token == token_b)
-        );
-        assert!(
-            matches!(events.events[14].event, L2BridgeEvent::BatchFinalized {
-            withdrawal_queue_hash, withdrawal_batch_index: 7
-        } if withdrawal_queue_hash == B256::repeat_byte(0xcc))
         );
     }
 
@@ -957,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_batch_finalized() {
+    fn decodes_and_ignores_batch_finalized() {
         let batch = event_log(
             ZONE_OUTBOX_ADDRESS,
             IZoneOutbox::BatchFinalized {
@@ -965,13 +922,13 @@ mod tests {
                 withdrawalBatchIndex: 0,
             },
         );
-        let error = collect(
+        let events = collect(
             &[transaction()],
-            &[receipt(vec![anchor_log(7), batch.clone(), batch])],
+            &[receipt(vec![anchor_log(7), batch])],
             BlockNumHash::new(4, B256::ZERO),
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("duplicate BatchFinalized"));
+        .unwrap();
+        assert_eq!(events.events.len(), 1);
     }
 
     #[test]
@@ -1064,17 +1021,17 @@ mod tests {
     }
 
     #[test]
-    fn retains_order_and_provenance_across_all_logs() {
-        let raw_anchor = anchor_log(7);
+    fn retains_receipt_provenance_across_all_logs() {
+        let anchor = anchor_log(7);
         let noise = Log {
             address: Address::repeat_byte(9),
-            data: raw_anchor.data.clone(),
+            data: anchor.data.clone(),
         };
         let receipt = Receipt {
             tx_type: TxType::Legacy,
             success: true,
             cumulative_gas_used: 0,
-            logs: vec![noise, raw_anchor.clone()],
+            logs: vec![noise, anchor],
         };
         let tx = transaction();
         let events = collect(
@@ -1087,14 +1044,11 @@ mod tests {
         let evidence = anchor_evidence(&events);
         assert_eq!(evidence.transaction_hash, *tx.tx_hash());
         assert_eq!(evidence.transaction_index, 0);
-        assert_eq!(evidence.transaction_log_index, 1);
-        assert_eq!(evidence.block_log_index, 1);
-        assert_eq!(evidence.raw_log, raw_anchor);
         assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
     }
 
     #[test]
-    fn failed_logs_are_not_evidence_but_count_in_block_index() {
+    fn failed_logs_are_not_evidence() {
         let failed = Receipt {
             tx_type: TxType::Legacy,
             success: false,
@@ -1113,7 +1067,6 @@ mod tests {
             BlockNumHash::new(4, B256::repeat_byte(4)),
         )
         .unwrap();
-        assert_eq!(anchor_evidence(&events).block_log_index, 1);
         assert_eq!(anchor_evidence(&events).transaction_index, 1);
     }
 
@@ -1121,9 +1074,6 @@ mod tests {
         L2EventEvidence {
             transaction_hash: B256::with_last_byte(transaction as u8),
             transaction_index: transaction,
-            transaction_log_index: 0,
-            block_log_index: 0,
-            raw_log: Log::default(),
             event,
         }
     }
@@ -1175,8 +1125,6 @@ mod tests {
                 token,
                 principal,
                 fee,
-                fallback_nonce: 1,
-                is_deposit_bounce_back: false,
             },
         )
     }
@@ -1204,7 +1152,6 @@ mod tests {
         let outcome = evidence(
             1,
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: B256::ZERO,
                 recipient: Some(recipient),
                 token,
                 amount: 10,
@@ -1230,7 +1177,6 @@ mod tests {
         let outcome = evidence(
             1,
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: B256::ZERO,
                 recipient: Some(Address::repeat_byte(2)),
                 token,
                 amount: 10,
@@ -1287,7 +1233,6 @@ mod tests {
         let outcome = evidence(
             1,
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: B256::ZERO,
                 recipient: Some(recipient),
                 token,
                 amount: 10,
@@ -1314,7 +1259,6 @@ mod tests {
         let outcome = evidence(
             2,
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: B256::ZERO,
                 recipient: Some(recipient),
                 token,
                 amount: 10,
@@ -1350,7 +1294,6 @@ mod tests {
         let outcome = evidence(
             1,
             L2BridgeEvent::DepositOutcome {
-                deposit_hash: B256::ZERO,
                 recipient: Some(recipient),
                 token,
                 amount: 10,
@@ -1467,8 +1410,6 @@ mod tests {
                 token: Address::repeat_byte(1),
                 principal: 100,
                 fee: 0,
-                fallback_nonce: 0,
-                is_deposit_bounce_back: true,
             },
         );
         authenticate_withdrawals(vec![event]).unwrap();

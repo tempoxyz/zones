@@ -109,7 +109,7 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                     change: BalanceChange::Credit(amount),
                 });
             }
-            L1PortalEvent::BatchSubmitted | L1PortalEvent::WithdrawalProcessed { .. } => {}
+            L1PortalEvent::WithdrawalProcessed { .. } => {}
         }
     }
     effects
@@ -143,11 +143,11 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
                 change: BalanceChange::Debit(U256::from(amount)),
             }),
             L2BridgeEvent::WithdrawalRequested {
+                sender,
                 token,
                 principal,
-                is_deposit_bounce_back: false,
                 ..
-            } => effects.push(Effect::PendingWithdrawal {
+            } if !sender.is_zero() => effects.push(Effect::PendingWithdrawal {
                 token,
                 change: BalanceChange::Credit(U256::from(principal)),
             }),
@@ -173,8 +173,7 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
             | L2BridgeEvent::WithdrawalRequested { .. }
             | L2BridgeEvent::WithdrawalBounceBack { .. }
             | L2BridgeEvent::Transfer { .. }
-            | L2BridgeEvent::TokenBurn { .. }
-            | L2BridgeEvent::BatchFinalized { .. } => {}
+            | L2BridgeEvent::TokenBurn { .. } => {}
         }
     }
     effects
@@ -224,8 +223,6 @@ mod tests {
             token: Address::repeat_byte(1),
             principal: 10,
             fee: 0,
-            fallback_nonce: 0,
-            is_deposit_bounce_back: true,
         };
 
         assert!(from_zone_events([&event].into_iter()).is_empty());

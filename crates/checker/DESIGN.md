@@ -105,6 +105,11 @@ The checker does not independently compare L1 and L2 token-enablement calldata
 or validate token metadata and Inbox/Outbox issuer roles. Those properties are
 outside this accounting model.
 
+It also does not correlate individual L1 deposits with L2 outcomes by deposit
+hash or authenticate cross-layer withdrawal batch identity. Batch events are
+strictly decoded but do not enter ghost state. Genesis bridge cursors are used
+only to establish the empty bootstrap baseline.
+
 For a sender-paid withdrawal, the sender's debit and burn must equal principal
 plus fee. Sponsored withdrawals must instead contain an exact principal debit
 from the sender and a separate exact fee debit from a nonzero payer. Deposit

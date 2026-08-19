@@ -27,6 +27,12 @@ checker tracks.
 Token enablement is not otherwise modeled: the checker does not compare L1 and
 L2 enablement calldata or validate token metadata and Inbox/Outbox issuer roles.
 
+The accounting model also does not correlate individual L1 deposits with L2
+outcomes by deposit hash or authenticate cross-layer withdrawal batch identity.
+Those protocol events are still strictly decoded, but only value movements that
+affect the aggregate solvency model are retained. Genesis bridge cursors are
+checked only to establish the empty bootstrap baseline.
+
 It then reads affected balances and every enabled token's supply from the exact
 Zone post-state and reads Portal custody at the exact imported Tempo block. The
 required invariants are:
@@ -128,7 +134,7 @@ src/
   accounting/        pure account and liability transitions
   persistence/       row-oriented MDBX state and bounded reorg deltas
   runtime.rs         recovery, verification, retry, and divergence handling
-  metrics.rs         operational progress and alert metrics
+  telemetry.rs       operational metrics and verified-activity logs
 ```
 
 ## Validation
