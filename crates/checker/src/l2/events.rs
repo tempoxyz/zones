@@ -369,21 +369,34 @@ impl EventCollector {
         T: TxHashRef,
         R: TxReceipt<Log = Log>,
     {
-        if !receipt.status() {
-            return Ok(());
-        }
-
+        let successful = receipt.status();
         let mut events = Vec::new();
         for log in receipt.logs() {
-            let event = match log.address {
-                ZONE_INBOX_ADDRESS => decode_inbox(log, block)?,
-                ZONE_OUTBOX_ADDRESS => decode_outbox(log, block)?,
-                _ => decode_token_event(log, block)?,
+            let event = if successful {
+                match log.address {
+                    ZONE_INBOX_ADDRESS => decode_inbox(log, block)?,
+                    ZONE_OUTBOX_ADDRESS => decode_outbox(log, block)?,
+                    _ => decode_token_event(log, block)?,
+                }
+            } else {
+                decode_token_event(log, block)?
             };
             if let Some(event) = event {
                 events.push(event);
             }
         }
+
+        if !successful {
+            self.transfers
+                .extend(events.into_iter().filter_map(|event| {
+                    let ReceiptEvent::Transfer(transfer) = event else {
+                        return None;
+                    };
+                    Some(transfer)
+                }));
+            return Ok(());
+        }
+
         let transaction_hash = *transaction.tx_hash();
         authenticate_receipt_mints(transaction_hash, &events)?;
         authenticate_receipt_withdrawals(transaction_hash, &events)?;
@@ -1004,18 +1017,53 @@ mod tests {
     }
 
     #[test]
-    fn failed_logs_are_not_evidence() {
+    fn failed_receipt_retains_fee_transfer_without_protocol_evidence() {
+        let token = address!("20c0000000000000000000000000000000000000");
+        let fee_payer = Address::repeat_byte(1);
+        let beneficiary = Address::repeat_byte(2);
+        let failed_fee = TokenTransfer {
+            token,
+            from: fee_payer,
+            to: beneficiary,
+            amount: U256::from(3),
+        };
+        let successful_fee = TokenTransfer {
+            token,
+            from: fee_payer,
+            to: beneficiary,
+            amount: U256::from(2),
+        };
         let failed = Receipt {
             tx_type: TxType::Legacy,
             success: false,
             cumulative_gas_used: 0,
-            logs: vec![anchor_log(6)],
+            logs: vec![
+                anchor_log(6),
+                event_log(
+                    token,
+                    ITIP20::Transfer {
+                        from: failed_fee.from,
+                        to: failed_fee.to,
+                        amount: failed_fee.amount,
+                    },
+                ),
+            ],
         };
         let successful = Receipt {
             tx_type: TxType::Legacy,
             success: true,
             cumulative_gas_used: 0,
-            logs: vec![anchor_log(7)],
+            logs: vec![
+                anchor_log(7),
+                event_log(
+                    token,
+                    ITIP20::Transfer {
+                        from: successful_fee.from,
+                        to: successful_fee.to,
+                        amount: successful_fee.amount,
+                    },
+                ),
+            ],
         };
         let events = collect(
             &[transaction(), transaction()],
@@ -1023,7 +1071,10 @@ mod tests {
             BlockNumHash::new(4, B256::repeat_byte(4)),
         )
         .unwrap();
+
         assert_eq!(events.l1_anchor().block_number(), 7);
+        assert!(events.actions.is_empty());
+        assert_eq!(events.transfers, vec![failed_fee, successful_fee]);
     }
 
     fn transfer(token: Address, from: Address, to: Address, amount: U256) -> ReceiptEvent {
