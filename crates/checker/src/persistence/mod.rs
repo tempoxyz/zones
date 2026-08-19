@@ -16,7 +16,7 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
 };
 
-use crate::accounting::{AccountingError, BlockDelta, Effect, State};
+use crate::accounting::{AccountingError, Effect, State};
 
 use model::DeltaRecord;
 pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
@@ -37,30 +37,31 @@ pub(crate) struct Snapshot {
 
 /// Post-block accounting state and its durable undo data.
 pub(crate) struct CandidateTransition {
-    zone: BlockRef,
-    parent: BlockRef,
-    imported_tempo: BlockRef,
     state: State,
-    delta: BlockDelta,
+    record: DeltaRecord,
 }
 
 impl CandidateTransition {
-    /// Derive one transition from the current verified state.
+    /// Consume the current snapshot and derive its next verified state.
     pub(crate) fn derive(
-        prior: &Snapshot,
+        prior: Snapshot,
         zone: BlockRef,
         parent: BlockRef,
         imported_tempo: BlockRef,
         effects: &[Effect],
     ) -> Result<Self, AccountingError> {
-        let mut state = prior.state.as_ref().clone();
+        let Snapshot { metadata, state } = prior;
+        let mut state = Arc::unwrap_or_clone(state);
         let delta = state.apply(effects)?;
         Ok(Self {
-            zone,
-            parent,
-            imported_tempo,
+            record: DeltaRecord {
+                zone,
+                parent,
+                imported_tempo,
+                imported_tempo_parent: metadata.imported_tempo,
+                delta,
+            },
             state,
-            delta,
         })
     }
 
@@ -241,45 +242,34 @@ impl Store {
 
     /// Atomically apply one contiguous verified block.
     ///
-    /// Requires `prior` to still be verifying. Coordinate mismatches return `StaleSnapshot`.
+    /// Requires the candidate's parent coordinates to still be current and verifying.
     pub(crate) fn apply(
         &self,
-        prior: &Snapshot,
         candidate: CandidateTransition,
     ) -> Result<Snapshot, PersistenceError> {
-        let CandidateTransition {
-            zone,
-            parent,
-            imported_tempo,
-            state,
-            delta,
-        } = candidate;
-        if prior.metadata.status != Status::Verifying {
+        let CandidateTransition { state, record } = candidate;
+        codec::validate(&record).map_err(PersistenceError::Invalid)?;
+        let zone = record.zone;
+        let imported_tempo = record.imported_tempo;
+
+        let tx = self.db.tx_mut()?;
+        let mut metadata = read_metadata(&tx)?;
+        if metadata.status != Status::Verifying {
             return Err(PersistenceError::Invalid("checker is not verifying".into()));
         }
-        if parent != prior.metadata.verified_zone || zone.number != parent.number.saturating_add(1)
+        if record.parent != metadata.verified_zone
+            || record.imported_tempo_parent != metadata.imported_tempo
+            || zone.number != record.parent.number.saturating_add(1)
         {
             return Err(PersistenceError::StaleSnapshot);
         }
-        let record = DeltaRecord {
-            zone,
-            parent,
-            imported_tempo,
-            imported_tempo_parent: prior.metadata.imported_tempo,
-            delta,
-        };
-        codec::validate(&record).map_err(PersistenceError::Invalid)?;
-        let mut metadata = prior.metadata.clone();
+        write_changed_rows(&tx, &state, &record.delta)?;
+        tx.put::<Deltas>(zone.number, record)?;
         metadata.verified_zone = zone;
         metadata.imported_tempo = imported_tempo;
         if metadata.observed_zone.number < zone.number {
             metadata.observed_zone = zone;
         }
-
-        let tx = self.db.tx_mut()?;
-        ensure_current(&tx, prior)?;
-        write_changed_rows(&tx, &state, &record.delta)?;
-        tx.put::<Deltas>(zone.number, record)?;
         tx.put::<Meta>(
             MetaKey::Metadata,
             MetaValue::Metadata(Box::new(metadata.clone())),
@@ -306,7 +296,7 @@ impl Store {
             ));
         }
         let tx = self.db.tx_mut()?;
-        ensure_current(&tx, prior)?;
+        ensure_current(&tx, &prior.metadata)?;
         let mut state = prior.state.as_ref().clone();
         let mut metadata = prior.metadata.clone();
         while metadata.verified_zone.number > ancestor.number {
@@ -389,7 +379,7 @@ impl Store {
     ) -> Result<Snapshot, PersistenceError> {
         codec::validate(&finding).map_err(PersistenceError::Invalid)?;
         let tx = self.db.tx_mut()?;
-        ensure_current(&tx, prior)?;
+        ensure_current(&tx, &prior.metadata)?;
         let mut metadata = prior.metadata.clone();
         let observed_through = if metadata.observed_zone.number >= finding.zone.number {
             metadata.observed_zone
@@ -432,7 +422,7 @@ impl Store {
             observed_through: observed,
         };
         let tx = self.db.tx_mut()?;
-        ensure_current(&tx, prior)?;
+        ensure_current(&tx, &prior.metadata)?;
         tx.put::<Meta>(
             MetaKey::Metadata,
             MetaValue::Metadata(Box::new(metadata.clone())),
@@ -458,7 +448,7 @@ impl Store {
         let mut metadata = prior.metadata.clone();
         metadata.observed_zone = observed;
         let tx = self.db.tx_mut()?;
-        ensure_current(&tx, prior)?;
+        ensure_current(&tx, &prior.metadata)?;
         tx.put::<Meta>(
             MetaKey::Metadata,
             MetaValue::Metadata(Box::new(metadata.clone())),
@@ -478,8 +468,8 @@ fn read_metadata<T: DbTx>(tx: &T) -> Result<Metadata, PersistenceError> {
     }
 }
 
-fn ensure_current<T: DbTx>(tx: &T, prior: &Snapshot) -> Result<(), PersistenceError> {
-    if read_metadata(tx)? != prior.metadata {
+fn ensure_current<T: DbTx>(tx: &T, prior: &Metadata) -> Result<(), PersistenceError> {
+    if read_metadata(tx)? != *prior {
         return Err(PersistenceError::StaleSnapshot);
     }
     Ok(())

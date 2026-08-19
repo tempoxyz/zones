@@ -131,12 +131,13 @@ where
         }
 
         loop {
+            let previous_verified = snapshot.metadata.verified_zone.number;
             match process_notification(
                 &notification,
                 ctx.provider(),
                 &l1,
                 &store,
-                &snapshot,
+                snapshot,
                 &config,
             )
             .await
@@ -147,7 +148,7 @@ where
                         .metadata
                         .verified_zone
                         .number
-                        .saturating_sub(snapshot.metadata.verified_zone.number);
+                        .saturating_sub(previous_verified);
                     snapshot = next;
                     metrics.verified_zone_blocks_total.increment(verified);
                     metrics.update(&snapshot);
@@ -277,7 +278,7 @@ async fn process_notification<N, P>(
     provider: &P,
     l1: &DynProvider<TempoNetwork>,
     store: &Store,
-    snapshot: &Snapshot,
+    snapshot: Snapshot,
     config: &CheckerConfig,
 ) -> Result<Outcome, BlockError>
 where
@@ -285,7 +286,7 @@ where
     P: ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
-    let mut current = snapshot.clone();
+    let mut current = snapshot;
     if let Some(ancestor) = notification_ancestor(notification).map_err(BlockError::Retry)? {
         current = match store.reorg(&current, ancestor) {
             Ok(snapshot) => snapshot,
@@ -304,8 +305,8 @@ where
             if already_applied(&current, block.header().number(), block.hash())? {
                 continue;
             }
-            current = verify_block::<N, _>(provider, l1, store, &current, config, block, receipts)
-                .await?;
+            current =
+                verify_block::<N, _>(provider, l1, store, current, config, block, receipts).await?;
         }
     }
     Ok(Outcome::Applied(Box::new(current)))
@@ -332,7 +333,7 @@ async fn verify_block<N, P>(
     provider: &P,
     l1: &DynProvider<TempoNetwork>,
     store: &Store,
-    prior: &Snapshot,
+    prior: Snapshot,
     config: &CheckerConfig,
     block: &RecoveredBlock<N::Block>,
     receipts: &[N::Receipt],
@@ -408,7 +409,7 @@ where
         .map_err(|error| fail(error.into()))?;
 
     let next = store
-        .apply(prior, candidate)
+        .apply(candidate)
         .map_err(|error| BlockError::Retry(error.into()))?;
     telemetry::log_verified_activity(&tempo_block, &l2, zone);
     Ok(next)

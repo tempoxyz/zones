@@ -181,7 +181,7 @@ impl State {
         let result = effects
             .iter()
             .try_for_each(|effect| self.apply_effect(*effect, &mut accounts, &mut tokens))
-            .and_then(|()| self.validate_aggregates(tokens.keys().copied()));
+            .and_then(|()| self.validate_changed_aggregates(&accounts, &tokens));
 
         if let Err(error) = result {
             restore(&mut self.accounts, accounts.iter().map(|(&k, &v)| (k, v)));
@@ -375,6 +375,39 @@ impl State {
         }
     }
 
+    /// Validate cached aggregates from only the account rows changed by this transition.
+    fn validate_changed_aggregates(
+        &self,
+        accounts: &BTreeMap<AccountKey, Option<U256>>,
+        tokens: &BTreeMap<Address, Option<TokenState>>,
+    ) -> Result<(), AccountingError> {
+        for (&token, previous_token) in tokens {
+            let mut previous_changed = U256::ZERO;
+            let mut current_changed = U256::ZERO;
+            let start = AccountKey::new(token, Address::ZERO);
+            for (key, previous_balance) in accounts
+                .range(start..)
+                .take_while(|(key, _)| key.token == token)
+            {
+                previous_changed = previous_changed
+                    .checked_add(previous_balance.unwrap_or_default())
+                    .ok_or(AccountingError::Overflow)?;
+                current_changed = current_changed
+                    .checked_add(self.accounts.get(key).copied().unwrap_or_default())
+                    .ok_or(AccountingError::Overflow)?;
+            }
+            let expected = previous_token
+                .unwrap_or_default()
+                .account_total
+                .checked_sub(previous_changed)
+                .ok_or(AccountingError::Underflow)?
+                .checked_add(current_changed)
+                .ok_or(AccountingError::Overflow)?;
+            self.ensure_aggregate(token, expected)?;
+        }
+        Ok(())
+    }
+
     /// Validate that every one of `tokens`' cached aggregate matches the sum
     /// of its accounts.
     fn validate_aggregates(
@@ -393,20 +426,26 @@ impl State {
                     .checked_add(*balance)
                     .ok_or(AccountingError::Overflow)?;
             }
-            let cached = self
-                .tokens
-                .get(&token)
-                .map(|state| state.account_total)
-                .unwrap_or_default();
-            if cached != total {
-                return Err(AccountingError::AggregateMismatch {
-                    token,
-                    expected: total,
-                    actual: cached,
-                });
-            }
+            self.ensure_aggregate(token, total)?;
         }
         Ok(())
+    }
+
+    fn ensure_aggregate(&self, token: Address, expected: U256) -> Result<(), AccountingError> {
+        let actual = self
+            .tokens
+            .get(&token)
+            .map(|state| state.account_total)
+            .unwrap_or_default();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(AccountingError::AggregateMismatch {
+                token,
+                expected,
+                actual,
+            })
+        }
     }
 }
 

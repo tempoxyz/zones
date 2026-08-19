@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, U256};
 
-use super::{AccountKey, AccountingError, BalanceChange, Effect, State};
+use super::{AccountKey, AccountingError, BalanceChange, Effect, State, TokenState};
 
 fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
@@ -19,13 +19,13 @@ fn evidence(
 #[test]
 fn applies_transfers_and_unwinds_exactly() {
     let token = address(1);
-    let alice = AccountKey::new(token, address(2));
-    let bob = AccountKey::new(token, address(3));
+    let alice = AccountKey::new(token, address(3));
+    let bob = AccountKey::new(token, address(2));
     let mut state = State::default();
     state
         .apply(&[Effect::Credit {
             key: alice,
-            amount: U256::from(100),
+            amount: U256::MAX,
         }])
         .unwrap();
     let before = state.clone();
@@ -35,22 +35,75 @@ fn applies_transfers_and_unwinds_exactly() {
             token,
             from: alice.account,
             to: bob.account,
-            amount: U256::from(40),
+            amount: U256::from(1),
         }])
         .unwrap();
     state
         .verify_zone_state([evidence(
             token,
-            U256::from(100),
+            U256::MAX,
             &[
-                (alice.account, U256::from(60)),
-                (bob.account, U256::from(40)),
+                (alice.account, U256::MAX - U256::from(1)),
+                (bob.account, U256::from(1)),
             ],
         )])
         .unwrap();
 
     state.unwind(delta).unwrap();
     assert_eq!(state, before);
+}
+
+#[test]
+fn records_each_changed_row_once() {
+    let token = address(1);
+    let key = AccountKey::new(token, address(2));
+    let mut state = State::default();
+
+    let delta = state
+        .apply(&[
+            Effect::Credit {
+                key,
+                amount: U256::from(10),
+            },
+            Effect::Credit {
+                key,
+                amount: U256::from(5),
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(delta.accounts, vec![(key, None)]);
+    assert_eq!(delta.tokens, vec![(token, None)]);
+    assert_eq!(state.account(key), Some(U256::from(15)));
+    assert_eq!(state.token(token).unwrap().account_total, U256::from(15));
+}
+
+#[test]
+fn rejects_inconsistent_changed_aggregate() {
+    let token = address(1);
+    let key = AccountKey::new(token, address(2));
+    let state = State {
+        accounts: [(key, U256::from(10))].into(),
+        tokens: [(
+            token,
+            TokenState {
+                account_total: U256::from(11),
+                ..Default::default()
+            },
+        )]
+        .into(),
+    };
+    let accounts = [(key, None)].into();
+    let tokens = [(token, None)].into();
+
+    assert_eq!(
+        state.validate_changed_aggregates(&accounts, &tokens),
+        Err(AccountingError::AggregateMismatch {
+            token,
+            expected: U256::from(10),
+            actual: U256::from(11),
+        })
+    );
 }
 
 #[test]

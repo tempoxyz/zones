@@ -2,7 +2,7 @@ use alloy_primitives::{Address, B256, U256};
 
 use crate::accounting::{AccountKey, BalanceChange, Effect};
 
-use super::{BlockRef, CandidateTransition, Finding, Identity, Status, Store};
+use super::{BlockRef, CandidateTransition, Finding, Identity, PersistenceError, Status, Store};
 
 fn block(number: u64, byte: u8) -> BlockRef {
     BlockRef {
@@ -35,7 +35,7 @@ fn rows_survive_restart_and_unwind() {
     let token = Address::repeat_byte(30);
     let account = AccountKey::new(token, Address::repeat_byte(31));
     let candidate = CandidateTransition::derive(
-        &reopened,
+        reopened,
         block(1, 11),
         genesis,
         block(21, 21),
@@ -55,7 +55,7 @@ fn rows_survive_restart_and_unwind() {
         ],
     )
     .unwrap();
-    let one = store.apply(&reopened, candidate).unwrap();
+    let one = store.apply(candidate).unwrap();
     drop(store);
 
     let (store, loaded) = Store::open(&path, identity()).unwrap();
@@ -104,4 +104,31 @@ fn finding_freezes_verified_tip() {
             observed_through: failed,
         }
     );
+}
+
+#[test]
+fn apply_rejects_stale_candidate_parent() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checker");
+    let genesis = block(0, 10);
+    Store::create_atomic(
+        &path,
+        identity(),
+        genesis,
+        block(20, 20),
+        Default::default(),
+    )
+    .unwrap();
+    let (store, snapshot) = Store::open(&path, identity()).unwrap();
+    let stale =
+        CandidateTransition::derive(snapshot.clone(), block(1, 11), genesis, block(21, 21), &[])
+            .unwrap();
+    let current =
+        CandidateTransition::derive(snapshot, block(1, 12), genesis, block(21, 21), &[]).unwrap();
+    store.apply(current).unwrap();
+
+    assert!(matches!(
+        store.apply(stale),
+        Err(PersistenceError::StaleSnapshot)
+    ));
 }
