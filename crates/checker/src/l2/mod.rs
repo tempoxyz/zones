@@ -43,7 +43,7 @@ impl L2BlockEvidence {
 
     /// Return authenticated bridge events in block-log order.
     pub(crate) fn bridge_events(&self) -> impl Iterator<Item = &L2BridgeEvent> + Clone {
-        self.events.events.iter().map(|evidence| &evidence.event)
+        self.events.events.iter()
     }
 }
 
@@ -66,9 +66,8 @@ where
     );
 
     let mut collector = EventCollector::default();
-    for (transaction_index, (transaction, receipt)) in transactions.iter().zip(receipts).enumerate()
-    {
-        collector.extract_receipt(transaction_index, transaction, receipt, block.number)?;
+    for (transaction, receipt) in transactions.iter().zip(receipts) {
+        collector.extract_receipt(transaction, receipt, block.number)?;
     }
 
     Ok(L2BlockEvidence {

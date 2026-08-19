@@ -72,25 +72,17 @@ pub(crate) enum L2BridgeEvent {
     },
 }
 
-/// One decoded bridge event and its canonical receipt provenance.
-#[derive(Debug)]
-pub(crate) struct L2EventEvidence {
-    pub(super) transaction_hash: B256,
-    pub(super) transaction_index: u32,
-    pub(super) event: L2BridgeEvent,
-}
-
 /// Ordered recognized events and the required L1 anchor position.
 #[derive(Debug)]
 pub(super) struct L2Events {
-    pub(super) events: Vec<L2EventEvidence>,
+    pub(super) events: Vec<L2BridgeEvent>,
     anchor_index: usize,
 }
 
 impl L2Events {
     /// Return the block's required `TempoAdvanced` anchor.
     pub(crate) fn l1_anchor(&self) -> Option<&L1Anchor> {
-        match &self.events.get(self.anchor_index)?.event {
+        match self.events.get(self.anchor_index)? {
             L2BridgeEvent::TempoAdvanced(anchor) => Some(anchor),
             _ => None,
         }
@@ -100,55 +92,31 @@ impl L2Events {
     pub(crate) fn token_transfers(
         &self,
     ) -> impl Iterator<Item = (Address, Address, Address, U256)> + '_ {
-        self.events
-            .iter()
-            .filter_map(|evidence| match evidence.event {
-                L2BridgeEvent::Transfer {
-                    token,
-                    from,
-                    to,
-                    amount,
-                } => Some((token, from, to, amount)),
-                _ => None,
-            })
-    }
-
-    /// Require every Inbox mint to match its authenticated bridge event.
-    fn authenticate_mints(&self) -> eyre::Result<()> {
-        for receipt in self
-            .events
-            .chunk_by(|left, right| left.transaction_index == right.transaction_index)
-        {
-            authenticate_receipt_mints(receipt)?;
-        }
-        Ok(())
-    }
-
-    /// Require every user withdrawal to have its exact debit-and-burn sequence.
-    fn authenticate_withdrawals(&self) -> eyre::Result<()> {
-        for receipt in self
-            .events
-            .chunk_by(|left, right| left.transaction_index == right.transaction_index)
-        {
-            authenticate_receipt_withdrawals(receipt)?;
-        }
-        Ok(())
+        self.events.iter().filter_map(|event| match *event {
+            L2BridgeEvent::Transfer {
+                token,
+                from,
+                to,
+                amount,
+            } => Some((token, from, to, amount)),
+            _ => None,
+        })
     }
 }
 
 /// Reconcile Inbox mints with their outcome in one receipt.
-fn authenticate_receipt_mints(receipt: &[L2EventEvidence]) -> eyre::Result<()> {
-    let Some(first) = receipt.first() else {
-        return Ok(());
-    };
+fn authenticate_receipt_mints(
+    transaction_hash: B256,
+    receipt: &[L2BridgeEvent],
+) -> eyre::Result<()> {
     let mut index = 0;
 
-    while let Some(evidence) = receipt.get(index) {
-        let Some(observed) = Mint::from_transfer(&evidence.event) else {
-            if Mint::from_outcome(&evidence.event).is_some() {
+    while let Some(event) = receipt.get(index) {
+        let Some(observed) = Mint::from_transfer(event) else {
+            if Mint::from_outcome(event).is_some() {
                 eyre::bail!(
                     "transaction {} has an Inbox outcome without its mint",
-                    first.transaction_hash,
+                    transaction_hash,
                 );
             }
             index += 1;
@@ -158,18 +126,15 @@ fn authenticate_receipt_mints(receipt: &[L2EventEvidence]) -> eyre::Result<()> {
         index += 1;
         if receipt
             .get(index)
-            .is_some_and(|evidence| observed.matches_forward(&evidence.event))
+            .is_some_and(|event| observed.matches_forward(event))
         {
             index += 1;
         }
 
-        let Some(expected) = receipt
-            .get(index)
-            .and_then(|evidence| Mint::from_outcome(&evidence.event))
-        else {
+        let Some(expected) = receipt.get(index).and_then(Mint::from_outcome) else {
             eyre::bail!(
                 "transaction {} has an unexplained mint of {} {} to {}",
-                first.transaction_hash,
+                transaction_hash,
                 observed.amount,
                 observed.token,
                 observed.recipient,
@@ -179,7 +144,7 @@ fn authenticate_receipt_mints(receipt: &[L2EventEvidence]) -> eyre::Result<()> {
         eyre::ensure!(
             observed == expected,
             "transaction {} mint {:?} does not match Inbox outcome {:?}",
-            first.transaction_hash,
+            transaction_hash,
             observed,
             expected,
         );
@@ -259,10 +224,10 @@ impl Mint {
 }
 
 /// Reconcile every withdrawal in one receipt with distinct preceding debit-and-burn groups.
-fn authenticate_receipt_withdrawals(receipt: &[L2EventEvidence]) -> eyre::Result<()> {
-    let Some(first) = receipt.first() else {
-        return Ok(());
-    };
+fn authenticate_receipt_withdrawals(
+    transaction_hash: B256,
+    receipt: &[L2BridgeEvent],
+) -> eyre::Result<()> {
     let burns = receipt
         .windows(3)
         .enumerate()
@@ -270,14 +235,14 @@ fn authenticate_receipt_withdrawals(receipt: &[L2EventEvidence]) -> eyre::Result
         .collect::<Vec<_>>();
     let mut consumed = vec![false; burns.len()];
 
-    for (request_index, evidence) in receipt.iter().enumerate() {
+    for (request_index, event) in receipt.iter().enumerate() {
         let L2BridgeEvent::WithdrawalRequested {
             sender,
             token,
             principal,
             fee,
             ..
-        } = evidence.event
+        } = *event
         else {
             continue;
         };
@@ -308,14 +273,14 @@ fn authenticate_receipt_withdrawals(receipt: &[L2EventEvidence]) -> eyre::Result
 
         eyre::bail!(
             "withdrawal in transaction {} has no matching debit and burn of {total} {token}",
-            evidence.transaction_hash
+            transaction_hash
         );
     }
 
     if burns.iter().enumerate().any(|(index, _)| !consumed[index]) {
         eyre::bail!(
             "transaction {} has an unexplained withdrawal debit and burn",
-            first.transaction_hash
+            transaction_hash
         );
     }
     Ok(())
@@ -370,7 +335,7 @@ struct WithdrawalBurn {
 
 impl WithdrawalBurn {
     /// Decode one adjacent transfer, zero transfer, and burn sequence.
-    fn from_events(end_index: usize, events: &[L2EventEvidence]) -> Option<Self> {
+    fn from_events(end_index: usize, events: &[L2BridgeEvent]) -> Option<Self> {
         let [debit, transfer, burn] = events else {
             return None;
         };
@@ -379,7 +344,7 @@ impl WithdrawalBurn {
             from: owner,
             to,
             amount: debit_amount,
-        } = debit.event
+        } = *debit
         else {
             return None;
         };
@@ -388,7 +353,7 @@ impl WithdrawalBurn {
             from,
             to: recipient,
             amount: transfer_amount,
-        } = transfer.event
+        } = *transfer
         else {
             return None;
         };
@@ -396,7 +361,7 @@ impl WithdrawalBurn {
             token: burn_token,
             from: burn_from,
             amount: burn_amount,
-        } = burn.event
+        } = *burn
         else {
             return None;
         };
@@ -420,7 +385,7 @@ impl WithdrawalBurn {
 /// Builds ordered event evidence while receipts are visited once.
 #[derive(Default)]
 pub(super) struct EventCollector {
-    events: Vec<L2EventEvidence>,
+    events: Vec<L2BridgeEvent>,
     anchor_index: Option<usize>,
 }
 
@@ -428,7 +393,6 @@ impl EventCollector {
     /// Decode recognized logs from one canonical receipt.
     pub(super) fn extract_receipt<T, R>(
         &mut self,
-        transaction_index: usize,
         transaction: &T,
         receipt: &R,
         block: u64,
@@ -441,6 +405,7 @@ impl EventCollector {
             return Ok(());
         }
 
+        let mut events = Vec::new();
         for log in receipt.logs() {
             let event = match log.address {
                 ZONE_INBOX_ADDRESS => decode_inbox(log, block)?,
@@ -448,20 +413,22 @@ impl EventCollector {
                 _ => decode_token_event(log, block)?,
             };
             if let Some(event) = event {
-                if matches!(event, L2BridgeEvent::TempoAdvanced(_)) {
-                    eyre::ensure!(
-                        self.anchor_index.is_none(),
-                        "duplicate TempoAdvanced in block {block}"
-                    );
-                    self.anchor_index = Some(self.events.len());
-                }
-                self.events.push(L2EventEvidence {
-                    transaction_hash: *transaction.tx_hash(),
-                    transaction_index: transaction_index as u32,
-                    event,
-                });
+                events.push(event);
             }
         }
+        let transaction_hash = *transaction.tx_hash();
+        authenticate_receipt_mints(transaction_hash, &events)?;
+        authenticate_receipt_withdrawals(transaction_hash, &events)?;
+        for (index, event) in events.iter().enumerate() {
+            if matches!(event, L2BridgeEvent::TempoAdvanced(_)) {
+                eyre::ensure!(
+                    self.anchor_index.is_none(),
+                    "duplicate TempoAdvanced in block {block}"
+                );
+                self.anchor_index = Some(self.events.len() + index);
+            }
+        }
+        self.events.extend(events);
         Ok(())
     }
 
@@ -470,13 +437,10 @@ impl EventCollector {
         let anchor_index = self
             .anchor_index
             .ok_or_else(|| eyre::eyre!("block {block} is missing TempoAdvanced"))?;
-        let events = L2Events {
+        Ok(L2Events {
             events: self.events,
             anchor_index,
-        };
-        events.authenticate_mints()?;
-        events.authenticate_withdrawals()?;
-        Ok(events)
+        })
     }
 }
 
@@ -635,7 +599,7 @@ mod tests {
     use alloy_sol_types::SolEvent;
     use reth_ethereum_primitives::Receipt;
 
-    fn anchor_evidence(events: &L2Events) -> &L2EventEvidence {
+    fn anchor_event(events: &L2Events) -> &L2BridgeEvent {
         &events.events[events.anchor_index]
     }
 
@@ -847,41 +811,35 @@ mod tests {
 
         assert_eq!(events.events.len(), 14);
         assert!(
-            matches!(events.events[0].event, L2BridgeEvent::TempoAdvanced(ref anchor)
+            matches!(events.events[0], L2BridgeEvent::TempoAdvanced(ref anchor)
             if anchor.tempo_block_number == 100)
         );
-        assert!(
-            matches!(events.events[2].event, L2BridgeEvent::DepositOutcome {
+        assert!(matches!(events.events[2], L2BridgeEvent::DepositOutcome {
             token, amount: 500, processed: true, ..
-        } if token == token_a)
-        );
-        assert!(
-            matches!(events.events[3].event, L2BridgeEvent::DepositOutcome {
+        } if token == token_a));
+        assert!(matches!(events.events[3], L2BridgeEvent::DepositOutcome {
             token, amount: 300, processed: false, ..
-        } if token == token_b)
-        );
+        } if token == token_b));
         assert!(
-            matches!(events.events[5].event, L2BridgeEvent::WithdrawalBounceBack {
+            matches!(events.events[5], L2BridgeEvent::WithdrawalBounceBack {
             token, amount: 777, processed: true, ..
         } if token == token_a)
         );
         assert!(
-            matches!(events.events[6].event, L2BridgeEvent::WithdrawalBounceBack {
+            matches!(events.events[6], L2BridgeEvent::WithdrawalBounceBack {
             token, amount: 888, processed: false, ..
         } if token == token_b)
         );
-        assert!(
-            matches!(events.events[8].event, L2BridgeEvent::RefundClaimed {
+        assert!(matches!(events.events[8], L2BridgeEvent::RefundClaimed {
             token, amount: 42, ..
-        } if token == token_a)
-        );
+        } if token == token_a));
         assert!(
-            matches!(events.events[9].event, L2BridgeEvent::WithdrawalRequested {
+            matches!(events.events[9], L2BridgeEvent::WithdrawalRequested {
             withdrawal_index: 3, sender, token, principal: 1000, fee: 50,
         } if sender == Address::ZERO && token == token_a)
         );
         assert!(
-            matches!(events.events[13].event, L2BridgeEvent::WithdrawalRequested {
+            matches!(events.events[13], L2BridgeEvent::WithdrawalRequested {
             withdrawal_index: 4, sender, token, principal: 2000, fee: 75,
         } if sender == Address::repeat_byte(0x44) && token == token_b)
         );
@@ -993,10 +951,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(events.events.len(), 1);
-        assert!(matches!(
-            events.events[0].event,
-            L2BridgeEvent::TempoAdvanced(_)
-        ));
+        assert!(matches!(events.events[0], L2BridgeEvent::TempoAdvanced(_)));
     }
 
     #[test]
@@ -1011,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn retains_receipt_provenance_across_all_logs() {
+    fn retains_recognized_events_across_ignored_logs() {
         let anchor = anchor_log(7);
         let noise = Log {
             address: Address::repeat_byte(9),
@@ -1031,9 +986,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(events.events.len(), 1);
-        let evidence = anchor_evidence(&events);
-        assert_eq!(evidence.transaction_hash, *tx.tx_hash());
-        assert_eq!(evidence.transaction_index, 0);
+        assert!(matches!(
+            anchor_event(&events),
+            L2BridgeEvent::TempoAdvanced(_)
+        ));
         assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
     }
 
@@ -1057,106 +1013,66 @@ mod tests {
             BlockNumHash::new(4, B256::repeat_byte(4)),
         )
         .unwrap();
-        assert_eq!(anchor_evidence(&events).transaction_index, 1);
+        assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
     }
 
-    fn evidence(transaction: u32, event: L2BridgeEvent) -> L2EventEvidence {
-        L2EventEvidence {
-            transaction_hash: B256::with_last_byte(transaction as u8),
-            transaction_index: transaction,
-            event,
-        }
-    }
-
-    fn burn(transaction: u32, token: Address, owner: Address, amount: u64) -> Vec<L2EventEvidence> {
+    fn burn(token: Address, owner: Address, amount: u64) -> Vec<L2BridgeEvent> {
         let amount = U256::from(amount);
         vec![
-            evidence(
-                transaction,
-                L2BridgeEvent::Transfer {
-                    token,
-                    from: owner,
-                    to: ZONE_OUTBOX_ADDRESS,
-                    amount,
-                },
-            ),
-            evidence(
-                transaction,
-                L2BridgeEvent::Transfer {
-                    token,
-                    from: ZONE_OUTBOX_ADDRESS,
-                    to: Address::ZERO,
-                    amount,
-                },
-            ),
-            evidence(
-                transaction,
-                L2BridgeEvent::TokenBurn {
-                    token,
-                    from: ZONE_OUTBOX_ADDRESS,
-                    amount,
-                },
-            ),
+            L2BridgeEvent::Transfer {
+                token,
+                from: owner,
+                to: ZONE_OUTBOX_ADDRESS,
+                amount,
+            },
+            L2BridgeEvent::Transfer {
+                token,
+                from: ZONE_OUTBOX_ADDRESS,
+                to: Address::ZERO,
+                amount,
+            },
+            L2BridgeEvent::TokenBurn {
+                token,
+                from: ZONE_OUTBOX_ADDRESS,
+                amount,
+            },
         ]
     }
 
-    fn withdrawal(
-        transaction: u32,
-        token: Address,
-        sender: Address,
-        principal: u128,
-        fee: u128,
-    ) -> L2EventEvidence {
-        evidence(
-            transaction,
-            L2BridgeEvent::WithdrawalRequested {
-                withdrawal_index: 0,
-                sender,
-                token,
-                principal,
-                fee,
-            },
-        )
+    fn withdrawal(token: Address, sender: Address, principal: u128, fee: u128) -> L2BridgeEvent {
+        L2BridgeEvent::WithdrawalRequested {
+            withdrawal_index: 0,
+            sender,
+            token,
+            principal,
+            fee,
+        }
     }
 
-    fn authenticate_withdrawals(events: Vec<L2EventEvidence>) -> eyre::Result<()> {
-        L2Events {
-            events,
-            anchor_index: 0,
-        }
-        .authenticate_withdrawals()
+    fn authenticate_withdrawals(events: Vec<L2BridgeEvent>) -> eyre::Result<()> {
+        authenticate_receipt_withdrawals(B256::repeat_byte(1), &events)
     }
 
-    fn authenticate_mints(events: Vec<L2EventEvidence>) -> eyre::Result<()> {
-        L2Events {
-            events,
-            anchor_index: 0,
-        }
-        .authenticate_mints()
+    fn authenticate_mints(events: Vec<L2BridgeEvent>) -> eyre::Result<()> {
+        authenticate_receipt_mints(B256::repeat_byte(1), &events)
     }
 
     #[test]
     fn authenticates_inbox_mints() {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
-        let outcome = evidence(
-            1,
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(recipient),
-                token,
-                amount: 10,
-                processed: true,
-            },
-        );
-        let mint = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: Address::ZERO,
-                to: recipient,
-                amount: U256::from(10),
-            },
-        );
+        let outcome = L2BridgeEvent::DepositOutcome {
+            recipient: Some(recipient),
+            token,
+            amount: 10,
+            processed: true,
+        };
+        let mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: recipient,
+            amount: U256::from(10),
+        };
 
         authenticate_mints(vec![mint, outcome]).unwrap();
     }
@@ -1164,33 +1080,24 @@ mod tests {
     #[test]
     fn rejects_unmatched_inbox_mints() {
         let token = Address::repeat_byte(1);
-        let outcome = evidence(
-            1,
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(Address::repeat_byte(2)),
-                token,
-                amount: 10,
-                processed: true,
-            },
-        );
-        let wrong_mint = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: Address::ZERO,
-                to: Address::repeat_byte(3),
-                amount: U256::from(10),
-            },
-        );
-        let unexpected_mint = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: Address::ZERO,
-                to: Address::repeat_byte(4),
-                amount: U256::from(10),
-            },
-        );
+        let outcome = L2BridgeEvent::DepositOutcome {
+            recipient: Some(Address::repeat_byte(2)),
+            token,
+            amount: 10,
+            processed: true,
+        };
+        let wrong_mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: Address::repeat_byte(3),
+            amount: U256::from(10),
+        };
+        let unexpected_mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: Address::repeat_byte(4),
+            amount: U256::from(10),
+        };
 
         assert!(authenticate_mints(vec![wrong_mint, outcome]).is_err());
         assert!(authenticate_mints(vec![unexpected_mint]).is_err());
@@ -1202,33 +1109,24 @@ mod tests {
         let recipient = Address::repeat_byte(2);
         let master = Address::repeat_byte(3);
         let amount = U256::from(10);
-        let mint = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: Address::ZERO,
-                to: recipient,
-                amount,
-            },
-        );
-        let forward = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: recipient,
-                to: master,
-                amount,
-            },
-        );
-        let outcome = evidence(
-            1,
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(recipient),
-                token,
-                amount: 10,
-                processed: true,
-            },
-        );
+        let mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: recipient,
+            amount,
+        };
+        let forward = L2BridgeEvent::Transfer {
+            token,
+            from: recipient,
+            to: master,
+            amount,
+        };
+        let outcome = L2BridgeEvent::DepositOutcome {
+            recipient: Some(recipient),
+            token,
+            amount: 10,
+            processed: true,
+        };
 
         authenticate_mints(vec![mint, forward, outcome]).unwrap();
     }
@@ -1237,59 +1135,58 @@ mod tests {
     fn rejects_inbox_mints_paired_across_receipts() {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
-        let mint = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
+        let mint = event_log(
+            token,
+            ITIP20::Transfer {
                 from: Address::ZERO,
                 to: recipient,
                 amount: U256::from(10),
             },
         );
-        let outcome = evidence(
-            2,
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(recipient),
+        let outcome = event_log(
+            ZONE_INBOX_ADDRESS,
+            IZoneInbox::DepositProcessed {
+                depositHash: B256::ZERO,
+                sender: Address::ZERO,
+                to: recipient,
                 token,
                 amount: 10,
-                processed: true,
+                memo: B256::ZERO,
             },
         );
 
-        assert!(authenticate_mints(vec![mint, outcome]).is_err());
+        assert!(
+            collect(
+                &[transaction(), transaction()],
+                &[receipt(vec![anchor_log(7), mint]), receipt(vec![outcome])],
+                BlockNumHash::new(4, B256::ZERO),
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_inbox_mints_with_an_intervening_recognized_event() {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
-        let mint = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: Address::ZERO,
-                to: recipient,
-                amount: U256::from(10),
-            },
-        );
-        let transfer = evidence(
-            1,
-            L2BridgeEvent::Transfer {
-                token,
-                from: recipient,
-                to: Address::repeat_byte(3),
-                amount: U256::from(1),
-            },
-        );
-        let outcome = evidence(
-            1,
-            L2BridgeEvent::DepositOutcome {
-                recipient: Some(recipient),
-                token,
-                amount: 10,
-                processed: true,
-            },
-        );
+        let mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: recipient,
+            amount: U256::from(10),
+        };
+        let transfer = L2BridgeEvent::Transfer {
+            token,
+            from: recipient,
+            to: Address::repeat_byte(3),
+            amount: U256::from(1),
+        };
+        let outcome = L2BridgeEvent::DepositOutcome {
+            recipient: Some(recipient),
+            token,
+            amount: 10,
+            processed: true,
+        };
 
         assert!(authenticate_mints(vec![mint, transfer, outcome]).is_err());
     }
@@ -1298,8 +1195,8 @@ mod tests {
     fn authenticates_sender_paid_withdrawal() {
         let token = address!("20c0000000000000000000000000000000000000");
         let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 105);
-        events.push(withdrawal(1, token, sender, 100, 5));
+        let mut events = burn(token, sender, 105);
+        events.push(withdrawal(token, sender, 100, 5));
         authenticate_withdrawals(events).unwrap();
     }
 
@@ -1308,9 +1205,9 @@ mod tests {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
         let fee_payer = Address::repeat_byte(3);
-        let mut events = burn(1, token, sender, 100);
-        events.extend(burn(1, token, fee_payer, 5));
-        events.push(withdrawal(1, token, sender, 100, 5));
+        let mut events = burn(token, sender, 100);
+        events.extend(burn(token, fee_payer, 5));
+        events.push(withdrawal(token, sender, 100, 5));
         authenticate_withdrawals(events).unwrap();
     }
 
@@ -1318,8 +1215,8 @@ mod tests {
     fn rejects_wrong_withdrawal_burn_amount() {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 101);
-        events.push(withdrawal(1, token, sender, 100, 0));
+        let mut events = burn(token, sender, 101);
+        events.push(withdrawal(token, sender, 100, 0));
         assert!(authenticate_withdrawals(events).is_err());
     }
 
@@ -1327,10 +1224,10 @@ mod tests {
     fn authenticates_multiple_withdrawals_in_one_transaction() {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 100);
-        events.push(withdrawal(1, token, sender, 100, 0));
-        events.extend(burn(1, token, sender, 205));
-        events.push(withdrawal(1, token, sender, 200, 5));
+        let mut events = burn(token, sender, 100);
+        events.push(withdrawal(token, sender, 100, 0));
+        events.extend(burn(token, sender, 205));
+        events.push(withdrawal(token, sender, 200, 5));
         authenticate_withdrawals(events).unwrap();
     }
 
@@ -1338,16 +1235,13 @@ mod tests {
     fn authenticates_withdrawal_after_unrelated_receipt_events() {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 100);
-        events.push(evidence(
-            1,
-            L2BridgeEvent::RefundClaimed {
-                recipient: sender,
-                token,
-                amount: 1,
-            },
-        ));
-        events.push(withdrawal(1, token, sender, 100, 0));
+        let mut events = burn(token, sender, 100);
+        events.push(L2BridgeEvent::RefundClaimed {
+            recipient: sender,
+            token,
+            amount: 1,
+        });
+        events.push(withdrawal(token, sender, 100, 0));
 
         authenticate_withdrawals(events).unwrap();
     }
@@ -1356,9 +1250,9 @@ mod tests {
     fn rejects_reusing_one_burn_for_multiple_withdrawals() {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 100);
-        events.push(withdrawal(1, token, sender, 100, 0));
-        events.push(withdrawal(1, token, sender, 100, 0));
+        let mut events = burn(token, sender, 100);
+        events.push(withdrawal(token, sender, 100, 0));
+        events.push(withdrawal(token, sender, 100, 0));
 
         assert!(authenticate_withdrawals(events).is_err());
     }
@@ -1368,40 +1262,28 @@ mod tests {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
 
-        assert!(authenticate_withdrawals(burn(1, token, sender, 100)).is_err());
+        assert!(authenticate_withdrawals(burn(token, sender, 100)).is_err());
     }
 
     #[test]
     fn rejects_missing_withdrawal_burn_event() {
         let token = Address::repeat_byte(1);
         let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 100);
+        let mut events = burn(token, sender, 100);
         events.remove(2);
-        events.push(withdrawal(1, token, sender, 100, 0));
-        assert!(authenticate_withdrawals(events).is_err());
-    }
-
-    #[test]
-    fn rejects_cross_transaction_withdrawal_evidence() {
-        let token = Address::repeat_byte(1);
-        let sender = Address::repeat_byte(2);
-        let mut events = burn(1, token, sender, 100);
-        events.push(withdrawal(2, token, sender, 100, 0));
+        events.push(withdrawal(token, sender, 100, 0));
         assert!(authenticate_withdrawals(events).is_err());
     }
 
     #[test]
     fn deposit_bounce_back_does_not_require_a_burn() {
-        let event = evidence(
-            1,
-            L2BridgeEvent::WithdrawalRequested {
-                withdrawal_index: 0,
-                sender: Address::ZERO,
-                token: Address::repeat_byte(1),
-                principal: 100,
-                fee: 0,
-            },
-        );
+        let event = L2BridgeEvent::WithdrawalRequested {
+            withdrawal_index: 0,
+            sender: Address::ZERO,
+            token: Address::repeat_byte(1),
+            principal: 100,
+            fee: 0,
+        };
         authenticate_withdrawals(vec![event]).unwrap();
     }
 }
