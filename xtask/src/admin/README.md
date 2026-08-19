@@ -153,8 +153,10 @@ tempo-xtask admin encryption-key register \
 ```
 
 The execute path repeats all checks immediately before submission and waits
-until the replacement is the finalized active Portal key. It is safe to retry
-if that key is already active.
+until the replacement is the finalized active Portal key. It is safe to retry:
+before submitting, the command checks the latest Portal state. If the replacement
+key is included but not finalized, it waits instead of appending the key again. A
+post-submission timeout includes the successful transaction hash.
 
 After registration, use the normal `tempo-xtask deposit` command for the
 decryption test. Then update `--sequencer-key-file`, roll nodes follower-first,

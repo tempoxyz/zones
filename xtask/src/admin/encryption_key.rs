@@ -305,58 +305,90 @@ impl Register {
         }
 
         progress("Rechecking all preconditions immediately before submission...");
-        let latest =
+        let finalized =
             ClusterView::collect(view.config.clone(), self.shared.rpc_timeout, |message| {
                 progress(message)
             })
             .await?;
-        if latest
+        if finalized
             .portal
             .encryption_key
             .is_some_and(|key| key_matches(key, new_key))
         {
-            ensure_healthy(&latest)?;
-            ensure_registration_coverage(&latest)?;
+            ensure_healthy(&finalized)?;
+            ensure_registration_coverage(&finalized)?;
             return self.print_report(RegisterReport {
                 ok: true,
                 dry_run: false,
                 submitted: false,
                 tx_hash: None,
-                portal: latest.portal.portal,
+                portal: finalized.portal.portal,
                 signer: tx_signer.address(),
                 old_key: Some(old_key),
                 new_key,
             });
         }
         ensure!(
-            latest
+            finalized
                 .portal
                 .encryption_key
                 .is_some_and(|key| key == old_key),
             "active Portal key changed during the dry-run; refusing to submit"
         );
-        ensure_registration_preconditions(&latest, old_expected, new_key.expected())?;
+        ensure_registration_preconditions(&finalized, old_expected, new_key.expected())?;
         ensure!(
-            latest.portal.sequencers.contains(&tx_signer.address()),
+            finalized.portal.sequencers.contains(&tx_signer.address()),
             "transaction signer is no longer a current Portal sequencer"
         );
 
-        progress("Submitting setSequencerEncryptionKey...");
-        let wallet = EthereumWallet::from(tx_signer.clone());
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
-            .connect(&latest.config.l1_rpc_url)
-            .await?;
-        let tx_hash =
-            zone_sequencer::register_encryption_key(&provider, latest.portal.portal, &new_signer)
+        let latest_key = ZonePortal::new(finalized.portal.portal, &l1)
+            .sequencerEncryptionKey()
+            .call()
+            .await
+            .wrap_err("failed reading the latest Portal encryption key")?;
+        let latest_key = PortalEncryptionKey {
+            x: latest_key.x,
+            y_parity: latest_key.normalized_y_parity().ok_or_else(|| {
+                eyre!(
+                    "Portal returned invalid encryption-key yParity {:#x}; expected 0/1 or 0x02/0x03",
+                    latest_key.yParity
+                )
+            })?,
+        };
+
+        let (tx_hash, submitted) = match registration_action(old_key, latest_key, new_key)? {
+            RegistrationAction::Submit => {
+                progress("Submitting setSequencerEncryptionKey...");
+                let wallet = EthereumWallet::from(tx_signer.clone());
+                let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                    .wallet(wallet)
+                    .connect(&finalized.config.l1_rpc_url)
+                    .await?;
+                let tx_hash = zone_sequencer::register_encryption_key(
+                    &provider,
+                    finalized.portal.portal,
+                    &new_signer,
+                )
                 .await
                 .wrap_err("failed to send setSequencerEncryptionKey")?;
+                progress(format!(
+                    "Transaction {tx_hash} succeeded; waiting for finalization..."
+                ));
+                (Some(tx_hash), true)
+            }
+            RegistrationAction::WaitForFinality => {
+                progress(
+                    "Replacement key is already included at latest; waiting for finalization without resubmitting...",
+                );
+                (None, false)
+            }
+        };
 
         let timeout = self.timeout.unwrap_or(DEFAULT_FINALITY_TIMEOUT);
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let later =
-                ClusterView::collect(latest.config.clone(), self.shared.rpc_timeout, |_| {})
+                ClusterView::collect(finalized.config.clone(), self.shared.rpc_timeout, |_| {})
                     .await?;
             if later
                 .portal
@@ -366,8 +398,8 @@ impl Register {
                 return self.print_report(RegisterReport {
                     ok: true,
                     dry_run: false,
-                    submitted: true,
-                    tx_hash: Some(tx_hash),
+                    submitted,
+                    tx_hash,
                     portal: later.portal.portal,
                     signer: tx_signer.address(),
                     old_key: Some(old_key),
@@ -382,10 +414,16 @@ impl Register {
                 "a different encryption key finalized while waiting for registration"
             );
             if std::time::Instant::now() >= deadline {
-                return Err(eyre!(
-                    "timed out after {} waiting for the new encryption key to finalize",
-                    format_duration(timeout)
-                ));
+                return match tx_hash {
+                    Some(tx_hash) => Err(eyre!(
+                        "transaction {tx_hash} succeeded but timed out after {} waiting for the new encryption key to finalize; retrying is safe",
+                        format_duration(timeout)
+                    )),
+                    None => Err(eyre!(
+                        "timed out after {} waiting for the included encryption key to finalize; no transaction was resubmitted",
+                        format_duration(timeout)
+                    )),
+                };
             }
             tokio::time::sleep(FINALITY_POLL).await;
         }
@@ -417,6 +455,29 @@ impl Register {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationAction {
+    Submit,
+    WaitForFinality,
+}
+
+fn registration_action(
+    old_key: PortalEncryptionKey,
+    latest_key: PortalEncryptionKey,
+    new_key: KeyIdentity,
+) -> eyre::Result<RegistrationAction> {
+    if latest_key == old_key {
+        return Ok(RegistrationAction::Submit);
+    }
+    if key_matches(latest_key, new_key) {
+        return Ok(RegistrationAction::WaitForFinality);
+    }
+    Err(eyre!(
+        "active Portal key changed before submission to {}; refusing to submit",
+        display_portal_key(latest_key)
+    ))
 }
 
 fn ensure_healthy(view: &ClusterView) -> eyre::Result<()> {
@@ -534,9 +595,13 @@ fn progress(message: impl fmt::Display) {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::B256;
     use alloy::signers::local::PrivateKeySigner;
 
-    use super::{identity_from_signer, merge_decryption_keyring};
+    use super::{
+        PortalEncryptionKey, RegistrationAction, identity_from_signer, merge_decryption_keyring,
+        registration_action,
+    };
 
     #[test]
     fn identity_contains_canonical_parity() {
@@ -554,5 +619,24 @@ mod tests {
         let keyring = merge_decryption_keyring(vec![old.clone(), historical, old], &new).unwrap();
         assert_eq!(keyring.lines().count(), 3);
         assert!(keyring.contains(&super::encode_private_key(&new)));
+    }
+
+    #[test]
+    fn included_replacement_waits_for_finality_instead_of_resubmitting() {
+        let old = PortalEncryptionKey {
+            x: B256::repeat_byte(0x11),
+            y_parity: 2,
+        };
+        let new_signer = PrivateKeySigner::from_slice(&[0x33; 32]).unwrap();
+        let new = identity_from_signer(&new_signer).unwrap();
+        let latest = PortalEncryptionKey {
+            x: new.x,
+            y_parity: new.y_parity,
+        };
+
+        assert_eq!(
+            registration_action(old, latest, new).unwrap(),
+            RegistrationAction::WaitForFinality
+        );
     }
 }
