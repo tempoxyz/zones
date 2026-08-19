@@ -2,7 +2,9 @@ use alloy_primitives::{Address, B256, U256};
 
 use crate::accounting::{AccountKey, BalanceChange, Effect, State, TokenState};
 
-use super::{BlockRef, CandidateTransition, Finding, Identity, PersistenceError, Status, Store};
+use super::{
+    BlockRef, CandidateTransition, Checkpoint, Finding, Identity, PersistenceError, Status, Store,
+};
 
 fn block(number: u64, byte: u8) -> BlockRef {
     BlockRef {
@@ -30,7 +32,16 @@ fn rows_survive_restart_and_unwind() {
     let token = Address::repeat_byte(30);
     let mut state = State::default();
     state.apply(&[Effect::EnableToken { token }]).unwrap();
-    let initial = Store::create_atomic(&path, identity(), genesis, tempo, state).unwrap();
+    let initial = Store::create_atomic(
+        &path,
+        &Checkpoint {
+            identity: identity(),
+            zone: genesis,
+            tempo,
+            state,
+        },
+    )
+    .unwrap();
     let (store, reopened) = Store::open(&path, identity()).unwrap();
     assert_eq!(reopened, initial);
     assert_eq!(reopened.state.token(token), Some(TokenState::default()));
@@ -80,10 +91,12 @@ fn finding_freezes_verified_tip() {
     let genesis = block(0, 10);
     Store::create_atomic(
         &path,
-        identity(),
-        genesis,
-        block(20, 20),
-        Default::default(),
+        &Checkpoint {
+            identity: identity(),
+            zone: genesis,
+            tempo: block(20, 20),
+            state: Default::default(),
+        },
     )
     .unwrap();
     let (store, snapshot) = Store::open(&path, identity()).unwrap();
@@ -115,10 +128,12 @@ fn apply_rejects_stale_candidate_parent() {
     let genesis = block(0, 10);
     Store::create_atomic(
         &path,
-        identity(),
-        genesis,
-        block(20, 20),
-        Default::default(),
+        &Checkpoint {
+            identity: identity(),
+            zone: genesis,
+            tempo: block(20, 20),
+            state: Default::default(),
+        },
     )
     .unwrap();
     let (store, snapshot) = Store::open(&path, identity()).unwrap();

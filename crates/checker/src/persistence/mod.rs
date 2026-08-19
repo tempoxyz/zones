@@ -90,23 +90,14 @@ impl Store {
             fs::create_dir_all(parent)
                 .map_err(|error| PersistenceError::Invalid(error.to_string()))?;
         }
-        Self::create_atomic(
-            path,
-            checkpoint.identity,
-            checkpoint.zone,
-            checkpoint.tempo,
-            checkpoint.state.clone(),
-        )?;
+        Self::create_atomic(path, checkpoint)?;
         Self::open(path, checkpoint.identity)
     }
 
     /// Create, verify, and atomically publish a genesis checkpoint.
     pub(crate) fn create_atomic(
         target: &Path,
-        identity: Identity,
-        zone: BlockRef,
-        tempo: BlockRef,
-        state: State,
+        checkpoint: &Checkpoint,
     ) -> Result<Snapshot, PersistenceError> {
         if target.exists() {
             return Err(PersistenceError::Invalid("database already exists".into()));
@@ -119,9 +110,9 @@ impl Store {
             .tempdir_in(parent)
             .map_err(|error| PersistenceError::Invalid(error.to_string()))?;
         let snapshot = {
-            let (store, snapshot) = Self::create(staging.path(), identity, zone, tempo, state)?;
+            let (store, snapshot) = Self::create(staging.path(), checkpoint)?;
             drop(store);
-            let (store, reopened) = Self::open(staging.path(), identity)?;
+            let (store, reopened) = Self::open(staging.path(), checkpoint.identity)?;
             drop(store);
             if reopened != snapshot {
                 return Err(PersistenceError::Invalid(
@@ -135,13 +126,7 @@ impl Store {
         Ok(snapshot)
     }
 
-    fn create(
-        path: &Path,
-        identity: Identity,
-        zone: BlockRef,
-        tempo: BlockRef,
-        state: State,
-    ) -> Result<(Self, Snapshot), PersistenceError> {
+    fn create(path: &Path, checkpoint: &Checkpoint) -> Result<(Self, Snapshot), PersistenceError> {
         if !is_database_empty(path) {
             return Err(PersistenceError::Invalid(
                 "fresh database is not empty".into(),
@@ -151,13 +136,13 @@ impl Store {
             .map_err(PersistenceError::Open)?;
         let store = Self {
             db: Arc::new(db),
-            identity,
+            identity: checkpoint.identity,
         };
         let metadata = Metadata {
-            identity,
-            verified_zone: zone,
-            imported_tempo: tempo,
-            observed_zone: zone,
+            identity: checkpoint.identity,
+            verified_zone: checkpoint.zone,
+            imported_tempo: checkpoint.tempo,
+            observed_zone: checkpoint.zone,
             status: Status::Verifying,
         };
         let tx = store.db.tx_mut()?;
@@ -166,10 +151,10 @@ impl Store {
             MetaKey::Metadata,
             MetaValue::Metadata(Box::new(metadata.clone())),
         )?;
-        for (key, value) in state.accounts() {
+        for (key, value) in checkpoint.state.accounts() {
             tx.put::<Accounts>(key, AccountValue(value))?;
         }
-        for (token, value) in state.tokens() {
+        for (token, value) in checkpoint.state.tokens() {
             tx.put::<Tokens>(token, TokenValue(value))?;
         }
         tx.commit()?;
@@ -177,7 +162,7 @@ impl Store {
             store,
             Snapshot {
                 metadata,
-                state: Arc::new(state),
+                state: Arc::new(checkpoint.state.clone()),
             },
         ))
     }

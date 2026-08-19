@@ -648,18 +648,8 @@ mod tests {
         T: TxHashRef,
         R: TxReceipt<Log = Log>,
     {
-        eyre::ensure!(
-            transactions.len() == receipts.len(),
-            "block {} has {} transactions but {} receipts",
-            block.number,
-            transactions.len(),
-            receipts.len()
-        );
-        let mut collector = EventCollector::default();
-        for (index, (transaction, receipt)) in transactions.iter().zip(receipts).enumerate() {
-            collector.extract_receipt(index, transaction, receipt, block.number)?;
-        }
-        collector.finish(block.number)
+        crate::l2::collect_l2_block_evidence(transactions, receipts, block)
+            .map(|evidence| evidence.events)
     }
 
     fn transaction() -> alloy_consensus::Signed<TxLegacy> {

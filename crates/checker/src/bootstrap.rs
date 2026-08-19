@@ -9,7 +9,7 @@ use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::SolEvent as _;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
-use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
+use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
 
@@ -17,7 +17,7 @@ use crate::{
     CheckerConfig,
     accounting::{State, effects},
     decode_event,
-    l1::{collect_l1_block, portal_balances},
+    l1::{collect_l1_block, portal_balances, validate_l1_receipts},
     l2::read_zone_genesis,
     persistence::{self, Checkpoint},
 };
@@ -138,7 +138,9 @@ async fn discover_creation(
     candidates.dedup();
     let [hash] = candidates.as_slice() else {
         eyre::bail!(
-            "expected one creation block for Zone {zone_id} and Portal {portal}, found {}",
+            "expected one creation block for Zone {} and Portal {}, found {}",
+            zone_id,
+            portal,
             candidates.len()
         );
     };
@@ -158,13 +160,13 @@ async fn authenticate_creation(
         .hashes()
         .await?
         .ok_or_else(|| eyre::eyre!("Portal creation block {hash} is unavailable"))?;
-    let number = block.header().number();
+    let coordinate = BlockNumHash::new(block.header().number(), hash);
     let receipts = provider
         .get_block_receipts(BlockId::hash(hash))
         .await?
         .ok_or_else(|| eyre::eyre!("Portal creation receipts are unavailable"))?;
     let transaction_hashes = block.transactions().hashes().collect::<Vec<_>>();
-    authenticate_receipts(hash, number, &transaction_hashes, &receipts)?;
+    validate_l1_receipts(coordinate, &transaction_hashes, &receipts)?;
 
     let mut creations = receipts
         .iter()
@@ -172,7 +174,9 @@ async fn authenticate_creation(
         .flat_map(|receipt| receipt.logs())
         .filter(|log| log.address() == ZONE_FACTORY_ADDRESS)
         .filter(|log| log.topic0() == Some(&ZoneFactory::ZoneCreated::SIGNATURE_HASH))
-        .map(|log| decode_event::<ZoneFactory::ZoneCreated>(&log.inner, "ZoneCreated", number))
+        .map(|log| {
+            decode_event::<ZoneFactory::ZoneCreated>(&log.inner, "ZoneCreated", coordinate.number)
+        })
         .collect::<eyre::Result<Vec<_>>>()?
         .into_iter()
         .filter(|event| event.zoneId == zone_id && event.portal == portal);
@@ -187,30 +191,7 @@ async fn authenticate_creation(
         event.initialToken == initial_token,
         "Portal initial token does not match Zone genesis"
     );
-    Ok(BlockNumHash::new(number, hash))
-}
-
-/// Require each receipt's provenance to match the block it was fetched from.
-fn authenticate_receipts(
-    hash: B256,
-    number: u64,
-    transaction_hashes: &[B256],
-    receipts: &[TempoTransactionReceipt],
-) -> eyre::Result<()> {
-    eyre::ensure!(
-        transaction_hashes.len() == receipts.len(),
-        "creation block transaction and receipt counts differ"
-    );
-    for (index, (transaction, receipt)) in transaction_hashes.iter().zip(receipts).enumerate() {
-        eyre::ensure!(
-            receipt.block_hash() == Some(hash)
-                && receipt.block_number() == Some(number)
-                && receipt.transaction_hash() == *transaction
-                && receipt.transaction_index() == Some(index as u64),
-            "creation receipt {index} has inconsistent provenance"
-        );
-    }
-    Ok(())
+    Ok(coordinate)
 }
 
 async fn ensure_canonical(

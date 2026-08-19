@@ -127,7 +127,7 @@ async fn collect_l1_block_evidence(
 }
 
 /// Validate transaction and receipt correspondence from the trusted L1 RPC.
-fn validate_l1_receipts(
+pub(crate) fn validate_l1_receipts(
     block: NumHash,
     transaction_hashes: &[B256],
     receipts: &[TempoTransactionReceipt],

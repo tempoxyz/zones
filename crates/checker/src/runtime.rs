@@ -348,12 +348,8 @@ where
     let parent_hash = block.parent_hash();
     let zone = BlockRef::new(number, hash);
     let fail = |error| BlockError::Finding { zone, error };
-    let l2 = collect_l2_block_evidence(
-        block.body().transactions(),
-        receipts,
-        BlockNumHash::new(number, hash),
-    )
-    .map_err(fail)?;
+    let l2 = collect_l2_block_evidence(block.body().transactions(), receipts, zone.into())
+        .map_err(fail)?;
     let anchor = l2
         .l1_anchor()
         .ok_or_else(|| fail(eyre::eyre!("Zone block is missing its Tempo anchor")))?;
@@ -391,8 +387,7 @@ where
         .chain_spec()
         .tempo_hardfork_at(block.header().timestamp());
     let observed =
-        read_accounting_state(provider, &accounts, BlockNumHash::new(number, hash), spec)
-            .map_err(BlockError::Retry)?;
+        read_accounting_state(provider, &accounts, zone.into(), spec).map_err(BlockError::Retry)?;
     state
         .verify_zone_state(
             observed
