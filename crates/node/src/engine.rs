@@ -50,20 +50,21 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tempo_chainspec::spec::TempoHardforks as _;
 use tempo_primitives::TempoHeader;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Per-anchor production permit backed by the effective leadership schedule.
+/// Full-block production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
-/// forced-recovery override assigns `N` to this node. An optimistic override is open-ended until
-/// the next finalized portal transition supplies the ordinary-authority boundary.
+/// Full blocks require the leader assigned to their imported Tempo header. Checkpoint-only blocks
+/// are leader-neutral and bypass this permit. An optimistic override is open-ended until the next
+/// finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -79,7 +80,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the zone block embedding `tempo_anchor`.
+    /// Decide whether this node may produce the full zone block embedding `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -324,8 +325,8 @@ impl ZoneEngine {
         let queued_headers = self
             .deposit_queue
             .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
-        // Do not checkpoint across the Z1 activation boundary. A pre-Z1 queue front must be
-        // imported operationally before a later Z1 header can enable advanceTempoHeaders.
+        // Do not checkpoint across the T12 activation boundary. A pre-T12 queue front must be
+        // imported operationally before a later T12 header can enable advanceTempoHeaders.
         let checkpoint_count = checkpoint_header_count(
             &self.chain_spec,
             &queued_headers,
@@ -338,13 +339,13 @@ impl ZoneEngine {
 
         let (timestamp_secs, timestamp_millis_part) = if self
             .chain_spec
-            .zone_hardfork_at(final_header.timestamp())
-            .is_z1()
+            .tempo_hardfork_at(final_header.timestamp())
+            .is_t12()
         {
-            // Z1 locks the Zone block timestamp to the final imported Tempo header.
+            // T12 locks the Zone block timestamp to the final imported Tempo header.
             (final_header.timestamp(), final_header.timestamp_millis_part)
         } else {
-            // Before Z1, the L1 timestamp remains a lower bound. Use wall-clock time to avoid
+            // Before T12, the L1 timestamp remains a lower bound. Use wall-clock time to avoid
             // backdating transactions during catch-up, and keep consecutive blocks monotonic.
             let wall_clock_timestamp_millis = SystemTime::now()
                 .duration_since(UNIX_EPOCH)?
@@ -456,7 +457,7 @@ fn checkpoint_header_count(
 ) -> usize {
     if !queued_headers
         .first()
-        .is_some_and(|header| chain_spec.zone_hardfork_at(header.timestamp()).is_z1())
+        .is_some_and(|header| chain_spec.tempo_hardfork_at(header.timestamp()).is_t12())
     {
         return 0;
     }
@@ -483,6 +484,19 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+        let queued_headers = self
+            .deposit_queue
+            .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
+        if checkpoint_header_count(
+            &self.chain_spec,
+            &queued_headers,
+            self.l1_block_tracker.finalized_target(),
+        ) > 0
+        {
+            // TIP-1096 assigns no leader to checkpoint-only blocks. Leader authority resumes at
+            // the final full block, whose single imported Tempo header is checked below.
+            return None;
+        }
         self.production_permit
             .as_ref()
             .and_then(|permit| permit.check(block.header.number()))
@@ -525,7 +539,7 @@ mod tests {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_001);
     }
 
-    fn z1_spec(activation: u64) -> ZoneChainSpec {
+    fn t12_spec(activation: u64) -> ZoneChainSpec {
         use reth_chainspec::EthChainSpec as _;
         let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
         genesis.config.chain_id =
@@ -534,7 +548,7 @@ mod tests {
         genesis
             .config
             .extra_fields
-            .insert_value("z1Time".into(), activation)
+            .insert_value("t12Time".into(), activation)
             .unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
     }
@@ -551,8 +565,8 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_batching_does_not_cross_z1_activation() {
-        let spec = z1_spec(100);
+    fn checkpoint_batching_does_not_cross_t12_activation() {
+        let spec = t12_spec(100);
         assert_eq!(
             checkpoint_header_count(&spec, &[header(1, 99), header(2, 100)], Some(2)),
             0
@@ -569,7 +583,7 @@ mod tests {
 
     #[test]
     fn checkpoint_batching_uses_announced_finalized_target() {
-        let spec = z1_spec(100);
+        let spec = t12_spec(100);
 
         // Backfill has announced 100 missing blocks, but only the first is verified and queued.
         // It must remain a checkpoint-only import instead of becoming a premature full block.
