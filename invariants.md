@@ -21,7 +21,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
 | `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash` starts at zero, and the first proof starts with the canonical genesis block derived from `zoneId` before transitioning through at least one non-genesis block | 🔴 | The zone may bootstrap from an attacker-chosen genesis state |
 | `TEMPO-ZONE-FIRST-TEMPO-ANCHOR` | The first proof contains at least two blocks, and its first non-genesis block imports Tempo and proves the portal's `sequencer` slot is non-zero at that block | 🔴 | The zone may settle an unanchored bootstrap state or anchor to Tempo state from before its portal existed |
-| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
+| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, and `TempoStateReader` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
 ### Access Control and Configuration
 

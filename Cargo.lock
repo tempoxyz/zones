@@ -13983,7 +13983,6 @@ dependencies = [
  "tempo-primitives",
  "tempo-zone-contracts",
  "thiserror 2.0.18",
- "tracing",
  "zone-hardfork",
  "zone-primitives",
 ]

@@ -236,18 +236,6 @@ address constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
 // ZoneOutbox system contract address (0x1c00...0002)
 address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
-// ZoneTxContext precompile address (0x1c00...0005)
-address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;
-
-/// @title IZoneTxContext
-/// @notice Interface for the zone precompile that exposes the currently executing tx hash
-interface IZoneTxContext {
-
-    /// @notice Returns the hash of the currently executing zone transaction
-    function currentTxHash() external returns (bytes32);
-
-}
-
 /*//////////////////////////////////////////////////////////////
                 ZONE PORTAL STORAGE SLOT CONSTANTS
 //////////////////////////////////////////////////////////////*/

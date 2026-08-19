@@ -11,7 +11,6 @@ import {
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
-    ZONE_TX_CONTEXT,
     ZONE_VERIFIER_ADDRESS,
     ZoneInfo
 } from "../src/runtime/interfaces/IZone.sol";
@@ -20,7 +19,6 @@ import { Verifier } from "../src/runtime/tempo/Verifier.sol";
 import { ZoneMessenger } from "../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../src/runtime/tempo/ZonePortal.sol";
 import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
-import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -51,7 +49,6 @@ contract BaseTest is Test {
     address internal constant _NONCE = StdPrecompiles.NONCE_ADDRESS;
     address internal constant _VALIDATOR_CONFIG = StdPrecompiles.VALIDATOR_CONFIG_ADDRESS;
     address internal constant _BLOCKHASH_HISTORY = EIP2935;
-    address internal constant _ZONE_TX_CONTEXT = ZONE_TX_CONTEXT;
     address internal constant _ZONE_FACTORY = ZONE_FACTORY_ADDRESS;
 
     // EIP-2935 serve window: hashes for the most recent 8191 blocks are available
@@ -84,7 +81,6 @@ contract BaseTest is Test {
     IValidatorConfig public validatorConfig = IValidatorConfig(_VALIDATOR_CONFIG);
     ITIP20Token public token1;
     ITIP20Token public token2;
-    MockZoneTxContext public zoneTxContext = MockZoneTxContext(_ZONE_TX_CONTEXT);
     MockZoneGateway public zoneGateway;
 
     error MissingPrecompile(string name, address addr);
@@ -120,14 +116,6 @@ contract BaseTest is Test {
 
         if (_BLOCKHASH_HISTORY.code.length == 0) {
             revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);
-        }
-
-        if (_ZONE_TX_CONTEXT.code.length == 0) {
-            MockZoneTxContext mockTxContext = new MockZoneTxContext();
-            vm.etch(_ZONE_TX_CONTEXT, address(mockTxContext).code);
-        }
-        if (_ZONE_TX_CONTEXT.code.length == 0) {
-            revert MissingPrecompile("ZoneTxContext", _ZONE_TX_CONTEXT);
         }
 
         // Set ValidatorConfig owner to sequencer via direct storage write

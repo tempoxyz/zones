@@ -33,9 +33,6 @@ pub const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c0000000000000000000000000
 /// WARNING: Updating this list is a consensus change.
 pub const CONTRACT_DEPLOYER_ALLOWLIST: &[Address] = &[];
 
-/// ZoneTxContext precompile address on Zone L2.
-pub const ZONE_TX_CONTEXT_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000005");
-
 /// Zone-native fee manager precompile address.
 ///
 /// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.

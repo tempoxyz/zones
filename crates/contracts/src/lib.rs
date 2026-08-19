@@ -6,7 +6,10 @@
 //!   accepts batch proofs, and processes withdrawals back to L1 recipients.
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes `LastBatch` state for proof generation.
-//! - **ZoneInbox**, **TempoState**, **ZoneTxContext** — Zone L2 predeploys.
+//! - **ZoneInbox** — deployed on the Zone L2. Advances finalized Tempo state, activates bridged
+//!   tokens, processes deposits, and tracks deposit queue progress.
+//! - **TempoState** — deployed on the Zone L2. Stores the finalized Tempo block checkpoint and
+//!   provides anchored Tempo storage reads to zone system execution.
 //! - **ZoneFactory** — native TIP-1091 precompile on Tempo L1.
 //! - **SwapAndDepositRouter** — deployed on Tempo L1.
 

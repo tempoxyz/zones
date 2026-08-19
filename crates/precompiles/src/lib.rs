@@ -109,9 +109,9 @@ use tempo_precompiles::{
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token, is_tip20_prefix},
     tip403_registry::TIP403Registry,
 };
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 #[cfg(feature = "std")]
-use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 use zone_hardfork::ZoneHardfork;
 
 /// Registers every precompile that is available to a Zone EVM.
@@ -134,10 +134,6 @@ pub fn extend_zone_precompiles<P>(
     let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
 
     precompiles.set_precompile_lookup(move |address: &Address| {
-        #[cfg(feature = "std")]
-        if *address == ZONE_TX_CONTEXT_ADDRESS {
-            return Some(tx_context::ZoneTxContext::create());
-        }
         #[cfg(feature = "std")]
         if *address == ZONE_OUTBOX_ADDRESS {
             return Some(create_outbox_precompile(l1.clone(), &env));
