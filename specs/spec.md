@@ -361,7 +361,7 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `abdicate(Capability.AccessPolicy)`: Permanently freeze account roles, gateway roles, and
   enforcement modes after the same delay. Existing access roles cannot be revoked afterward.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with an enabled flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. At most `MAX_UNPROCESSED_TOKEN_ENABLEMENTS` (8) entries may remain beyond the portal's last settled token cursor. Each metadata string copied into the zone (`name`, `symbol`, and `currency`) is bounded to 31 encoded bytes. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Token Enablement Commitment
 
@@ -381,7 +381,7 @@ nextTokenEnablementHash = keccak256(
 
 The encoding is Solidity's standard `abi.encode(bytes32,address,string,string,string)` encoding, not packed encoding. Implementations in other languages must produce exactly the same bytes. `ZonePortal` updates `tokenEnablementHash` once in `_enableTokenInternal`, using the same metadata bytes emitted in `TokenEnabled`, and no other operation may modify it. The native `ZoneFactory` performs the identical transition for the initial token when it creates a portal.
 
-`ZoneInbox` stores `processedTokenEnablementHash`, initially zero, in a new storage-layout slot appended after its existing state. After importing a Tempo header, `advanceTempo` starts from this stored value and applies the transition above to every supplied `enabledTokens` entry in order. It then reads the portal's `tokenEnablementHash` from the imported Tempo state and requires exact equality. A mismatch reverts the complete system transaction before any token initialization or deposit processing. Partial token-enablement processing is not permitted.
+`ZoneInbox` stores both `processedTokenEnablementHash` and `processedEnabledTokenCount`. A full `advanceTempo` authenticates every array entry from the stored count through `enabledTokenCount` at the final imported Tempo root, applies them in order, and requires the resulting hash to equal the portal commitment. Partial processing and replay are invalid. Settlement exposes the count pair as `TokenEnablementTransition`; the portal advances `lastProcessedEnabledTokenCount` only after proof verification.
 
 Consequently, `enabledTokens` is the exact ordered append-only delta that transforms the prior zone commitment into the portal commitment at the imported header. It is the sequence of `TokenEnabled` events from that Tempo block in transaction and log order. The bootstrap import is the portal-creation block, so this sequence starts with the initial token enablement and transforms the zero genesis commitment into the imported portal commitment. After equality is established, `ZoneInbox` initializes every supplied token, grants the Inbox and Outbox bridge roles, updates `processedTokenEnablementHash`, and only then processes deposits. An offchain comparison against observed receipt logs is defense in depth and is not a substitute for this consensus check.
 
@@ -465,9 +465,15 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Deposit, deposit, cur
 
 The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` and `processedDepositNumber` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo L1 at the zone's finalized checkpoint.
 
-Each portal accepts at most `MAX_DEPOSITS_PER_TEMPO_BLOCK` deposits in one Tempo block. The cap applies to encrypted deposits and internal withdrawal bounce-backs because both append to the same queue. Twenty slots are reserved for withdrawal bounce-backs, enough for one maximum-size sequencer withdrawal batch, so user deposits stop at `MAX_DEPOSITS_PER_TEMPO_BLOCK - 20`. This both bounds the complete per-block deposit vector below the Zone's `advanceTempo()` system gas budget and guarantees FIFO withdrawal progress under sustained public deposit load.
+Each portal permits at most `MAX_UNPROCESSED_DEPOSITS` (230) entries beyond `lastProcessedDepositNumber`, regardless of how many Tempo blocks produced them. The cap applies to encrypted deposits and internal withdrawal bounce-backs because both append to the same queue. Twenty slots are reserved for withdrawal bounce-backs, so user deposits stop at `MAX_UNPROCESSED_DEPOSITS - 20`; withdrawal processing preflights the whole bounce-back batch before mutating state.
 
 `advanceTempo()` reads the portal's `currentDepositQueueHash` from Tempo L1 at the zone's finalized checkpoint. The call must process deposits through the current queue head: after rebuilding the hash chain, the resulting `processedDepositQueueHash` must equal the portal's `currentDepositQueueHash`.
+
+### Header-Only Tempo Advancement
+
+After Z1 activates, a Zone block may consist solely of `advanceTempoHeaders(bytes[] headers)`. The call accepts 1–1024 consecutive Tempo headers, validates continuity from the stored checkpoint, requires the Zone timestamp to equal the final header timestamp, and commits only the final checkpoint. It performs no portal reads or work and is not restricted to the current leader. It is invalid at an uninitialized zero checkpoint.
+
+A full `advanceTempo(bytes header, ...)` retains its single-header ABI and imports exactly one direct child. It processes the complete outstanding deposit and token-enablement suffix visible at that header's state root and may then execute user transactions. A settleable Z1 batch contains only header-only blocks, or zero or more header-only blocks followed by exactly one full block. The final full block finalizes the withdrawal batch; a header-only batch leaves deposit, token, and withdrawal commitments unchanged.
 
 After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced, and updates `lastProcessedDepositNumber` from the proven `DepositQueueTransition`. Users should track deposit inclusion by deposit number: `DepositMade` emits `depositNumber`, `ZoneInbox.TempoAdvanced` emits the inbox's `lastProcessedDepositNumber`, and `ZonePortal.BatchSubmitted` emits the accepted portal value. A deposit with number `N` is processed once `lastProcessedDepositNumber >= N`.
 
@@ -864,11 +870,13 @@ Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a gene
 
 ### Header Finalization
 
-`ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo. This function decodes the RLP header, requires its timestamp (seconds and millisecond component) to exactly match the executing zone block, validates chain continuity (parent hash must match the previous finalized header, block number must increment by one), stores the new checkpoint, and emits the decoded state root in `TempoBlockFinalized`.
+Both Zone inbox import paths call `TempoState.finalizeTempo(headers)` to advance the zone's view of Tempo. The function accepts between 1 and 1,024 consecutive RLP headers, validates continuity from the current checkpoint, requires the final header's timestamp (seconds and millisecond component) to exactly match the executing zone block, stores only the final checkpoint, and emits its decoded state root in `TempoBlockFinalized`.
 
 Canonical deployed Zones start with the nonzero pre-portal Tempo checkpoint recorded in genesis. Their first import begins with its immediate child—the portal-creation block—and ordinary parent-hash and consecutive-number validation applies from that block onward. The standalone zero-hash genesis template MUST be anchored before use and MUST NOT bootstrap a deployed portal from an arbitrary later snapshot.
 
-Every non-genesis zone block must call `advanceTempo` exactly once as its first transaction. Consequently, its Tempo binding advances by exactly one block.
+Every non-genesis zone block must contain exactly one inbox import as its first transaction. A checkpoint-only block calls `advanceTempoHeaders` and may import up to 1,024 headers without reading Tempo state or performing operational work. A full block calls `advanceTempo`, imports exactly one header, and performs all pending token enablements and deposits against that header's final state root. Under Z1 a batch is either entirely checkpoint-only or consists of zero or more checkpoint-only blocks followed by exactly one full settlement block. Checkpoint-only blocks may cross sequencer leadership boundaries; the full block must be produced by the leader for its final Tempo header.
+
+The zero-checkpoint bootstrap state cannot use the checkpoint-only path. Its first import is a single full block, which also proves that the portal administrator and sequencer set are initialized at the imported root.
 
 ### L1 Storage Reads
 
@@ -1346,13 +1354,13 @@ The stateless execution function must reject the witness on any failed check, mi
    Compute `keccak256(rlp(node))` for each node in `tempo_state_witness.node_pool` and build a hash-to-node index for proof traversal. Decode `tempo_state_witness.initial_tempo_header_rlp`; require its hash and block number to equal `TempoState.tempoBlockHash` and `TempoState.tempoBlockNumber` in the initial zone state. Set the active Tempo trie root to the decoded header's `state_root`.
 
 4. **For each `zone_blocks[i]`, verify the block witness before executing it.**
-   In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `(public_inputs.parent_chain_id, public_inputs.zone_id)`, including `chain_id = zone_chain_id(parent_chain_id, zone_id)` under the rules in [Chain ID](#chain-id); its parent hash is zero and it contains no user or system transactions. Apply the ordinary block rules to every remaining bootstrap block and to every block in an ordinary batch: require `block.parent_hash == prev_block_hash`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlp` to be present. Require `finalize_withdrawal_batch_count` to be absent in the genesis block and all intermediate blocks, and present in the final block of a batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
+   In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `(public_inputs.parent_chain_id, public_inputs.zone_id)`, including `chain_id = zone_chain_id(parent_chain_id, zone_id)` under the rules in [Chain ID](#chain-id); its parent hash is zero and it contains no user or system transactions. Apply the ordinary parent-hash, number, and timestamp rules to every remaining block. Classify a block with nonempty `tempo_headers_rlp` as checkpoint-only: require 1--1,024 consecutive headers, exactly the inbox transaction, and empty deposits, decryptions, enabled tokens, user transactions, and withdrawal-finalization fields. Otherwise classify it as full: require one `tempo_header_rlp`, the expected beneficiary, and ordinary system/user transaction ordering. Under Z1 require at most one full block and require it to be last; if present, it must finalize a withdrawal batch. A checkpoint-only-only batch leaves the withdrawal index and queue hash unchanged.
 
-5. **Execute `advanceTempo` if the block imports a Tempo header.**
-   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This requires the imported Tempo header's timestamp and millisecond component to exactly match the zone block, validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
+5. **Execute the block's Tempo import.**
+   For a checkpoint-only block, call `ZoneInbox.advanceTempoHeaders(tempo_headers_rlp)` and advance the active Tempo root through each consecutive header to the final header. For a full block, call `ZoneInbox.advanceTempo(tempo_header_rlp, ...)` and advance through its single direct-child header. In either case require the resulting local checkpoint to match the final supplied header. Only the final header must exactly match the zone block timestamp.
 
-6. **Authenticate token enablements inside `advanceTempo`.**
-   Using the now-bound Tempo root for this block, verify the portal's `tokenEnablementHash`. Execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order. Starting from the pre-state `ZoneInbox.processedTokenEnablementHash`, apply the [token enablement commitment](#token-enablement-commitment) transition to each entry and require the result to equal the portal's `tokenEnablementHash` proven against the imported Tempo root. Reject omitted, extra, reordered, or modified entries. After equality is established, initialize each enabled token and its bridge roles, then update `processedTokenEnablementHash`. Token activation must complete before processing any deposit in the call.
+6. **Authenticate token enablements inside a full `advanceTempo`.**
+   Using the final imported Tempo root, read the portal's enabled-token count and require `enabled_tokens` to be the complete unprocessed suffix in exact order, subject to the global eight-token outstanding cap. Starting from `ZoneInbox.processedEnabledTokenCount`, authenticate each array entry against the portal array, initialize the token and bridge roles, then update both the processed count and compatibility hash. The first operational Z1 proof initializes an upgraded portal's count cursor by proving the pre-Z1 processed prefix. Token activation must complete before processing any deposit. A checkpoint-only block performs none of these reads or writes.
 
 7. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
    Continuing the same `advanceTempo` call, verify the portal's current deposit queue hash and process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). Require exactly one `DecryptionData` entry for every encrypted deposit and consume those entries in deposit order. For each encrypted deposit, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification). The enabled-token, deposit, and decryption arrays are part of the system transaction calldata and therefore affect the transaction root, receipts/logs root, and resulting state transition.
@@ -1406,15 +1414,17 @@ The call takes the following parameters:
 | `recentTempoBlockNumber` | A recent Tempo block for ancestry validation (`0` for direct lookup) |
 | `blockTransition` | Zone block hash transition: `prevBlockHash` to `nextBlockHash` |
 | `depositQueueTransition` | Deposit queue progress from the previous `(processedHash, depositNumber)` pair to the next `(processedHash, depositNumber)` pair |
-| `withdrawalQueueHash` | Hash chain of withdrawals finalized in this batch (`0` if none) |
+| `tokenEnablementTransition` | Enabled-token prefix progress from the previous processed count to the next processed count |
+| `withdrawalQueueHash` | Hash chain of withdrawals finalized in this batch (`0` for checkpoint-only batches) |
+| `resultingWithdrawalBatchIndex` | Withdrawal index after the proof: unchanged for checkpoint-only, incremented by one for a full batch |
 | `verifierConfig` | Opaque payload for the verifier (domain separation, attestation data) |
 | `proof` | The proof or attestation produced by the proving backend |
 | `zoneHeight` | Strictly increasing zone height committed by the certificate |
 | `signatures` | Distinct active-sequencer signatures meeting `sequencerThreshold` |
 
 The EIP-712 settlement commitment binds the Tempo chain, portal, zone ID, sequencer-set version,
-zone height, withdrawal batch index, verifier, Tempo anchor, block transition, deposit transition,
-withdrawal queue hash, and verifier configuration. Duplicate, malformed, unregistered, or
+zone height, resulting withdrawal batch index, verifier, Tempo anchor, block transition, deposit transition,
+token-enablement transition, withdrawal queue hash, and verifier configuration. Duplicate, malformed, unregistered, or
 stale-version signatures are rejected. The transaction submitter has no distinguished authority
 beyond being an active sequencer.
 
@@ -1422,10 +1432,10 @@ On success, the portal:
 
 1. Updates `blockHash` to `nextBlockHash`.
 2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
-3. Advances `withdrawalBatchIndex`.
+3. Sets `withdrawalBatchIndex` to `resultingWithdrawalBatchIndex` and advances the enabled-token cursor to `tokenEnablementTransition.nextProcessedTokenCount`.
 4. Updates `zoneHeight`.
-5. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to `slots[tail]`, and advances `tail`.
-6. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for an empty batch.
+5. For a full batch, assigns the current logical withdrawal queue `tail`, writes the (possibly zero) hash chain to `slots[tail]`, and advances `tail`.
+6. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for a checkpoint-only batch.
 
 ### Verifier Interface
 
@@ -1791,8 +1801,10 @@ interface IZonePortal {
     error InvalidQuorumCertificate();
 
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
-    function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
-    function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+    function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
+    function MAX_UNPROCESSED_TOKEN_ENABLEMENTS() external view returns (uint64);
+    function lastProcessedEnabledTokenCount() external view returns (uint64);
+    function tokenEnablementCursorInitialized() external view returns (bool);
     function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
     function MAX_GAS_FEE_RATE() external view returns (uint128);
@@ -1852,7 +1864,9 @@ interface IZonePortal {
     function submitBatch(
         uint64 tempoBlockNumber, uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition, DepositQueueTransition calldata depositQueueTransition,
-        bytes32 withdrawalQueueHash, bytes calldata verifierConfig, bytes calldata proof,
+        TokenEnablementTransition calldata tokenEnablementTransition,
+        bytes32 withdrawalQueueHash, uint64 resultingWithdrawalBatchIndex,
+        bytes calldata verifierConfig, bytes calldata proof,
         uint256 zoneHeight, bytes[] calldata signatures
     ) external;
 
@@ -1952,7 +1966,7 @@ interface ITempoState {
     function tempoBlockHash() external view returns (bytes32);
     function tempoBlockNumber() external view returns (uint64);
 
-    function finalizeTempo(bytes calldata header) external;
+    function finalizeTempo(bytes[] calldata headers) external;
 }
 ```
 
@@ -1962,6 +1976,8 @@ Address: `0x1c00000000000000000000000000000000000001`
 
 ```solidity
 interface IZoneInbox {
+    function processedEnabledTokenCount() external view returns (uint64);
+    function advanceTempoHeaders(bytes[] calldata headers) external;
     /// @notice A canonical deposit queued by the portal for processing on the zone.
     /// @dev WithdrawalBounceBack entries are internal. Every Deposit entry consumes
     ///      one DecryptionData item and performs onchain verification.
