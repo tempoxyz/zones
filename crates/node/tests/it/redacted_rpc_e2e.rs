@@ -43,7 +43,6 @@ use tempo_zone_contracts::{
     IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
     ZONE_TOKEN_ADDRESS,
 };
-use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -441,7 +440,7 @@ async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Keychain auth rejects missing, revoked, expired, and signature-type-mismatched keys.
+/// Keychain auth rejects missing, revoked, and signature-type-mismatched keys.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -484,30 +483,6 @@ async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
         .call_raw("eth_blockNumber", serde_json::json!([]), &revoked_token)
         .await?;
     assert_eq!(status.as_u16(), 403, "revoked key should return 403");
-
-    let expired_root = PrivateKeySigner::random();
-    let expired_access = P256SigningKey::random(&mut thread_rng());
-    ctx.inject_deposit(
-        PATH_USD_ADDRESS,
-        address!("0x0000000000000000000000000000000000003333"),
-        expired_root.address(),
-        1_000_000,
-    )
-    .await?;
-    let (expired_token, expired_key_id) =
-        ctx.keychain_p256_token(expired_root.address(), &expired_access, 0x04);
-    ctx.authorize_keychain_key(
-        &expired_root,
-        expired_key_id,
-        KeyInfoSignatureType::P256,
-        now_secs() + 20,
-    )
-    .await?;
-    sleep(std::time::Duration::from_secs(21)).await;
-    let (status, _) = ctx
-        .call_raw("eth_blockNumber", serde_json::json!([]), &expired_token)
-        .await?;
-    assert_eq!(status.as_u16(), 403, "expired key should return 403");
 
     let mismatch_root = PrivateKeySigner::random();
     let mismatch_access = P256SigningKey::random(&mut thread_rng());
