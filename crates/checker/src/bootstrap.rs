@@ -7,8 +7,10 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::SolEvent as _;
+use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
+use tempo_chainspec::spec::TempoHardforks;
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
 
 use crate::{
@@ -30,7 +32,8 @@ pub(crate) async fn build<P>(
     config: &CheckerConfig,
 ) -> eyre::Result<Checkpoint>
 where
-    P: BlockNumReader + StateProviderFactory + ?Sized,
+    P: BlockNumReader + ChainSpecProvider + StateProviderFactory + ?Sized,
+    P::ChainSpec: TempoHardforks,
 {
     let portal = config.portal_address;
     let zone_id = config.zone_id;
@@ -69,9 +72,12 @@ where
 /// Read and validate Zone genesis, returning its Tempo anchor and initial token.
 fn read_genesis<P>(provider: &P, hash: B256) -> eyre::Result<(BlockNumHash, Address)>
 where
-    P: StateProviderFactory + ?Sized,
+    P: ChainSpecProvider + StateProviderFactory + ?Sized,
+    P::ChainSpec: TempoHardforks,
 {
-    let snapshot = read_zone_genesis(provider, hash)?;
+    let chain_spec = provider.chain_spec();
+    let spec = chain_spec.tempo_hardfork_at(chain_spec.genesis_header().timestamp());
+    let snapshot = read_zone_genesis(provider, hash, spec)?;
     eyre::ensure!(
         !snapshot.tempo_block_hash.is_zero(),
         "Zone genesis has no Tempo anchor"

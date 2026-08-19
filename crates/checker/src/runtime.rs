@@ -6,11 +6,13 @@ use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumHash;
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
 use futures::{StreamExt as _, TryStreamExt as _, future};
+use reth_chainspec::ChainSpecProvider;
 use reth_exex::{ExExContext, ExExHead, ExExNotification};
 use reth_node_api::{BlockBody as _, FullNodeComponents, NodePrimitives};
 use reth_primitives_traits::RecoveredBlock;
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::spec::TempoHardforks;
 
 use crate::{
     CheckerConfig,
@@ -45,7 +47,8 @@ pub(crate) async fn run<Node>(
 ) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
-    Node::Provider: BlockNumReader + StateProviderFactory,
+    Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
+    <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     match run_inner(config, ctx).await {
@@ -88,7 +91,8 @@ where
 async fn run_inner<Node>(config: CheckerConfig, ctx: &mut ExExContext<Node>) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
-    Node::Provider: BlockNumReader + StateProviderFactory,
+    Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
+    <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     tracing::info!(target: "zone::checker", "checker started");
@@ -278,7 +282,8 @@ async fn process_notification<N, P>(
 ) -> Result<Outcome, BlockError>
 where
     N: CheckedPrimitives,
-    P: StateProviderFactory,
+    P: ChainSpecProvider + StateProviderFactory,
+    P::ChainSpec: TempoHardforks,
 {
     let mut current = snapshot.clone();
     if let Some(ancestor) = notification_ancestor(notification).map_err(BlockError::Retry)? {
@@ -334,7 +339,8 @@ async fn verify_block<N, P>(
 ) -> Result<Snapshot, BlockError>
 where
     N: CheckedPrimitives,
-    P: StateProviderFactory,
+    P: ChainSpecProvider + StateProviderFactory,
+    P::ChainSpec: TempoHardforks,
 {
     let number = block.number();
     let hash = block.hash();
@@ -380,8 +386,12 @@ where
     for token in &tokens {
         accounts.entry(*token).or_default();
     }
-    let observed = read_accounting_state(provider, &accounts, BlockNumHash::new(number, hash))
-        .map_err(BlockError::Retry)?;
+    let spec = provider
+        .chain_spec()
+        .tempo_hardfork_at(block.header().timestamp());
+    let observed =
+        read_accounting_state(provider, &accounts, BlockNumHash::new(number, hash), spec)
+            .map_err(BlockError::Retry)?;
     state
         .verify_zone_state(
             observed
