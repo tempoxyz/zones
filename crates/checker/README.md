@@ -67,8 +67,10 @@ With `--checker.mode observe`, startup is self-contained:
 3. Discover the unique matching `ZoneCreated` through Tempo's log index, then
    authenticate its canonical block, receipts, Zone identity, Portal, and
    initial token.
-4. Replay canonical Portal activity from creation through the Zone genesis
-   anchor and verify initial Portal collateral.
+4. If genesis follows Portal creation, replay canonical Portal activity through
+   its Tempo anchor and verify initial collateral. A pre-creation genesis starts
+   with empty accounting and derives token membership when normal Zone replay
+   reaches the creation block.
 5. Create `<node datadir>/checker` atomically if it is missing, or validate and
    open it if it exists.
 6. Ask Reth to replay canonical Zone history after the durable verified tip.

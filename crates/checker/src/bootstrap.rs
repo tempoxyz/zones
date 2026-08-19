@@ -163,16 +163,12 @@ async fn discover_creation(
     candidates.dedup();
     let hash = match candidates.as_slice() {
         [hash] => *hash,
-        [] if head < anchor_number => {
-            return Err(AttemptError::retry(eyre::eyre!(
-                "Tempo has not reached Zone genesis anchor {anchor_number}"
-            )));
-        }
         [] => {
-            return Err(AttemptError::disable(eyre::eyre!(
-                "no creation block found for Zone {} and Portal {}",
+            return Err(AttemptError::retry(eyre::eyre!(
+                "creation block is not yet available for Zone {} and Portal {} after genesis anchor {}",
                 config.zone_id,
-                config.portal_address
+                config.portal_address,
+                anchor_number,
             )));
         }
         _ => {
@@ -266,13 +262,8 @@ async fn initial_state(
     initial_token: Address,
 ) -> Result<State, AttemptError> {
     let mut state = State::default();
-    state
-        .apply(&[crate::accounting::Effect::EnableToken(initial_token)])
-        .map_err(AttemptError::disable)?;
     if anchor.number < creation.number {
-        return Err(AttemptError::disable(eyre::eyre!(
-            "Zone genesis anchor predates Portal creation"
-        )));
+        return Ok(state);
     }
     let block = provider
         .get_block_by_hash(creation.hash)
@@ -296,6 +287,11 @@ async fn initial_state(
     if previous != anchor {
         return Err(AttemptError::disable(eyre::eyre!(
             "Tempo history does not end at the Zone genesis anchor"
+        )));
+    }
+    if state.token(initial_token).is_none() {
+        return Err(AttemptError::disable(eyre::eyre!(
+            "Portal creation did not enable the Zone genesis token"
         )));
     }
     let tokens = state.tokens().map(|(token, _)| token).collect::<Vec<_>>();
