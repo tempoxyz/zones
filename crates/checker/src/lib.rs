@@ -20,6 +20,27 @@ use reth_node_api::FullNodeComponents;
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_chainspec::spec::TempoHardforks;
 
+/// Whether an operation should be retried or disable the checker.
+#[derive(Debug)]
+pub(crate) enum AttemptError {
+    /// Retry after the configured delay.
+    Retry(eyre::Report),
+    /// Stop verification while leaving Zone execution running.
+    Disable(eyre::Report),
+}
+
+impl AttemptError {
+    /// Retry the operation after the configured delay.
+    pub(crate) fn retry(error: impl Into<eyre::Report>) -> Self {
+        Self::Retry(error.into())
+    }
+
+    /// Disable verification without stopping Zone execution.
+    pub(crate) fn disable(error: impl Into<eyre::Report>) -> Self {
+        Self::Disable(error.into())
+    }
+}
+
 /// Decode a known event and reject a non-canonical ABI representation.
 pub(crate) fn decode_event<E: alloy_sol_types::SolEvent>(
     log: &alloy_primitives::Log,

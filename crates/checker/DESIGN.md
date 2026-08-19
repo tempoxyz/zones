@@ -119,5 +119,6 @@ bounce-backs are exempt because they do not debit a Zone user.
 
 Transient acquisition failures retry without advancing the verified tip. A
 deterministic mismatch records a durable divergence and freezes verification at
-the preceding block. Observe mode never changes Zone execution or terminates
-the node.
+the preceding block. Unrecoverable configuration, persistence, or provider
+failures disable verification while the ExEx drains notifications. Observe mode
+never changes Zone execution or terminates the node.

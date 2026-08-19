@@ -108,12 +108,14 @@ The node's existing metrics endpoint exports:
 - `reth_tempo_zone_checker_observed_zone_height`
 - `reth_tempo_zone_checker_verification_lag_blocks`
 - `reth_tempo_zone_checker_divergence_active`
+- `reth_tempo_zone_checker_disabled`
 - `reth_tempo_zone_checker_acquisition_retries_total`
 - `reth_tempo_zone_checker_verified_zone_blocks_total`
 - `reth_tempo_zone_checker_recovery_rebuilds_total`
 
-At minimum, alert when `divergence_active` is `1`, verification lag continues
-to grow, or the verified height stops advancing while the Zone head advances.
+At minimum, alert when `disabled` or `divergence_active` is `1`, verification
+lag continues to grow, or the verified height stops advancing while the Zone
+head advances.
 
 ## Modes
 

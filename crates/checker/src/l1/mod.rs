@@ -7,16 +7,38 @@ use alloy_eips::{BlockId, BlockNumHash, NumHash};
 use alloy_network::{BlockResponse as _, ReceiptResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider};
-use eyre::WrapErr as _;
+use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_contracts::precompiles::ITIP20;
+
+use crate::AttemptError;
 
 pub(crate) use events::L1PortalEvent;
 use events::{EventCollector, L1Events};
 
 /// Bound on concurrent Portal balance reads for one token set.
 const BALANCE_CONCURRENCY: usize = 8;
+
+/// Failure acquiring or interpreting exact Tempo state.
+#[derive(Debug)]
+pub(crate) enum L1ReadError {
+    /// Required RPC data is not currently available.
+    Unavailable(eyre::Report),
+    /// Authenticated protocol evidence cannot be verified.
+    Finding(eyre::Report),
+    /// Deterministic provider or checker failure prevents verification.
+    Disable(eyre::Report),
+}
+
+impl From<AttemptError> for L1ReadError {
+    fn from(error: AttemptError) -> Self {
+        match error {
+            AttemptError::Retry(error) => Self::Unavailable(error),
+            AttemptError::Disable(error) => Self::Disable(error),
+        }
+    }
+}
 
 /// Recognized Portal events for one exact anchored L1 block.
 #[derive(Debug)]
@@ -41,32 +63,60 @@ pub(crate) async fn collect_l1_block(
     provider: &DynProvider<TempoNetwork>,
     portal: Address,
     parent: BlockNumHash,
-) -> eyre::Result<L1BlockEvidence> {
-    let number = parent
-        .number
-        .checked_add(1)
-        .ok_or_else(|| eyre::eyre!("Tempo block number overflow after {}", parent.number))?;
+) -> Result<L1BlockEvidence, L1ReadError> {
+    collect_l1_block_inner(provider, portal, parent, None).await
+}
+
+/// Fetch the exact anchored Tempo block that extends `parent`.
+pub(crate) async fn collect_l1_block_at(
+    provider: &DynProvider<TempoNetwork>,
+    portal: Address,
+    parent: BlockNumHash,
+    expected: BlockNumHash,
+) -> Result<L1BlockEvidence, L1ReadError> {
+    collect_l1_block_inner(provider, portal, parent, Some(expected)).await
+}
+
+async fn collect_l1_block_inner(
+    provider: &DynProvider<TempoNetwork>,
+    portal: Address,
+    parent: BlockNumHash,
+    expected: Option<BlockNumHash>,
+) -> Result<L1BlockEvidence, L1ReadError> {
+    let number = parent.number.checked_add(1).ok_or_else(|| {
+        disable(eyre::eyre!(
+            "Tempo block number overflow after {}",
+            parent.number
+        ))
+    })?;
     let block = provider
         .get_block_by_number(number.into())
         .hashes()
         .await
-        .wrap_err_with(|| format!("failed to fetch Tempo block {number}"))?
-        .ok_or_else(|| eyre::eyre!("Tempo block {number} is unavailable"))?;
-    eyre::ensure!(
-        block.header().number() == number,
-        "Tempo RPC returned block {} for requested block {number}",
-        block.header().number()
-    );
-    eyre::ensure!(
-        block.header().parent_hash() == parent.hash,
-        "Tempo history is not contiguous at block {number}"
-    );
+        .map_err(classify_rpc_error)?
+        .ok_or_else(|| unavailable(eyre::eyre!("Tempo block {number} is unavailable")))?;
+    if block.header().number() != number {
+        return Err(disable(eyre::eyre!(
+            "Tempo RPC returned block {} for requested block {number}",
+            block.header().number()
+        )));
+    }
+    if block.header().parent_hash() != parent.hash {
+        return Err(unavailable(eyre::eyre!(
+            "Tempo history is not contiguous at block {number}"
+        )));
+    }
     let coordinate = BlockNumHash::new(number, block.header().hash());
+    if expected.is_some_and(|expected| coordinate != expected) {
+        return Err(unavailable(eyre::eyre!(
+            "Tempo history does not end at the Zone anchor"
+        )));
+    }
     let transaction_hashes = block.transactions().as_hashes().ok_or_else(|| {
-        eyre::eyre!(
+        disable(eyre::eyre!(
             "Tempo block {number} ({}) did not contain transaction hashes",
             coordinate.hash
-        )
+        ))
     })?;
     collect_l1_block_evidence(provider, portal, coordinate, transaction_hashes).await
 }
@@ -77,12 +127,13 @@ pub(crate) async fn portal_balance(
     token: Address,
     portal: Address,
     block: B256,
-) -> eyre::Result<U256> {
-    Ok(ITIP20::new(token, provider)
+) -> Result<U256, L1ReadError> {
+    ITIP20::new(token, provider)
         .balanceOf(portal)
         .block(BlockId::hash_canonical(block))
         .call()
-        .await?)
+        .await
+        .map_err(classify_contract_error)
 }
 
 /// Read Portal custody for every token, concurrently, at one exact canonical Tempo block.
@@ -91,7 +142,7 @@ pub(crate) async fn portal_balances(
     portal: Address,
     tokens: impl IntoIterator<Item = Address>,
     block: B256,
-) -> eyre::Result<Vec<(Address, U256)>> {
+) -> Result<Vec<(Address, U256)>, L1ReadError> {
     stream::iter(tokens.into_iter().map(|token| async move {
         portal_balance(provider, token, portal, block)
             .await
@@ -108,22 +159,68 @@ async fn collect_l1_block_evidence(
     portal: Address,
     block: BlockNumHash,
     transaction_hashes: &[B256],
-) -> eyre::Result<L1BlockEvidence> {
+) -> Result<L1BlockEvidence, L1ReadError> {
     let hash = block.hash;
     let number = block.number;
     let receipts = provider
         .get_block_receipts(BlockId::hash(hash))
         .await
-        .wrap_err_with(|| format!("failed to fetch L1 receipts for block {number} ({hash})"))?
-        .ok_or_else(|| eyre::eyre!("no receipts for L1 block {number} ({hash})"))?;
-    validate_l1_receipts(NumHash::new(number, hash), transaction_hashes, &receipts)?;
+        .map_err(classify_rpc_error)?
+        .ok_or_else(|| unavailable(eyre::eyre!("no receipts for L1 block {number} ({hash})")))?;
+    validate_l1_receipts(NumHash::new(number, hash), transaction_hashes, &receipts)
+        .map_err(disable)?;
 
     let mut event_collector = EventCollector::new(portal);
     for receipt in &receipts {
-        event_collector.extract_receipt(receipt, number)?;
+        event_collector
+            .extract_receipt(receipt, number)
+            .map_err(finding)?;
     }
     let events = event_collector.finish();
     Ok(L1BlockEvidence { block, events })
+}
+
+fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
+    if error.as_revert_data().is_some() {
+        return finding(error);
+    }
+    match error {
+        alloy_contract::Error::TransportError(error) => classify_rpc_error(error).into(),
+        error @ (alloy_contract::Error::ContractNotDeployed
+        | alloy_contract::Error::ZeroData(..)
+        | alloy_contract::Error::AbiError(_)) => finding(error),
+        error => disable(error),
+    }
+}
+
+/// Classify one provider RPC failure without relying on its display text.
+pub(crate) fn classify_rpc_error(error: TransportError) -> AttemptError {
+    let retryable = match &error {
+        RpcError::ErrorResp(error) => error.is_retry_err(),
+        RpcError::UnsupportedFeature(_)
+        | RpcError::LocalUsageError(_)
+        | RpcError::SerError(_)
+        | RpcError::DeserError { .. }
+        | RpcError::Transport(TransportErrorKind::NonRetryable(_)) => false,
+        _ => true,
+    };
+    if retryable {
+        AttemptError::retry(error)
+    } else {
+        AttemptError::disable(error)
+    }
+}
+
+fn unavailable(error: impl Into<eyre::Report>) -> L1ReadError {
+    L1ReadError::Unavailable(error.into())
+}
+
+fn finding(error: impl Into<eyre::Report>) -> L1ReadError {
+    L1ReadError::Finding(error.into())
+}
+
+fn disable(error: impl Into<eyre::Report>) -> L1ReadError {
+    L1ReadError::Disable(error.into())
 }
 
 /// Validate transaction and receipt correspondence from the trusted L1 RPC.
@@ -229,5 +326,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn classifies_retryable_and_terminal_transport_failures() {
+        let retryable = alloy_transport::TransportErrorKind::backend_gone();
+        assert!(matches!(
+            classify_rpc_error(retryable),
+            AttemptError::Retry(_)
+        ));
+
+        let terminal = alloy_transport::TransportErrorKind::non_retryable_str("invalid request");
+        assert!(matches!(
+            classify_rpc_error(terminal),
+            AttemptError::Disable(_)
+        ));
     }
 }

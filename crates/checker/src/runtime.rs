@@ -15,11 +15,11 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
 
 use crate::{
-    CheckerConfig,
+    AttemptError, CheckerConfig,
     accounting::effects,
     bootstrap,
-    l1::{collect_l1_block, portal_balances},
-    l2::{collect_l2_block_evidence, read_accounting_state},
+    l1::{L1ReadError, classify_rpc_error, collect_l1_block_at, portal_balances},
+    l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
     persistence::{
         AppliedStatus, BlockRef, CandidateTransition, Finding, PersistenceError, Snapshot, Status,
         Store,
@@ -51,7 +51,11 @@ where
     <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
-    match run_inner(config, ctx).await {
+    let metrics = CheckerMetrics::default();
+    metrics.disabled.set(0.0);
+    let result = run_inner(config, ctx, &metrics).await;
+    metrics.disabled.set(1.0);
+    match result {
         Ok(()) => tracing::error!(
             target: "zone::checker",
             "checker stopped unexpectedly; Zone execution continues"
@@ -84,11 +88,14 @@ where
 
 /// Bootstrap or open durable state, then verify or recover from each notification in turn.
 ///
-/// Bootstrap and block verification retry indefinitely on transient failure
-/// (`BlockError::Retry`); an authenticated divergence (`BlockError::Finding`)
-/// is instead persisted and verification stops until a recoverable reorg
-/// clears it. Returns once the notification stream closes.
-async fn run_inner<Node>(config: CheckerConfig, ctx: &mut ExExContext<Node>) -> eyre::Result<()>
+/// Transient acquisition failures are retried. An authenticated divergence is
+/// persisted until a recoverable reorg clears it, while deterministic checker
+/// failures return so the outer runtime can disable verification and drain.
+async fn run_inner<Node>(
+    config: CheckerConfig,
+    ctx: &mut ExExContext<Node>,
+    metrics: &CheckerMetrics,
+) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
     Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
@@ -96,13 +103,12 @@ where
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     tracing::info!(target: "zone::checker", "checker started");
-    let metrics = CheckerMetrics::default();
-    let l1 = connect(&config.l1_rpc_url).await;
-    let checkpoint = retry_forever(
+    let l1 = connect(&config.l1_rpc_url).await?;
+    let checkpoint = retry_transient(
         || bootstrap::build(ctx.provider(), &l1, &config),
         "checker bootstrap failed",
     )
-    .await;
+    .await?;
     let (store, mut snapshot) = Store::open_or_create(&config.database_path, &checkpoint)?;
     metrics.update(&snapshot);
 
@@ -182,6 +188,7 @@ where
                     tracing::warn!(target: "zone::checker", %error, "checker block processing failed; retrying");
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
+                Err(BlockError::Disable(error)) => return Err(error),
             }
         }
     }
@@ -189,29 +196,34 @@ where
     Ok(())
 }
 
-async fn connect(url: &str) -> DynProvider<TempoNetwork> {
-    retry_forever(
-        || ProviderBuilder::new_with_network::<TempoNetwork>().connect(url),
+async fn connect(url: &str) -> eyre::Result<DynProvider<TempoNetwork>> {
+    let provider = retry_transient(
+        || async {
+            ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(url)
+                .await
+                .map_err(classify_rpc_error)
+        },
         "Tempo RPC unavailable",
     )
-    .await
-    .erased()
+    .await?;
+    Ok(provider.erased())
 }
 
-/// Retry `attempt` forever, logging and sleeping `RETRY_DELAY` between failures.
-async fn retry_forever<T, E, F, Fut>(mut attempt: F, message: &str) -> T
+/// Retry transient failure and return failures that disable the checker.
+async fn retry_transient<T, F, Fut>(mut attempt: F, message: &str) -> eyre::Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
+    Fut: Future<Output = Result<T, AttemptError>>,
 {
     loop {
         match attempt().await {
-            Ok(value) => return value,
-            Err(error) => {
+            Ok(value) => return Ok(value),
+            Err(AttemptError::Retry(error)) => {
                 tracing::warn!(target: "zone::checker", %error, "{message}; retrying");
                 tokio::time::sleep(RETRY_DELAY).await;
             }
+            Err(AttemptError::Disable(error)) => return Err(error),
         }
     }
 }
@@ -265,6 +277,17 @@ enum BlockError {
     Retry(eyre::Report),
     /// Authenticated divergence to persist as a finding.
     Finding { zone: BlockRef, error: eyre::Report },
+    /// Deterministic checker failure that cannot be resolved by retrying.
+    Disable(eyre::Report),
+}
+
+impl From<AccountingStateError> for BlockError {
+    fn from(error: AccountingStateError) -> Self {
+        match error {
+            AccountingStateError::Unavailable(error) => Self::Retry(error),
+            AccountingStateError::Invalid(error) => Self::Disable(error),
+        }
+    }
 }
 
 /// Verify or recover from one notification's blocks.
@@ -285,11 +308,11 @@ where
     P::ChainSpec: TempoHardforks,
 {
     let mut current = snapshot;
-    if let Some(ancestor) = notification_ancestor(notification).map_err(BlockError::Retry)? {
+    if let Some(ancestor) = notification_ancestor(notification).map_err(BlockError::Disable)? {
         current = match store.reorg(&current, ancestor) {
             Ok(snapshot) => snapshot,
             Err(PersistenceError::ReorgBeyondRetention { .. }) => return Ok(Outcome::Rebuild),
-            Err(error) => return Err(BlockError::Retry(error.into())),
+            Err(error) => return Err(BlockError::Disable(error.into())),
         };
     }
     let new = match notification {
@@ -352,14 +375,9 @@ where
     let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
-    let tempo_block = collect_l1_block(l1, config.portal_address, tempo_parent)
+    let tempo_block = collect_l1_block_at(l1, config.portal_address, tempo_parent, tempo)
         .await
-        .map_err(BlockError::Retry)?;
-    if tempo_block.block() != tempo {
-        return Err(BlockError::Retry(eyre::eyre!(
-            "Tempo history does not end at the Zone anchor"
-        )));
-    }
+        .map_err(|error| classify_block_l1_error(error, zone))?;
     let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
     let candidate = CandidateTransition::derive(
@@ -383,7 +401,7 @@ where
         .chain_spec()
         .tempo_hardfork_at(block.header().timestamp());
     let observed =
-        read_accounting_state(provider, &accounts, zone.into(), spec).map_err(BlockError::Retry)?;
+        read_accounting_state(provider, &accounts, zone.into(), spec).map_err(BlockError::from)?;
     state
         .verify_zone_state(
             observed
@@ -394,16 +412,24 @@ where
 
     let balances = portal_balances(l1, config.portal_address, tokens, tempo.hash)
         .await
-        .map_err(BlockError::Retry)?;
+        .map_err(|error| classify_block_l1_error(error, zone))?;
     state
         .verify_portal_balances(balances)
         .map_err(|error| fail(error.into()))?;
 
     let next = store
         .apply(candidate)
-        .map_err(|error| BlockError::Retry(error.into()))?;
+        .map_err(|error| BlockError::Disable(error.into()))?;
     telemetry::log_verified_activity(&tempo_block, &l2, zone);
     Ok(next)
+}
+
+fn classify_block_l1_error(error: L1ReadError, zone: BlockRef) -> BlockError {
+    match error {
+        L1ReadError::Unavailable(error) => BlockError::Retry(error),
+        L1ReadError::Finding(error) => BlockError::Finding { zone, error },
+        L1ReadError::Disable(error) => BlockError::Disable(error),
+    }
 }
 
 fn validate_tempo_advance(parent: u64, tip: u64) -> eyre::Result<()> {
@@ -420,6 +446,24 @@ fn validate_tempo_advance(parent: u64, tip: u64) -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disable_error_is_not_retried() {
+        let attempts = std::cell::Cell::new(0);
+        let result = retry_transient(
+            || {
+                attempts.set(attempts.get() + 1);
+                future::ready(Err::<(), _>(AttemptError::Disable(eyre::eyre!(
+                    "invalid genesis"
+                ))))
+            },
+            "operation failed",
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
+    }
 
     #[test]
     fn tempo_advance_requires_the_exact_successor() {

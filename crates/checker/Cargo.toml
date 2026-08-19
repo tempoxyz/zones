@@ -24,12 +24,14 @@ reth-storage-api.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
+alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
 alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
+alloy-transport.workspace = true
 
 # tempo
 tempo-alloy.workspace = true
@@ -59,7 +61,6 @@ tokio = { workspace = true, features = ["time"] }
 alloy-consensus = { workspace = true, features = ["std"] }
 alloy-rlp.workspace = true
 alloy-rpc-types-eth.workspace = true
-alloy-transport.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-primitives-traits = { workspace = true, features = ["std", "test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }

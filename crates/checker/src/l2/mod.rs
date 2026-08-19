@@ -15,7 +15,7 @@ pub(crate) use events::{
     DepositResult, L1Anchor, L2BridgeAction, TokenTransfer, WithdrawalBounceBackStatus,
     WithdrawalOrigin,
 };
-pub(crate) use state::{read_accounting_state, read_zone_genesis};
+pub(crate) use state::{AccountingStateError, read_accounting_state, read_zone_genesis};
 
 /// Authenticated anchor, transfers, and bridge actions from one L2 block.
 #[derive(Debug)]

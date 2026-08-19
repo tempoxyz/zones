@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloy_eips::BlockNumHash;
 use alloy_primitives::{Address, B256, U256};
 use eyre::WrapErr as _;
-use reth_storage_api::StateProviderFactory;
+use reth_storage_api::{StateProviderFactory, errors::provider::ProviderError};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     storage::{ContractStorage, StorageActions},
@@ -61,16 +61,25 @@ pub(crate) struct TokenAccountingEvidence {
     pub(crate) balances: BTreeMap<Address, U256>,
 }
 
+/// Failure reading exact accounting state for one Zone block.
+#[derive(Debug)]
+pub(crate) enum AccountingStateError {
+    /// The requested block state is not currently available.
+    Unavailable(eyre::Report),
+    /// Available state could not be interpreted as valid TIP-20 accounting.
+    Invalid(eyre::Report),
+}
+
 /// Read exact balances and supply for affected accounts at one Zone block.
 pub(crate) fn read_accounting_state<P: StateProviderFactory>(
     provider: &P,
     accounts: &BTreeMap<Address, BTreeSet<Address>>,
     block: BlockNumHash,
     spec: TempoHardfork,
-) -> eyre::Result<Vec<TokenAccountingEvidence>> {
+) -> Result<Vec<TokenAccountingEvidence>, AccountingStateError> {
     let mut state = provider
         .state_by_block_hash(block.hash)
-        .wrap_err_with(|| format!("failed to obtain state for block {}", block.hash))?;
+        .map_err(|error| classify_provider_error(error, block.hash))?;
     state
         .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
             accounts
@@ -94,4 +103,41 @@ pub(crate) fn read_accounting_state<P: StateProviderFactory>(
                 .collect::<tempo_precompiles::Result<Vec<_>>>()
         })
         .wrap_err_with(|| format!("failed to read accounting state for block {}", block.hash))
+        .map_err(AccountingStateError::Invalid)
+}
+
+fn classify_provider_error(error: ProviderError, block: B256) -> AccountingStateError {
+    let report = |error| {
+        eyre::Report::new(error).wrap_err(format!("failed to obtain state for block {block}"))
+    };
+    match error {
+        error @ (ProviderError::BlockHashNotFound(_)
+        | ProviderError::HeaderNotFound(_)
+        | ProviderError::UnknownBlockHash(_)
+        | ProviderError::StateForHashNotFound(_)
+        | ProviderError::StateForNumberNotFound(_)
+        | ProviderError::BlockNotExecuted { .. }) => {
+            AccountingStateError::Unavailable(report(error))
+        }
+        error => AccountingStateError::Invalid(report(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_transient_and_permanent_provider_failures() {
+        let block = B256::repeat_byte(1);
+        assert!(matches!(
+            classify_provider_error(ProviderError::StateForHashNotFound(block), block),
+            AccountingStateError::Unavailable(_)
+        ));
+
+        assert!(matches!(
+            classify_provider_error(ProviderError::StateAtBlockPruned(1), block),
+            AccountingStateError::Invalid(_)
+        ));
+    }
 }
