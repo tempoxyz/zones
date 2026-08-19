@@ -10,7 +10,7 @@ use reth_chainspec::ChainSpecProvider;
 use reth_exex::{ExExContext, ExExHead, ExExNotification};
 use reth_node_api::{BlockBody as _, FullNodeComponents, NodePrimitives};
 use reth_primitives_traits::RecoveredBlock;
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_storage_api::{BlockHashReader as _, BlockNumReader, StateProviderFactory};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
 
@@ -20,10 +20,7 @@ use crate::{
     bootstrap,
     l1::{L1ReadError, classify_rpc_error, collect_l1_block_at, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
-    persistence::{
-        AppliedStatus, BlockRef, CandidateTransition, Finding, PersistenceError, Snapshot, Status,
-        Store,
-    },
+    persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
     telemetry::{self, CheckerMetrics},
 };
 
@@ -86,11 +83,11 @@ where
     future::pending().await
 }
 
-/// Bootstrap or open durable state, then verify or recover from each notification in turn.
+/// Bootstrap or open durable state, then verify each append-only notification in turn.
 ///
 /// Transient acquisition failures are retried. An authenticated divergence is
-/// persisted until a recoverable reorg clears it, while deterministic checker
-/// failures return so the outer runtime can disable verification and drain.
+/// persisted until the checker is rebuilt, while deterministic checker failures
+/// return so the outer runtime can disable verification and drain.
 async fn run_inner<Node>(
     config: CheckerConfig,
     ctx: &mut ExExContext<Node>,
@@ -110,29 +107,41 @@ where
     )
     .await?;
     let (store, mut snapshot) = Store::open_or_create(&config.database_path, &checkpoint)?;
+    let verified = snapshot.metadata.verified_zone;
+    if ctx.provider().block_hash(verified.number)? != Some(verified.hash) {
+        tracing::warn!(
+            target: "zone::checker",
+            zone_block = verified.number,
+            zone_hash = %verified.hash,
+            "checker tip is not in local Zone history; rebuilding"
+        );
+        snapshot = store.reset(&checkpoint)?;
+        metrics.recovery_rebuilds_total.increment(1);
+    }
     metrics.update(&snapshot);
 
     ctx.catch_up_notifications_with_head(ExExHead::new(snapshot.metadata.verified_zone.into()))?;
     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
 
     while let Some(notification) = ctx.notifications.try_next().await? {
+        if !matches!(&notification, ExExNotification::ChainCommitted { .. }) {
+            snapshot = store.reset(&checkpoint)?;
+            metrics.recovery_rebuilds_total.increment(1);
+            metrics.update(&snapshot);
+            ctx.catch_up_notifications_with_head(ExExHead::new(checkpoint.zone.into()))?;
+            tracing::warn!(target: "zone::checker", "unexpected Zone revert; rebuilding from genesis");
+            continue;
+        }
         let delivered_tip = notification_tip(&notification)
             .ok_or_else(|| eyre::eyre!("received an empty ExEx notification"))?;
-        let recoverable_finding = match &snapshot.metadata.status {
-            Status::Diverged { finding } => notification_ancestor(&notification)?
-                .is_some_and(|ancestor| ancestor.number < finding.zone.number),
-            Status::Verifying => false,
-        };
-        if matches!(&snapshot.metadata.status, Status::Diverged { .. }) && !recoverable_finding {
+        if matches!(&snapshot.metadata.status, Status::Diverged { .. }) {
             snapshot = store.observe(&snapshot, delivered_tip.into())?;
             metrics.update(&snapshot);
             ctx.send_finished_height(delivered_tip)?;
             continue;
         }
-        if !recoverable_finding {
-            snapshot = store.observe(&snapshot, delivered_tip.into())?;
-            metrics.update(&snapshot);
-        }
+        snapshot = store.observe(&snapshot, delivered_tip.into())?;
+        metrics.update(&snapshot);
 
         loop {
             let previous_verified = snapshot.metadata.verified_zone.number;
@@ -146,7 +155,7 @@ where
             )
             .await
             {
-                Ok(Outcome::Applied(next)) => {
+                Ok(next) => {
                     let next = *next;
                     let verified = next
                         .metadata
@@ -157,14 +166,6 @@ where
                     metrics.verified_zone_blocks_total.increment(verified);
                     metrics.update(&snapshot);
                     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
-                    break;
-                }
-                Ok(Outcome::Rebuild) => {
-                    snapshot = store.reset(&checkpoint)?;
-                    metrics.recovery_rebuilds_total.increment(1);
-                    metrics.update(&snapshot);
-                    ctx.catch_up_notifications_with_head(ExExHead::new(checkpoint.zone.into()))?;
-                    tracing::warn!(target: "zone::checker", "rebuilding after reorg beyond retained history");
                     break;
                 }
                 Err(BlockError::Finding { zone, error }) => {
@@ -245,32 +246,6 @@ fn notification_tip<N: NodePrimitives>(notification: &ExExNotification<N>) -> Op
     }
 }
 
-/// Return the reorg's new parent for a reverted or reorged chain, or `None` for a plain commit.
-fn notification_ancestor<N: NodePrimitives>(
-    notification: &ExExNotification<N>,
-) -> eyre::Result<Option<BlockRef>> {
-    let old = match notification {
-        ExExNotification::ChainReverted { old } | ExExNotification::ChainReorged { old, .. } => old,
-        ExExNotification::ChainCommitted { .. } => return Ok(None),
-    };
-    let (&number, block) = old
-        .blocks()
-        .iter()
-        .next()
-        .ok_or_else(|| eyre::eyre!("received an empty reverted chain"))?;
-    Ok(Some(BlockRef::new(
-        number.saturating_sub(1),
-        block.header().parent_hash(),
-    )))
-}
-
-/// Result of processing one notification's blocks.
-enum Outcome {
-    Applied(Box<Snapshot>),
-    /// Reorg exceeded retained history; state must be rebuilt from the checkpoint.
-    Rebuild,
-}
-
 /// Failure processing one block.
 enum BlockError {
     /// Transient failure; retry without advancing.
@@ -290,10 +265,7 @@ impl From<AccountingStateError> for BlockError {
     }
 }
 
-/// Verify or recover from one notification's blocks.
-///
-/// Returns `Outcome::Rebuild` if a reorg unwinds past the retained delta
-/// history instead of an error, since that case has a recovery path.
+/// Verify one append-only notification's blocks.
 async fn process_notification<N, P>(
     notification: &ExExNotification<N>,
     provider: &P,
@@ -301,36 +273,29 @@ async fn process_notification<N, P>(
     store: &Store,
     snapshot: Snapshot,
     config: &CheckerConfig,
-) -> Result<Outcome, BlockError>
+) -> Result<Box<Snapshot>, BlockError>
 where
     N: CheckedPrimitives,
     P: ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
     let mut current = snapshot;
-    if let Some(ancestor) = notification_ancestor(notification).map_err(BlockError::Disable)? {
-        current = match store.reorg(&current, ancestor) {
-            Ok(snapshot) => snapshot,
-            Err(PersistenceError::ReorgBeyondRetention { .. }) => return Ok(Outcome::Rebuild),
-            Err(error) => return Err(BlockError::Disable(error.into())),
-        };
-    }
     let new = match notification {
-        ExExNotification::ChainCommitted { new } | ExExNotification::ChainReorged { new, .. } => {
-            Some(new)
+        ExExNotification::ChainCommitted { new } => new,
+        ExExNotification::ChainReorged { .. } | ExExNotification::ChainReverted { .. } => {
+            return Err(BlockError::Disable(eyre::eyre!(
+                "unexpected Zone revert reached block verification"
+            )));
         }
-        ExExNotification::ChainReverted { .. } => None,
     };
-    if let Some(new) = new {
-        for (block, receipts) in new.blocks_and_receipts() {
-            if already_applied(&current, block.header().number(), block.hash())? {
-                continue;
-            }
-            current =
-                verify_block::<N, _>(provider, l1, store, current, config, block, receipts).await?;
+    for (block, receipts) in new.blocks_and_receipts() {
+        if already_applied(&current, block.header().number(), block.hash())? {
+            continue;
         }
+        current =
+            verify_block::<N, _>(provider, l1, store, current, config, block, receipts).await?;
     }
-    Ok(Outcome::Applied(Box::new(current)))
+    Ok(Box::new(current))
 }
 
 fn already_applied(

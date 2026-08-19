@@ -3,7 +3,7 @@
 use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
-use crate::accounting::{BlockDelta, State};
+use crate::accounting::State;
 
 /// Exact canonical block coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -103,14 +103,4 @@ pub(crate) enum AppliedStatus {
     Applied,
     /// Same height as the verified tip but a different hash.
     Conflicts,
-}
-
-/// One retained verified transition and its exact previous values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct DeltaRecord {
-    pub(crate) zone: BlockRef,
-    pub(crate) parent: BlockRef,
-    pub(crate) imported_tempo: BlockRef,
-    pub(crate) imported_tempo_parent: BlockRef,
-    pub(crate) delta: BlockDelta,
 }

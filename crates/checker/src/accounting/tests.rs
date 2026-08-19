@@ -27,7 +27,7 @@ fn evidence(
 }
 
 #[test]
-fn applies_transfers_and_unwinds_exactly() {
+fn applies_transfers_exactly() {
     let token = address(1);
     let alice = AccountKey::new(token, address(3));
     let bob = AccountKey::new(token, address(2));
@@ -38,9 +38,7 @@ fn applies_transfers_and_unwinds_exactly() {
             change: BalanceChange::Credit(U256::MAX),
         }])
         .unwrap();
-    let before = state.clone();
-
-    let delta = state
+    state
         .apply(&[
             Effect::Account {
                 key: alice,
@@ -62,9 +60,6 @@ fn applies_transfers_and_unwinds_exactly() {
             ],
         )])
         .unwrap();
-
-    state.unwind(delta).unwrap();
-    assert_eq!(state, before);
 }
 
 #[test]
@@ -73,7 +68,7 @@ fn records_each_changed_row_once() {
     let key = AccountKey::new(token, address(2));
     let mut state = State::default();
 
-    let delta = state
+    let changes = state
         .apply(&[
             Effect::EnableToken(token),
             Effect::Account {
@@ -87,8 +82,8 @@ fn records_each_changed_row_once() {
         ])
         .unwrap();
 
-    assert_eq!(delta.accounts, vec![(key, None)]);
-    assert_eq!(delta.tokens, vec![(token, None)]);
+    assert_eq!(changes.accounts, vec![key]);
+    assert_eq!(changes.tokens, vec![token]);
     assert_eq!(state.account(key), Some(U256::from(15)));
     assert_eq!(state.token(token).unwrap().account_total, U256::from(15));
 }
@@ -122,7 +117,7 @@ fn rejects_inconsistent_changed_aggregate() {
 }
 
 #[test]
-fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
+fn apply_scopes_aggregate_checks_to_touched_tokens() {
     let token_a = address(1);
     let token_b = address(2);
     let token_c = address(3);
@@ -145,11 +140,9 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
             },
         ])
         .unwrap();
-    let before = state.clone();
-
     // Touch only token_a and token_c; token_b's aggregate must stay valid
-    // without appearing in this batch's delta at all.
-    let delta = state
+    // without appearing in this batch's changed rows.
+    let changes = state
         .apply(&[
             Effect::Account {
                 key: AccountKey::new(token_a, account),
@@ -161,6 +154,11 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
             },
         ])
         .unwrap();
+    assert_eq!(
+        changes.tokens,
+        vec![token_a, token_c],
+        "untouched tokens must not be persisted"
+    );
 
     state
         .verify_zone_state([
@@ -169,9 +167,6 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
             evidence(token_c, U256::from(275), &[(account, U256::from(275))]),
         ])
         .unwrap();
-
-    state.unwind(delta).unwrap();
-    assert_eq!(state, before);
 }
 
 #[test]
@@ -299,12 +294,12 @@ fn rejects_account_rows_for_unknown_tokens() {
 }
 
 #[test]
-fn retains_zero_state_until_enablement_is_unwound() {
+fn retains_enabled_token_after_balance_returns_to_zero() {
     let token = address(1);
     let key = AccountKey::new(token, address(2));
     let mut state = State::default();
-    let enable = state.apply(&[Effect::EnableToken(token)]).unwrap();
-    let balance = state
+    state.apply(&[Effect::EnableToken(token)]).unwrap();
+    state
         .apply(&[
             Effect::Account {
                 key,
@@ -318,8 +313,4 @@ fn retains_zero_state_until_enablement_is_unwound() {
         .unwrap();
 
     assert_eq!(state.token(token), Some(TokenState::default()));
-    state.unwind(balance).unwrap();
-    assert_eq!(state.token(token), Some(TokenState::default()));
-    state.unwind(enable).unwrap();
-    assert_eq!(state.token(token), None);
 }

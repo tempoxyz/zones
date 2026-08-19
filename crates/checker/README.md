@@ -77,12 +77,12 @@ The database is created in `<node datadir>/checker`; no separate checkpoint
 command is required. An existing database is opened only when its Zone, Tempo,
 Portal, and creation identity matches the authenticated bootstrap result.
 
-MDBX stores current nonzero account rows, per-token accounting, metadata, the
-active finding, and 16,384 exact undo deltas. Old deltas are pruned, so reorg
-history is bounded; account storage still scales with the number of nonzero
-derived entitlements. Reorgs inside the retained window unwind exactly. A
-deeper reorg atomically resets to the authenticated genesis checkpoint and asks
-Reth to replay canonical local history.
+MDBX stores current nonzero account rows, per-token accounting, metadata, and
+the active finding. Storage therefore scales with the current number of nonzero
+derived entitlements rather than Zone history. Zones are append-only; if the
+saved checker tip is absent from local Zone history or Reth reports an
+unexpected revert, the checker atomically resets to authenticated genesis and
+replays local history.
 
 On normal restart, Reth replays notifications after the last durably verified
 Zone block. Each block transition is persisted before the ExEx acknowledges its
@@ -93,8 +93,8 @@ height.
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
 or acknowledging the block. A deterministic mismatch records one durable
 finding, freezes the verified tip, and continues acknowledging subsequent
-notifications while recording how far the unchecked range extends. A reorg
-that removes the finding resumes verification from the canonical ancestor.
+notifications while recording how far the unchecked range extends. A finding
+remains active until the checker is rebuilt from authenticated genesis.
 
 An unrecoverable checker-local error disables the checker and drains ExEx
 notifications so it cannot terminate or stall Zone execution. Observe mode
@@ -136,7 +136,7 @@ src/
   l1/                exact Tempo blocks, receipts, and Portal events
   l2/                Zone events and exact post-state reads
   accounting/        pure account and liability transitions
-  persistence/       row-oriented MDBX state and bounded reorg deltas
+  persistence/       row-oriented MDBX state and exact verified coordinates
   runtime.rs         recovery, verification, retry, and divergence handling
   telemetry.rs       operational metrics and verified-activity logs
 ```

@@ -98,18 +98,18 @@ pub(crate) enum Effect {
     },
 }
 
-/// Previous values changed by one Zone block, sufficient for deterministic unwind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BlockDelta {
-    pub(super) accounts: Vec<(AccountKey, Option<U256>)>,
-    pub(super) tokens: Vec<(Address, Option<TokenState>)>,
+/// Rows changed by one successfully applied Zone block.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ChangedRows {
+    pub(crate) accounts: Vec<AccountKey>,
+    pub(crate) tokens: Vec<Address>,
 }
 
 /// Current independently derived bridge accounting state.
 ///
 /// Membership in `tokens` means the token was authenticated through Portal
 /// creation or enablement.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct State {
     accounts: BTreeMap<AccountKey, U256>,
     tokens: BTreeMap<Address, TokenState>,
@@ -154,13 +154,13 @@ impl State {
         Ok(state)
     }
 
-    /// Apply ordered effects atomically and return their undo delta.
+    /// Apply ordered effects atomically and return the changed rows.
     ///
     /// Mutates in place and tracks each touched entry's prior value; on any
-    /// failure that same tracked delta is used to roll the mutation back
+    /// failure those values are used to roll the mutation back
     /// before returning the error, so no upfront full-state clone is needed
     /// to guarantee `self` is unchanged when this returns `Err`.
-    pub(crate) fn apply(&mut self, effects: &[Effect]) -> Result<BlockDelta, AccountingError> {
+    pub(crate) fn apply(&mut self, effects: &[Effect]) -> Result<ChangedRows, AccountingError> {
         let mut accounts = BTreeMap::new();
         let mut tokens = BTreeMap::new();
 
@@ -175,23 +175,10 @@ impl State {
             return Err(error);
         }
 
-        Ok(BlockDelta {
-            accounts: accounts.into_iter().collect(),
-            tokens: tokens.into_iter().collect(),
+        Ok(ChangedRows {
+            accounts: accounts.into_keys().collect(),
+            tokens: tokens.into_keys().collect(),
         })
-    }
-
-    /// Restore the state that preceded an applied block.
-    pub(crate) fn unwind(&mut self, delta: BlockDelta) -> Result<(), AccountingError> {
-        let touched_tokens = delta
-            .accounts
-            .iter()
-            .map(|(key, _)| key.token)
-            .chain(delta.tokens.iter().map(|(token, _)| *token))
-            .collect::<BTreeSet<_>>();
-        restore(&mut self.accounts, delta.accounts);
-        restore(&mut self.tokens, delta.tokens);
-        self.validate_aggregates(touched_tokens)
     }
 
     /// Verify exact post-state balances and supplies for the supplied observations.
@@ -417,7 +404,7 @@ fn write_optional<K: Ord, V>(values: &mut BTreeMap<K, V>, key: K, value: Option<
     }
 }
 
-/// Restore each entry's prior value, undoing whatever changed it.
+/// Restore each entry's prior value after a failed transition.
 fn restore<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: impl IntoIterator<Item = (K, Option<V>)>) {
     for (key, previous) in entries {
         write_optional(map, key, previous);

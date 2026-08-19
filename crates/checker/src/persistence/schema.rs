@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::accounting::{AccountKey, TokenState};
 
-use super::model::{DeltaRecord, Metadata};
+use super::model::Metadata;
 
 /// Fixed single-byte key discriminating schema metadata rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -124,7 +124,6 @@ macro_rules! table {
 table!(Meta, MetaKey, MetaValue, "CheckerMeta");
 table!(Accounts, AccountKey, AccountValue, "CheckerAccounts");
 table!(Tokens, Address, TokenValue, "CheckerTokens");
-table!(Deltas, u64, DeltaRecord, "CheckerDeltas");
 
 /// All MDBX tables owned by the checker database.
 pub(crate) struct Tables;
@@ -136,7 +135,6 @@ impl TableSet for Tables {
                 Box::new(Meta) as Box<dyn TableInfo>,
                 Box::new(Accounts),
                 Box::new(Tokens),
-                Box::new(Deltas),
             ]
             .into_iter(),
         )

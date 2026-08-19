@@ -1,4 +1,4 @@
-//! Row-oriented MDBX persistence with bounded canonical undo history.
+//! Row-oriented MDBX persistence for the current verified state.
 
 mod codec;
 mod model;
@@ -16,16 +16,12 @@ use reth_db::{
     transaction::{DbTx, DbTxMut},
 };
 
-use crate::accounting::{AccountingError, Effect, State};
+use crate::accounting::{AccountingError, ChangedRows, Effect, State};
 
-use model::DeltaRecord;
 pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
-use schema::{
-    AccountValue, Accounts, Deltas, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens,
-};
+use schema::{AccountValue, Accounts, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens};
 
 const SCHEMA_VERSION: u32 = 1;
-const RETAINED_DELTAS: u64 = 16_384;
 
 /// Loaded durable accounting state and its exact coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,10 +30,14 @@ pub(crate) struct Snapshot {
     pub(crate) state: Arc<State>,
 }
 
-/// Post-block accounting state and its durable undo data.
+/// Verified post-block state and the rows changed by its transition.
 pub(crate) struct CandidateTransition {
     state: State,
-    record: DeltaRecord,
+    zone: BlockRef,
+    parent: BlockRef,
+    imported_tempo: BlockRef,
+    imported_tempo_parent: BlockRef,
+    changes: ChangedRows,
 }
 
 impl CandidateTransition {
@@ -51,16 +51,14 @@ impl CandidateTransition {
     ) -> Result<Self, AccountingError> {
         let Snapshot { metadata, state } = prior;
         let mut state = Arc::unwrap_or_clone(state);
-        let delta = state.apply(effects)?;
+        let changes = state.apply(effects)?;
         Ok(Self {
-            record: DeltaRecord {
-                zone,
-                parent,
-                imported_tempo,
-                imported_tempo_parent: metadata.imported_tempo,
-                delta,
-            },
             state,
+            zone,
+            parent,
+            imported_tempo,
+            imported_tempo_parent: metadata.imported_tempo,
+            changes,
         })
     }
 
@@ -228,81 +226,32 @@ impl Store {
         &self,
         candidate: CandidateTransition,
     ) -> Result<Snapshot, PersistenceError> {
-        let CandidateTransition { state, record } = candidate;
-        codec::validate(&record).map_err(PersistenceError::Invalid)?;
-        let zone = record.zone;
-        let imported_tempo = record.imported_tempo;
+        let CandidateTransition {
+            state,
+            zone,
+            parent,
+            imported_tempo,
+            imported_tempo_parent,
+            changes,
+        } = candidate;
 
         let tx = self.db.tx_mut()?;
         let mut metadata = read_metadata(&tx)?;
         if metadata.status != Status::Verifying {
             return Err(PersistenceError::Invalid("checker is not verifying".into()));
         }
-        if record.parent != metadata.verified_zone
-            || record.imported_tempo_parent != metadata.imported_tempo
-            || zone.number != record.parent.number.saturating_add(1)
+        if parent != metadata.verified_zone
+            || imported_tempo_parent != metadata.imported_tempo
+            || zone.number != parent.number.saturating_add(1)
         {
             return Err(PersistenceError::StaleSnapshot);
         }
-        write_changed_rows(&tx, &state, &record.delta)?;
-        tx.put::<Deltas>(zone.number, record)?;
+        write_changed_rows(&tx, &state, &changes)?;
         metadata.verified_zone = zone;
         metadata.imported_tempo = imported_tempo;
         if metadata.observed_zone.number < zone.number {
             metadata.observed_zone = zone;
         }
-        write_metadata(&tx, &metadata)?;
-        if let Some(height) = zone.number.checked_sub(RETAINED_DELTAS) {
-            tx.delete::<Deltas>(height, None)?;
-        }
-        tx.commit()?;
-        Ok(Snapshot {
-            metadata,
-            state: Arc::new(state),
-        })
-    }
-
-    /// Unwind verified state to one retained exact ancestor.
-    pub(crate) fn reorg(
-        &self,
-        prior: &Snapshot,
-        ancestor: BlockRef,
-    ) -> Result<Snapshot, PersistenceError> {
-        if ancestor.number > prior.metadata.verified_zone.number {
-            return Err(PersistenceError::Invalid(
-                "reorg ancestor exceeds verified tip".into(),
-            ));
-        }
-        let tx = self.db.tx_mut()?;
-        ensure_current(&tx, &prior.metadata)?;
-        let mut state = prior.state.as_ref().clone();
-        let mut metadata = prior.metadata.clone();
-        while metadata.verified_zone.number > ancestor.number {
-            let height = metadata.verified_zone.number;
-            let record = tx
-                .get::<Deltas>(height)?
-                .ok_or(PersistenceError::ReorgBeyondRetention { ancestor })?;
-            if record.zone != metadata.verified_zone
-                || record.imported_tempo != metadata.imported_tempo
-            {
-                return Err(PersistenceError::Invalid(
-                    "delta chain is inconsistent".into(),
-                ));
-            }
-            let delta = record.delta.clone();
-            state.unwind(record.delta)?;
-            write_changed_rows(&tx, &state, &delta)?;
-            tx.delete::<Deltas>(height, None)?;
-            metadata.verified_zone = record.parent;
-            metadata.imported_tempo = record.imported_tempo_parent;
-        }
-        if metadata.verified_zone != ancestor {
-            return Err(PersistenceError::Invalid(
-                "reorg ancestor hash mismatch".into(),
-            ));
-        }
-        metadata.observed_zone = ancestor;
-        metadata.status = Status::Verifying;
         write_metadata(&tx, &metadata)?;
         tx.commit()?;
         Ok(Snapshot {
@@ -326,7 +275,6 @@ impl Store {
         let tx = self.db.tx_mut()?;
         tx.clear::<Accounts>()?;
         tx.clear::<Tokens>()?;
-        tx.clear::<Deltas>()?;
         for (key, value) in checkpoint.state.accounts() {
             tx.put::<Accounts>(key, AccountValue(value))?;
         }
@@ -405,9 +353,9 @@ fn ensure_current<T: DbTx>(tx: &T, prior: &Metadata) -> Result<(), PersistenceEr
 fn write_changed_rows<T: DbTxMut>(
     tx: &T,
     state: &State,
-    delta: &crate::accounting::BlockDelta,
+    changes: &ChangedRows,
 ) -> Result<(), PersistenceError> {
-    for (key, _) in &delta.accounts {
+    for key in &changes.accounts {
         match state.account(*key) {
             Some(value) => tx.put::<Accounts>(*key, AccountValue(value))?,
             None => {
@@ -415,7 +363,7 @@ fn write_changed_rows<T: DbTxMut>(
             }
         }
     }
-    for (token, _) in &delta.tokens {
+    for token in &changes.tokens {
         match state.token(*token) {
             Some(value) => tx.put::<Tokens>(*token, TokenValue(value))?,
             None => {
@@ -441,8 +389,6 @@ pub(crate) enum PersistenceError {
     Schema { expected: u32, actual: u32 },
     #[error("stale checker snapshot")]
     StaleSnapshot,
-    #[error("reorg ancestor {ancestor:?} is outside retained history")]
-    ReorgBeyondRetention { ancestor: BlockRef },
     #[error("invalid checker database: {0}")]
     Invalid(String),
 }

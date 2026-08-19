@@ -33,7 +33,7 @@ pub(crate) struct CheckerMetrics {
     pub(crate) acquisition_retries_total: Counter,
     /// Number of verified Zone blocks.
     pub(crate) verified_zone_blocks_total: Counter,
-    /// Number of deep reorg rebuilds.
+    /// Number of checker-state rebuilds after local history changes.
     pub(crate) recovery_rebuilds_total: Counter,
 }
 

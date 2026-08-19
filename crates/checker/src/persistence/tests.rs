@@ -24,7 +24,7 @@ fn identity() -> Identity {
 }
 
 #[test]
-fn rows_survive_restart_and_unwind() {
+fn rows_survive_restart_and_clear_on_reset() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("checker");
     let genesis = block(0, 10);
@@ -32,16 +32,13 @@ fn rows_survive_restart_and_unwind() {
     let token = Address::repeat_byte(30);
     let mut state = State::default();
     state.apply(&[Effect::EnableToken(token)]).unwrap();
-    let initial = Store::create_atomic(
-        &path,
-        &Checkpoint {
-            identity: identity(),
-            zone: genesis,
-            tempo,
-            state,
-        },
-    )
-    .unwrap();
+    let checkpoint = Checkpoint {
+        identity: identity(),
+        zone: genesis,
+        tempo,
+        state,
+    };
+    let initial = Store::create_atomic(&path, &checkpoint).unwrap();
     let (store, reopened) = Store::open(&path, identity()).unwrap();
     assert_eq!(reopened, initial);
     assert_eq!(reopened.state.token(token), Some(TokenState::default()));
@@ -80,27 +77,24 @@ fn rows_survive_restart_and_unwind() {
     assert_eq!(token_state.pending_tempo_refunds, U256::from(5));
     assert_eq!(token_state.pending_zone_refunds, U256::from(7));
 
-    let genesis = store.reorg(&loaded, genesis).unwrap();
-    assert_eq!(genesis.metadata.verified_zone, block(0, 10));
-    assert_eq!(genesis.state.account(account), None);
-    assert_eq!(genesis.state.token(token), Some(TokenState::default()));
+    let reset = store.reset(&checkpoint).unwrap();
+    assert_eq!(reset.metadata.verified_zone, genesis);
+    assert_eq!(reset.state.account(account), None);
+    assert_eq!(reset.state.token(token), Some(TokenState::default()));
 }
 
 #[test]
-fn finding_survives_restart_and_clears_on_reorg() {
+fn finding_survives_restart_and_clears_on_reset() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("checker");
     let genesis = block(0, 10);
-    Store::create_atomic(
-        &path,
-        &Checkpoint {
-            identity: identity(),
-            zone: genesis,
-            tempo: block(20, 20),
-            state: Default::default(),
-        },
-    )
-    .unwrap();
+    let checkpoint = Checkpoint {
+        identity: identity(),
+        zone: genesis,
+        tempo: block(20, 20),
+        state: Default::default(),
+    };
+    Store::create_atomic(&path, &checkpoint).unwrap();
     let (store, snapshot) = Store::open(&path, identity()).unwrap();
     let failed = block(1, 11);
     let finding = Finding {
@@ -127,7 +121,7 @@ fn finding_survives_restart_and_clears_on_reorg() {
     assert_eq!(extended.metadata.observed_zone, observed);
     assert_eq!(extended.metadata.status, Status::Diverged { finding });
 
-    let recovered = store.reorg(&extended, genesis).unwrap();
+    let recovered = store.reset(&checkpoint).unwrap();
     assert_eq!(recovered.metadata.observed_zone, genesis);
     assert_eq!(recovered.metadata.status, Status::Verifying);
 }
