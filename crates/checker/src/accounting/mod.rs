@@ -31,8 +31,10 @@ pub(crate) struct TokenState {
     pub(crate) pending_deposits: U256,
     /// Liability from withdrawals accepted on the Zone but not yet settled on Tempo.
     pub(crate) pending_withdrawals: U256,
-    /// Liability from refunds parked on Tempo but not yet claimed.
-    pub(crate) pending_refunds: U256,
+    /// Liability from refunds parked on Tempo.
+    pub(crate) pending_tempo_refunds: U256,
+    /// Liability from withdrawal bounce-backs queued to or parked on the Zone.
+    pub(crate) pending_zone_refunds: U256,
 }
 
 impl TokenState {
@@ -41,7 +43,8 @@ impl TokenState {
         self.account_total
             .checked_add(self.pending_deposits)
             .and_then(|value| value.checked_add(self.pending_withdrawals))
-            .and_then(|value| value.checked_add(self.pending_refunds))
+            .and_then(|value| value.checked_add(self.pending_tempo_refunds))
+            .and_then(|value| value.checked_add(self.pending_zone_refunds))
             .ok_or(AccountingError::Overflow)
     }
 
@@ -50,7 +53,8 @@ impl TokenState {
             && self.account_total.is_zero()
             && self.pending_deposits.is_zero()
             && self.pending_withdrawals.is_zero()
-            && self.pending_refunds.is_zero()
+            && self.pending_tempo_refunds.is_zero()
+            && self.pending_zone_refunds.is_zero()
     }
 }
 
@@ -98,7 +102,11 @@ pub(crate) enum Effect {
         token: Address,
         change: BalanceChange,
     },
-    PendingRefund {
+    PendingTempoRefund {
+        token: Address,
+        change: BalanceChange,
+    },
+    PendingZoneRefund {
         token: Address,
         change: BalanceChange,
     },
@@ -305,8 +313,15 @@ impl State {
                     &mut state.pending_withdrawals
                 })
             }
-            Effect::PendingRefund { token, change } => {
-                self.change_liability(token, change, tokens, |state| &mut state.pending_refunds)
+            Effect::PendingTempoRefund { token, change } => {
+                self.change_liability(token, change, tokens, |state| {
+                    &mut state.pending_tempo_refunds
+                })
+            }
+            Effect::PendingZoneRefund { token, change } => {
+                self.change_liability(token, change, tokens, |state| {
+                    &mut state.pending_zone_refunds
+                })
             }
         }
     }

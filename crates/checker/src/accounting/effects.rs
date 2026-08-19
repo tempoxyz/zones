@@ -90,20 +90,29 @@ fn from_tempo<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) -> Vec<Ef
                     token,
                     change: BalanceChange::Debit(U256::from(amount) + U256::from(bounceback_fee)),
                 });
-                effects.push(Effect::PendingRefund {
+                effects.push(Effect::PendingTempoRefund {
                     token,
                     change: BalanceChange::Credit(U256::from(amount)),
                 });
             }
             L1PortalEvent::RefundClaimed { token, amount, .. } => {
-                effects.push(Effect::PendingRefund {
+                effects.push(Effect::PendingTempoRefund {
                     token,
                     change: BalanceChange::Debit(U256::from(amount)),
                 });
             }
-            L1PortalEvent::BatchSubmitted
-            | L1PortalEvent::WithdrawalProcessed { .. }
-            | L1PortalEvent::WithdrawalBounceBack { .. } => {}
+            L1PortalEvent::WithdrawalBounceBack { token, amount } => {
+                let amount = U256::from(amount);
+                effects.push(Effect::PendingWithdrawal {
+                    token,
+                    change: BalanceChange::Debit(amount),
+                });
+                effects.push(Effect::PendingZoneRefund {
+                    token,
+                    change: BalanceChange::Credit(amount),
+                });
+            }
+            L1PortalEvent::BatchSubmitted | L1PortalEvent::WithdrawalProcessed { .. } => {}
         }
     }
     effects
@@ -150,9 +159,14 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
                 amount,
                 processed: true,
                 ..
+            } => {
+                effects.push(Effect::PendingZoneRefund {
+                    token,
+                    change: BalanceChange::Debit(U256::from(amount)),
+                });
             }
-            | L2BridgeEvent::RefundClaimed { token, amount, .. } => {
-                effects.push(Effect::PendingWithdrawal {
+            L2BridgeEvent::RefundClaimed { token, amount, .. } => {
+                effects.push(Effect::PendingZoneRefund {
                     token,
                     change: BalanceChange::Debit(U256::from(amount)),
                 });
@@ -221,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_withdrawal_stays_pending_until_zone_bounce_back() {
+    fn failed_withdrawal_returns_through_zone_bounce_back() {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
         let amount = U256::from(10);
@@ -232,14 +246,18 @@ mod tests {
                 change: BalanceChange::Credit(amount),
             }])
             .unwrap();
+        let enqueued = L1PortalEvent::WithdrawalBounceBack { token, amount: 10 };
         let failed = L1PortalEvent::WithdrawalProcessed {
             to: recipient,
             token,
             amount: 10,
             callback_success: false,
         };
-        state.apply(&from_tempo([&failed])).unwrap();
-        assert_eq!(state.token(token).unwrap().pending_withdrawals, amount);
+        state.apply(&from_tempo([&enqueued, &failed])).unwrap();
+        let token_state = state.token(token).unwrap();
+        assert_eq!(token_state.pending_withdrawals, U256::ZERO);
+        assert_eq!(token_state.pending_zone_refunds, amount);
+        assert_eq!(token_state.liability().unwrap(), amount);
 
         let mint = L2BridgeEvent::Transfer {
             token,
@@ -258,11 +276,105 @@ mod tests {
             .unwrap();
 
         let token_state = state.token(token).unwrap();
-        assert_eq!(token_state.pending_withdrawals, U256::ZERO);
+        assert_eq!(token_state.pending_zone_refunds, U256::ZERO);
         assert_eq!(token_state.account_total, amount);
+        assert_eq!(token_state.liability().unwrap(), amount);
         assert_eq!(
             state.account(AccountKey::new(token, recipient)),
             Some(amount)
         );
+    }
+
+    #[test]
+    fn pending_zone_refund_stays_liability_until_claimed() {
+        let token = Address::repeat_byte(1);
+        let recipient = Address::repeat_byte(2);
+        let amount = U256::from(10);
+        let mut state = crate::accounting::State::default();
+        state
+            .apply(&[Effect::PendingWithdrawal {
+                token,
+                change: BalanceChange::Credit(amount),
+            }])
+            .unwrap();
+        let enqueued = L1PortalEvent::WithdrawalBounceBack { token, amount: 10 };
+        let failed = L1PortalEvent::WithdrawalProcessed {
+            to: recipient,
+            token,
+            amount: 10,
+            callback_success: false,
+        };
+        state.apply(&from_tempo([&enqueued, &failed])).unwrap();
+
+        let pending = L2BridgeEvent::WithdrawalBounceBack {
+            recipient,
+            token,
+            amount: 10,
+            processed: false,
+        };
+        state
+            .apply(&from_zone_events([&pending].into_iter()))
+            .unwrap();
+        let token_state = state.token(token).unwrap();
+        assert_eq!(token_state.pending_zone_refunds, amount);
+        assert_eq!(token_state.liability().unwrap(), amount);
+
+        let mint = L2BridgeEvent::Transfer {
+            token,
+            from: Address::ZERO,
+            to: recipient,
+            amount,
+        };
+        let claimed = L2BridgeEvent::RefundClaimed {
+            recipient,
+            token,
+            amount: 10,
+        };
+        state
+            .apply(&from_zone_events([&mint, &claimed].into_iter()))
+            .unwrap();
+
+        let token_state = state.token(token).unwrap();
+        assert_eq!(token_state.pending_zone_refunds, U256::ZERO);
+        assert_eq!(token_state.account_total, amount);
+        assert_eq!(token_state.liability().unwrap(), amount);
+    }
+
+    #[test]
+    fn tempo_refund_replaces_failed_deposit_liability_until_claimed() {
+        let token = Address::repeat_byte(1);
+        let amount = U256::from(10);
+        let fee = U256::from(1);
+        let mut state = crate::accounting::State::default();
+        state
+            .apply(&[
+                Effect::EnableToken { token },
+                Effect::PendingDeposit {
+                    token,
+                    change: BalanceChange::Credit(amount + fee),
+                },
+            ])
+            .unwrap();
+
+        let pending = L1PortalEvent::DepositBounceBackPending {
+            token,
+            amount: 10,
+            bounceback_fee: 1,
+        };
+        state.apply(&from_tempo([&pending])).unwrap();
+        let token_state = state.token(token).unwrap();
+        assert_eq!(token_state.pending_deposits, U256::ZERO);
+        assert_eq!(token_state.pending_tempo_refunds, amount);
+        assert_eq!(token_state.liability().unwrap(), amount);
+
+        let claimed = L1PortalEvent::RefundClaimed {
+            recipient: Address::repeat_byte(2),
+            token,
+            amount: 10,
+        };
+        state.apply(&from_tempo([&claimed])).unwrap();
+        let token_state = state.token(token).unwrap();
+        assert_eq!(token_state.pending_tempo_refunds, U256::ZERO);
+        assert_eq!(token_state.liability().unwrap(), U256::ZERO);
     }
 }

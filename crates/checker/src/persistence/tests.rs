@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, B256, U256};
 
-use crate::accounting::{AccountKey, Effect};
+use crate::accounting::{AccountKey, BalanceChange, Effect};
 
 use super::{BlockRef, Finding, Identity, Status, Store};
 
@@ -41,10 +41,20 @@ fn rows_survive_restart_and_unwind() {
             genesis,
             block(21, 21),
             tempo,
-            &[Effect::Credit {
-                key: account,
-                amount: U256::from(100),
-            }],
+            &[
+                Effect::Credit {
+                    key: account,
+                    amount: U256::from(100),
+                },
+                Effect::PendingTempoRefund {
+                    token,
+                    change: BalanceChange::Credit(U256::from(5)),
+                },
+                Effect::PendingZoneRefund {
+                    token,
+                    change: BalanceChange::Credit(U256::from(7)),
+                },
+            ],
         )
         .unwrap();
     drop(store);
@@ -52,10 +62,14 @@ fn rows_survive_restart_and_unwind() {
     let (store, loaded) = Store::open(&path, identity()).unwrap();
     assert_eq!(loaded, one);
     assert_eq!(loaded.state.account(account), Some(U256::from(100)));
+    let token_state = loaded.state.token(token).unwrap();
+    assert_eq!(token_state.pending_tempo_refunds, U256::from(5));
+    assert_eq!(token_state.pending_zone_refunds, U256::from(7));
 
     let genesis = store.reorg(&loaded, genesis).unwrap();
     assert_eq!(genesis.metadata.verified_zone, block(0, 10));
     assert_eq!(genesis.state.account(account), None);
+    assert!(genesis.state.token(token).is_none());
 }
 
 #[test]

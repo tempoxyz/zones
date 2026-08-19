@@ -140,18 +140,22 @@ fn checks_full_portal_liability() {
                 token,
                 change: BalanceChange::Credit(U256::from(30)),
             },
-            Effect::PendingRefund {
+            Effect::PendingTempoRefund {
                 token,
                 change: BalanceChange::Credit(U256::from(5)),
+            },
+            Effect::PendingZoneRefund {
+                token,
+                change: BalanceChange::Credit(U256::from(7)),
             },
         ])
         .unwrap();
 
     state
-        .verify_portal_balances([(token, U256::from(155))])
+        .verify_portal_balances([(token, U256::from(162))])
         .unwrap();
     assert!(matches!(
-        state.verify_portal_balances([(token, U256::from(154))]),
+        state.verify_portal_balances([(token, U256::from(161))]),
         Err(AccountingError::CollateralShortfall { .. })
     ));
 }
