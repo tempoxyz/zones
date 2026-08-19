@@ -595,8 +595,7 @@ fn progress(message: impl fmt::Display) {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::B256;
-    use alloy::signers::local::PrivateKeySigner;
+    use alloy::{primitives::B256, signers::local::PrivateKeySigner};
 
     use super::{
         PortalEncryptionKey, RegistrationAction, identity_from_signer, merge_decryption_keyring,
