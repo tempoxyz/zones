@@ -91,6 +91,7 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                     change: BalanceChange::Credit(U256::from(amount)),
                 });
             }
+            L1PortalEvent::RefundClaimed { amount: 0, .. } => {}
             L1PortalEvent::RefundClaimed { token, amount, .. } => {
                 effects.push(Effect::Liability {
                     token,
@@ -407,5 +408,27 @@ mod tests {
         let token_state = state.token(token).unwrap();
         assert_eq!(token_state.pending_tempo_refunds, U256::ZERO);
         assert_eq!(token_state.liability().unwrap(), U256::ZERO);
+    }
+
+    #[test]
+    fn handles_tempo_refunds_for_unknown_tokens_by_amount() {
+        let token = Address::repeat_byte(1);
+        let refund = |amount| L1PortalEvent::RefundClaimed {
+            recipient: Address::repeat_byte(2),
+            token,
+            amount,
+        };
+        let mut state = crate::accounting::State::default();
+
+        let zero_refund = from_tempo_events([&refund(0)]);
+        assert!(zero_refund.is_empty());
+        state.apply(&zero_refund).unwrap();
+
+        let nonzero_refund = from_tempo_events([&refund(1)]);
+        assert_eq!(
+            state.apply(&nonzero_refund),
+            Err(crate::accounting::AccountingError::UnknownToken { token }),
+        );
+        assert_eq!(state, crate::accounting::State::default());
     }
 }

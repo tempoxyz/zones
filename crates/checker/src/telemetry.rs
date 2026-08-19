@@ -130,6 +130,7 @@ fn log_tempo_event(event: &L1PortalEvent, zone: BlockRef, tempo_block: u64) {
             amount,
             "accounted authenticated pending Portal deposit bounce-back"
         ),
+        L1PortalEvent::RefundClaimed { amount: 0, .. } => {}
         L1PortalEvent::RefundClaimed {
             recipient,
             token,
