@@ -308,7 +308,10 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
         .filter(|(event, _)| event.token == token)
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
-                .checked_add(U256::from(event.amount))
+                .checked_add(deposit_bounce_back_retired_amount(
+                    event.amount,
+                    event.bouncebackFee,
+                ))
                 .ok_or_else(|| eyre::eyre!("paid deposit bounce-back total overflow"))
         })?;
     let paid = paid
@@ -327,7 +330,10 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
         .filter(|(event, _)| event.token == token)
         .try_fold(U256::ZERO, |total, (event, _)| {
             total
-                .checked_add(U256::from(event.amount))
+                .checked_add(deposit_bounce_back_retired_amount(
+                    event.amount,
+                    event.bouncebackFee,
+                ))
                 .ok_or_else(|| eyre::eyre!("Portal refund transition total overflow"))
         })?;
     let refunded = refunded
@@ -342,6 +348,10 @@ async fn withdrawal_liability<P: Provider<TempoNetwork>>(
         .ok_or_else(|| eyre::eyre!("refunded withdrawal total overflow"))?;
 
     outstanding_withdrawals(requested, paid, reminted, refunded)
+}
+
+fn deposit_bounce_back_retired_amount(amount: u128, bounceback_fee: u128) -> U256 {
+    U256::from(amount) + U256::from(bounceback_fee)
 }
 
 fn outstanding_withdrawals(
@@ -499,6 +509,30 @@ mod tests {
         assert!(
             outstanding_withdrawals(U256::from(10), U256::from(11), U256::ZERO, U256::ZERO,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn successful_deposit_bounce_back_retires_refund_and_fee() {
+        let retired = deposit_bounce_back_retired_amount(990, 10);
+
+        assert_eq!(
+            outstanding_withdrawals(U256::from(1_000), retired, U256::ZERO, U256::ZERO).unwrap(),
+            U256::ZERO
+        );
+    }
+
+    #[test]
+    fn pending_deposit_bounce_back_retires_fee_and_tracks_refund() {
+        let retired = deposit_bounce_back_retired_amount(990, 10);
+
+        assert_eq!(
+            outstanding_withdrawals(U256::from(1_000), U256::ZERO, U256::ZERO, retired).unwrap(),
+            U256::ZERO
+        );
+        assert_eq!(
+            outstanding_refunds("Portal", U256::from(990), U256::ZERO).unwrap(),
+            U256::from(990)
         );
     }
 }
