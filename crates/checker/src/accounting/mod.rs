@@ -48,7 +48,7 @@ impl TokenState {
 }
 
 /// Direction and amount of one account or liability change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BalanceChange {
     Credit(U256),
     Debit(U256),
@@ -63,40 +63,37 @@ impl BalanceChange {
     }
 }
 
-/// One independently authenticated accounting change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// In-flight liability tracked for one token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiabilityKind {
+    Deposit,
+    Withdrawal,
+    TempoRefund,
+    ZoneRefund,
+}
+
+impl LiabilityKind {
+    fn balance(self, state: &mut TokenState) -> &mut U256 {
+        match self {
+            Self::Deposit => &mut state.pending_deposits,
+            Self::Withdrawal => &mut state.pending_withdrawals,
+            Self::TempoRefund => &mut state.pending_tempo_refunds,
+            Self::ZoneRefund => &mut state.pending_zone_refunds,
+        }
+    }
+}
+
+/// One accounting mutation derived from authenticated evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Effect {
-    EnableToken {
-        token: Address,
-    },
-    Credit {
+    EnableToken(Address),
+    Account {
         key: AccountKey,
-        amount: U256,
-    },
-    Debit {
-        key: AccountKey,
-        amount: U256,
-    },
-    Transfer {
-        token: Address,
-        from: Address,
-        to: Address,
-        amount: U256,
-    },
-    PendingDeposit {
-        token: Address,
         change: BalanceChange,
     },
-    PendingWithdrawal {
+    Liability {
         token: Address,
-        change: BalanceChange,
-    },
-    PendingTempoRefund {
-        token: Address,
-        change: BalanceChange,
-    },
-    PendingZoneRefund {
-        token: Address,
+        kind: LiabilityKind,
         change: BalanceChange,
     },
 }
@@ -260,7 +257,7 @@ impl State {
         tokens: &mut BTreeMap<Address, Option<TokenState>>,
     ) -> Result<(), AccountingError> {
         match effect {
-            Effect::EnableToken { token } => {
+            Effect::EnableToken(token) => {
                 if self.tokens.contains_key(&token) {
                     return Ok(());
                 }
@@ -268,49 +265,12 @@ impl State {
                 self.tokens.insert(token, TokenState::default());
                 Ok(())
             }
-            Effect::Credit { key, amount } => {
-                self.change_account(key, BalanceChange::Credit(amount), accounts, tokens)
-            }
-            Effect::Debit { key, amount } => {
-                self.change_account(key, BalanceChange::Debit(amount), accounts, tokens)
-            }
-            Effect::Transfer {
+            Effect::Account { key, change } => self.change_account(key, change, accounts, tokens),
+            Effect::Liability {
                 token,
-                from,
-                to,
-                amount,
-            } => {
-                self.change_account(
-                    AccountKey::new(token, from),
-                    BalanceChange::Debit(amount),
-                    accounts,
-                    tokens,
-                )?;
-                self.change_account(
-                    AccountKey::new(token, to),
-                    BalanceChange::Credit(amount),
-                    accounts,
-                    tokens,
-                )
-            }
-            Effect::PendingDeposit { token, change } => {
-                self.change_liability(token, change, tokens, |state| &mut state.pending_deposits)
-            }
-            Effect::PendingWithdrawal { token, change } => {
-                self.change_liability(token, change, tokens, |state| {
-                    &mut state.pending_withdrawals
-                })
-            }
-            Effect::PendingTempoRefund { token, change } => {
-                self.change_liability(token, change, tokens, |state| {
-                    &mut state.pending_tempo_refunds
-                })
-            }
-            Effect::PendingZoneRefund { token, change } => {
-                self.change_liability(token, change, tokens, |state| {
-                    &mut state.pending_zone_refunds
-                })
-            }
+                kind,
+                change,
+            } => self.change_liability(token, kind, change, tokens),
         }
     }
 
@@ -343,9 +303,9 @@ impl State {
     fn change_liability(
         &mut self,
         token: Address,
+        kind: LiabilityKind,
         change: BalanceChange,
         previous: &mut BTreeMap<Address, Option<TokenState>>,
-        field: impl FnOnce(&mut TokenState) -> &mut U256,
     ) -> Result<(), AccountingError> {
         let previous_state = self
             .tokens
@@ -353,7 +313,7 @@ impl State {
             .copied()
             .ok_or(AccountingError::UnknownToken { token })?;
         let mut state = previous_state;
-        let value = field(&mut state);
+        let value = kind.balance(&mut state);
         *value = change.apply(*value)?;
 
         previous.entry(token).or_insert(Some(previous_state));

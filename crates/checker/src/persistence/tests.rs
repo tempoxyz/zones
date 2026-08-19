@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, B256, U256};
 
-use crate::accounting::{AccountKey, BalanceChange, Effect, State, TokenState};
+use crate::accounting::{AccountKey, BalanceChange, Effect, LiabilityKind, State, TokenState};
 
 use super::{
     BlockRef, CandidateTransition, Checkpoint, Finding, Identity, PersistenceError, Status, Store,
@@ -31,7 +31,7 @@ fn rows_survive_restart_and_unwind() {
     let tempo = block(20, 20);
     let token = Address::repeat_byte(30);
     let mut state = State::default();
-    state.apply(&[Effect::EnableToken { token }]).unwrap();
+    state.apply(&[Effect::EnableToken(token)]).unwrap();
     let initial = Store::create_atomic(
         &path,
         &Checkpoint {
@@ -53,16 +53,18 @@ fn rows_survive_restart_and_unwind() {
         genesis,
         block(21, 21),
         &[
-            Effect::Credit {
+            Effect::Account {
                 key: account,
-                amount: U256::from(100),
+                change: BalanceChange::Credit(U256::from(100)),
             },
-            Effect::PendingTempoRefund {
+            Effect::Liability {
                 token,
+                kind: LiabilityKind::TempoRefund,
                 change: BalanceChange::Credit(U256::from(5)),
             },
-            Effect::PendingZoneRefund {
+            Effect::Liability {
                 token,
+                kind: LiabilityKind::ZoneRefund,
                 change: BalanceChange::Credit(U256::from(7)),
             },
         ],

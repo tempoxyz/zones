@@ -2,7 +2,7 @@
 
 use alloy_primitives::U256;
 
-use super::{AccountKey, BalanceChange, Effect};
+use super::{AccountKey, BalanceChange, Effect, LiabilityKind};
 use crate::{
     l1::{L1BlockEvidence, L1PortalEvent},
     l2::{
@@ -13,32 +13,25 @@ use crate::{
 
 /// Convert canonical transfers after their protocol provenance has been authenticated.
 fn from_transfers(transfers: impl IntoIterator<Item = TokenTransfer>) -> Vec<Effect> {
-    transfers
-        .into_iter()
-        .filter_map(|transfer| {
-            if transfer.amount.is_zero() || transfer.from == transfer.to {
-                return None;
-            }
-
-            match (transfer.from.is_zero(), transfer.to.is_zero()) {
-                (true, false) => Some(Effect::Credit {
-                    key: AccountKey::new(transfer.token, transfer.to),
-                    amount: transfer.amount,
-                }),
-                (false, true) => Some(Effect::Debit {
-                    key: AccountKey::new(transfer.token, transfer.from),
-                    amount: transfer.amount,
-                }),
-                (false, false) => Some(Effect::Transfer {
-                    token: transfer.token,
-                    from: transfer.from,
-                    to: transfer.to,
-                    amount: transfer.amount,
-                }),
-                (true, true) => None,
-            }
-        })
-        .collect()
+    let mut effects = Vec::new();
+    for transfer in transfers {
+        if transfer.amount.is_zero() || transfer.from == transfer.to {
+            continue;
+        }
+        if !transfer.from.is_zero() {
+            effects.push(Effect::Account {
+                key: AccountKey::new(transfer.token, transfer.from),
+                change: BalanceChange::Debit(transfer.amount),
+            });
+        }
+        if !transfer.to.is_zero() {
+            effects.push(Effect::Account {
+                key: AccountKey::new(transfer.token, transfer.to),
+                change: BalanceChange::Credit(transfer.amount),
+            });
+        }
+    }
+    effects
 }
 
 /// Derive liability changes from one authenticated Tempo block.
@@ -52,12 +45,13 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
     for event in events {
         match *event {
             L1PortalEvent::TokenEnabled { token } => {
-                effects.push(Effect::EnableToken { token });
+                effects.push(Effect::EnableToken(token));
             }
             L1PortalEvent::DepositMade {
                 token, net_amount, ..
-            } => effects.push(Effect::PendingDeposit {
+            } => effects.push(Effect::Liability {
                 token,
+                kind: LiabilityKind::Deposit,
                 change: BalanceChange::Credit(U256::from(net_amount)),
             }),
             L1PortalEvent::WithdrawalProcessed {
@@ -66,8 +60,9 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                 callback_success: true,
                 ..
             } => {
-                effects.push(Effect::PendingWithdrawal {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::Withdrawal,
                     change: BalanceChange::Debit(U256::from(amount)),
                 });
             }
@@ -75,8 +70,9 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                 token,
                 amount,
                 bounceback_fee,
-            } => effects.push(Effect::PendingDeposit {
+            } => effects.push(Effect::Liability {
                 token,
+                kind: LiabilityKind::Deposit,
                 change: BalanceChange::Debit(U256::from(amount) + U256::from(bounceback_fee)),
             }),
             L1PortalEvent::DepositBounceBackPending {
@@ -84,29 +80,34 @@ fn from_tempo_events<'a>(events: impl IntoIterator<Item = &'a L1PortalEvent>) ->
                 amount,
                 bounceback_fee,
             } => {
-                effects.push(Effect::PendingDeposit {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::Deposit,
                     change: BalanceChange::Debit(U256::from(amount) + U256::from(bounceback_fee)),
                 });
-                effects.push(Effect::PendingTempoRefund {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::TempoRefund,
                     change: BalanceChange::Credit(U256::from(amount)),
                 });
             }
             L1PortalEvent::RefundClaimed { token, amount, .. } => {
-                effects.push(Effect::PendingTempoRefund {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::TempoRefund,
                     change: BalanceChange::Debit(U256::from(amount)),
                 });
             }
             L1PortalEvent::WithdrawalBounceBack { token, amount } => {
                 let amount = U256::from(amount);
-                effects.push(Effect::PendingWithdrawal {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::Withdrawal,
                     change: BalanceChange::Debit(amount),
                 });
-                effects.push(Effect::PendingZoneRefund {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::ZoneRefund,
                     change: BalanceChange::Credit(amount),
                 });
             }
@@ -132,8 +133,9 @@ fn from_zone_actions<'a>(actions: impl Iterator<Item = &'a L2BridgeAction>) -> V
                 token,
                 amount,
                 result: DepositResult::Processed { .. },
-            } => effects.push(Effect::PendingDeposit {
+            } => effects.push(Effect::Liability {
                 token,
+                kind: LiabilityKind::Deposit,
                 change: BalanceChange::Debit(amount),
             }),
             L2BridgeAction::WithdrawalRequested {
@@ -141,8 +143,9 @@ fn from_zone_actions<'a>(actions: impl Iterator<Item = &'a L2BridgeAction>) -> V
                 token,
                 principal,
                 ..
-            } => effects.push(Effect::PendingWithdrawal {
+            } => effects.push(Effect::Liability {
                 token,
+                kind: LiabilityKind::Withdrawal,
                 change: BalanceChange::Credit(principal),
             }),
             L2BridgeAction::WithdrawalBounceBack {
@@ -151,14 +154,16 @@ fn from_zone_actions<'a>(actions: impl Iterator<Item = &'a L2BridgeAction>) -> V
                 status: WithdrawalBounceBackStatus::Processed,
                 ..
             } => {
-                effects.push(Effect::PendingZoneRefund {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::ZoneRefund,
                     change: BalanceChange::Debit(amount),
                 });
             }
             L2BridgeAction::RefundClaimed { token, amount, .. } => {
-                effects.push(Effect::PendingZoneRefund {
+                effects.push(Effect::Liability {
                     token,
+                    kind: LiabilityKind::ZoneRefund,
                     change: BalanceChange::Debit(amount),
                 });
             }
@@ -183,7 +188,7 @@ mod tests {
 
     fn state_with_token(token: Address) -> crate::accounting::State {
         let mut state = crate::accounting::State::default();
-        state.apply(&[Effect::EnableToken { token }]).unwrap();
+        state.apply(&[Effect::EnableToken(token)]).unwrap();
         state
     }
 
@@ -216,19 +221,21 @@ mod tests {
                 },
             ]),
             vec![
-                Effect::Credit {
+                Effect::Account {
                     key: AccountKey::new(token, alice),
-                    amount,
+                    change: BalanceChange::Credit(amount),
                 },
-                Effect::Debit {
+                Effect::Account {
                     key: AccountKey::new(token, alice),
-                    amount,
+                    change: BalanceChange::Debit(amount),
                 },
-                Effect::Transfer {
-                    token,
-                    from: alice,
-                    to: bob,
-                    amount,
+                Effect::Account {
+                    key: AccountKey::new(token, alice),
+                    change: BalanceChange::Debit(amount),
+                },
+                Effect::Account {
+                    key: AccountKey::new(token, bob),
+                    change: BalanceChange::Credit(amount),
                 },
             ]
         );
@@ -254,8 +261,9 @@ mod tests {
         let amount = U256::from(10);
         let mut state = state_with_token(token);
         state
-            .apply(&[Effect::PendingWithdrawal {
+            .apply(&[Effect::Liability {
                 token,
+                kind: LiabilityKind::Withdrawal,
                 change: BalanceChange::Credit(amount),
             }])
             .unwrap();
@@ -309,8 +317,9 @@ mod tests {
         let amount = U256::from(10);
         let mut state = state_with_token(token);
         state
-            .apply(&[Effect::PendingWithdrawal {
+            .apply(&[Effect::Liability {
                 token,
+                kind: LiabilityKind::Withdrawal,
                 change: BalanceChange::Credit(amount),
             }])
             .unwrap();
@@ -369,9 +378,10 @@ mod tests {
         let mut state = crate::accounting::State::default();
         state
             .apply(&[
-                Effect::EnableToken { token },
-                Effect::PendingDeposit {
+                Effect::EnableToken(token),
+                Effect::Liability {
                     token,
+                    kind: LiabilityKind::Deposit,
                     change: BalanceChange::Credit(amount + fee),
                 },
             ])

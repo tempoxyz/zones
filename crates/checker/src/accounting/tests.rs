@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, U256};
 
-use super::{AccountKey, AccountingError, BalanceChange, Effect, State, TokenState};
+use super::{AccountKey, AccountingError, BalanceChange, Effect, LiabilityKind, State, TokenState};
 
 fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
@@ -12,7 +12,7 @@ fn state_with_tokens(tokens: impl IntoIterator<Item = Address>) -> State {
     let mut state = State::default();
     let effects = tokens
         .into_iter()
-        .map(|token| Effect::EnableToken { token })
+        .map(Effect::EnableToken)
         .collect::<Vec<_>>();
     state.apply(&effects).unwrap();
     state
@@ -33,20 +33,24 @@ fn applies_transfers_and_unwinds_exactly() {
     let bob = AccountKey::new(token, address(2));
     let mut state = state_with_tokens([token]);
     state
-        .apply(&[Effect::Credit {
+        .apply(&[Effect::Account {
             key: alice,
-            amount: U256::MAX,
+            change: BalanceChange::Credit(U256::MAX),
         }])
         .unwrap();
     let before = state.clone();
 
     let delta = state
-        .apply(&[Effect::Transfer {
-            token,
-            from: alice.account,
-            to: bob.account,
-            amount: U256::from(1),
-        }])
+        .apply(&[
+            Effect::Account {
+                key: alice,
+                change: BalanceChange::Debit(U256::from(1)),
+            },
+            Effect::Account {
+                key: bob,
+                change: BalanceChange::Credit(U256::from(1)),
+            },
+        ])
         .unwrap();
     state
         .verify_zone_state([evidence(
@@ -71,14 +75,14 @@ fn records_each_changed_row_once() {
 
     let delta = state
         .apply(&[
-            Effect::EnableToken { token },
-            Effect::Credit {
+            Effect::EnableToken(token),
+            Effect::Account {
                 key,
-                amount: U256::from(10),
+                change: BalanceChange::Credit(U256::from(10)),
             },
-            Effect::Credit {
+            Effect::Account {
                 key,
-                amount: U256::from(5),
+                change: BalanceChange::Credit(U256::from(5)),
             },
         ])
         .unwrap();
@@ -127,17 +131,17 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
     let mut state = state_with_tokens([token_a, token_b, token_c]);
     state
         .apply(&[
-            Effect::Credit {
+            Effect::Account {
                 key: AccountKey::new(token_a, account),
-                amount: U256::from(100),
+                change: BalanceChange::Credit(U256::from(100)),
             },
-            Effect::Credit {
+            Effect::Account {
                 key: AccountKey::new(token_b, account),
-                amount: U256::from(50),
+                change: BalanceChange::Credit(U256::from(50)),
             },
-            Effect::Credit {
+            Effect::Account {
                 key: AccountKey::new(token_c, account),
-                amount: U256::from(200),
+                change: BalanceChange::Credit(U256::from(200)),
             },
         ])
         .unwrap();
@@ -147,13 +151,13 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
     // without appearing in this batch's delta at all.
     let delta = state
         .apply(&[
-            Effect::Credit {
+            Effect::Account {
                 key: AccountKey::new(token_a, account),
-                amount: U256::from(25),
+                change: BalanceChange::Credit(U256::from(25)),
             },
-            Effect::Credit {
+            Effect::Account {
                 key: AccountKey::new(token_c, account),
-                amount: U256::from(75),
+                change: BalanceChange::Credit(U256::from(75)),
             },
         ])
         .unwrap();
@@ -177,9 +181,9 @@ fn rejects_unbacked_debits_without_mutating_state() {
     let before = state.clone();
 
     assert_eq!(
-        state.apply(&[Effect::Debit {
+        state.apply(&[Effect::Account {
             key,
-            amount: U256::from(1),
+            change: BalanceChange::Debit(U256::from(1)),
         }]),
         Err(AccountingError::Underflow)
     );
@@ -192,24 +196,28 @@ fn checks_full_portal_liability() {
     let mut state = state_with_tokens([token]);
     state
         .apply(&[
-            Effect::Credit {
+            Effect::Account {
                 key: AccountKey::new(token, address(2)),
-                amount: U256::from(100),
+                change: BalanceChange::Credit(U256::from(100)),
             },
-            Effect::PendingDeposit {
+            Effect::Liability {
                 token,
+                kind: LiabilityKind::Deposit,
                 change: BalanceChange::Credit(U256::from(20)),
             },
-            Effect::PendingWithdrawal {
+            Effect::Liability {
                 token,
+                kind: LiabilityKind::Withdrawal,
                 change: BalanceChange::Credit(U256::from(30)),
             },
-            Effect::PendingTempoRefund {
+            Effect::Liability {
                 token,
+                kind: LiabilityKind::TempoRefund,
                 change: BalanceChange::Credit(U256::from(5)),
             },
-            Effect::PendingZoneRefund {
+            Effect::Liability {
                 token,
+                kind: LiabilityKind::ZoneRefund,
                 change: BalanceChange::Credit(U256::from(7)),
             },
         ])
@@ -230,9 +238,9 @@ fn detects_balance_and_supply_mismatches() {
     let key = AccountKey::new(token, address(2));
     let mut state = state_with_tokens([token]);
     state
-        .apply(&[Effect::Credit {
+        .apply(&[Effect::Account {
             key,
-            amount: U256::from(10),
+            change: BalanceChange::Credit(U256::from(10)),
         }])
         .unwrap();
 
@@ -258,12 +266,13 @@ fn detects_balance_and_supply_mismatches() {
 fn rejects_unknown_token_changes_without_mutating_state() {
     let token = address(1);
     let effects = [
-        Effect::Credit {
+        Effect::Account {
             key: AccountKey::new(token, address(2)),
-            amount: U256::from(1),
+            change: BalanceChange::Credit(U256::from(1)),
         },
-        Effect::PendingDeposit {
+        Effect::Liability {
             token,
+            kind: LiabilityKind::Deposit,
             change: BalanceChange::Credit(U256::from(1)),
         },
     ];
@@ -294,16 +303,16 @@ fn retains_zero_state_until_enablement_is_unwound() {
     let token = address(1);
     let key = AccountKey::new(token, address(2));
     let mut state = State::default();
-    let enable = state.apply(&[Effect::EnableToken { token }]).unwrap();
+    let enable = state.apply(&[Effect::EnableToken(token)]).unwrap();
     let balance = state
         .apply(&[
-            Effect::Credit {
+            Effect::Account {
                 key,
-                amount: U256::from(1),
+                change: BalanceChange::Credit(U256::from(1)),
             },
-            Effect::Debit {
+            Effect::Account {
                 key,
-                amount: U256::from(1),
+                change: BalanceChange::Debit(U256::from(1)),
             },
         ])
         .unwrap();

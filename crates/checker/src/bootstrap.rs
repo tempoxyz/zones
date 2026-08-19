@@ -218,9 +218,7 @@ async fn initial_state(
     initial_token: Address,
 ) -> eyre::Result<State> {
     let mut state = State::default();
-    state.apply(&[crate::accounting::Effect::EnableToken {
-        token: initial_token,
-    }])?;
+    state.apply(&[crate::accounting::Effect::EnableToken(initial_token)])?;
     if anchor.number < creation.number {
         return Ok(state);
     }
