@@ -183,6 +183,12 @@ fn from_zone_events<'a>(events: impl Iterator<Item = &'a L2BridgeEvent> + Clone)
 mod tests {
     use super::*;
 
+    fn state_with_token(token: Address) -> crate::accounting::State {
+        let mut state = crate::accounting::State::default();
+        state.apply(&[Effect::EnableToken { token }]).unwrap();
+        state
+    }
+
     #[test]
     fn classifies_mints_burns_and_transfers() {
         let token = Address::repeat_byte(1);
@@ -233,7 +239,7 @@ mod tests {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
         let amount = U256::from(10);
-        let mut state = crate::accounting::State::default();
+        let mut state = state_with_token(token);
         state
             .apply(&[Effect::PendingWithdrawal {
                 token,
@@ -286,7 +292,7 @@ mod tests {
         let token = Address::repeat_byte(1);
         let recipient = Address::repeat_byte(2);
         let amount = U256::from(10);
-        let mut state = crate::accounting::State::default();
+        let mut state = state_with_token(token);
         state
             .apply(&[Effect::PendingWithdrawal {
                 token,

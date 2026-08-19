@@ -95,8 +95,8 @@ Portal custody >= account_total
 Events drive the ghost model but are not accepted in isolation. The checker
 also validates relationships between independent protocol evidence, including:
 
-- Canonical Portal creation and token-enablement events establish the tracked
-  tokens.
+- Canonical Portal creation and token-enablement events are the only source of
+  tracked-token membership; other accounting effects require existing members.
 - Processed deposit outcomes and their exact TIP-20 mints.
 - User withdrawal principal and fees and their exact receipt-local TIP-20
   debits and burns.

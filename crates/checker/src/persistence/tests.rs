@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, B256, U256};
 
-use crate::accounting::{AccountKey, BalanceChange, Effect};
+use crate::accounting::{AccountKey, BalanceChange, Effect, State, TokenState};
 
 use super::{BlockRef, CandidateTransition, Finding, Identity, PersistenceError, Status, Store};
 
@@ -27,12 +27,14 @@ fn rows_survive_restart_and_unwind() {
     let path = directory.path().join("checker");
     let genesis = block(0, 10);
     let tempo = block(20, 20);
-    let initial =
-        Store::create_atomic(&path, identity(), genesis, tempo, Default::default()).unwrap();
+    let token = Address::repeat_byte(30);
+    let mut state = State::default();
+    state.apply(&[Effect::EnableToken { token }]).unwrap();
+    let initial = Store::create_atomic(&path, identity(), genesis, tempo, state).unwrap();
     let (store, reopened) = Store::open(&path, identity()).unwrap();
     assert_eq!(reopened, initial);
+    assert_eq!(reopened.state.token(token), Some(TokenState::default()));
 
-    let token = Address::repeat_byte(30);
     let account = AccountKey::new(token, Address::repeat_byte(31));
     let candidate = CandidateTransition::derive(
         reopened,
@@ -68,7 +70,7 @@ fn rows_survive_restart_and_unwind() {
     let genesis = store.reorg(&loaded, genesis).unwrap();
     assert_eq!(genesis.metadata.verified_zone, block(0, 10));
     assert_eq!(genesis.state.account(account), None);
-    assert!(genesis.state.token(token).is_none());
+    assert_eq!(genesis.state.token(token), Some(TokenState::default()));
 }
 
 #[test]

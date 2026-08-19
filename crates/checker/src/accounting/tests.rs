@@ -8,6 +8,16 @@ fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
 }
 
+fn state_with_tokens(tokens: impl IntoIterator<Item = Address>) -> State {
+    let mut state = State::default();
+    let effects = tokens
+        .into_iter()
+        .map(|token| Effect::EnableToken { token })
+        .collect::<Vec<_>>();
+    state.apply(&effects).unwrap();
+    state
+}
+
 fn evidence(
     token: Address,
     total_supply: U256,
@@ -21,7 +31,7 @@ fn applies_transfers_and_unwinds_exactly() {
     let token = address(1);
     let alice = AccountKey::new(token, address(3));
     let bob = AccountKey::new(token, address(2));
-    let mut state = State::default();
+    let mut state = state_with_tokens([token]);
     state
         .apply(&[Effect::Credit {
             key: alice,
@@ -61,6 +71,7 @@ fn records_each_changed_row_once() {
 
     let delta = state
         .apply(&[
+            Effect::EnableToken { token },
             Effect::Credit {
                 key,
                 amount: U256::from(10),
@@ -113,7 +124,7 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
     let token_c = address(3);
     let account = address(10);
 
-    let mut state = State::default();
+    let mut state = state_with_tokens([token_a, token_b, token_c]);
     state
         .apply(&[
             Effect::Credit {
@@ -162,7 +173,7 @@ fn apply_and_unwind_scope_aggregate_checks_to_touched_tokens() {
 #[test]
 fn rejects_unbacked_debits_without_mutating_state() {
     let key = AccountKey::new(address(1), address(2));
-    let mut state = State::default();
+    let mut state = state_with_tokens([key.token]);
     let before = state.clone();
 
     assert_eq!(
@@ -178,7 +189,7 @@ fn rejects_unbacked_debits_without_mutating_state() {
 #[test]
 fn checks_full_portal_liability() {
     let token = address(1);
-    let mut state = State::default();
+    let mut state = state_with_tokens([token]);
     state
         .apply(&[
             Effect::Credit {
@@ -217,7 +228,7 @@ fn checks_full_portal_liability() {
 fn detects_balance_and_supply_mismatches() {
     let token = address(1);
     let key = AccountKey::new(token, address(2));
-    let mut state = State::default();
+    let mut state = state_with_tokens([token]);
     state
         .apply(&[Effect::Credit {
             key,
@@ -241,4 +252,65 @@ fn detects_balance_and_supply_mismatches() {
         )]),
         Err(AccountingError::SupplyMismatch { .. })
     ));
+}
+
+#[test]
+fn rejects_unknown_token_changes_without_mutating_state() {
+    let token = address(1);
+    let effects = [
+        Effect::Credit {
+            key: AccountKey::new(token, address(2)),
+            amount: U256::from(1),
+        },
+        Effect::PendingDeposit {
+            token,
+            change: BalanceChange::Credit(U256::from(1)),
+        },
+    ];
+
+    for effect in effects {
+        let mut state = State::default();
+        assert_eq!(
+            state.apply(&[effect]),
+            Err(AccountingError::UnknownToken { token })
+        );
+        assert_eq!(state, State::default());
+    }
+}
+
+#[test]
+fn rejects_account_rows_for_unknown_tokens() {
+    let token = address(1);
+    let key = AccountKey::new(token, address(2));
+
+    assert_eq!(
+        State::from_rows([(key, U256::from(1))], []),
+        Err(AccountingError::UnknownToken { token })
+    );
+}
+
+#[test]
+fn retains_zero_state_until_enablement_is_unwound() {
+    let token = address(1);
+    let key = AccountKey::new(token, address(2));
+    let mut state = State::default();
+    let enable = state.apply(&[Effect::EnableToken { token }]).unwrap();
+    let balance = state
+        .apply(&[
+            Effect::Credit {
+                key,
+                amount: U256::from(1),
+            },
+            Effect::Debit {
+                key,
+                amount: U256::from(1),
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(state.token(token), Some(TokenState::default()));
+    state.unwind(balance).unwrap();
+    assert_eq!(state.token(token), Some(TokenState::default()));
+    state.unwind(enable).unwrap();
+    assert_eq!(state.token(token), None);
 }

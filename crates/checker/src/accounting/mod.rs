@@ -23,8 +23,6 @@ impl AccountKey {
 /// Aggregate circulating and in-flight liabilities for one token.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TokenState {
-    /// Token was authenticated through Portal creation or enablement.
-    pub(crate) enabled: bool,
     /// Sum of all nonzero account entitlements.
     pub(crate) account_total: U256,
     /// Liability from deposits authenticated on Tempo but not yet reflected on the Zone.
@@ -46,15 +44,6 @@ impl TokenState {
             .and_then(|value| value.checked_add(self.pending_tempo_refunds))
             .and_then(|value| value.checked_add(self.pending_zone_refunds))
             .ok_or(AccountingError::Overflow)
-    }
-
-    fn is_empty(self) -> bool {
-        !self.enabled
-            && self.account_total.is_zero()
-            && self.pending_deposits.is_zero()
-            && self.pending_withdrawals.is_zero()
-            && self.pending_tempo_refunds.is_zero()
-            && self.pending_zone_refunds.is_zero()
     }
 }
 
@@ -120,6 +109,9 @@ pub(crate) struct BlockDelta {
 }
 
 /// Current independently derived bridge accounting state.
+///
+/// Membership in `tokens` means the token was authenticated through Portal
+/// creation or enablement.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct State {
     accounts: BTreeMap<AccountKey, U256>,
@@ -143,7 +135,7 @@ impl State {
         self.tokens.get(&token).copied()
     }
 
-    /// Build state from raw rows, dropping zero entries and asserting aggregate consistency.
+    /// Build state from raw rows, dropping zero accounts and asserting aggregate consistency.
     pub(crate) fn from_rows(
         accounts: impl IntoIterator<Item = (AccountKey, U256)>,
         tokens: impl IntoIterator<Item = (Address, TokenState)>,
@@ -153,10 +145,7 @@ impl State {
                 .into_iter()
                 .filter(|(_, value)| !value.is_zero())
                 .collect(),
-            tokens: tokens
-                .into_iter()
-                .filter(|(_, value)| !value.is_empty())
-                .collect(),
+            tokens: tokens.into_iter().collect(),
         };
         let all_tokens: BTreeSet<Address> = state
             .tokens
@@ -214,6 +203,11 @@ impl State {
         observed: impl IntoIterator<Item = (Address, U256, BTreeMap<Address, U256>)>,
     ) -> Result<(), AccountingError> {
         for (token, total_supply, balances) in observed {
+            let expected_supply = self
+                .tokens
+                .get(&token)
+                .ok_or(AccountingError::UnknownToken { token })?
+                .account_total;
             for (account, actual) in balances {
                 let key = AccountKey::new(token, account);
                 let expected = self.accounts.get(&key).copied().unwrap_or_default();
@@ -225,15 +219,10 @@ impl State {
                     });
                 }
             }
-            let expected = self
-                .tokens
-                .get(&token)
-                .map(|state| state.account_total)
-                .unwrap_or_default();
-            if total_supply != expected {
+            if total_supply != expected_supply {
                 return Err(AccountingError::SupplyMismatch {
                     token,
-                    expected,
+                    expected: expected_supply,
                     actual: total_supply,
                 });
             }
@@ -251,7 +240,7 @@ impl State {
                 .tokens
                 .get(&token)
                 .copied()
-                .unwrap_or_default()
+                .ok_or(AccountingError::UnknownToken { token })?
                 .liability()?;
             if available < required {
                 return Err(AccountingError::CollateralShortfall {
@@ -272,12 +261,11 @@ impl State {
     ) -> Result<(), AccountingError> {
         match effect {
             Effect::EnableToken { token } => {
-                tokens
-                    .entry(token)
-                    .or_insert_with(|| self.tokens.get(&token).copied());
-                let mut state = self.tokens.get(&token).copied().unwrap_or_default();
-                state.enabled = true;
-                self.write_token(token, state);
+                if self.tokens.contains_key(&token) {
+                    return Ok(());
+                }
+                tokens.insert(token, None);
+                self.tokens.insert(token, TokenState::default());
                 Ok(())
             }
             Effect::Credit { key, amount } => {
@@ -333,20 +321,22 @@ impl State {
         accounts: &mut BTreeMap<AccountKey, Option<U256>>,
         tokens: &mut BTreeMap<Address, Option<TokenState>>,
     ) -> Result<(), AccountingError> {
+        let previous_token = self
+            .tokens
+            .get(&key.token)
+            .copied()
+            .ok_or(AccountingError::UnknownToken { token: key.token })?;
+        let mut next_token = previous_token;
+        next_token.account_total = change.apply(next_token.account_total)?;
+        let current = self.accounts.get(&key).copied().unwrap_or_default();
+        let next = change.apply(current)?;
+
         accounts
             .entry(key)
             .or_insert_with(|| self.accounts.get(&key).copied());
-        tokens
-            .entry(key.token)
-            .or_insert_with(|| self.tokens.get(&key.token).copied());
-
-        let current = self.accounts.get(&key).copied().unwrap_or_default();
-        let next = change.apply(current)?;
+        tokens.entry(key.token).or_insert(Some(previous_token));
         write_nonzero(&mut self.accounts, key, next);
-
-        let mut token = self.tokens.get(&key.token).copied().unwrap_or_default();
-        token.account_total = change.apply(token.account_total)?;
-        self.write_token(key.token, token);
+        self.tokens.insert(key.token, next_token);
         Ok(())
     }
 
@@ -357,22 +347,18 @@ impl State {
         previous: &mut BTreeMap<Address, Option<TokenState>>,
         field: impl FnOnce(&mut TokenState) -> &mut U256,
     ) -> Result<(), AccountingError> {
-        previous
-            .entry(token)
-            .or_insert_with(|| self.tokens.get(&token).copied());
-        let mut state = self.tokens.get(&token).copied().unwrap_or_default();
+        let previous_state = self
+            .tokens
+            .get(&token)
+            .copied()
+            .ok_or(AccountingError::UnknownToken { token })?;
+        let mut state = previous_state;
         let value = field(&mut state);
         *value = change.apply(*value)?;
-        self.write_token(token, state);
-        Ok(())
-    }
 
-    fn write_token(&mut self, token: Address, state: TokenState) {
-        if state.is_empty() {
-            self.tokens.remove(&token);
-        } else {
-            self.tokens.insert(token, state);
-        }
+        previous.entry(token).or_insert(Some(previous_state));
+        self.tokens.insert(token, state);
+        Ok(())
     }
 
     /// Validate cached aggregates from only the account rows changed by this transition.
@@ -426,6 +412,9 @@ impl State {
                     .checked_add(*balance)
                     .ok_or(AccountingError::Overflow)?;
             }
+            if !self.tokens.contains_key(&token) && total.is_zero() {
+                continue;
+            }
             self.ensure_aggregate(token, total)?;
         }
         Ok(())
@@ -435,8 +424,8 @@ impl State {
         let actual = self
             .tokens
             .get(&token)
-            .map(|state| state.account_total)
-            .unwrap_or_default();
+            .ok_or(AccountingError::UnknownToken { token })?
+            .account_total;
         if actual == expected {
             Ok(())
         } else {
@@ -478,6 +467,8 @@ fn restore<K: Ord, V>(map: &mut BTreeMap<K, V>, entries: impl IntoIterator<Item 
 /// Deterministic accounting or externally observed invariant failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum AccountingError {
+    #[error("token {token} is not enabled")]
+    UnknownToken { token: Address },
     #[error("accounting arithmetic overflow")]
     Overflow,
     #[error("accounting arithmetic underflow")]

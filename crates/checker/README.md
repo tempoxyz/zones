@@ -22,10 +22,12 @@ For every canonical Zone block, the checker independently derives:
   fees.
 
 Canonical Portal creation and enablement events establish which tokens the
-checker tracks.
+checker tracks. Membership in the accounting token map is the authenticated
+enablement record; other accounting effects cannot introduce tokens.
 
-Token enablement is not otherwise modeled: the checker does not compare L1 and
-L2 enablement calldata or validate token metadata and Inbox/Outbox issuer roles.
+Beyond establishing membership, token enablement is not otherwise modeled: the
+checker does not compare L1 and L2 enablement calldata or validate token metadata
+and Inbox/Outbox issuer roles.
 
 The accounting model also does not correlate individual L1 deposits with L2
 outcomes by deposit hash or authenticate cross-layer withdrawal batch identity.
