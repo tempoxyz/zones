@@ -707,9 +707,9 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 
 /// Import live/backfilled blocks in canonical order on a follower.
 ///
-/// Live blocks are only imported when the sender equals the leader for their first imported Tempo
-/// header. This also applies to checkpoint-only ranges that cross a leadership change, resolving
-/// accidental split brain using the finalized schedule.
+/// Live full blocks are only imported when the sender equals the leader for their imported Tempo
+/// header. Checkpoint-only blocks have no designated leader and may be imported from any authorized
+/// P2P peer. The full-block check resolves accidental split brain using the finalized schedule.
 ///
 /// Backfilled blocks carry no producer claim and are judged by
 /// parent/anchor/execution/conflict validation alone. The loop exits when `stop` fires.
@@ -1198,9 +1198,10 @@ where
         }
         Err(PeerAnchorWaitError::Other(error)) => return Err(error),
     }
-    // Resolve production authority after observing the imported range, which may publish the
-    // leadership transition governing its first header. Backfilled blocks carry no producer claim.
-    validate_live_block_sender(
+    // Resolve live full-block production authority after observing its imported header, which may
+    // publish the leadership transition governing that same anchor. Checkpoint-only blocks are
+    // leader-neutral, and backfilled blocks carry no producer claim.
+    validate_live_import_sender(
         schedule,
         peer_block.live_sender.as_ref(),
         leader_anchor,
@@ -1278,6 +1279,18 @@ fn validate_live_block_sender(
              record governs",
         ),
     }
+}
+
+fn validate_live_import_sender(
+    schedule: &LeadershipSchedule,
+    live_sender: Option<&P2pPeerId>,
+    leader_anchor: Option<u64>,
+    block_number: u64,
+) -> eyre::Result<()> {
+    let Some(anchor_number) = leader_anchor else {
+        return Ok(());
+    };
+    validate_live_block_sender(schedule, live_sender, anchor_number, block_number)
 }
 
 fn reconcile_canonical_import(
@@ -1491,12 +1504,13 @@ impl DecodedTempoImport {
 
     /// Tempo anchor whose leader must produce this Zone block.
     ///
-    /// The first imported header selects the leader even if later headers cross a handoff.
-    fn leader_anchor(&self) -> u64 {
-        self.headers()
-            .first()
-            .expect("decoded nonempty Tempo import")
-            .number()
+    /// Checkpoint-only blocks have no designated leader. A full block imports exactly one Tempo
+    /// header, whose effective leader supplies its production authority.
+    fn leader_anchor(&self) -> Option<u64> {
+        match self {
+            Self::Full { header, .. } => Some(header.number()),
+            Self::CheckpointOnly { .. } => None,
+        }
     }
 }
 
@@ -1980,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_live_producer_uses_first_header_leader() {
+    fn checkpoint_live_producer_is_not_leader_restricted() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use reth_primitives_traits::SealedHeader;
         use tempo_primitives::TempoHeader;
@@ -2006,11 +2020,9 @@ mod tests {
         let tempo_import = super::DecodedTempoImport::CheckpointOnly { headers };
 
         let leader_anchor = tempo_import.leader_anchor();
-        assert_eq!(leader_anchor, 90);
-        super::validate_live_block_sender(&schedule, Some(&outgoing), leader_anchor, 7).unwrap();
-        let error = super::validate_live_block_sender(&schedule, Some(&incoming), leader_anchor, 7)
-            .expect_err("a crossed handoff must not change the catch-up producer");
-        assert!(error.to_string().contains(&outgoing.to_string()));
+        assert_eq!(leader_anchor, None);
+        super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 7).unwrap();
+        super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 7).unwrap();
 
         let full_import = super::DecodedTempoImport::Full {
             header: Box::new(SealedHeader::seal_slow(TempoHeader {
@@ -2024,10 +2036,11 @@ mod tests {
             enabled_tokens: Vec::new(),
         };
         let leader_anchor = full_import.leader_anchor();
-        assert_eq!(leader_anchor, 110);
-        super::validate_live_block_sender(&schedule, Some(&incoming), leader_anchor, 8).unwrap();
-        let error = super::validate_live_block_sender(&schedule, Some(&outgoing), leader_anchor, 8)
-            .expect_err("the final full block must be produced by its effective leader");
+        assert_eq!(leader_anchor, Some(110));
+        super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 8).unwrap();
+        let error =
+            super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 8)
+                .expect_err("the final full block must be produced by its effective leader");
         assert!(error.to_string().contains(&incoming.to_string()));
     }
 
