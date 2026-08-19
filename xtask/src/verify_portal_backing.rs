@@ -8,7 +8,10 @@ use alloy::{
 use eyre::{WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    IZoneInbox, ZONE_FACTORY_ADDRESS, ZONE_INBOX_ADDRESS, ZoneFactory, ZonePortal,
+};
+use zone_primitives::constants::zone_chain_id;
 
 use crate::zone_utils::normalize_http_rpc;
 
@@ -62,9 +65,13 @@ impl VerifyPortalBacking {
             .await
             .wrap_err("failed connecting to Zone RPC")?;
 
-        let (l1_snapshot, zone_snapshot) =
-            tokio::try_join!(l1.get_block_number(), zone.get_block_number(),)
-                .wrap_err("failed reading snapshot blocks")?;
+        let (l1_snapshot, zone_snapshot, l1_chain_id, actual_zone_chain_id) = tokio::try_join!(
+            l1.get_block_number(),
+            zone.get_block_number(),
+            l1.get_chain_id(),
+            zone.get_chain_id(),
+        )
+        .wrap_err("failed reading snapshot blocks and chain IDs")?;
         ensure!(
             self.l1_from_block <= l1_snapshot,
             "L1 scan start {} is after snapshot block {l1_snapshot}",
@@ -78,6 +85,7 @@ impl VerifyPortalBacking {
         let l1_block = BlockId::number(l1_snapshot);
         let zone_block = BlockId::number(zone_snapshot);
         let portal = ZonePortal::new(self.portal, &l1);
+        let factory = ZoneFactory::new(ZONE_FACTORY_ADDRESS, &l1);
         let l1_token = TIP20Token::new(self.token, &l1);
         let zone_token = TIP20Token::new(self.token, &zone);
         let inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, &zone);
@@ -89,12 +97,16 @@ impl VerifyPortalBacking {
             .add(portal.withdrawalQueueHead())
             .add(portal.withdrawalQueueTail())
             .add(portal.depositCount())
-            .add(portal.lastProcessedDepositNumber());
+            .add(portal.lastProcessedDepositNumber())
+            .add(portal.zoneId())
+            .add(portal.isTokenEnabled(self.token))
+            .add(factory.isZonePortal(self.portal));
         let zone_reads = zone
             .multicall()
             .block(zone_block)
             .add(zone_token.totalSupply())
-            .add(inbox.processedDepositNumber());
+            .add(inbox.processedDepositNumber())
+            .add(inbox.tempoPortal());
         let (
             (
                 portal_balance,
@@ -102,10 +114,38 @@ impl VerifyPortalBacking {
                 withdrawal_tail,
                 deposit_count,
                 l1_processed_deposits,
+                portal_zone_id,
+                token_enabled,
+                portal_registered,
             ),
-            (zone_supply, zone_processed_deposits),
+            (zone_supply, zone_processed_deposits, inbox_portal),
         ) = tokio::try_join!(l1_reads.aggregate(), zone_reads.aggregate())
             .wrap_err("failed reading backing state")?;
+
+        let factory_zone = factory
+            .zones(portal_zone_id)
+            .block(l1_block)
+            .call()
+            .await
+            .wrap_err("failed reading ZoneFactory registration")?;
+        let expected_zone_chain_id =
+            zone_chain_id(l1_chain_id, portal_zone_id).wrap_err("failed deriving Zone chain ID")?;
+
+        ensure!(portal_registered, "Portal is not registered in ZoneFactory");
+        ensure!(
+            factory_zone.portal == self.portal && factory_zone.zoneId == portal_zone_id,
+            "Portal does not match ZoneFactory registration for zone {portal_zone_id}"
+        );
+        ensure!(
+            inbox_portal == self.portal,
+            "ZoneInbox Portal mismatch: expected {}, got {inbox_portal}",
+            self.portal
+        );
+        ensure!(
+            actual_zone_chain_id == expected_zone_chain_id,
+            "Zone chain ID mismatch: expected {expected_zone_chain_id} for L1 chain {l1_chain_id} and zone {portal_zone_id}, got {actual_zone_chain_id}"
+        );
+        ensure!(token_enabled, "Token is not enabled on the Portal");
 
         ensure!(
             zone_processed_deposits <= deposit_count,
