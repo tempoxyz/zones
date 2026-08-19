@@ -74,7 +74,9 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    IZoneInbox, LegacyTempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -130,10 +132,17 @@ where
         };
         for receipt in receipts {
             for log in receipt.logs() {
-                if log.address == ZONE_INBOX_ADDRESS
-                    && log.topics().first() == Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
-                {
-                    return Ok(IZoneInbox::TempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                if log.address != ZONE_INBOX_ADDRESS {
+                    continue;
+                }
+                match log.topics().first() {
+                    Some(topic) if topic == &IZoneInbox::TempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(IZoneInbox::TempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    Some(topic) if topic == &LegacyTempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(LegacyTempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    _ => {}
                 }
             }
         }
