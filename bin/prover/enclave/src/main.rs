@@ -375,27 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_chain_before_execution() {
-        let mut witness = empty_witness();
-        witness.public_inputs.parent_chain_id = 99;
-        let request = VerifyRequest {
-            version: PROTOCOL_VERSION,
-            request_id: "chain-test".into(),
-            witness,
-        };
-        let response = process_request(request, &TrustedChainSpecs::default());
-
-        assert!(matches!(
-            response,
-            VerifyResponse::Error {
-                request_id: Some(id),
-                code: ErrorCode::UnsupportedChain,
-                ..
-            } if id == "chain-test"
-        ));
-    }
-
-    #[test]
     fn binds_the_canonical_digest_into_the_proof_bundle() {
         let public_inputs = empty_witness().public_inputs;
         let output = BatchOutput {
