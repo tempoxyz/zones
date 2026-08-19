@@ -610,8 +610,6 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 |------------|---------|-------------|
 | TempoStateReader | `0x1c00…0004` | Reads L1 contract storage from zone contracts via the L1 state cache. |
 | ZoneTxContext | `0x1c00…0005` | Exposes the hash of the currently executing zone transaction (`currentTxHash`), used by ZoneOutbox for authenticated withdrawals. |
-| ChaumPedersenVerify | `0x1c00…0100` | Verifies DLOG equality proofs for ECDH key exchange (encrypted deposits). |
-| AesGcmDecrypt | `0x1c00…0101` | AES-256-GCM authenticated decryption (encrypted deposit payloads). |
 
 ## Configuration
 

@@ -1,16 +1,11 @@
-//! Chaum-Pedersen DLOG equality proof verification precompile.
+//! Chaum-Pedersen DLOG equality proof verification for encrypted Zone deposits.
 //!
-//! Registered at [`CHAUM_PEDERSEN_VERIFY_ADDRESS`] (`0x1C00...0100`).
-//!
-//! Verifies that the sequencer correctly derived the ECDH shared secret
-//! from the depositor's ephemeral public key, without revealing the
-//! sequencer's private key to the EVM.
+//! Verifies that the sequencer correctly derived the ECDH shared secret from the
+//! depositor's ephemeral public key without revealing the sequencer's private key.
 //!
 //! Uses the NCC-audited [`k256`] crate (v0.13.4) for secp256k1 operations.
 
-mod dispatch;
-
-use alloy_primitives::{Address, Keccak256, address};
+use alloy_primitives::Keccak256;
 use k256::{
     AffinePoint, FieldBytes, ProjectivePoint, Scalar,
     elliptic_curve::{
@@ -20,37 +15,10 @@ use k256::{
 };
 use tempo_precompiles::storage::StorageCtx;
 
-/// Chaum-Pedersen Verify precompile address on Zone L2.
-pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
-    address!("0x1C00000000000000000000000000000000000100");
-
 /// Gas cost for Chaum-Pedersen proof verification (two EC muls + hashing).
 const CP_VERIFY_GAS: u64 = 6_000;
 
-alloy_sol_types::sol! {
-    /// Chaum-Pedersen proof for ECDH shared secret derivation.
-    struct ChaumPedersenProof {
-        bytes32 s;
-        bytes32 c;
-    }
-
-    interface IChaumPedersenVerify {
-        /// Verify a Chaum-Pedersen proof of correct ECDH shared secret derivation.
-        function verifyProof(
-            bytes32 ephemeralPubX,
-            uint8 ephemeralPubYParity,
-            bytes32 sharedSecret,
-            uint8 sharedSecretYParity,
-            bytes32 sequencerPubX,
-            uint8 sequencerPubYParity,
-            ChaumPedersenProof proof
-        ) external view returns (bool valid);
-    }
-}
-
-pub use IChaumPedersenVerify::verifyProofCall;
-
-/// Chaum-Pedersen DLOG equality proof verification precompile.
+/// Chaum-Pedersen DLOG equality proof verifier.
 ///
 /// Verifies that the sequencer knows `privSeq` such that:
 /// - `pubSeq = privSeq * G` (their public key)
@@ -61,15 +29,9 @@ pub use IChaumPedersenVerify::verifyProofCall;
 /// - `R2 = s*ephemeralPub - c*sharedSecretPoint`
 /// - `c' = keccak256(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
 /// - Check: `c == c'`
-#[derive(Default)]
 pub struct ChaumPedersenVerify;
 
 impl ChaumPedersenVerify {
-    /// Creates the stateless Chaum-Pedersen implementation.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Charge the gas cost for Chaum-Pedersen proof verification.
     pub fn verify_chaum_pedersen_gas() -> tempo_precompiles::Result<()> {
         StorageCtx::default().deduct_gas(CP_VERIFY_GAS)

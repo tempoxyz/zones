@@ -36,13 +36,6 @@ pub const CONTRACT_DEPLOYER_ALLOWLIST: &[Address] = &[];
 /// ZoneTxContext precompile address on Zone L2.
 pub const ZONE_TX_CONTEXT_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000005");
 
-/// Chaum-Pedersen verification precompile address.
-pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
-    address!("0x1C00000000000000000000000000000000000100");
-
-/// AES-GCM decryption precompile address.
-pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
-
 /// Zone-native fee manager precompile address.
 ///
 /// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.

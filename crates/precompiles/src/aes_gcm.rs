@@ -1,22 +1,14 @@
-//! AES-256-GCM decryption precompile.
+//! AES-256-GCM decryption for encrypted Zone deposits.
 //!
-//! Registered at [`AES_GCM_DECRYPT_ADDRESS`] (`0x1C00...0101`).
-//!
-//! Decrypts ECIES ciphertext and verifies the GCM authentication tag,
-//! enabling the `ZoneInbox` contract to process encrypted deposits.
+//! Decrypts ECIES ciphertext and verifies the GCM authentication tag for the native
+//! `ZoneInbox` implementation.
 //!
 //! Uses the NCC-audited `aes-gcm` crate (v0.10.3).
 
 use alloc::vec::Vec;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInPlace};
-mod dispatch;
-
-use alloy_primitives::{Address, address};
 use tempo_precompiles::{error::TempoPrecompileError, storage::StorageCtx};
-
-/// AES-256-GCM Decrypt precompile address on Zone L2.
-pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
 
 /// Base gas cost for AES-GCM decryption.
 const AES_GCM_BASE_GAS: u64 = 1_000;
@@ -24,35 +16,14 @@ const AES_GCM_BASE_GAS: u64 = 1_000;
 /// Additional gas per byte of authenticated AES-GCM input.
 const AES_GCM_PER_BYTE_GAS: u64 = 3;
 
-alloy_sol_types::sol! {
-    interface IAesGcmDecrypt {
-        /// Decrypt AES-256-GCM ciphertext and verify authentication tag.
-        function decrypt(
-            bytes32 key,
-            bytes12 nonce,
-            bytes ciphertext,
-            bytes aad,
-            bytes16 tag
-        ) external view returns (bytes plaintext, bool valid);
-    }
-}
-
-pub use IAesGcmDecrypt::{decryptCall, decryptReturn};
-
-/// AES-256-GCM decryption precompile.
+/// AES-256-GCM decryption helper.
 ///
 /// Decrypts ciphertext using the provided key, nonce, and AAD, and verifies
 /// the GCM authentication tag. Returns `(plaintext, true)` on success or
 /// `(empty, false)` if tag verification fails.
-#[derive(Default)]
 pub struct AesGcmDecrypt;
 
 impl AesGcmDecrypt {
-    /// Creates the stateless AES-GCM implementation.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Charge the native gas cost for AES-GCM authenticated input.
     pub fn charge_gas(ciphertext_len: usize, aad_len: usize) -> tempo_precompiles::Result<()> {
         let len = u64::try_from(ciphertext_len.saturating_add(aad_len)).unwrap_or(u64::MAX);
@@ -88,19 +59,16 @@ impl AesGcmDecrypt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{test_context, test_env, test_storage_provider};
+    use crate::test_utils::{test_context, test_storage_provider};
     use aes_gcm::aead::{Aead, Payload};
-    use alloy_primitives::Bytes;
-    use alloy_sol_types::SolCall;
-    use revm::precompile::PrecompileOutput;
-    use tempo_precompiles::{charge_input_cost, storage::StorageCtx};
+    use tempo_precompiles::storage::PrecompileStorageProvider;
 
-    fn encrypt(plaintext: &[u8], aad: &[u8]) -> decryptCall {
+    fn encrypt(plaintext: &[u8], aad: &[u8]) -> ([u8; 32], [u8; 12], Vec<u8>, [u8; 16]) {
         let key = [0x42u8; 32];
         let nonce_bytes = [0x01u8; 12];
         let cipher = Aes256Gcm::new((&key).into());
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let encrypted = cipher
+        let mut encrypted = cipher
             .encrypt(
                 nonce,
                 Payload {
@@ -109,44 +77,30 @@ mod tests {
                 },
             )
             .expect("encrypt");
-        let ct = &encrypted[..encrypted.len() - 16];
-        let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
+        let tag = encrypted
+            .split_off(encrypted.len() - 16)
+            .try_into()
+            .expect("16-byte tag");
 
-        decryptCall {
-            key: key.into(),
-            nonce: nonce_bytes.into(),
-            ciphertext: Bytes::copy_from_slice(ct),
-            aad: Bytes::copy_from_slice(aad),
-            tag: tag.into(),
-        }
+        (key, nonce_bytes, encrypted, tag)
     }
 
-    fn call_precompile(calldata: Bytes) -> PrecompileOutput {
+    fn decrypt_with_native_gas(
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+    ) -> (Vec<u8>, bool, u64) {
         let mut ctx = test_context();
-        let env = test_env(&ctx);
-        let precompile = zone_precompile!(env, AesGcmDecrypt);
-        crate::test_utils::call_precompile(
-            &mut ctx,
-            &precompile,
-            Address::ZERO,
-            &calldata,
-            u64::MAX,
-            true,
-            AES_GCM_DECRYPT_ADDRESS,
-            AES_GCM_DECRYPT_ADDRESS,
-        )
-        .expect("precompile call succeeds")
-    }
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        let gas_before = storage.gas_used();
+        let (plaintext, valid) = StorageCtx::enter(&mut storage, || {
+            AesGcmDecrypt::charge_gas(ciphertext.len(), aad.len()).expect("charge native gas");
+            AesGcmDecrypt::decrypt(key, nonce, ciphertext, aad, tag)
+        });
 
-    fn charged_input_gas(calldata: &[u8]) -> u64 {
-        let mut ctx = test_context();
-        let mut provider = test_storage_provider(&mut ctx, u64::MAX, true);
-        StorageCtx::enter(&mut provider, || {
-            let mut storage = StorageCtx::default();
-            let gas_before = storage.gas_used();
-            assert!(charge_input_cost(&mut storage, calldata).is_none());
-            storage.gas_used().saturating_sub(gas_before)
-        })
+        (plaintext, valid, storage.gas_used() - gas_before)
     }
 
     #[test]
@@ -216,38 +170,30 @@ mod tests {
     fn precompile_gas_charges_aad_bytes() {
         let plaintext = b"";
         let aad = vec![0xA5; 128];
-        let call = encrypt(plaintext, &aad);
-        let ciphertext_len = call.ciphertext.len();
-        let aad_len = call.aad.len();
-        let calldata = call.abi_encode();
-        let expected_gas = charged_input_gas(&calldata)
-            + AES_GCM_BASE_GAS
-            + AES_GCM_PER_BYTE_GAS * (ciphertext_len + aad_len) as u64;
+        let (key, nonce, ciphertext, tag) = encrypt(plaintext, &aad);
+        let expected_gas =
+            AES_GCM_BASE_GAS + AES_GCM_PER_BYTE_GAS * (ciphertext.len() + aad.len()) as u64;
 
-        let output = call_precompile(calldata.into());
-        let decoded = decryptCall::abi_decode_returns(&output.bytes).expect("decode return");
+        let (decrypted, valid, gas_used) =
+            decrypt_with_native_gas(&key, &nonce, &ciphertext, &aad, &tag);
 
-        assert!(decoded.valid);
-        assert_eq!(decoded.plaintext, Bytes::copy_from_slice(plaintext));
-        assert_eq!(output.gas_used, expected_gas);
+        assert!(valid);
+        assert_eq!(decrypted, plaintext);
+        assert_eq!(gas_used, expected_gas);
     }
 
     #[test]
     fn precompile_decrypts_without_aad_and_reports_ciphertext_gas() {
         let plaintext = b"normal precompile path";
-        let call = encrypt(plaintext, &[]);
-        let ciphertext_len = call.ciphertext.len();
-        let calldata = call.abi_encode();
-        let expected_gas = charged_input_gas(&calldata)
-            + AES_GCM_BASE_GAS
-            + AES_GCM_PER_BYTE_GAS * ciphertext_len as u64;
+        let (key, nonce, ciphertext, tag) = encrypt(plaintext, &[]);
+        let expected_gas = AES_GCM_BASE_GAS + AES_GCM_PER_BYTE_GAS * ciphertext.len() as u64;
 
-        let output = call_precompile(calldata.into());
-        let decoded = decryptCall::abi_decode_returns(&output.bytes).expect("decode return");
+        let (decrypted, valid, gas_used) =
+            decrypt_with_native_gas(&key, &nonce, &ciphertext, &[], &tag);
 
-        assert!(decoded.valid);
-        assert_eq!(decoded.plaintext, Bytes::copy_from_slice(plaintext));
-        assert_eq!(output.gas_used, expected_gas);
+        assert!(valid);
+        assert_eq!(decrypted, plaintext);
+        assert_eq!(gas_used, expected_gas);
     }
 
     #[test]
