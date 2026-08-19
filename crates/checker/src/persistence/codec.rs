@@ -68,7 +68,6 @@ values!(
     super::schema::MetaValue,
     super::schema::TokenValue,
     super::model::DeltaRecord,
-    super::model::Finding,
 );
 
 /// Invalid durable value envelope.

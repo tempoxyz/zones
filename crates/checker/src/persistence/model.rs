@@ -51,14 +51,20 @@ pub(crate) struct Identity {
     pub(crate) creation: BlockRef,
 }
 
+/// Current deterministic finding retained after verification stops.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Finding {
+    pub(crate) zone: BlockRef,
+    pub(crate) summary: String,
+}
+
 /// Durable checker coverage state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Status {
     Verifying,
-    /// Verification has stopped; retains the first unverified block and latest observed Zone tip.
+    /// Verification has stopped at this deterministic finding.
     Diverged {
-        first_unchecked: BlockRef,
-        observed_through: BlockRef,
+        finding: Finding,
     },
 }
 
@@ -107,11 +113,4 @@ pub(crate) struct DeltaRecord {
     pub(crate) imported_tempo: BlockRef,
     pub(crate) imported_tempo_parent: BlockRef,
     pub(crate) delta: BlockDelta,
-}
-
-/// Current deterministic finding retained after verification stops.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Finding {
-    pub(crate) zone: BlockRef,
-    pub(crate) summary: String,
 }

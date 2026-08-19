@@ -87,7 +87,7 @@ fn rows_survive_restart_and_unwind() {
 }
 
 #[test]
-fn finding_freezes_verified_tip() {
+fn finding_survives_restart_and_clears_on_reorg() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("checker");
     let genesis = block(0, 10);
@@ -103,24 +103,33 @@ fn finding_freezes_verified_tip() {
     .unwrap();
     let (store, snapshot) = Store::open(&path, identity()).unwrap();
     let failed = block(1, 11);
-    let diverged = store
-        .record_finding(
-            &snapshot,
-            Finding {
-                zone: failed,
-                summary: "balance mismatch".into(),
-            },
-        )
-        .unwrap();
+    let finding = Finding {
+        zone: failed,
+        summary: "balance mismatch".into(),
+    };
+    let diverged = store.record_finding(&snapshot, finding.clone()).unwrap();
 
     assert_eq!(diverged.metadata.verified_zone, genesis);
     assert_eq!(
         diverged.metadata.status,
         Status::Diverged {
-            first_unchecked: failed,
-            observed_through: failed,
+            finding: finding.clone(),
         }
     );
+
+    drop(store);
+    let (store, reopened) = Store::open(&path, identity()).unwrap();
+    assert_eq!(reopened, diverged);
+
+    let observed = block(2, 12);
+    let extended = store.observe_diverged(&reopened, observed).unwrap();
+    assert_eq!(extended.metadata.verified_zone, genesis);
+    assert_eq!(extended.metadata.observed_zone, observed);
+    assert_eq!(extended.metadata.status, Status::Diverged { finding });
+
+    let recovered = store.reorg(&extended, genesis).unwrap();
+    assert_eq!(recovered.metadata.observed_zone, genesis);
+    assert_eq!(recovered.metadata.status, Status::Verifying);
 }
 
 #[test]

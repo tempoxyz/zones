@@ -112,14 +112,12 @@ where
     while let Some(notification) = ctx.notifications.try_next().await? {
         let delivered_tip = notification_tip(&notification)
             .ok_or_else(|| eyre::eyre!("received an empty ExEx notification"))?;
-        let recoverable_finding = match snapshot.metadata.status {
-            Status::Diverged {
-                first_unchecked, ..
-            } => notification_ancestor(&notification)?
-                .is_some_and(|ancestor| ancestor.number < first_unchecked.number),
+        let recoverable_finding = match &snapshot.metadata.status {
+            Status::Diverged { finding } => notification_ancestor(&notification)?
+                .is_some_and(|ancestor| ancestor.number < finding.zone.number),
             Status::Verifying => false,
         };
-        if matches!(snapshot.metadata.status, Status::Diverged { .. }) && !recoverable_finding {
+        if matches!(&snapshot.metadata.status, Status::Diverged { .. }) && !recoverable_finding {
             snapshot = store.observe_diverged(&snapshot, delivered_tip.into())?;
             metrics.update(&snapshot);
             ctx.send_finished_height(delivered_tip)?;

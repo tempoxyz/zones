@@ -47,7 +47,7 @@ impl CheckerMetrics {
         self.verification_lag_blocks
             .set(observed.saturating_sub(verified) as f64);
         self.divergence_active.set(
-            if matches!(snapshot.metadata.status, Status::Diverged { .. }) {
+            if matches!(&snapshot.metadata.status, Status::Diverged { .. }) {
                 1.0
             } else {
                 0.0

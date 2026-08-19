@@ -21,12 +21,11 @@ use crate::accounting::{AccountingError, Effect, State};
 use model::DeltaRecord;
 pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
 use schema::{
-    AccountValue, Accounts, Deltas, Findings, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens,
+    AccountValue, Accounts, Deltas, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens,
 };
 
 const SCHEMA_VERSION: u32 = 1;
 const RETAINED_DELTAS: u64 = 16_384;
-const ACTIVE_FINDING: u8 = 0;
 
 /// Loaded durable accounting state and its exact coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,10 +146,7 @@ impl Store {
         };
         let tx = store.db.tx_mut()?;
         tx.put::<Meta>(MetaKey::Version, MetaValue::Version(SCHEMA_VERSION))?;
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        write_metadata(&tx, &metadata)?;
         for (key, value) in checkpoint.state.accounts() {
             tx.put::<Accounts>(key, AccountValue(value))?;
         }
@@ -255,10 +251,7 @@ impl Store {
         if metadata.observed_zone.number < zone.number {
             metadata.observed_zone = zone;
         }
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        write_metadata(&tx, &metadata)?;
         if let Some(height) = zone.number.checked_sub(RETAINED_DELTAS) {
             tx.delete::<Deltas>(height, None)?;
         }
@@ -310,11 +303,7 @@ impl Store {
         }
         metadata.observed_zone = ancestor;
         metadata.status = Status::Verifying;
-        tx.delete::<Findings>(ACTIVE_FINDING, None)?;
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        write_metadata(&tx, &metadata)?;
         tx.commit()?;
         Ok(Snapshot {
             metadata,
@@ -338,17 +327,13 @@ impl Store {
         tx.clear::<Accounts>()?;
         tx.clear::<Tokens>()?;
         tx.clear::<Deltas>()?;
-        tx.clear::<Findings>()?;
         for (key, value) in checkpoint.state.accounts() {
             tx.put::<Accounts>(key, AccountValue(value))?;
         }
         for (token, value) in checkpoint.state.tokens() {
             tx.put::<Tokens>(token, TokenValue(value))?;
         }
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        write_metadata(&tx, &metadata)?;
         tx.commit()?;
         Ok(Snapshot {
             metadata,
@@ -362,25 +347,14 @@ impl Store {
         prior: &Snapshot,
         finding: Finding,
     ) -> Result<Snapshot, PersistenceError> {
-        codec::validate(&finding).map_err(PersistenceError::Invalid)?;
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, &prior.metadata)?;
         let mut metadata = prior.metadata.clone();
-        let observed_through = if metadata.observed_zone.number >= finding.zone.number {
-            metadata.observed_zone
-        } else {
-            finding.zone
-        };
-        metadata.observed_zone = observed_through;
-        metadata.status = Status::Diverged {
-            first_unchecked: finding.zone,
-            observed_through,
-        };
-        tx.put::<Findings>(ACTIVE_FINDING, finding)?;
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        if metadata.observed_zone.number < finding.zone.number {
+            metadata.observed_zone = finding.zone;
+        }
+        metadata.status = Status::Diverged { finding };
+        write_metadata(&tx, &metadata)?;
         tx.commit()?;
         Ok(Snapshot {
             metadata,
@@ -394,24 +368,14 @@ impl Store {
         prior: &Snapshot,
         observed: BlockRef,
     ) -> Result<Snapshot, PersistenceError> {
-        let Status::Diverged {
-            first_unchecked, ..
-        } = prior.metadata.status
-        else {
+        if !matches!(&prior.metadata.status, Status::Diverged { .. }) {
             return Err(PersistenceError::Invalid("checker has not diverged".into()));
-        };
+        }
         let mut metadata = prior.metadata.clone();
         metadata.observed_zone = observed;
-        metadata.status = Status::Diverged {
-            first_unchecked,
-            observed_through: observed,
-        };
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, &prior.metadata)?;
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        write_metadata(&tx, &metadata)?;
         tx.commit()?;
         Ok(Snapshot {
             metadata,
@@ -434,10 +398,7 @@ impl Store {
         metadata.observed_zone = observed;
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, &prior.metadata)?;
-        tx.put::<Meta>(
-            MetaKey::Metadata,
-            MetaValue::Metadata(Box::new(metadata.clone())),
-        )?;
+        write_metadata(&tx, &metadata)?;
         tx.commit()?;
         Ok(Snapshot {
             metadata,
@@ -451,6 +412,13 @@ fn read_metadata<T: DbTx>(tx: &T) -> Result<Metadata, PersistenceError> {
         Some(MetaValue::Metadata(metadata)) => Ok(*metadata),
         _ => Err(PersistenceError::Invalid("metadata is missing".into())),
     }
+}
+
+fn write_metadata<T: DbTxMut>(tx: &T, metadata: &Metadata) -> Result<(), PersistenceError> {
+    let value = MetaValue::Metadata(Box::new(metadata.clone()));
+    codec::validate(&value).map_err(PersistenceError::Invalid)?;
+    tx.put::<Meta>(MetaKey::Metadata, value)?;
+    Ok(())
 }
 
 fn ensure_current<T: DbTx>(tx: &T, prior: &Metadata) -> Result<(), PersistenceError> {
