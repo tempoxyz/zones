@@ -119,6 +119,45 @@ At minimum, alert when `disabled` or `divergence_active` is `1`, verification
 lag continues to grow, or the verified height stops advancing while the Zone
 head advances.
 
+### Verified activity logs
+
+After a Zone block is durably verified, the checker emits one structured
+`zone::checker` log for each authenticated bridge activity. These fields form
+the stable schema for log-backed dashboards:
+
+- `activity_schema_version`: currently `1`.
+- `activity_event`: the stable event name from the table below.
+- `activity_source`: `tempo` for Portal activity or `zone` for Zone activity.
+- `activity_id`: `<zone_hash>:<activity_source>:<activity_index>`, which remains
+  stable if recovery replays the same canonical block.
+- `activity_index`: the event's canonical order within its source for the Zone
+  block.
+- `zone_block`, `zone_hash`, `tempo_block`, and `tempo_hash`: exact verified
+  coordinates.
+- Event-specific fields such as `token`, `amount`, `recipient`, `sender`,
+  `deposit_number`, `withdrawal_index`, `fee`, and `callback_success`.
+
+| `activity_event` | Meaning |
+| --- | --- |
+| `portal_deposit_accounted` | Authenticated Portal deposit entered accounting. |
+| `portal_token_enabled` | Authenticated Portal token entered accounting coverage. |
+| `portal_withdrawal_accounted` | Authenticated Portal withdrawal and callback result. |
+| `portal_withdrawal_bounce_back` | Authenticated Portal withdrawal bounce-back. |
+| `portal_deposit_bounce_back` | Authenticated processed Portal deposit bounce-back. |
+| `portal_deposit_bounce_back_pending` | Authenticated pending Portal deposit bounce-back. |
+| `portal_refund_accounted` | Authenticated Portal refund entered accounting. |
+| `zone_deposit_minted` | Verified Zone deposit mint. |
+| `zone_deposit_failed` | Verified failed Zone deposit. |
+| `zone_deposit_bounce_back_requested` | Authenticated Zone deposit bounce-back request. |
+| `zone_withdrawal_burned` | Verified user withdrawal debit and burn. |
+| `zone_withdrawal_bounce_back_minted` | Verified Zone withdrawal bounce-back mint. |
+| `zone_withdrawal_bounce_back_pending` | Verified pending Zone withdrawal bounce-back. |
+| `zone_refund_minted` | Verified Zone refund mint. |
+
+`activity_id` lets a log consumer deduplicate replayed activities, but logs are
+still retention-bound diagnostic evidence rather than the canonical accounting
+ledger.
+
 ## Modes
 
 | Mode | Behavior |
