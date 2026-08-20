@@ -105,7 +105,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         info!(target: "reth::cli", "Launching Tempo Zone node");
 
         validate_l1_rpc_url(&args.l1_rpc_url)?;
-        validate_portal_address(args.portal_address)?;
         let zone_id = builder.config().chain.zone_id();
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
@@ -292,7 +291,11 @@ pub struct ZoneArgs {
     pub l1_rpc_url: String,
 
     /// ZonePortal contract address on L1.
-    #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
+    #[arg(
+        long = "l1.portal-address",
+        env = "L1_PORTAL_ADDRESS",
+        value_parser = parse_portal_address
+    )]
     pub portal_address: Address,
 
     /// Path to a file or FIFO containing the shared sequencer private key.
@@ -522,12 +525,14 @@ fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
-    eyre::ensure!(
-        !portal_address.is_zero(),
-        "--l1.portal-address must be nonzero"
-    );
-    Ok(())
+fn parse_portal_address(value: &str) -> Result<Address, String> {
+    let address = value
+        .parse::<Address>()
+        .map_err(|err| format!("invalid --l1.portal-address: {err}"))?;
+    if address.is_zero() {
+        return Err("--l1.portal-address must be nonzero".to_owned());
+    }
+    Ok(address)
 }
 
 fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
@@ -547,9 +552,9 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
-        validate_deprecated_zone_id, validate_l1_rpc_url, validate_p2p_transaction_size_limit,
-        validate_portal_address,
+        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_portal_address,
+        sequencer_enabled, validate_deprecated_zone_id, validate_l1_rpc_url,
+        validate_p2p_transaction_size_limit,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -575,8 +580,8 @@ mod tests {
 
     #[test]
     fn portal_address_must_be_nonzero() {
-        assert!(validate_portal_address(alloy_primitives::Address::ZERO).is_err());
-        assert!(validate_portal_address(alloy_primitives::Address::repeat_byte(0x11)).is_ok());
+        assert!(parse_portal_address("0x0000000000000000000000000000000000000000").is_err());
+        assert!(parse_portal_address("0x1111111111111111111111111111111111111111").is_ok());
     }
 
     #[test]
