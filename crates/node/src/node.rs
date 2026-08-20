@@ -197,9 +197,9 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
-    /// Run the SPF over finalized candidates in detached, observational mode.
+    /// Validate finalized batch candidates and request Nitro attestations observationally.
     pub enable_prover: bool,
-    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
     pub prover_address: Option<String>,
 }
 
