@@ -132,8 +132,8 @@ pub struct ZoneSequencerHandle {
 ///   submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for each pending withdrawal.
-/// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates
-///   observationally without delaying or changing settlement.
+/// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates and
+///   requests Nitro attestations observationally without delaying or changing settlement.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
