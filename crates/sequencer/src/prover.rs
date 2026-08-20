@@ -424,7 +424,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
         let attempt = witness.clone();
-        tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
+        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
             .await
             .context("SPF worker panicked")?
             .context("SPF rejected generated witness")
