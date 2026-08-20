@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, future::Future, time::Duration};
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumHash;
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
+use alloy_rpc_client::{ConnectionConfig, RpcClient, WebSocketConfig};
 use futures::{StreamExt as _, TryStreamExt as _, future};
 use reth_chainspec::ChainSpecProvider;
 use reth_exex::{ExExContext, ExExHead, ExExNotification};
@@ -26,6 +27,7 @@ use crate::{
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_STATE_ATTEMPTS: u32 = 30;
+const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 /// `NodePrimitives` whose transaction and receipt types the checker can process.
 pub(crate) trait CheckedPrimitives: NodePrimitives {}
@@ -219,15 +221,26 @@ where
 async fn connect(url: &str) -> eyre::Result<DynProvider<TempoNetwork>> {
     let provider = retry_transient(
         || async {
-            ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect(url)
+            let client = RpcClient::builder()
+                .connect_with_config(url, rpc_connection_config())
                 .await
-                .map_err(classify_rpc_error)
+                .map_err(classify_rpc_error)?;
+            Ok(ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_client(client)
+                .erased())
         },
         "Tempo RPC unavailable",
     )
     .await?;
-    Ok(provider.erased())
+    Ok(provider)
+}
+
+fn rpc_connection_config() -> ConnectionConfig {
+    ConnectionConfig::new().with_ws_config(
+        WebSocketConfig::default()
+            .max_frame_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE))
+            .max_message_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)),
+    )
 }
 
 /// Retry transient failure and return failures that disable the checker.
