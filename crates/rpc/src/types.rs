@@ -355,10 +355,10 @@ pub struct SequencerInfoResponse {
     pub mode: String,
     /// ZonePortal address on Tempo L1.
     pub portal: Address,
-    /// Zone ID declared by the loaded manifest (multi-sequencer mode only).
+    /// Canonical Zone ID derived from the genesis chain ID (multi-sequencer mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_zone_id: Option<U64>,
-    /// Sequencer-set version declared by the loaded manifest (multi-sequencer mode only).
+    /// Sequencer-set version validated and pinned at node startup (multi-sequencer mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_sequencer_set_version: Option<U64>,
     /// Digest of the loaded manifest's settlement-relevant membership.

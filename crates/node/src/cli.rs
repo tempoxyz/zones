@@ -106,6 +106,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
         validate_l1_rpc_url(&args.l1_rpc_url)?;
         validate_portal_address(args.portal_address)?;
+        let zone_id = builder.config().chain.zone_id();
+        validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
         let p2p_config = args
             .sequencer_manifest
@@ -122,7 +124,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     args.secp256k1_key.as_ref(),
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
-                    args.zone_id,
+                    zone_id,
                     args.sequencer_role,
                 )
             })
@@ -187,7 +189,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
         .with_redacted_rpc(ZoneRedactedRpcConfig {
             redacted_rpc_port: args.redacted_rpc_port,
-            zone_id: args.zone_id,
+            zone_id,
             max_auth_token_validity: Duration::from_secs(
                 args.redacted_rpc_max_auth_token_validity_secs,
             ),
@@ -207,7 +209,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,
-                zone_id: args.zone_id,
+                zone_id,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_anchor_config: BatchAnchorConfig::default(),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
@@ -443,9 +445,9 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    /// Zone ID used for chain identity and redacted RPC authentication.
-    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u32,
+    /// Deprecated: validates the Zone ID encoded in the genesis chain ID.
+    #[arg(long = "zone.id", env = "ZONE_ID")]
+    pub zone_id: Option<u32>,
 
     /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
@@ -536,6 +538,16 @@ fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
     Ok(())
 }
 
+fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
+    if let Some(configured) = configured {
+        eyre::ensure!(
+            configured == derived,
+            "deprecated --zone.id value {configured} does not match zone ID {derived} encoded in the genesis chain ID"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Write as _, process::Command, thread, time::Duration};
@@ -544,7 +556,8 @@ mod tests {
 
     use super::{
         Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
-        validate_l1_rpc_url, validate_p2p_transaction_size_limit, validate_portal_address,
+        validate_deprecated_zone_id, validate_l1_rpc_url, validate_p2p_transaction_size_limit,
+        validate_portal_address,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -572,6 +585,25 @@ mod tests {
     fn portal_address_must_be_nonzero() {
         assert!(validate_portal_address(alloy_primitives::Address::ZERO).is_err());
         assert!(validate_portal_address(alloy_primitives::Address::repeat_byte(0x11)).is_ok());
+    }
+
+    #[test]
+    fn deprecated_zone_id_is_optional_and_validated() {
+        assert!(validate_deprecated_zone_id(None, 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
+
+        let parsed = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "7",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zone.zone_id, Some(7));
     }
 
     #[test]

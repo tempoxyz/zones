@@ -86,6 +86,8 @@ pub struct SequencerRpcContext {
     pub(crate) peer_tips: PeerTipRegistry,
     /// Validated static topology manifest.
     pub manifest: Arc<ZoneManifest>,
+    /// Portal sequencer-set version validated against the manifest at startup.
+    pub pinned_sequencer_set_version: Option<u64>,
     /// This node's individual secp256k1 address (the `setLeader` relayer identity).
     ///
     /// `None` on an rpc-only member: it holds no individual key, so it cannot relay.
@@ -105,6 +107,7 @@ impl SequencerRpcContext {
         status: SharedRoleStatus,
         peer_tips: PeerTipRegistry,
         manifest: Arc<ZoneManifest>,
+        pinned_sequencer_set_version: Option<u64>,
         local_secp256k1_address: Option<Address>,
         local_ed25519_public_key: zone_p2p::P2pPeerId,
         relayer: Option<DynProvider<TempoNetwork>>,
@@ -115,6 +118,7 @@ impl SequencerRpcContext {
             status,
             peer_tips,
             manifest,
+            pinned_sequencer_set_version,
             local_secp256k1_address,
             local_ed25519_public_key,
             relayer,
@@ -196,6 +200,7 @@ where
 
 /// Build the unauthenticated Zone extension installed on the node's operator HTTP RPC.
 pub(crate) fn operator_zone_rpc_module<P>(
+    zone_id: u32,
     portal_address: Address,
     sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
     provider: P,
@@ -218,7 +223,7 @@ where
         let sequencer = sequencer.clone();
         let provider = provider.clone();
         async move {
-            get_sequencer_info(portal_address, sequencer.as_ref(), &provider)
+            get_sequencer_info(zone_id, portal_address, sequencer.as_ref(), &provider)
                 .map_err(operator_rpc_error)
         }
     })?;
@@ -420,6 +425,7 @@ async fn encryption_key(
 }
 
 fn get_sequencer_info<P>(
+    zone_id: u32,
     portal_address: Address,
     sequencer: &std::sync::OnceLock<SequencerRpcContext>,
     provider: &P,
@@ -490,8 +496,8 @@ where
     Ok(SequencerInfoResponse {
         mode: "multi".to_owned(),
         portal: portal_address,
-        manifest_zone_id: Some(U64::from(context.manifest.zone_id())),
-        manifest_sequencer_set_version: Some(U64::from(context.manifest.sequencer_set_version())),
+        manifest_zone_id: Some(U64::from(zone_id)),
+        manifest_sequencer_set_version: context.pinned_sequencer_set_version.map(U64::from),
         manifest_membership_digest: Some(context.manifest.membership_digest()),
         decryption_keys: Some({
             let status = context.encryption_keys.public_status();
@@ -1514,6 +1520,7 @@ mod tests {
     #[tokio::test]
     async fn operator_rpc_module_exposes_sequencer_methods_without_auth() {
         let module = operator_zone_rpc_module(
+            7,
             Address::repeat_byte(0x11),
             Arc::new(std::sync::OnceLock::new()),
             Arc::new(reth_provider::test_utils::MockEthProvider::default()),

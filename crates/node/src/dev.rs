@@ -425,8 +425,6 @@ mod command {
                 &self.l1_rpc_url,
                 "--l1.portal-address",
                 &provisioned.portal.to_string(),
-                "--zone.id",
-                &provisioned.zone_id.to_string(),
                 "--http",
                 "--http.addr",
                 &self.http_addr,

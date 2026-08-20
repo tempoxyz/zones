@@ -912,7 +912,7 @@ fn append_manifest_invariants(
     live_nodes: &[(&NodeSnapshot, &ZoneInfoResponse, &SequencerInfoResponse)],
 ) {
     let portal_members = address_set(&portal.sequencers);
-    let node_manifest_zones = live_nodes
+    let node_zone_ids = live_nodes
         .iter()
         .map(|(node, _, info)| {
             format!(
@@ -926,19 +926,16 @@ fn append_manifest_invariants(
     add_check(
         results,
         "manifest_zone",
-        manifest.zone_id() == config.zone_id
-            && live_nodes.iter().all(|(_, _, info)| {
-                info.manifest_zone_id.map(|id| id.to::<u32>()) == Some(config.zone_id)
-            }),
-        format!("manifest and all nodes declare Zone {}", config.zone_id),
+        live_nodes.iter().all(|(_, _, info)| {
+            info.manifest_zone_id.map(|id| id.to::<u32>()) == Some(config.zone_id)
+        }),
+        format!("all nodes report canonical Zone {}", config.zone_id),
         format!(
-            "expected Zone {}; file={}, nodes=[{}]",
-            config.zone_id,
-            manifest.zone_id(),
-            node_manifest_zones
+            "expected canonical Zone {}; nodes=[{}]",
+            config.zone_id, node_zone_ids
         ),
     );
-    let node_manifest_versions = live_nodes
+    let node_sequencer_set_versions = live_nodes
         .iter()
         .map(|(node, _, info)| {
             format!(
@@ -953,21 +950,18 @@ fn append_manifest_invariants(
     add_check(
         results,
         "manifest_version",
-        manifest.sequencer_set_version() == portal.sequencer_set_version
-            && live_nodes.iter().all(|(_, _, info)| {
-                info.manifest_sequencer_set_version
-                    .map(|version| version.to::<u64>())
-                    == Some(manifest.sequencer_set_version())
-            }),
+        live_nodes.iter().all(|(_, _, info)| {
+            info.manifest_sequencer_set_version
+                .map(|version| version.to::<u64>())
+                == Some(portal.sequencer_set_version)
+        }),
         format!(
-            "manifest, Portal, and all nodes report version {}",
-            manifest.sequencer_set_version()
+            "Portal and all nodes report sequencer-set version {}",
+            portal.sequencer_set_version
         ),
         format!(
-            "expected version {}; Portal={}, nodes=[{}]",
-            manifest.sequencer_set_version(),
-            portal.sequencer_set_version,
-            node_manifest_versions
+            "expected finalized Portal version {}; nodes=[{}]",
+            portal.sequencer_set_version, node_sequencer_set_versions
         ),
     );
     let digest = manifest.membership_digest();

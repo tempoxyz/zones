@@ -514,7 +514,9 @@ where
             .await?
             .erased();
         let l1_chain_id = l1_provider.get_chain_id().await?;
-        let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let chain_spec = ctx.node.provider().chain_spec();
+        let chain_id = chain_spec.genesis().config.chain_id;
+        let genesis_zone_id = chain_spec.zone_id();
         // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
         // explicit sentinel because they have no on-chain portal to bind against.
         if self.portal_address.is_zero() {
@@ -534,8 +536,9 @@ where
                     )
                 })?;
 
+            validate_configured_zone_id("genesis", genesis_zone_id, portal_zone_id)?;
             validate_configured_zone_id(
-                "--zone.id/redacted RPC configuration",
+                "redacted RPC configuration",
                 self.redacted_rpc_config.zone_id,
                 portal_zone_id,
             )?;
@@ -547,7 +550,7 @@ where
                 )?;
             }
             if let Some(config) = self.p2p_config.as_ref() {
-                validate_configured_zone_id("P2P manifest", config.zone_id(), portal_zone_id)?;
+                validate_configured_zone_id("P2P configuration", config.zone_id(), portal_zone_id)?;
             }
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
@@ -625,8 +628,7 @@ where
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
                 portal_address: self.portal_address,
-                zone_id: config.zone_id(),
-                sequencer_set_version: config.sequencer_set_version(),
+                zone_id: genesis_zone_id,
             };
             let anchor_config = self
                 .sequencer_config
@@ -637,15 +639,17 @@ where
             // decides whose signatures count and how many are needed. Reconcile them before any
             // role task starts, so a disagreement fails at startup instead of stalling
             // settlement at the next batch boundary.
-            crate::settlement_attestation::validate_registered_sequencer_set(
-                config.manifest(),
-                self.portal_address,
-                &l1_provider,
-            )
-            .await?;
+            let pinned_sequencer_set_version =
+                crate::settlement_attestation::validate_registered_sequencer_set(
+                    config.manifest(),
+                    self.portal_address,
+                    &l1_provider,
+                )
+                .await?;
             // Every node holds an attestation store so it can be promoted anytime.
             let attestation = AttestationContext::new(
                 attestation_domain,
+                pinned_sequencer_set_version,
                 config.block_attestation_signer(),
                 config.block_attestation_addresses(),
                 AttestationStore::default(),
@@ -700,6 +704,7 @@ where
                     role_status.clone(),
                     peer_tips.clone(),
                     manifest,
+                    pinned_sequencer_set_version,
                     local_secp256k1_address,
                     local_ed25519_public_key.clone(),
                     relayer,
@@ -760,6 +765,7 @@ where
                     NodeZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
                 )?;
                 container.modules.merge_http(operator_zone_rpc_module(
+                    genesis_zone_id,
                     portal_address,
                     operator_rpc_slot,
                     operator_rpc_provider,

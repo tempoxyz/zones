@@ -20,7 +20,7 @@ use tempo_chainspec::{
 };
 use tempo_primitives::TempoHeader;
 pub use zone_hardfork::ZoneHardfork;
-use zone_primitives::constants::{ZoneChainIdError, decode_l1_chain_id};
+use zone_primitives::constants::{ZoneChainIdError, decode_l1_chain_id, decode_zone_chain_id};
 
 /// Chain specification for a Tempo Zone.
 ///
@@ -75,6 +75,13 @@ impl ZoneChainSpec {
         Ok(Self {
             inner: Arc::new(zone),
         })
+    }
+
+    /// Zone identifier encoded in the genesis chain ID.
+    pub fn zone_id(&self) -> u32 {
+        decode_zone_chain_id(self.inner.genesis().config.chain_id)
+            .expect("ZoneChainSpec validates its chain ID during construction")
+            .1
     }
 }
 

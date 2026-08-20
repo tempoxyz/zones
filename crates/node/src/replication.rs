@@ -47,6 +47,8 @@ use crate::settlement_attestation::build_settlement_attestation;
 #[derive(Clone)]
 pub(crate) struct AttestationContext {
     pub(crate) domain: AttestationDomain,
+    /// Portal sequencer-set version validated against the manifest at startup.
+    pub(crate) pinned_sequencer_set_version: Option<u64>,
     /// `None` on an rpc-only member: it holds no individual key and never signs.
     pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
@@ -58,6 +60,7 @@ pub(crate) struct AttestationContext {
 impl AttestationContext {
     pub(crate) fn new(
         domain: AttestationDomain,
+        pinned_sequencer_set_version: Option<u64>,
         signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
         store: AttestationStore,
@@ -66,6 +69,7 @@ impl AttestationContext {
     ) -> Self {
         Self {
             domain,
+            pinned_sequencer_set_version,
             signer,
             addresses,
             store,

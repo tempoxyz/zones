@@ -133,12 +133,6 @@ impl LeaderSet {
                     "--rolling-membership requires --zone-manifest with the finalized next manifest"
                 )
             })?;
-            ensure!(
-                manifest.sequencer_set_version() == view.portal.sequencer_set_version,
-                "rolling manifest version {} does not match finalized Portal version {}",
-                manifest.sequencer_set_version(),
-                view.portal.sequencer_set_version
-            );
             let manifest_members = manifest
                 .quorum_nodes()
                 .map(|(_, address)| address)

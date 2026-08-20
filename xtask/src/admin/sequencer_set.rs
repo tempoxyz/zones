@@ -299,21 +299,9 @@ fn validate(
         proposed.len()
     );
 
-    let next_version = command
-        .expected_version
-        .checked_add(1)
-        .ok_or_else(|| eyre!("expected sequencer-set version cannot be incremented"))?;
     ensure!(
-        next_manifest.zone_id() == view.config.zone_id,
-        "next manifest declares Zone {}, expected {}",
-        next_manifest.zone_id(),
-        view.config.zone_id
-    );
-    ensure!(
-        next_manifest.sequencer_set_version() == next_version,
-        "next manifest sequencer_set_version is {}, expected {}",
-        next_manifest.sequencer_set_version(),
-        next_version
+        command.expected_version != u64::MAX,
+        "expected sequencer-set version cannot be incremented"
     );
     let manifest_members = next_manifest
         .quorum_nodes()

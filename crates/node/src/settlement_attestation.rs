@@ -41,12 +41,12 @@ pub(crate) async fn validate_registered_sequencer_set(
     manifest: &zone_p2p::ZoneManifest,
     portal_address: alloy_primitives::Address,
     l1_provider: &alloy_provider::DynProvider<tempo_alloy::TempoNetwork>,
-) -> eyre::Result<()> {
+) -> eyre::Result<Option<u64>> {
     // Programmatic synthetic test harnesses use zero to mean no Portal; the production CLI
     // rejects a zero address before node launch.
     if portal_address.is_zero() {
         info!(target: "zone::p2p", "No ZonePortal configured; skipping the manifest quorum check");
-        return Ok(());
+        return Ok(None);
     }
     let portal_code = l1_provider
         .get_code_at(portal_address)
@@ -62,6 +62,11 @@ pub(crate) async fn validate_registered_sequencer_set(
     // harmless for a startup sanity check.
     let portal = ZonePortal::new(portal_address, l1_provider);
     let quorum: Vec<_> = manifest.quorum_nodes().collect();
+    let sequencer_set_version = portal
+        .sequencerSetVersion()
+        .call()
+        .await
+        .wrap_err("failed reading the ZonePortal sequencer-set version")?;
     let threshold_call = portal.sequencerThreshold();
     let count_call = portal.sequencerCount();
     let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
@@ -72,6 +77,15 @@ pub(crate) async fn validate_registered_sequencer_set(
     let (threshold, registered_count, registered) =
         tokio::try_join!(threshold_call.call(), count_call.call(), registered)
             .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+    let validated_version = portal
+        .sequencerSetVersion()
+        .call()
+        .await
+        .wrap_err("failed re-reading the ZonePortal sequencer-set version")?;
+    eyre::ensure!(
+        validated_version == sequencer_set_version,
+        "ZonePortal sequencer set changed during startup validation ({sequencer_set_version} -> {validated_version})"
+    );
 
     for (name, address, is_registered) in registered {
         eyre::ensure!(
@@ -93,8 +107,8 @@ pub(crate) async fn validate_registered_sequencer_set(
         );
     }
 
-    info!(target: "zone::p2p", threshold, quorum_nodes = quorum.len(), "Checked the manifest quorum against ZonePortal");
-    Ok(())
+    info!(target: "zone::p2p", threshold, sequencer_set_version, quorum_nodes = quorum.len(), "Checked the manifest quorum against ZonePortal");
+    Ok(Some(sequencer_set_version))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,11 +228,7 @@ where
         verifier_call.call(),
         portal_tip_call.call(),
     )?;
-    eyre::ensure!(
-        set_version == context.domain.sequencer_set_version,
-        "portal signer-set version {set_version} does not match manifest version {}",
-        context.domain.sequencer_set_version
-    );
+    validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
     eyre::ensure!(
         portal_tip == previous_tip,
         "proposal does not extend the portal batch tip"
@@ -278,6 +288,19 @@ where
         withdrawalQueueHash: withdrawal_queue_hash,
         verifierConfigHash: alloy_primitives::keccak256(Bytes::new()),
     }))
+}
+
+fn validate_sequencer_set_version(
+    pinned_version: Option<u64>,
+    live_version: u64,
+) -> eyre::Result<()> {
+    if let Some(pinned_version) = pinned_version {
+        eyre::ensure!(
+            live_version == pinned_version,
+            "portal signer-set version {live_version} does not match startup-pinned version {pinned_version}"
+        );
+    }
+    Ok(())
 }
 
 /// Verify that the proposed Tempo and anchor endpoints are canonical and that the anchor remains
@@ -651,18 +674,29 @@ mod tests {
             .connect_mocked_client(asserter.clone())
             .erased();
 
-        validate_registered_sequencer_set(
+        let pinned_version = validate_registered_sequencer_set(
             &test_manifest(),
             alloy_primitives::Address::ZERO,
             &provider,
         )
         .await
         .expect("synthetic nodes have no configured ZonePortal");
+        assert_eq!(pinned_version, None);
 
         assert!(
             asserter.read_q().is_empty(),
             "the zero-address test bypass must not issue an L1 request"
         );
+    }
+
+    #[test]
+    fn settlement_rejects_runtime_sequencer_set_rotation() {
+        validate_sequencer_set_version(Some(7), 7).expect("unchanged version must remain valid");
+        let err = validate_sequencer_set_version(Some(7), 8)
+            .expect_err("runtime rotation must fail closed");
+        assert!(err.to_string().contains("startup-pinned version 7"));
+        validate_sequencer_set_version(None, 8)
+            .expect("synthetic nodes without a Portal have no pinned version");
     }
 
     #[tokio::test]

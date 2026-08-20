@@ -64,6 +64,7 @@ struct BackfillNodeChannels {
 /// Fully validated configuration for one node's Zone P2P runtime.
 #[derive(Clone)]
 pub struct P2pConfig {
+    zone_id: u32,
     manifest: Arc<ZoneManifest>,
     ed25519_identity: Ed25519Identity,
     // This individual node key will be used to sign zone blocks for the on-chain quorum.
@@ -76,8 +77,8 @@ pub struct P2pConfig {
 }
 
 impl P2pConfig {
-    /// Loads the Commonware Ed25519 key and manifest, then validates this node's
-    /// membership, zone ID, and optional role assertion.
+    /// Loads the Commonware Ed25519 key and manifest, then validates this node's membership and
+    /// optional role assertion. `zone_id` comes from the node's genesis configuration.
     ///
     /// `secp256k1_key_path` is required for a quorum member and rejected for an `rpc_only`
     /// node; [`ZoneManifest::validate_node`] enforces the correspondence.
@@ -87,7 +88,7 @@ impl P2pConfig {
         secp256k1_key_path: Option<impl AsRef<Path>>,
         listen: SocketAddr,
         bypass_ip_check: bool,
-        expected_zone_id: u32,
+        zone_id: u32,
         asserted_role: Option<Role>,
     ) -> eyre::Result<Self> {
         let ed25519_identity = Ed25519Identity::read_from_file(ed25519_key_path)?;
@@ -97,7 +98,6 @@ impl P2pConfig {
         let manifest = ZoneManifest::read_from_file(manifest_path)?;
         validate_ip_check_configuration(&manifest, bypass_ip_check)?;
         manifest.validate_node(
-            expected_zone_id,
             &ed25519_identity.ed25519_public_key(),
             secp256k1_identity.as_ref().map(Secp256k1Identity::address),
             asserted_role,
@@ -107,6 +107,7 @@ impl P2pConfig {
         // local Tempo checkpoint before any role-dependent task starts.
         let leadership = manifest.leadership_schedule();
         Ok(Self {
+            zone_id,
             manifest: Arc::new(manifest),
             ed25519_identity,
             secp256k1_identity,
@@ -168,19 +169,14 @@ impl P2pConfig {
 
     /// Zone ID included in each block attestation.
     pub fn zone_id(&self) -> u32 {
-        self.manifest.zone_id()
-    }
-
-    /// Registered signer-set version included in each block attestation.
-    pub fn sequencer_set_version(&self) -> u64 {
-        self.manifest.sequencer_set_version()
+        self.zone_id
     }
 }
 
 impl std::fmt::Debug for P2pConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2pConfig")
-            .field("zone_id", &self.manifest.zone_id())
+            .field("zone_id", &self.zone_id)
             .field("ed25519_public_key", &self.ed25519_public_key())
             .field("secp256k1_address", &self.secp256k1_address())
             .field("listen", &self.listen)
@@ -392,6 +388,7 @@ fn run(
         let (mut commonware, mut oracle, peers) = network::instantiate(
             &context,
             &config.manifest,
+            config.zone_id,
             config.ed25519_identity.into_private_key(),
             config.listen,
             config.bypass_ip_check,
@@ -438,7 +435,7 @@ fn run(
 
         info!(
             target: "zone::p2p",
-            zone_id = config.manifest.zone_id(),
+            zone_id = config.zone_id,
             ed25519_public_key = %local_ed25519_public_key,
             listen = %config.listen,
             peers = config.manifest.nodes().len(),
@@ -967,7 +964,7 @@ mod tests {
         standby: usize,
     ) -> String {
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -995,6 +992,7 @@ mod tests {
         let input = manifest_with_standby(&identities, &addresses, 41, 3);
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
         let config = P2pConfig {
+            zone_id: 9,
             manifest: manifest.clone(),
             ed25519_identity: ed25519_identity(41),
             secp256k1_identity: Some(secp256k1_identity(41)),
@@ -1018,7 +1016,7 @@ mod tests {
             ed25519_identity(3),
         ];
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, identity) in identities.iter().enumerate() {
@@ -1113,7 +1111,7 @@ mod tests {
             ed25519_identity(3),
         ];
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -1133,7 +1131,6 @@ mod tests {
                 let secp256k1_identity = secp256k1_identity(index as u64 + 1);
                 manifest
                     .validate_node(
-                        9,
                         &identity.ed25519_public_key(),
                         Some(secp256k1_identity.address()),
                         None,
@@ -1141,6 +1138,7 @@ mod tests {
                     .unwrap();
                 spawn_p2p(
                     P2pConfig {
+                        zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
                         secp256k1_identity: Some(secp256k1_identity),
@@ -1371,7 +1369,7 @@ mod tests {
             ed25519_identity(23),
         ];
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -1402,6 +1400,7 @@ mod tests {
                 leadership.record_applied_anchor(10);
                 spawn_p2p(
                     P2pConfig {
+                        zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 21)),
@@ -1608,6 +1607,7 @@ mod tests {
                 leadership.publish(manifest.bootstrap_leadership()).unwrap();
                 spawn_p2p(
                     P2pConfig {
+                        zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
                         // The standby is provisioned without quorum key material at all.
@@ -1762,7 +1762,7 @@ mod tests {
         ];
         let identities = [51_u64, 52, 53].map(ed25519_identity);
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -1779,6 +1779,7 @@ mod tests {
             .map(|index| {
                 spawn_p2p(
                     P2pConfig {
+                        zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: ed25519_identity(index as u64 + 51),
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 51)),
@@ -1847,7 +1848,7 @@ mod tests {
             ed25519_identity(13),
         ];
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -1869,7 +1870,6 @@ mod tests {
                 let secp256k1_identity = secp256k1_identity(index as u64 + 11);
                 let role = manifest
                     .validate_node(
-                        9,
                         &identity.ed25519_public_key(),
                         Some(secp256k1_identity.address()),
                         None,
@@ -1878,6 +1878,7 @@ mod tests {
                 assert_eq!(role, crate::Role::Follower);
                 spawn_p2p(
                     P2pConfig {
+                        zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
                         secp256k1_identity: Some(secp256k1_identity),
@@ -1949,7 +1950,7 @@ mod tests {
             ed25519_identity(63),
         ];
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -1967,6 +1968,7 @@ mod tests {
         let spawn_node = |index: usize| {
             spawn_p2p(
                 P2pConfig {
+                    zone_id: 9,
                     manifest: manifest.clone(),
                     ed25519_identity: ed25519_identity(index as u64 + 61),
                     secp256k1_identity: Some(secp256k1_identity(index as u64 + 61)),
@@ -2047,6 +2049,7 @@ mod tests {
         for attempt in 0..10 {
             match spawn_p2p(
                 P2pConfig {
+                    zone_id: 9,
                     manifest: manifest.clone(),
                     ed25519_identity: ed25519_identity(63),
                     secp256k1_identity: Some(secp256k1_identity(63)),
@@ -2116,7 +2119,7 @@ mod tests {
             ed25519_identity(73),
         ];
         let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
@@ -2137,6 +2140,7 @@ mod tests {
             .map(|index| {
                 spawn_p2p(
                     P2pConfig {
+                        zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: ed25519_identity(index as u64 + 71),
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 71)),
@@ -2191,6 +2195,7 @@ mod tests {
 
         let mut leader = spawn_p2p(
             P2pConfig {
+                zone_id: 9,
                 manifest: manifest.clone(),
                 ed25519_identity: ed25519_identity(71),
                 secp256k1_identity: Some(secp256k1_identity(71)),

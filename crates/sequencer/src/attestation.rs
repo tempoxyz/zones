@@ -47,7 +47,6 @@ pub struct AttestationDomain {
     pub l1_chain_id: u64,
     pub portal_address: Address,
     pub zone_id: u32,
-    pub sequencer_set_version: u64,
 }
 
 impl AttestationDomain {
@@ -324,7 +323,6 @@ mod tests {
             l1_chain_id: 1337,
             portal_address: Address::repeat_byte(0x11),
             zone_id: 7,
-            sequencer_set_version: 3,
         }
     }
 

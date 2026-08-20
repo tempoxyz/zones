@@ -715,8 +715,6 @@ impl ManifestNode {
 /// A parsed and intrinsically validated zone manifest.
 #[derive(Debug, Clone)]
 pub struct ZoneManifest {
-    zone_id: u32,
-    sequencer_set_version: u64,
     leader_ed25519_public_key: PublicKey,
     forced_recovery: Option<ForcedRecoveryConfig>,
     nodes: Vec<ManifestNode>,
@@ -872,8 +870,6 @@ impl ZoneManifest {
         };
 
         Ok(Self {
-            zone_id: raw.zone_id,
-            sequencer_set_version: raw.sequencer_set_version,
             leader_ed25519_public_key,
             forced_recovery,
             nodes,
@@ -898,18 +894,10 @@ impl ZoneManifest {
     /// a quorum member without it could never settle.
     pub fn validate_node(
         &self,
-        expected_zone_id: u32,
         local_ed25519_public_key: &PublicKey,
         local_secp256k1_address: Option<EthereumAddress>,
         asserted_role: Option<Role>,
     ) -> Result<Role, ManifestError> {
-        if self.zone_id != expected_zone_id {
-            return Err(ManifestError::ZoneIdMismatch {
-                manifest: self.zone_id,
-                cli: expected_zone_id,
-            });
-        }
-
         let local_node = self
             .node_by_ed25519_public_key(local_ed25519_public_key)
             .ok_or_else(|| {
@@ -941,16 +929,6 @@ impl ZoneManifest {
             });
         }
         Ok(role)
-    }
-
-    /// Zone identifier used to domain-separate the P2P network.
-    pub const fn zone_id(&self) -> u32 {
-        self.zone_id
-    }
-
-    /// Version of the registered L1 attester set used in EIP-712 statements.
-    pub const fn sequencer_set_version(&self) -> u64 {
-        self.sequencer_set_version
     }
 
     /// Ed25519 Commonware public key of the configured initial leader.
@@ -1092,19 +1070,18 @@ impl ZoneManifest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
-    zone_id: u32,
-    #[serde(default = "default_sequencer_set_version")]
-    sequencer_set_version: u64,
+    /// Deprecated compatibility field. Zone identity comes from the genesis chain ID.
+    #[serde(default, rename = "zone_id")]
+    _legacy_zone_id: Option<u32>,
+    /// Deprecated compatibility field. The signer-set version comes from `ZonePortal`.
+    #[serde(default, rename = "sequencer_set_version")]
+    _legacy_sequencer_set_version: Option<u64>,
     leader_ed25519_public_key: String,
     #[serde(default)]
     forced_recovery: Option<RawForcedRecovery>,
     #[serde(default)]
     historical_leaders: Vec<RawHistoricalLeaderIdentity>,
     nodes: Vec<RawManifestNode>,
-}
-
-const fn default_sequencer_set_version() -> u64 {
-    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -1225,9 +1202,6 @@ pub enum ManifestError {
 
     #[error("manifest leader Ed25519 public key `{0}` does not match any node")]
     LeaderEd25519PublicKeyNotFound(String),
-
-    #[error("zone ID mismatch: manifest has {manifest}, but --zone.id is {cli}")]
-    ZoneIdMismatch { manifest: u32, cli: u32 },
 
     #[error("this node's Ed25519 public key `{0}` is not present in the sequencer manifest")]
     LocalNodeNotFound(String),
@@ -1648,7 +1622,7 @@ mod tests {
     /// node declares no `secp256k1_address`, exactly as the loader requires.
     fn manifest_with_rpc_only(leader: u64, nodes: &[(u64, &str, &str, bool)]) -> String {
         let mut value = format!(
-            "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             ed25519_public_key(leader)
         );
         for (key, name, address, rpc_only) in nodes {
@@ -1700,19 +1674,13 @@ mod tests {
         );
         assert_eq!(
             manifest
-                .validate_node(
-                    7,
-                    &leader,
-                    Some(secp256k1_address(1).parse().unwrap()),
-                    None
-                )
+                .validate_node(&leader, Some(secp256k1_address(1).parse().unwrap()), None)
                 .unwrap(),
             Role::Leader
         );
         assert_eq!(
             manifest
                 .validate_node(
-                    7,
                     &follower,
                     Some(secp256k1_address(2).parse().unwrap()),
                     Some(Role::Follower),
@@ -1802,9 +1770,9 @@ mod tests {
     }
 
     #[test]
-    fn accepts_factory_installed_sequencer_set_version_zero() {
+    fn accepts_ignored_legacy_identity_fields() {
         let input = format!(
-            "sequencer_set_version = 0\n{}",
+            "zone_id = 7\nsequencer_set_version = 42\n{}",
             manifest(
                 1,
                 &[
@@ -1816,7 +1784,8 @@ mod tests {
         );
 
         let manifest = ZoneManifest::parse(&input).unwrap();
-        assert_eq!(manifest.sequencer_set_version(), 0);
+
+        assert_eq!(manifest.bootstrap_role_of(&public_key(1)), Role::Leader);
     }
 
     #[test]
@@ -1876,7 +1845,6 @@ mod tests {
 
         // The example uses placeholder keys, so only its shape can be checked.
         let manifest: super::RawManifest = toml::from_str(example).unwrap();
-        assert_eq!(manifest.zone_id, 7);
         assert_eq!(manifest.nodes.len(), 4);
         assert_eq!(manifest.historical_leaders.len(), 1);
         assert_eq!(
@@ -1945,12 +1913,12 @@ mod tests {
         // Its role assertion must name the standby role, not `follower`.
         assert_eq!(
             manifest
-                .validate_node(7, &rpc_follower, None, Some(Role::RpcFollower))
+                .validate_node(&rpc_follower, None, Some(Role::RpcFollower))
                 .unwrap(),
             Role::RpcFollower
         );
         assert!(matches!(
-            manifest.validate_node(7, &rpc_follower, None, Some(Role::Follower)),
+            manifest.validate_node(&rpc_follower, None, Some(Role::Follower)),
             Err(ManifestError::RoleMismatch { .. })
         ));
     }
@@ -2108,13 +2076,12 @@ mod tests {
 
         // A quorum member started without --secp256k1.key cannot sign.
         assert!(matches!(
-            manifest.validate_node(7, &public_key(2), None, None),
+            manifest.validate_node(&public_key(2), None, None),
             Err(ManifestError::LocalSecp256k1KeyMissing(node)) if node == "follower-a"
         ));
         // A standby started with one holds key material it must not have.
         assert!(matches!(
             manifest.validate_node(
-                7,
                 &public_key(4),
                 Some(secp256k1_address(4).parse().unwrap()),
                 None
@@ -2162,40 +2129,20 @@ mod tests {
         let follower = PrivateKey::from_seed(2).public_key();
         assert!(matches!(
             valid.validate_node(
-                7,
                 &follower,
                 Some(secp256k1_address(2).parse().unwrap()),
                 Some(Role::Leader),
             ),
             Err(ManifestError::RoleMismatch { .. })
         ));
-        assert!(matches!(
-            valid.validate_node(
-                8,
-                &follower,
-                Some(secp256k1_address(2).parse().unwrap()),
-                None,
-            ),
-            Err(ManifestError::ZoneIdMismatch { .. })
-        ));
         let unknown = PrivateKey::from_seed(99).public_key();
         assert!(matches!(
-            valid.validate_node(
-                7,
-                &unknown,
-                Some(secp256k1_address(99).parse().unwrap()),
-                None,
-            ),
+            valid.validate_node(&unknown, Some(secp256k1_address(99).parse().unwrap()), None,),
             Err(ManifestError::LocalNodeNotFound(_))
         ));
 
         assert!(matches!(
-            valid.validate_node(
-                7,
-                &follower,
-                Some(secp256k1_address(3).parse().unwrap()),
-                None,
-            ),
+            valid.validate_node(&follower, Some(secp256k1_address(3).parse().unwrap()), None,),
             Err(ManifestError::LocalSecp256k1AddressMismatch { .. })
         ));
     }

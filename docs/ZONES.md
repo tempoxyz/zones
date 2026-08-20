@@ -185,7 +185,7 @@ just create-zone my-zone alphausd
 ```
 
 This creates `generated/my-zone/` containing:
-- **`genesis.json`** — Zone L2 genesis state (system contracts, fee token, etc.)
+- **`genesis.json`** — Zone L2 genesis state (system contracts, fee token, chain ID, etc.)
 - **`zone.json`** — Deployment metadata (portal address, zone ID, anchor block, `zoneFactory`, public `admin` / `sequencer` addresses, and optional saved keys/router metadata)
 
 This initial token controls the first L1 TIP-20 the portal accepts and mirrors onto the zone. The zone's fee token in genesis remains `pathUSD`.
@@ -648,7 +648,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 |------|---------|-------------|
 | `--l1.rpc-url` | (required) | Certified Tempo follower WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
-| `--zone.id` | 0 | Zone ID from ZoneFactory. At startup it must match `ZonePortal.zoneId()`; `0` does not bypass validation. |
+| `--zone.id` | (deprecated) | Optional compatibility check against the zone ID encoded in the genesis chain ID. |
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key-file` | (required for sequencing) | Owner-readable file or FIFO containing the sequencer private key |
 | `--deposit-decryption-keys-file` | (optional) | File containing additional historical or pre-provisioned deposit decryption keys, one hex key per line |

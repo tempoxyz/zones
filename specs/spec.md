@@ -303,7 +303,7 @@ else:
     # 0 < parent_chain_id <= 1048574
 ```
 
-The production ranges reject exhaustion rather than wrapping. Generic IDs are at least `2^32` and cannot collide with the sub-`2^31` production ranges. The generic-parent ceiling ensures that even the largest `zone_id` keeps the EIP-155 legacy signature `v` value below JavaScript's `Number.MAX_SAFE_INTEGER`. Distinct devnets MUST use distinct parent chain IDs. This prevents replay between zones and between mainnet, Moderato, and devnets. The chain ID is set in genesis and validated at startup against both the connected parent and the zone ID returned by the configured `ZonePortal.zoneId()`.
+The production ranges reject exhaustion rather than wrapping. Generic IDs are at least `2^32` and cannot collide with the sub-`2^31` production ranges. The generic-parent ceiling ensures that even the largest `zone_id` keeps the EIP-155 legacy signature `v` value below JavaScript's `Number.MAX_SAFE_INTEGER`. Distinct devnets MUST use distinct parent chain IDs. This prevents replay between zones and between mainnet, Moderato, and devnets. The chain ID is set in genesis; the parent and zone IDs decoded from it are validated at startup against the connected parent and the configured `ZonePortal.zoneId()`.
 
 ### Tempo Contracts
 

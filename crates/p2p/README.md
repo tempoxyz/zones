@@ -87,8 +87,6 @@ The manifest is TOML and must contain at least three quorum nodes. The following
 the configuration shape:
 
 ```toml
-zone_id = 7
-sequencer_set_version = 0
 leader_ed25519_public_key = "0xleader..."
 
 [[nodes]]
@@ -130,11 +128,6 @@ quorum, cannot be selected by `zone_setLeader` or `[forced_recovery]`, and are n
 the Portal's current registered sequencer set. Once every retained checkpoint and replay window is
 past that leader's last epoch, the entry can be removed.
 
-`sequencer_set_version` must exactly match the value reported by `ZonePortal`. Version `0` is
-valid for the initial sequencer set installed atomically by `ZoneFactory`; later
-`setSequencerSet` calls increment it. The field defaults to `1` for compatibility with existing
-manifests that omitted it.
-
 To recover a crashed leader, add this top-level table before restarting the fleet:
 
 ```toml
@@ -164,7 +157,6 @@ The manifest loader validates that:
   their Ed25519 identities do not alias an `rpc_only` node;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
-- the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
 
 At P2P startup, the node requires the configured `ZonePortal` to be deployed at the current L1 tip,

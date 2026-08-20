@@ -114,8 +114,8 @@ pub fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChai
     Ok(chain_id)
 }
 
-/// Decodes the parent Tempo chain ID from a Zone chain ID.
-pub fn decode_l1_chain_id(chain_id: u64) -> Result<u64, ZoneChainIdError> {
+/// Decodes the parent Tempo chain ID and ZoneFactory ID from a Zone chain ID.
+pub fn decode_zone_chain_id(chain_id: u64) -> Result<(u64, u32), ZoneChainIdError> {
     let (parent_chain_id, zone_id) =
         if (ZONE_CHAIN_ID_BASE..ZONE_CHAIN_ID_BASE + ZONE_CHAIN_ID_RANGE).contains(&chain_id) {
             (MAINNET_CHAIN_ID, (chain_id - ZONE_CHAIN_ID_BASE) as u32)
@@ -134,10 +134,15 @@ pub fn decode_l1_chain_id(chain_id: u64) -> Result<u64, ZoneChainIdError> {
         };
 
     if zone_chain_id(parent_chain_id, zone_id) == Ok(chain_id) {
-        Ok(parent_chain_id)
+        Ok((parent_chain_id, zone_id))
     } else {
         Err(ZoneChainIdError::InvalidZoneChainId(chain_id))
     }
+}
+
+/// Decodes the parent Tempo chain ID from a Zone chain ID.
+pub fn decode_l1_chain_id(chain_id: u64) -> Result<u64, ZoneChainIdError> {
+    decode_zone_chain_id(chain_id).map(|(parent_chain_id, _)| parent_chain_id)
 }
 
 fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
@@ -210,6 +215,10 @@ mod tests {
             (MAX_GENERIC_PARENT_CHAIN_ID, u32::MAX),
         ] {
             let chain_id = zone_chain_id(parent_chain_id, zone_id).unwrap();
+            assert_eq!(
+                decode_zone_chain_id(chain_id),
+                Ok((parent_chain_id, zone_id))
+            );
             assert_eq!(decode_l1_chain_id(chain_id), Ok(parent_chain_id));
         }
 
