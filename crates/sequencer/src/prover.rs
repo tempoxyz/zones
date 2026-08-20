@@ -1034,7 +1034,6 @@ fn witness_size(witness: &BatchWitness) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-<<<<<<< HEAD
     use alloy_consensus::Header as ConsensusHeader;
     use zone_spf::{
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
@@ -1082,7 +1081,7 @@ mod tests {
         let error = validate_prepared_anchor(&anchor, checkpoint_number, checkpoint_hash)
             .expect_err("terminal anchor mismatch must fail proving");
         assert!(error.to_string().contains("not prepared anchor hash"));
-=======
+    }
 
     #[test]
     fn rejects_noncanonical_verifier_config() {
@@ -1098,7 +1097,6 @@ mod tests {
                 .to_string()
                 .contains("unsupported verifier config 0x02; expected 0x01")
         );
->>>>>>> 0f60c4d7 (feat(settlement): prepare Nitro-attested batch proofs)
     }
 
     #[test]
