@@ -14008,6 +14008,7 @@ dependencies = [
  "zone-payload",
  "zone-precompiles",
  "zone-primitives",
+ "zone-prover",
  "zone-rpc",
  "zone-sequencer",
  "zone-spf",

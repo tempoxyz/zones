@@ -52,9 +52,8 @@ pub enum VerifyResponse {
         request_id: String,
         /// Output produced by the Zone stateless proof function.
         output: Box<BatchOutput>,
-        /// Nitro proof material returned by an attesting prover.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        proof_bundle: Option<ProofBundle>,
+        /// Nitro proof material returned by the attesting prover.
+        proof_bundle: ProofBundle,
     },
     /// The request could not be decoded, accepted, or verified.
     #[serde(rename = "error")]
