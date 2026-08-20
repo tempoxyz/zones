@@ -295,14 +295,6 @@ pub struct ZoneArgs {
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
     pub portal_address: Address,
 
-    /// Block building interval in milliseconds.
-    #[arg(
-        long = "block.interval-ms",
-        env = "BLOCK_INTERVAL_MS",
-        default_value_t = 250
-    )]
-    pub block_interval_ms: u64,
-
     /// Path to a file or FIFO containing the shared sequencer private key.
     ///
     /// Required by every node that can produce blocks. Requiredness is checked after the
