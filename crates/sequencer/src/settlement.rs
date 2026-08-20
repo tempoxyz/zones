@@ -350,14 +350,10 @@ impl BatchSubmitter {
         &self,
         prepared: &PreparedBatch,
         shutdown: &sync::CancellationToken,
-<<<<<<< HEAD
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
-=======
-    ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
         let verifier_config = Bytes::from_static(NITRO_VERIFIER_CONFIG_V1);
->>>>>>> 0f60c4d7 (feat(settlement): prepare Nitro-attested batch proofs)
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
