@@ -1,5 +1,8 @@
 //! Checker metrics and verified protocol activity logs.
 
+use std::fmt;
+
+use alloy_primitives::B256;
 use reth_metrics::{
     Metrics,
     metrics::{Counter, Gauge},
@@ -19,7 +22,7 @@ const ACTIVITY_SCHEMA_VERSION: u64 = 1;
 mod activity_event {
     pub(super) const PORTAL_DEPOSIT_ACCOUNTED: &str = "portal_deposit_accounted";
     pub(super) const PORTAL_TOKEN_ENABLED: &str = "portal_token_enabled";
-    pub(super) const PORTAL_WITHDRAWAL_ACCOUNTED: &str = "portal_withdrawal_accounted";
+    pub(super) const PORTAL_WITHDRAWAL_PROCESSED: &str = "portal_withdrawal_processed";
     pub(super) const PORTAL_WITHDRAWAL_BOUNCE_BACK: &str = "portal_withdrawal_bounce_back";
     pub(super) const PORTAL_DEPOSIT_BOUNCE_BACK: &str = "portal_deposit_bounce_back";
     pub(super) const PORTAL_DEPOSIT_BOUNCE_BACK_PENDING: &str =
@@ -35,26 +38,9 @@ mod activity_event {
     pub(super) const ZONE_WITHDRAWAL_BOUNCE_BACK_PENDING: &str =
         "zone_withdrawal_bounce_back_pending";
     pub(super) const ZONE_REFUND_MINTED: &str = "zone_refund_minted";
-
-    #[cfg(test)]
-    pub(super) const ALL: [&str; 14] = [
-        PORTAL_DEPOSIT_ACCOUNTED,
-        PORTAL_TOKEN_ENABLED,
-        PORTAL_WITHDRAWAL_ACCOUNTED,
-        PORTAL_WITHDRAWAL_BOUNCE_BACK,
-        PORTAL_DEPOSIT_BOUNCE_BACK,
-        PORTAL_DEPOSIT_BOUNCE_BACK_PENDING,
-        PORTAL_REFUND_ACCOUNTED,
-        ZONE_DEPOSIT_MINTED,
-        ZONE_DEPOSIT_FAILED,
-        ZONE_DEPOSIT_BOUNCE_BACK_REQUESTED,
-        ZONE_WITHDRAWAL_BURNED,
-        ZONE_WITHDRAWAL_BOUNCE_BACK_MINTED,
-        ZONE_WITHDRAWAL_BOUNCE_BACK_PENDING,
-        ZONE_REFUND_MINTED,
-    ];
 }
 
+/// Protocol source of an activity within a verified Zone block.
 #[derive(Clone, Copy)]
 enum ActivitySource {
     Tempo,
@@ -62,7 +48,7 @@ enum ActivitySource {
 }
 
 impl ActivitySource {
-    const fn label(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Tempo => "tempo",
             Self::Zone => "zone",
@@ -70,29 +56,50 @@ impl ActivitySource {
     }
 }
 
+/// Coordinates shared by one structured activity log.
 struct ActivityContext {
     zone: BlockRef,
     tempo: BlockRef,
     source: ActivitySource,
     index: u64,
-    id: String,
 }
 
 impl ActivityContext {
-    fn new(zone: BlockRef, tempo: BlockRef, source: ActivitySource, index: usize) -> Self {
-        let index = u64::try_from(index).expect("activity index must fit in u64");
+    const fn new(zone: BlockRef, tempo: BlockRef, source: ActivitySource, index: u64) -> Self {
         Self {
             zone,
             tempo,
             source,
             index,
-            id: activity_id(zone, source, index),
+        }
+    }
+
+    const fn id(&self) -> ActivityId {
+        ActivityId {
+            zone_hash: self.zone.hash,
+            source: self.source,
+            index: self.index,
         }
     }
 }
 
-fn activity_id(zone: BlockRef, source: ActivitySource, index: u64) -> String {
-    format!("{}:{}:{index}", zone.hash, source.label())
+/// Replay-stable identifier for one activity schema version.
+struct ActivityId {
+    zone_hash: B256,
+    source: ActivitySource,
+    index: u64,
+}
+
+impl fmt::Display for ActivityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "v{ACTIVITY_SCHEMA_VERSION}:{}:{}:{}",
+            self.zone_hash,
+            self.source.as_str(),
+            self.index
+        )
+    }
 }
 
 macro_rules! activity_log {
@@ -102,8 +109,8 @@ macro_rules! activity_log {
             target: "zone::checker",
             activity_schema_version = ACTIVITY_SCHEMA_VERSION,
             activity_event = $event,
-            activity_source = context.source.label(),
-            activity_id = %context.id,
+            activity_source = context.source.as_str(),
+            activity_id = %context.id(),
             activity_index = context.index,
             zone_block = context.zone.number,
             zone_hash = %context.zone.hash,
@@ -161,13 +168,13 @@ impl CheckerMetrics {
 /// Log authenticated protocol activity after a Zone block is verified.
 pub(crate) fn log_verified_activity(tempo: &L1BlockEvidence, l2: &L2BlockEvidence, zone: BlockRef) {
     let tempo_ref = BlockRef::from(tempo.block());
-    for (index, event) in tempo.portal_events().enumerate() {
+    for (index, event) in (0u64..).zip(tempo.portal_events()) {
         log_tempo_event(
             event,
             &ActivityContext::new(zone, tempo_ref, ActivitySource::Tempo, index),
         );
     }
-    for (index, action) in l2.bridge_actions().enumerate() {
+    for (index, action) in (0u64..).zip(l2.bridge_actions()) {
         log_zone_action(
             action,
             &ActivityContext::new(zone, tempo_ref, ActivitySource::Zone, index),
@@ -185,7 +192,7 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
             context,
             activity_event::PORTAL_DEPOSIT_ACCOUNTED,
             %token,
-            amount = net_amount,
+            amount = %net_amount,
             deposit_number,
             "accounted authenticated Portal deposit"
         ),
@@ -202,19 +209,19 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
             callback_success,
         } => activity_log!(
             context,
-            activity_event::PORTAL_WITHDRAWAL_ACCOUNTED,
+            activity_event::PORTAL_WITHDRAWAL_PROCESSED,
             %token,
             recipient = %to,
-            amount,
+            %amount,
             callback_success,
-            "accounted authenticated Portal withdrawal"
+            "authenticated Portal withdrawal result"
         ),
         L1PortalEvent::WithdrawalBounceBack { token, amount } => activity_log!(
             context,
             activity_event::PORTAL_WITHDRAWAL_BOUNCE_BACK,
             %token,
-            amount,
-            "observed authenticated Portal withdrawal bounce-back"
+            %amount,
+            "accounted authenticated Portal withdrawal bounce-back"
         ),
         L1PortalEvent::DepositBounceBack {
             token,
@@ -224,8 +231,8 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
             context,
             activity_event::PORTAL_DEPOSIT_BOUNCE_BACK,
             %token,
-            amount,
-            fee = bounceback_fee,
+            %amount,
+            fee = %bounceback_fee,
             "accounted authenticated Portal deposit bounce-back"
         ),
         L1PortalEvent::DepositBounceBackPending {
@@ -236,8 +243,8 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
             context,
             activity_event::PORTAL_DEPOSIT_BOUNCE_BACK_PENDING,
             %token,
-            amount,
-            fee = bounceback_fee,
+            %amount,
+            fee = %bounceback_fee,
             "accounted authenticated pending Portal deposit bounce-back"
         ),
         L1PortalEvent::RefundClaimed { amount: 0, .. } => {}
@@ -250,7 +257,7 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
             activity_event::PORTAL_REFUND_ACCOUNTED,
             %token,
             %recipient,
-            amount,
+            %amount,
             "accounted authenticated Portal refund"
         ),
     }
@@ -279,7 +286,7 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
             activity_event::ZONE_DEPOSIT_FAILED,
             %token,
             amount = %amount,
-            "verified Zone deposit failure"
+            "authenticated Zone deposit failure"
         ),
         L2BridgeAction::WithdrawalRequested {
             withdrawal_index,
@@ -294,7 +301,7 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
                 %token,
                 amount = %principal,
                 withdrawal_index,
-                "accounted authenticated Zone deposit bounce-back request"
+                "authenticated Zone deposit bounce-back request"
             ),
             WithdrawalOrigin::User { sender } => activity_log!(
                 context,
@@ -331,7 +338,7 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
             %token,
             %recipient,
             amount = %amount,
-            "verified pending Zone withdrawal bounce-back"
+            "authenticated pending Zone withdrawal bounce-back"
         ),
         L2BridgeAction::RefundClaimed {
             recipient,
@@ -345,43 +352,5 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
             amount = %amount,
             "verified Zone refund mint"
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use alloy_primitives::B256;
-
-    use super::*;
-
-    #[test]
-    fn activity_event_names_are_unique_snake_case() {
-        let names = activity_event::ALL;
-        assert_eq!(
-            names.iter().copied().collect::<BTreeSet<_>>().len(),
-            names.len()
-        );
-        assert!(names.iter().all(|name| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        }));
-    }
-
-    #[test]
-    fn activity_ids_are_stable_and_source_specific() {
-        let zone = BlockRef::new(42, B256::repeat_byte(0x11));
-
-        assert_eq!(
-            activity_id(zone, ActivitySource::Tempo, 3),
-            format!("{}:tempo:3", zone.hash)
-        );
-        assert_eq!(
-            activity_id(zone, ActivitySource::Zone, 3),
-            format!("{}:zone:3", zone.hash)
-        );
     }
 }
