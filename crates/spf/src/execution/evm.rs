@@ -117,13 +117,22 @@ pub(crate) fn execute_zone_block(
         )
     })?;
 
-    transactions.push(execute_advance_tempo(
-        &mut executor,
-        &block.tempo_header_rlp,
-        block,
-        zone_block_index,
-        chain_id,
-    )?);
+    if block.tempo_headers_rlp.is_empty() {
+        transactions.push(execute_advance_tempo(
+            &mut executor,
+            &block.tempo_header_rlp,
+            block,
+            zone_block_index,
+            chain_id,
+        )?);
+    } else {
+        transactions.push(execute_advance_tempo_headers(
+            &mut executor,
+            &block.tempo_headers_rlp,
+            zone_block_index,
+            chain_id,
+        )?);
+    }
     transactions.extend(execute_user_transactions(
         &mut executor,
         zone_block_index,
@@ -246,6 +255,40 @@ where
         TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
     let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
 
+    execute_recovered_transaction(
+        executor,
+        recovered,
+        Error::AdvanceTempoExecution { block_index },
+        true,
+    )?;
+    Ok(transaction)
+}
+
+fn execute_advance_tempo_headers<'a, 'db, I>(
+    executor: &mut WitnessExecutor<'a, 'db, I>,
+    headers: &[Bytes],
+    block_index: usize,
+    chain_id: u64,
+) -> Result<TempoTxEnvelope, Error>
+where
+    I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
+{
+    let calldata = IZoneInbox::advanceTempoHeadersCall {
+        headers: headers.to_vec(),
+    }
+    .abi_encode();
+    let transaction = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_INBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+    let transaction =
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
+    let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
     execute_recovered_transaction(
         executor,
         recovered,

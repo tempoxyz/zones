@@ -7,7 +7,7 @@ use tempo_primitives::TempoHeader;
 
 pub use tempo_zone_contracts::{
     BlockTransition, ChaumPedersenProof, DecryptionData, DepositQueueTransition, DepositType,
-    EnabledToken, QueuedDeposit,
+    EnabledToken, QueuedDeposit, TokenEnablementTransition,
 };
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -102,6 +102,10 @@ pub struct ZoneBlock {
     pub beneficiary: Address,
     /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`.
     pub tempo_header_rlp: Bytes,
+    /// RLP-encoded consecutive Tempo headers for a checkpoint-only block. Nonempty means this is
+    /// the explicit `advanceTempoHeaders` variant and all operational fields must be empty.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub tempo_headers_rlp: Vec<Bytes>,
     /// Deposits processed by `ZoneInbox.advanceTempo`, in calldata order.
     pub deposits: Vec<QueuedDeposit>,
     /// Encrypted-deposit decryption data, in calldata order.
@@ -148,6 +152,8 @@ pub struct BatchOutput {
     pub block_transition: BlockTransition,
     /// Progress of the ZoneInbox deposit queue during the batch.
     pub deposit_queue_transition: DepositQueueTransition,
+    /// Progress of the append-only portal token-enablement prefix during the batch.
+    pub token_enablement_transition: TokenEnablementTransition,
     /// Hash chain created by finalizing the batch's withdrawals.
     pub withdrawal_queue_hash: B256,
     /// Batch index committed by `ZoneOutbox.lastBatch`.
