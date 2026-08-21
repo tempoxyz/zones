@@ -4,7 +4,8 @@ pragma solidity ^0.8.13;
 import {
     BlockTransition,
     DepositQueueTransition,
-    IVerifier
+    IVerifier,
+    TokenEnablementTransition
 } from "../../src/runtime/interfaces/IZone.sol";
 
 /// @title MockVerifier
@@ -25,6 +26,7 @@ contract MockVerifier is IVerifier {
         uint64, // expectedWithdrawalBatchIndex
         BlockTransition calldata,
         DepositQueueTransition calldata,
+        TokenEnablementTransition calldata,
         bytes32, // withdrawalQueueHash
         bytes calldata, // verifierConfig
         bytes calldata // proof

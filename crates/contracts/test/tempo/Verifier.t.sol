@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { BlockTransition, DepositQueueTransition } from "../../src/runtime/interfaces/IZone.sol";
+import {
+    BlockTransition,
+    DepositQueueTransition,
+    TokenEnablementTransition
+} from "../../src/runtime/interfaces/IZone.sol";
 import { Verifier } from "../../src/runtime/tempo/Verifier.sol";
 import { Test } from "forge-std/Test.sol";
 
@@ -25,6 +29,7 @@ contract VerifierTest is Test {
                 prevDepositNumber: 0,
                 nextDepositNumber: 0
             }),
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 0 }),
             bytes32("withdrawals"),
             "config",
             "proof"
