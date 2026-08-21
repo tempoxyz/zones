@@ -321,7 +321,15 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let final_tempo_header = extracted
         .iter()
         .last()
-        .map(|encoded| decode_tempo_header(&encoded.input.tempo_header_rlp))
+        .map(|encoded| {
+            let block = &encoded.input;
+            decode_tempo_header(
+                block
+                    .tempo_headers_rlp
+                    .last()
+                    .unwrap_or(&block.tempo_header_rlp),
+            )
+        })
         .transpose()?
         .unwrap_or_else(|| initial_tempo_header.clone());
 
@@ -822,6 +830,7 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
     };
 
     let mut tempo_header_rlp = None;
+    let mut tempo_headers_rlp = Vec::new();
     let mut deposits = Vec::new();
     let mut decryptions = Vec::new();
     let mut enabled_tokens = Vec::new();
@@ -845,15 +854,38 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                         header.number()
                     );
                 }
-                let call = ZoneInbox::advanceTempoCall::abi_decode(envelope.input())
-                    .wrap_err_with(|| {
-                        format!("decode advanceTempo in Zone block {}", header.number())
-                    })?;
-                checkpoint_number = Some(decode_tempo_header(&call.header)?.number());
-                tempo_header_rlp = Some(call.header);
-                deposits = call.deposits;
-                decryptions = call.decryptions;
-                enabled_tokens = call.enabledTokens;
+                if envelope
+                    .input()
+                    .starts_with(&ZoneInbox::advanceTempoCall::SELECTOR)
+                {
+                    let call = ZoneInbox::advanceTempoCall::abi_decode(envelope.input())
+                        .wrap_err_with(|| {
+                            format!("decode advanceTempo in Zone block {}", header.number())
+                        })?;
+                    checkpoint_number = Some(decode_tempo_header(&call.header)?.number());
+                    tempo_header_rlp = Some(call.header);
+                    deposits = call.deposits;
+                    decryptions = call.decryptions;
+                    enabled_tokens = call.enabledTokens;
+                } else {
+                    let call = ZoneInbox::advanceTempoHeadersCall::abi_decode(envelope.input())
+                        .wrap_err_with(|| {
+                            format!(
+                                "decode advanceTempoHeaders in Zone block {}",
+                                header.number()
+                            )
+                        })?;
+                    let final_header = call
+                        .headers
+                        .last()
+                        .ok_or_eyre("checkpoint-only Zone block has no Tempo headers")?;
+                    checkpoint_number = Some(decode_tempo_header(final_header)?.number());
+                    for encoded in &call.headers {
+                        decode_tempo_header(encoded)?;
+                    }
+                    tempo_headers_rlp = call.headers;
+                    tempo_header_rlp = Some(Bytes::new());
+                }
             }
             Some(to) if to == ZONE_OUTBOX_ADDRESS => {
                 if finalize_count.is_some() {
@@ -902,6 +934,7 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
             timestamp_millis_part: header.timestamp_millis_part,
             beneficiary: header.beneficiary(),
             tempo_header_rlp,
+            tempo_headers_rlp,
             deposits,
             decryptions,
             enabled_tokens,
