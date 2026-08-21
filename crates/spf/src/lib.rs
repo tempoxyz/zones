@@ -12,10 +12,14 @@ use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::noop::NoopProvider;
 use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
+use tempo_chainspec::spec::TempoHardforks as _;
 use tempo_evm::{TempoBlockAssembler, TempoEvmConfig};
 use tempo_primitives::{TempoHeader, TempoPrimitives};
 use zone_precompiles::{inbox, outbox, tempo_state};
-use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use zone_primitives::constants::{
+    MAX_UNPROCESSED_DEPOSITS, MAX_UNPROCESSED_TOKEN_ENABLEMENTS, TEMPO_STATE_ADDRESS,
+    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+};
 
 mod execution;
 mod mpt;
@@ -29,8 +33,8 @@ pub use types::*;
 ///
 /// `config` is trusted network configuration chosen by the verifier. Every
 /// other value is prover supplied and must be validated against witness-backed
-/// execution. The replay may end at an open Zone tip without withdrawal
-/// finalization; settlement policy can impose a finalization boundary separately.
+/// execution. Before T12 the replay may end at an open Zone tip without withdrawal
+/// finalization. Every T12 batch must end at a full block's finalization boundary.
 pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
@@ -54,6 +58,29 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             expected: config.portal(),
             actual: witness.public_inputs.portal,
         });
+    }
+
+    let first_t12 = witness.zone_blocks.iter().position(|block| {
+        config
+            .chain_spec()
+            .tempo_hardfork_at(block.timestamp)
+            .is_t12()
+    });
+    if let Some(first_t12) = first_t12 {
+        let t12_blocks = &witness.zone_blocks[first_t12..];
+        let full_positions: Vec<_> = t12_blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| block.tempo_headers_rlp.is_empty().then_some(index))
+            .collect();
+        if full_positions.len() != 1
+            || full_positions[0] + 1 != t12_blocks.len()
+            || t12_blocks
+                .last()
+                .is_some_and(|block| block.finalize_withdrawal_batch_count.is_none())
+        {
+            return Err(Error::InvalidT12BatchShape);
+        }
     }
 
     // The Zone database is backed by the parent state root and the supplied
@@ -82,6 +109,15 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
         inbox::slots::PROCESSED_DEPOSIT_NUMBER,
+    )?
+    .to::<u64>();
+    // Keep the public transition anchored to the physical pre-state. On the first T12 batch this
+    // is zero; ZoneInbox authenticates the legacy hash prefix internally before writing the
+    // migrated count, so rewriting this value would diverge from settlement attestations.
+    let previous_processed_token_count = read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT,
     )?
     .to::<u64>();
 
@@ -151,7 +187,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         // The EVM environment uses the verifier-selected fork schedule at this
         // block's timestamp. An imported Tempo header changes the L1 reader
         // used by the subsequent system and user execution in this block.
-        tempo_database = tempo_database.with_imported_checkpoint(&block.tempo_header_rlp)?;
+        let final_imported_header = block
+            .tempo_headers_rlp
+            .last()
+            .unwrap_or(&block.tempo_header_rlp);
+        tempo_database = tempo_database.with_imported_checkpoint(final_imported_header)?;
         let executed_block = execution::evm::execute_zone_block(
             &mut zone_state,
             config.evm_config(tempo_database.clone()),
@@ -220,6 +260,12 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
         inbox::slots::PROCESSED_DEPOSIT_NUMBER,
+    )?
+    .to::<u64>();
+    let next_processed_token_count = read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT,
     )?
     .to::<u64>();
     let has_withdrawal_finalization = witness
@@ -298,6 +344,10 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             nextProcessedHash: next_processed_hash,
             prevDepositNumber: previous_processed_number,
             nextDepositNumber: next_processed_number,
+        },
+        token_enablement_transition: TokenEnablementTransition {
+            prevProcessedTokenCount: previous_processed_token_count,
+            nextProcessedTokenCount: next_processed_token_count,
         },
         withdrawal_queue_hash,
         last_batch_commitment: LastBatchCommitment {
@@ -392,6 +442,22 @@ fn validate_tempo_anchor(
 }
 
 fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
+    if block.deposits.len() > MAX_UNPROCESSED_DEPOSITS
+        || block.enabled_tokens.len() > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+    {
+        return Err(Error::PortalWorkCapacityExceeded { block_index: index });
+    }
+    if !block.tempo_headers_rlp.is_empty()
+        && (!block.tempo_header_rlp.is_empty()
+            || !block.deposits.is_empty()
+            || !block.decryptions.is_empty()
+            || !block.enabled_tokens.is_empty()
+            || !block.transactions.is_empty()
+            || block.finalize_withdrawal_batch_count.is_some()
+            || !block.finalize_withdrawal_batch_encrypted_senders.is_empty())
+    {
+        return Err(Error::InvalidCheckpointOnlyBlock { block_index: index });
+    }
     match block.finalize_withdrawal_batch_count {
         Some(count)
             if count != U256::from(block.finalize_withdrawal_batch_encrypted_senders.len()) =>
@@ -433,6 +499,16 @@ pub enum Error {
     /// A batch must execute at least one Zone block.
     #[error("zone batch contains no blocks")]
     EmptyZoneBatch,
+    /// A checkpoint-only block carried operational inputs or transactions.
+    #[error("checkpoint-only zone block {block_index} contains operational inputs")]
+    InvalidCheckpointOnlyBlock { block_index: usize },
+    /// A full block exceeded a protocol-wide outstanding portal-work bound.
+    #[error("zone block {block_index} exceeds portal-work capacity")]
+    PortalWorkCapacityExceeded { block_index: usize },
+    /// A T12 batch must contain exactly one full operational block at the end, optionally preceded
+    /// by checkpoint-only blocks.
+    #[error("invalid T12 batch shape")]
+    InvalidT12BatchShape,
     /// The witness identifies a Zone other than the verifier-selected chain specification.
     #[error("Zone chain ID mismatch: expected {expected}, got {actual}")]
     ChainIdMismatch { expected: u64, actual: u64 },
@@ -620,6 +696,20 @@ mod tests {
         SpfConfig::new(zone_chain_spec, Address::repeat_byte(0x11))
     }
 
+    fn t12_test_config(activation: u64) -> SpfConfig {
+        let tempo_chain_spec = tempo_chainspec::spec::MODERATO.clone();
+        let mut genesis = tempo_chain_spec.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain().id(), 1).unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t12Time".into(), activation)
+            .unwrap();
+        let zone_chain_spec =
+            Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
+        SpfConfig::new(zone_chain_spec, Address::repeat_byte(0x11))
+    }
+
     fn minimal_batch_witness() -> BatchWitness {
         let parent_header = TempoHeader {
             inner: Header {
@@ -732,6 +822,56 @@ mod tests {
     }
 
     #[test]
+    fn t12_batch_shape_rejects_multiple_full_blocks() {
+        let mut witness = minimal_batch_witness();
+        for number in 1..=2 {
+            witness.zone_blocks.push(ZoneBlock {
+                number,
+                parent_hash: B256::ZERO,
+                timestamp: 100,
+                timestamp_millis_part: 0,
+                beneficiary: Address::ZERO,
+                tempo_header_rlp: Bytes::from([0x01]),
+                tempo_headers_rlp: Vec::new(),
+                deposits: Vec::new(),
+                decryptions: Vec::new(),
+                enabled_tokens: Vec::new(),
+                finalize_withdrawal_batch_count: Some(U256::ZERO),
+                finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+                transactions: Vec::new(),
+            });
+        }
+        assert_eq!(
+            prove_zone_batch(&t12_test_config(100), witness),
+            Err(Error::InvalidT12BatchShape)
+        );
+    }
+
+    #[test]
+    fn t12_batch_shape_rejects_checkpoint_only_batch() {
+        let mut witness = minimal_batch_witness();
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: B256::ZERO,
+            timestamp: 100,
+            timestamp_millis_part: 0,
+            beneficiary: Address::ZERO,
+            tempo_header_rlp: Bytes::new(),
+            tempo_headers_rlp: vec![Bytes::from([0x01])],
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        });
+        assert_eq!(
+            prove_zone_batch(&t12_test_config(100), witness),
+            Err(Error::InvalidT12BatchShape)
+        );
+    }
+
+    #[test]
     fn rejects_a_portal_other_than_the_verifier_selected_portal() {
         let mut witness = minimal_batch_witness();
         witness.public_inputs.portal = Address::repeat_byte(0x22);
@@ -742,6 +882,7 @@ mod tests {
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::new(),
+            tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -771,6 +912,7 @@ mod tests {
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::new(),
+            tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1038,6 +1180,7 @@ mod tests {
             timestamp_millis_part: 321,
             beneficiary: Address::ZERO,
             tempo_header_rlp: witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
+            tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1080,6 +1223,7 @@ mod tests {
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
+            tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1101,6 +1245,7 @@ mod tests {
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
+            tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1130,6 +1275,7 @@ mod tests {
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
+            tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
