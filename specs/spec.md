@@ -699,7 +699,7 @@ for i from (count - 1) down to 0:
 
 The function writes `withdrawalQueueHash` and `withdrawalBatchIndex` to `lastBatch` storage, where the proof reads them. The call is required at each batch boundary even if there are zero withdrawals (use `count = 0`) so the batch index advances. The `withdrawalBatchIndex` ensures batches are submitted in order, preventing the sequencer from omitting batches that contain withdrawals.
 
-A successful call emits `BatchFinalized(withdrawalQueueHash, withdrawalBatchIndex)`. This event is the authoritative zone-side batch boundary consumed by the sequencer; “finalized” means sealed on the zone and does not imply that the batch has been submitted to or accepted by Tempo. For an empty batch, `withdrawalQueueHash` is zero while `withdrawalBatchIndex` still advances.
+A successful call emits `BatchFinalized(withdrawalQueueHash, withdrawalBatchIndex)`. This event is the authoritative zone-side batch boundary consumed by the sequencer; “finalized” means sealed on the zone and does not imply that the batch has been submitted to or accepted by Tempo. Acceptance on Tempo is indicated separately by the portal's `BatchSubmitted` event. For an empty batch, `withdrawalQueueHash` is zero while `withdrawalBatchIndex` still advances.
 
 Batch cadence is deterministic. It closes a batch when there are pending withdrawals or otherwise closes an empty batch at a block-number boundary. The default cadence is every 120th zone block (~1 minute at Tempo's expected 500 ms block interval), configurable as a block count. Intermediate zone blocks in the same batch do not call `finalizeWithdrawalBatch`.
 
