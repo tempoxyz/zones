@@ -10,6 +10,36 @@ pub struct L1BlockDeposits {
 }
 
 impl L1BlockDeposits {
+    /// Prepare portal work accumulated across checkpoint-only blocks for one full import.
+    pub async fn prepare_many(
+        blocks: Vec<Self>,
+        encryption_keys: &EncryptionKeyRing,
+        portal_address: Address,
+    ) -> eyre::Result<PreparedL1Block> {
+        let mut blocks = blocks.into_iter();
+        let first = blocks
+            .next()
+            .ok_or_else(|| eyre::eyre!("cannot prepare an empty L1 range"))?;
+        let mut prepared = first.prepare(encryption_keys, portal_address).await?;
+        for block in blocks {
+            let next = block.prepare(encryption_keys, portal_address).await?;
+            prepared.header = next.header;
+            prepared.queued_deposits.extend(next.queued_deposits);
+            prepared.decryptions.extend(next.decryptions);
+            prepared.enabled_tokens.extend(next.enabled_tokens);
+        }
+        eyre::ensure!(
+            prepared.queued_deposits.len() <= zone_primitives::constants::MAX_UNPROCESSED_DEPOSITS,
+            "outstanding deposit suffix exceeds protocol capacity"
+        );
+        eyre::ensure!(
+            prepared.enabled_tokens.len()
+                <= zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS,
+            "outstanding token-enablement suffix exceeds protocol capacity"
+        );
+        Ok(prepared)
+    }
+
     /// Prepare all deposits for the payload builder.
     ///
     /// Decrypts deposits and ABI-encodes the types the `advanceTempo` call expects.

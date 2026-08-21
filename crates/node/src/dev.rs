@@ -35,6 +35,8 @@ pub struct ProvisionConfig {
     pub is_gateway_enforced: bool,
     /// Initial callback-only ZoneGateway implementations.
     pub zone_gateways: Vec<Address>,
+    /// Optional Z1 activation timestamp for the generated Zone genesis.
+    pub z1_time: Option<u64>,
     /// Initial portal membership (required for closed mode, retained but unenforced in open mode).
     pub allowed_accounts: Vec<Address>,
     /// Operator zone RPC URL registered on the portal.
@@ -74,6 +76,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         is_access_open,
         is_gateway_enforced,
         zone_gateways,
+        z1_time,
         allowed_accounts,
         rpc_url,
     } = config;
@@ -147,6 +150,12 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
 
     let (mut genesis, anchor_block_number) =
         crate::genesis::l1_anchored_genesis(&anchor_header, initial_token)?;
+    if let Some(z1_time) = z1_time {
+        genesis
+            .config
+            .extra_fields
+            .insert_value("z1Time".into(), z1_time)?;
+    }
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {
@@ -283,6 +292,10 @@ mod command {
         #[arg(long = "dev.token", default_value_t = PATH_USD_ADDRESS)]
         initial_token: Address,
 
+        /// Optional Z1 activation timestamp for the generated Zone genesis.
+        #[arg(long = "dev.z1-time")]
+        z1_time: Option<u64>,
+
         /// Enable account allowlist enforcement.
         #[arg(long = "dev.access-mode")]
         access_mode: bool,
@@ -362,6 +375,7 @@ mod command {
                     is_access_open: !self.access_mode,
                     is_gateway_enforced: self.gateway_mode,
                     zone_gateways: self.zone_gateways.clone(),
+                    z1_time: self.z1_time,
                     allowed_accounts: allowed_accounts.clone(),
                     rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),
                 }))?
@@ -512,6 +526,15 @@ mod command {
 
             assert_eq!(redacted.redacted_rpc_port, 9544);
             assert_eq!(private.redacted_rpc_port, 9544);
+        }
+
+        #[test]
+        fn z1_activation_time_is_optional() {
+            let default = DevCommand::try_parse_from(["dev"]).unwrap();
+            let activated = DevCommand::try_parse_from(["dev", "--dev.z1-time", "1234"]).unwrap();
+
+            assert_eq!(default.z1_time, None);
+            assert_eq!(activated.z1_time, Some(1234));
         }
 
         #[test]

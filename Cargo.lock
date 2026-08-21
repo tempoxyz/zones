@@ -13796,6 +13796,7 @@ dependencies = [
  "tracing",
  "url",
  "zone-precompiles",
+ "zone-primitives",
 ]
 
 [[package]]
