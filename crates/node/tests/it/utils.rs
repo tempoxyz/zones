@@ -1846,12 +1846,13 @@ impl L1TestNode {
     /// Wait for a withdrawal to be fully processed on L1 (pathUSD).
     ///
     /// Polls the account's L1 token balance until it increases by at least
-    /// `amount`, then asserts both `BatchSubmitted` and `WithdrawalProcessed`
-    /// events exist on the portal.
+    /// `amount` from the caller-provided pre-withdrawal balance, then asserts
+    /// both `BatchSubmitted` and `WithdrawalProcessed` events exist on the portal.
     pub(crate) async fn wait_for_withdrawal_on_l1(
         &self,
         portal_address: Address,
         account: Address,
+        balance_before: U256,
         amount: u128,
         timeout: Duration,
     ) -> eyre::Result<()> {
@@ -1860,6 +1861,7 @@ impl L1TestNode {
             portal_address,
             PATH_USD_ADDRESS,
             account,
+            balance_before,
             amount,
             timeout,
         )
@@ -1867,15 +1869,17 @@ impl L1TestNode {
     }
 
     /// Wait for a withdrawal of a specific token to be fully processed on L1.
+    ///
+    /// `balance_before` must be captured before submitting the withdrawal request.
     pub(crate) async fn wait_for_withdrawal_on_l1_token(
         &self,
         portal_address: Address,
         token: Address,
         account: Address,
+        balance_before: U256,
         amount: u128,
         timeout: Duration,
     ) -> eyre::Result<()> {
-        let balance_before = self.balance_of(token, account).await?;
         let expected = balance_before + U256::from(amount);
         self.wait_for_balance(token, account, expected, timeout)
             .await?;
