@@ -14236,3 +14236,68 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "tempo-alloy"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-chainspec"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-consensus"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-contracts"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-evm"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-hardfork"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-node"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-payload-types"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-precompiles"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-precompiles-macros"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-primitives"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-revm"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"
+
+[[patch.unused]]
+name = "tempo-transaction-pool"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?branch=alexey%2Ftip-1096-zone-bytecodes#af42d75600a10c6c78ebf4b6d6016d208df7403b"

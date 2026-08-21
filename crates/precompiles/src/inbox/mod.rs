@@ -105,7 +105,7 @@ impl ZoneInbox {
         tempo_state.finalize_checkpoints(l1, &[call.header], false, true)?;
         if bootstrap && !portal.is_zero() {
             let admin = l1.read_portal(|portal| &portal.admin)?;
-            if admin.is_zero() || l1.portal_sequencer_count()? == 0 {
+            if admin.is_zero() || l1.read_portal_vec_len(|portal| &portal.sequencers)? == 0 {
                 return Err(TempoStateError::invalid_parent_hash().into());
             }
         }
@@ -115,7 +115,7 @@ impl ZoneInbox {
         let enabled_token_count = call.enabledTokens.len();
         let mut previous_token_count = self.processed_enabled_token_count.read()?;
         if z1_active && !portal.is_zero() && previous_token_count == 0 {
-            let portal_count = l1.portal_enabled_token_count()?;
+            let portal_count = l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?;
             let supplied_count = call.enabledTokens.len();
             if supplied_count > portal_count {
                 return Err(ZoneInboxError::invalid_token_enablement_hash().into());
@@ -135,31 +135,41 @@ impl ZoneInbox {
             next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
         }
 
-        if !portal.is_zero() && !z1_active {
-            if l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
-            {
-                return Err(ZoneInboxError::invalid_token_enablement_hash().into());
-            }
-        } else if !portal.is_zero() {
-            let previous = usize::try_from(previous_token_count)
-                .map_err(|_| TempoPrecompileError::under_overflow())?;
-            let enabled_token_count = l1.portal_enabled_token_count()?;
-            let complete_suffix = previous <= enabled_token_count
-                && enabled_token_count - previous == call.enabledTokens.len();
-            let mut addresses_match = complete_suffix;
-            if complete_suffix {
-                for (offset, enabled) in call.enabledTokens.iter().enumerate() {
-                    if l1.portal_enabled_token(previous + offset)? != enabled.token {
-                        addresses_match = false;
-                        break;
+        if !portal.is_zero() {
+            if !z1_active {
+                if l1.read_portal(|portal| &portal.token_enablement_hash)?
+                    != next_token_enablement_hash
+                {
+                    return Err(ZoneInboxError::invalid_token_enablement_hash().into());
+                }
+            } else {
+                let previous = usize::try_from(previous_token_count)
+                    .map_err(|_| TempoPrecompileError::under_overflow())?;
+                let enabled_token_count =
+                    l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?;
+                let complete_suffix = enabled_token_count
+                    .checked_sub(previous)
+                    .is_some_and(|len| len == call.enabledTokens.len());
+                let mut addresses_match = complete_suffix;
+                if complete_suffix {
+                    for (index, enabled_token) in
+                        (previous..enabled_token_count).zip(&call.enabledTokens)
+                    {
+                        let portal_token =
+                            l1.read_portal(|portal| &portal.enabled_tokens[index])?;
+
+                        if portal_token != enabled_token.token {
+                            addresses_match = false;
+                            break;
+                        }
                     }
                 }
-            }
-            if !addresses_match
-                || l1.read_portal(|portal| &portal.token_enablement_hash)?
-                    != next_token_enablement_hash
-            {
-                return Err(ZoneInboxError::invalid_token_enablement_hash().into());
+                if !addresses_match
+                    || l1.read_portal(|portal| &portal.token_enablement_hash)?
+                        != next_token_enablement_hash
+                {
+                    return Err(ZoneInboxError::invalid_token_enablement_hash().into());
+                }
             }
         }
 

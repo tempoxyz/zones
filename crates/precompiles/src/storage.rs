@@ -17,7 +17,8 @@ use revm::{
     precompile::PrecompileError,
 };
 use tempo_precompiles::{
-    error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
+    error::TempoPrecompileError, storage::vec::VecHandler,
+    zone_factory::ZonePortalStorage as ZonePortal,
 };
 use thiserror::Error;
 
@@ -189,24 +190,17 @@ impl<P: L1StorageReader> L1State<P> {
         self.read_l1(select_slot(&portal))
     }
 
-    /// Reads the length of the portal's append-only `_enabledTokens` array (storage slot 7).
-    pub fn portal_enabled_token_count(&self) -> tempo_precompiles::Result<usize> {
-        let slot = Slot::<U256>::new(U256::from(7), self.portal_address);
-        usize::try_from(self.read_l1(&slot)?).map_err(|_| TempoPrecompileError::under_overflow())
-    }
+    /// Selects and reads a [`VecHandler`] length slot from the configured `ZonePortal` at the active anchor.
+    pub fn read_portal_vec_len<T: Storable>(
+        &self,
+        select: impl for<'a> FnOnce(&'a ZonePortal) -> &'a VecHandler<T>,
+    ) -> tempo_precompiles::Result<usize> {
+        let portal = ZonePortal::new(self.portal_address);
+        let vec = select(&portal);
+        let len_slot = Slot::<U256>::new(vec.len_slot(), self.portal_address);
 
-    /// Reads the length of the portal's active `_sequencers` array (storage slot 18).
-    pub fn portal_sequencer_count(&self) -> tempo_precompiles::Result<usize> {
-        let slot = Slot::<U256>::new(U256::from(18), self.portal_address);
-        usize::try_from(self.read_l1(&slot)?).map_err(|_| TempoPrecompileError::under_overflow())
-    }
-
-    /// Reads one entry from the portal's append-only `_enabledTokens` array.
-    pub fn portal_enabled_token(&self, index: usize) -> tempo_precompiles::Result<Address> {
-        let data_start =
-            U256::from_be_bytes(alloy_primitives::keccak256(U256::from(7).to_be_bytes::<32>()).0);
-        let slot = Slot::<Address>::new(data_start + U256::from(index), self.portal_address);
-        self.read_l1(&slot)
+        usize::try_from(self.read_l1(&len_slot)?)
+            .map_err(|_| TempoPrecompileError::under_overflow())
     }
 
     /// Returns whether `account` has `expected` in the configured ZonePortal's role mapping.
