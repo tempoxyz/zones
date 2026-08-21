@@ -712,6 +712,9 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
+            Self::InvalidTokenEnablementTransition(_) => {
+                f.write_str("InvalidTokenEnablementTransition")
+            }
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),

@@ -1788,6 +1788,7 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
+    error InvalidTokenEnablementTransition();
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
     error InvalidQuorumCertificate();
