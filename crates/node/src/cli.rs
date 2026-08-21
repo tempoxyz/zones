@@ -6,7 +6,7 @@ use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
 use reth_ethereum::cli::Cli;
-use reth_tracing::tracing::info;
+use reth_tracing::tracing::{info, warn};
 use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
@@ -103,6 +103,10 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
         info!(target: "reth::cli", "Launching Tempo Zone node");
+
+        if args.block_interval_ms.is_some() {
+            warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
+        }
 
         validate_l1_rpc_url(&args.l1_rpc_url)?;
         validate_portal_address(args.portal_address)?;
@@ -294,6 +298,14 @@ pub struct ZoneArgs {
     /// ZonePortal contract address on L1.
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
     pub portal_address: Address,
+
+    /// Deprecated compatibility flag. Ignored.
+    #[arg(
+        long = "block.interval-ms",
+        env = "BLOCK_INTERVAL_MS",
+        help = "Deprecated: no longer has any effect and will be removed in the next release."
+    )]
+    pub block_interval_ms: Option<u64>,
 
     /// Path to a file or FIFO containing the shared sequencer private key.
     ///
@@ -580,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_zone_id_is_optional_and_validated() {
+    fn deprecated_args_are_accepted_and_validated() {
         assert!(validate_deprecated_zone_id(None, 7).is_ok());
         assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
         assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
@@ -593,9 +605,12 @@ mod tests {
             "0x0000000000000000000000000000000000000001",
             "--zone.id",
             "7",
+            "--block.interval-ms",
+            "500",
         ])
         .unwrap();
         assert_eq!(parsed.zone.zone_id, Some(7));
+        assert_eq!(parsed.zone.block_interval_ms, Some(500));
     }
 
     #[test]
