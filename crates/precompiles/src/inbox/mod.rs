@@ -120,7 +120,7 @@ impl ZoneInbox {
             if supplied_count > portal_count {
                 return Err(ZoneInboxError::invalid_token_enablement_hash().into());
             }
-            // T11/Z1 activation adds the count cursor to zones that already committed the old
+            // T12/Z1 activation adds the count cursor to zones that already committed the old
             // append-only token hash. Derive the existing prefix from the final-root array; the
             // hash check below authenticates that prefix and the complete supplied suffix.
             previous_token_count = u64::try_from(portal_count - supplied_count)

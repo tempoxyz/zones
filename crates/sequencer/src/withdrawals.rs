@@ -50,7 +50,9 @@ use crate::{
     settlement::{WithdrawalPage, find_processed_offset},
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
-use zone_primitives::constants::MAX_UNPROCESSED_DEPOSITS;
+use zone_primitives::constants::{
+    MAX_UNPROCESSED_DEPOSITS, WITHDRAWAL_BOUNCEBACK_RESERVE,
+};
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -596,7 +598,13 @@ impl WithdrawalProcessor {
                 );
                 return Ok(());
             }
-            let admitted = remaining.len().min(headroom);
+            // Public deposits cannot consume the reserved suffix. Restricting each submission to
+            // that reserve prevents a public deposit landing after this read from racing the
+            // portal's withdrawal-capacity preflight.
+            let admitted = remaining
+                .len()
+                .min(headroom)
+                .min(WITHDRAWAL_BOUNCEBACK_RESERVE);
             let fully_admitted = admitted == remaining.len();
             let batches = build_withdrawal_batches(
                 &remaining[..admitted],
