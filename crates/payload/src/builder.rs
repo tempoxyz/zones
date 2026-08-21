@@ -44,13 +44,13 @@ use tempo_transaction_pool::{
     StateAwareBestTransactions, TempoTransactionPool, transaction::TempoPooledTransaction,
 };
 use tracing::{error, info, warn};
-use zone_chainspec::ZoneChainSpec;
+use zone_chainspec::{ZoneChainSpec, ZoneHardforks as _};
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
-use crate::{ZonePayloadAttributes, ZonePayloadTypes};
+use crate::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Default empty-batch cadence: every 120 zone blocks (~60 sec at Tempo's 500 ms block time).
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
@@ -172,19 +172,41 @@ where
         let start = Instant::now();
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
-        let prepared = attributes.l1_block();
-        validate_l1_continuity(state_provider.as_ref(), prepared)?;
+        let tempo_import = attributes.tempo_import();
+        let imported_headers = match tempo_import {
+            TempoImport::Full(prepared) => core::slice::from_ref(&prepared.header),
+            TempoImport::CheckpointOnly(headers) => headers.as_slice(),
+        };
+        validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
+        let final_imported = imported_headers.last().expect("validated nonempty import");
+        let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
+        let total_deposits = match tempo_import {
+            TempoImport::Full(prepared) => prepared.queued_deposits.len(),
+            TempoImport::CheckpointOnly(_) => 0,
+        };
+        let enabled_tokens = match tempo_import {
+            TempoImport::Full(prepared) => prepared.enabled_tokens.len(),
+            TempoImport::CheckpointOnly(_) => 0,
+        };
 
-        let total_deposits = prepared.queued_deposits.len();
-
-        info!(
-            target: "zone::payload",
-            zone_block = parent_header.number() + 1,
-            l1_block = prepared.header.inner.number,
-            deposits = total_deposits,
-            enabled_tokens = prepared.enabled_tokens.len(),
-            "Including advanceTempo system tx (chain continuity OK)"
-        );
+        if checkpoint_only {
+            info!(
+                target: "zone::payload",
+                zone_block = parent_header.number() + 1,
+                l1_block = final_imported.inner.number,
+                header_count = imported_headers.len(),
+                "Including advanceTempoHeaders system tx (chain continuity OK)"
+            );
+        } else {
+            info!(
+                target: "zone::payload",
+                zone_block = parent_header.number() + 1,
+                l1_block = final_imported.inner.number,
+                deposits = total_deposits,
+                enabled_tokens,
+                "Including advanceTempo system tx (chain continuity OK)"
+            );
+        }
 
         let state = StateProviderDatabase::new(state_provider.as_ref());
         let mut db = State::builder()
@@ -235,51 +257,63 @@ where
         })?;
 
         // Execute advanceTempo system transaction — exactly one per zone block.
+        let opening_tx = match tempo_import {
+            TempoImport::Full(prepared) => build_advance_tempo_tx(prepared, chain_id),
+            TempoImport::CheckpointOnly(headers) => {
+                build_advance_tempo_headers_tx(headers, chain_id)?
+            }
+        };
         builder
-            .execute_transaction(build_advance_tempo_tx(prepared, chain_id))
+            .execute_transaction(opening_tx)
             .map(|_| ())
             .map_err(PayloadBuilderError::evm)
             .map_err(|err| {
                 error!(
                     ?err,
-                    l1_block = prepared.header.inner.number,
+                    l1_block = final_imported.inner.number,
                     deposits = total_deposits,
                     "advanceTempo system tx failed"
                 );
                 err
             })?;
 
-        // Execute pool transactions until either all of them fit or their packed RLP bytes reach
-        // the size budget
-        // The block executor owns gas-capacity accounting.
-        let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
-        let raw_best_txs = self
-            .pool
-            .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
-        let mut best_txs = StateAwareBestTransactions::new(raw_best_txs);
-        if execute_pool_transactions(
-            |tx, best_txs| {
-                builder
-                    .execute_transaction_with_result_closure(tx, |result| {
-                        best_txs.on_new_result(result);
-                    })
-                    .map(|_| ())
-            },
-            &mut best_txs,
-            &cancel,
-            pool_tx_size_budget,
-        )? == PoolExecutionOutcome::Cancelled
-        {
-            return Ok(BuildOutcome::Cancelled);
-        }
+        if !checkpoint_only {
+            // Execute pool transactions until either all of them fit or their packed RLP bytes reach
+            // the size budget
+            // The block executor owns gas-capacity accounting.
+            let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
+            let raw_best_txs = self
+                .pool
+                .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
+            let mut best_txs = StateAwareBestTransactions::new(raw_best_txs);
+            if execute_pool_transactions(
+                |tx, best_txs| {
+                    builder
+                        .execute_transaction_with_result_closure(tx, |result| {
+                            best_txs.on_new_result(result);
+                        })
+                        .map(|_| ())
+                },
+                &mut best_txs,
+                &cancel,
+                pool_tx_size_budget,
+            )? == PoolExecutionOutcome::Cancelled
+            {
+                return Ok(BuildOutcome::Cancelled);
+            }
 
-        finalize_withdrawal_batch_if_needed(
-            &mut builder,
-            block_number,
-            self.withdrawal_batch_interval_blocks,
-            self.withdrawal_reveal_encryptor.as_deref(),
-            chain_id,
-        )?;
+            finalize_withdrawal_batch_if_needed(
+                &mut builder,
+                block_number,
+                if chain_spec.zone_hardfork_at(attributes.timestamp()).is_z1() {
+                    1
+                } else {
+                    self.withdrawal_batch_interval_blocks
+                },
+                self.withdrawal_reveal_encryptor.as_deref(),
+                chain_id,
+            )?;
+        }
 
         let BlockBuilderOutcome {
             execution_result,
@@ -309,8 +343,8 @@ where
         let elapsed = start.elapsed();
         info!(
             number = sealed_block.number(),
-            l1_block = prepared.header.number(),
-            l1_hash = ?prepared.header.hash(),
+            l1_block = final_imported.number(),
+            l1_hash = ?final_imported.hash(),
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
@@ -378,7 +412,7 @@ where
 /// Validate that the prepared L1 block is the next block expected by TempoState.
 fn validate_l1_continuity(
     state_provider: &dyn StateProvider,
-    prepared: &PreparedL1Block,
+    headers: &[reth_primitives_traits::SealedHeader<TempoHeader>],
 ) -> Result<(), PayloadBuilderError> {
     let stored_l1 = state_provider
         .tempo_num_hash()
@@ -392,35 +426,50 @@ fn validate_l1_continuity(
         "TempoState current state"
     );
 
-    if prepared.header.inner.number != expected_block_number {
-        error!(
-            target: "zone::payload",
-            got = prepared.header.inner.number,
-            expected = expected_block_number,
-            "L1 block number mismatch — chain continuity broken"
-        );
+    if headers.is_empty() {
         return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-            format!(
-                "L1 block number mismatch: got {} expected {expected_block_number}",
-                prepared.header.inner.number
-            ),
+            "Tempo import contains no headers",
         )));
     }
+    let mut expected_number = expected_block_number;
+    let mut expected_hash = stored_l1.hash;
+    for header in headers {
+        if header.inner.number != expected_number {
+            error!(
+                target: "zone::payload",
+                got = header.inner.number,
+                expected = expected_number,
+                "L1 block number mismatch — chain continuity broken"
+            );
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                format!(
+                    "L1 block number mismatch: got {} expected {expected_block_number}",
+                    header.inner.number
+                ),
+            )));
+        }
 
-    if prepared.header.inner.parent_hash != stored_l1.hash {
-        error!(
-            target: "zone::payload",
-            got = %prepared.header.inner.parent_hash,
-            expected = %stored_l1.hash,
-            l1_block = prepared.header.inner.number,
-            "L1 parent hash mismatch — chain continuity broken"
-        );
-        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-            format!(
-                "L1 parent hash mismatch at block {}: got {} expected {}",
-                prepared.header.inner.number, prepared.header.inner.parent_hash, stored_l1.hash
-            ),
-        )));
+        if header.inner.parent_hash != expected_hash {
+            error!(
+                target: "zone::payload",
+                got = %header.inner.parent_hash,
+                expected = %expected_hash,
+                l1_block = header.inner.number,
+                "L1 parent hash mismatch — chain continuity broken"
+            );
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                format!(
+                    "L1 parent hash mismatch at block {}: got {} expected {}",
+                    header.inner.number, header.inner.parent_hash, expected_hash
+                ),
+            )));
+        }
+        expected_number = expected_number.checked_add(1).ok_or_else(|| {
+            PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                "Tempo block number overflow",
+            ))
+        })?;
+        expected_hash = header.hash();
     }
 
     Ok(())
@@ -715,10 +764,50 @@ pub fn build_advance_tempo_tx(
     )
 }
 
+/// Build a checkpoint-only `advanceTempoHeaders(headers)` system transaction.
+///
+/// The executor requires this transaction to be the complete body of its Zone block. Portal
+/// deposits and token enablements remain pending until a later full `advanceTempo` block.
+pub fn build_advance_tempo_headers_tx(
+    headers: &[reth_primitives_traits::SealedHeader<TempoHeader>],
+    chain_id: u64,
+) -> Result<Recovered<TempoTxEnvelope>, PayloadBuilderError> {
+    if headers.is_empty()
+        || headers.len() > zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK
+    {
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            "checkpoint-only Tempo header range is empty or oversized",
+        )));
+    }
+    let headers = headers
+        .iter()
+        .map(|header| {
+            let mut encoded = Vec::new();
+            header.header().encode(&mut encoded);
+            Bytes::from(encoded)
+        })
+        .collect();
+    let calldata = abi::IZoneInbox::advanceTempoHeadersCall { headers }.abi_encode();
+    let tx = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_INBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+    Ok(Recovered::new_unchecked(
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
+        TEMPO_SYSTEM_TX_SENDER,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{Header, Signed, TxLegacy};
     use alloy_primitives::{Address, B256, U256, address};
+    use alloy_rlp::Decodable;
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
     use reth_revm::cancelled::CancelOnDrop;
@@ -753,6 +842,34 @@ mod tests {
             super::ZonePayloadFactory::new(0).withdrawal_batch_interval_blocks,
             1
         );
+    }
+
+    #[test]
+    fn builds_checkpoint_only_import_with_all_headers() {
+        let headers = [7, 8].map(|number| {
+            SealedHeader::seal_slow(TempoHeader {
+                inner: Header {
+                    number,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        });
+
+        let recovered = super::build_advance_tempo_headers_tx(&headers, 1337).unwrap();
+        let TempoTxEnvelope::Legacy(signed) = recovered.inner() else {
+            panic!("expected legacy transaction")
+        };
+        assert_eq!(signed.tx().chain_id, Some(1337));
+
+        let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(&signed.tx().input).unwrap();
+        assert_eq!(call.headers.len(), 2);
+        for (encoded, expected) in call.headers.iter().zip(headers) {
+            let mut encoded = encoded.as_ref();
+            let decoded = TempoHeader::decode(&mut encoded).unwrap();
+            assert!(encoded.is_empty());
+            assert_eq!(decoded.inner.number, expected.inner.number);
+        }
     }
 
     /// A [`BestTransactions`] stream backed by a fixed queue that counts size-based rejections.

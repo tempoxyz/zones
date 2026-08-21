@@ -23,7 +23,8 @@ use tempo_zone_contracts::IZoneOutbox;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{
-    ADVANCE_TEMPO_SELECTOR, L1StorageReader, is_finalize_withdrawal_batch_calldata,
+    ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader,
+    is_finalize_withdrawal_batch_calldata,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -36,6 +37,8 @@ enum ZoneBlockPhase {
     AwaitingAdvanceTempo,
     /// The block has committed `advanceTempo` and may execute ordinary transactions.
     Executing,
+    /// The block authenticated Tempo headers and must contain no further transactions.
+    CheckpointOnly,
     /// The block has finalized withdrawals and cannot accept any more transactions.
     WithdrawalsFinalized,
 }
@@ -53,6 +56,9 @@ impl ZoneBlockPhase {
 
         match (self, tx_kind) {
             (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempo) => Ok(Self::Executing),
+            (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempoHeaders) => {
+                Ok(Self::CheckpointOnly)
+            }
             (Self::AwaitingAdvanceTempo, _) => Err(BlockValidationError::msg(
                 "advanceTempo must be the first transaction in a zone block",
             )
@@ -61,6 +67,9 @@ impl ZoneBlockPhase {
                 "advanceTempo must only execute once per zone block",
             )
             .into()),
+            (Self::Executing, ZoneTransactionKind::AdvanceTempoHeaders) => Err(
+                BlockValidationError::msg("advanceTempoHeaders must only open a zone block").into(),
+            ),
             (Self::Executing, ZoneTransactionKind::Regular) => Ok(Self::Executing),
             (Self::Executing, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
                 Ok(Self::WithdrawalsFinalized)
@@ -76,6 +85,10 @@ impl ZoneBlockPhase {
                 "finalizeWithdrawalBatch must be the last transaction in a zone block",
             )
             .into()),
+            (Self::CheckpointOnly, _) => Err(BlockValidationError::msg(
+                "advanceTempoHeaders must be the only transaction in a zone block",
+            )
+            .into()),
         }
     }
 
@@ -88,6 +101,7 @@ impl ZoneBlockPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZoneTransactionKind {
     AdvanceTempo,
+    AdvanceTempoHeaders,
     Regular,
     FinalizeWithdrawalBatch,
     UnexpectedSystem,
@@ -103,6 +117,13 @@ impl ZoneTransactionKind {
             kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
         }) {
             return Self::AdvanceTempo;
+        }
+
+        if tx.calls().any(|(kind, input)| {
+            kind.to() == Some(&ZONE_INBOX_ADDRESS)
+                && input.starts_with(&ADVANCE_TEMPO_HEADERS_SELECTOR)
+        }) {
+            return Self::AdvanceTempoHeaders;
         }
 
         if tx.calls().any(|(kind, input)| {
