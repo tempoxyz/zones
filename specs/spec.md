@@ -2041,9 +2041,6 @@ interface IZoneOutbox {
     );
     event TempoGasRateUpdated(uint128 tempoGasRate);
     event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
-    /// @dev Emitted for every batch boundary, including empty batches. The hash is zero
-    ///      for an empty batch, and the index increases by one at every boundary. This
-    ///      event does not indicate that the batch has been submitted to or accepted by Tempo.
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
     error InvalidFallbackRecipient();
