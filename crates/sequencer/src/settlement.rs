@@ -32,7 +32,9 @@ use crate::{
         LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
         ZonePortal,
     },
-    attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
+    attestation::{
+        AttestationDomain, AttestationStore, SettlementAttestation, SettlementCertificate,
+    },
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_eips::BlockHashOrNumber;
@@ -43,7 +45,7 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain};
+use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
@@ -408,7 +410,7 @@ impl BatchSubmitter {
         let signatures = if let Some(certificate) = &certificate {
             certificate.signatures.clone()
         } else {
-            // Legacy mode, where the 1-of-1 sequencer will self-sign the attestation
+            // Single-sequencer mode, where the 1-of-1 sequencer self-signs the attestation.
             let anchor_block_number = anchor_mode.anchor_block_number(batch.tempo_block_number);
             let anchor_block_hash = self
                 .l1_provider
@@ -464,35 +466,57 @@ impl BatchSubmitter {
             "Submitting batch to ZonePortal on L1"
         );
 
-        let mut submission = self
-            .portal
-            .submitBatch_1(
-                batch.tempo_block_number,
-                recent_tempo_block_number,
-                block_transition,
-                deposit_transition,
-                token_transition,
-                batch.withdrawal_queue_hash,
-                verifier_config,
-                Bytes::new(),
-                U256::from(batch.zone_height),
-                signatures,
-            )
-            .nonce_key(SUBMIT_BATCH_NONCE_KEY)
-            .nonce(nonce)
-            .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
-            .max_priority_fee_per_gas(0);
-        // Estimation against state N cannot see hash(N), although execution in N+1 can. If this
-        // send does not settle, a retry after the head advances uses normal estimation.
-        if anchors_to_current_tip {
-            submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+        let receipt = match batch.settlement_abi {
+            SettlementAbi::Legacy => {
+                let mut submission = self
+                    .portal
+                    .submitBatch_0(
+                        batch.tempo_block_number,
+                        recent_tempo_block_number,
+                        block_transition,
+                        deposit_transition,
+                        batch.withdrawal_queue_hash,
+                        verifier_config,
+                        Bytes::new(),
+                        U256::from(batch.zone_height),
+                        signatures,
+                    )
+                    .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                    .nonce(nonce)
+                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                    .max_priority_fee_per_gas(0);
+                if anchors_to_current_tip {
+                    submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+                }
+                tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
+            }
+            SettlementAbi::T12 => {
+                let mut submission = self
+                    .portal
+                    .submitBatch_1(
+                        batch.tempo_block_number,
+                        recent_tempo_block_number,
+                        block_transition,
+                        deposit_transition,
+                        token_transition,
+                        batch.withdrawal_queue_hash,
+                        verifier_config,
+                        Bytes::new(),
+                        U256::from(batch.zone_height),
+                        signatures,
+                    )
+                    .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                    .nonce(nonce)
+                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                    .max_priority_fee_per_gas(0);
+                if anchors_to_current_tip {
+                    submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+                }
+                tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
+            }
         }
-
-        let receipt =
-            tokio::time::timeout(std::time::Duration::from_secs(30), submission.send_sync())
-                .await
-                .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))?
-                .map_err(|error| BatchSubmitError::Other(error.into()))?;
+        .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))?
+        .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
@@ -567,11 +591,10 @@ impl BatchSubmitter {
             deposit_transition,
             verifier_config,
         } = attestation;
-        let domain = eip712_domain! {
-            name: "ZonePortal",
-            version: "1",
-            chain_id: metadata.stable.chain_id,
-            verifying_contract: self.portal_address,
+        let domain = AttestationDomain {
+            l1_chain_id: metadata.stable.chain_id,
+            portal_address: self.portal_address,
+            zone_id: metadata.stable.zone_id,
         };
         let message = SettlementAttestation {
             zoneId: metadata.stable.zone_id,
@@ -584,17 +607,20 @@ impl BatchSubmitter {
             anchorBlockHash: anchor_block_hash,
             blockTransitionHash: keccak256(block_transition.abi_encode()),
             depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
-            tokenEnablementTransitionHash: keccak256(
-                TokenEnablementTransition {
-                    prevProcessedTokenCount: batch.prev_processed_token_count,
-                    nextProcessedTokenCount: batch.next_processed_token_count,
-                }
-                .abi_encode(),
-            ),
+            tokenEnablementTransitionHash: match batch.settlement_abi {
+                SettlementAbi::Legacy => B256::ZERO,
+                SettlementAbi::T12 => keccak256(
+                    TokenEnablementTransition {
+                        prevProcessedTokenCount: batch.prev_processed_token_count,
+                        nextProcessedTokenCount: batch.next_processed_token_count,
+                    }
+                    .abi_encode(),
+                ),
+            },
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfigHash: keccak256(verifier_config),
         };
-        let digest = message.eip712_signing_hash(&domain);
+        let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
         let mut encoded = Vec::with_capacity(65);
         encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
@@ -759,13 +785,16 @@ impl BatchSubmitter {
             )
                 .abi_encode(),
         );
-        let expected_token_transition_hash = alloy_primitives::keccak256(
-            (
-                batch.prev_processed_token_count,
-                batch.next_processed_token_count,
-            )
-                .abi_encode(),
-        );
+        let expected_token_transition_hash = match batch.settlement_abi {
+            SettlementAbi::Legacy => B256::ZERO,
+            SettlementAbi::T12 => alloy_primitives::keccak256(
+                (
+                    batch.prev_processed_token_count,
+                    batch.next_processed_token_count,
+                )
+                    .abi_encode(),
+            ),
+        };
 
         // Run a bunch of checks to verify that whats in the attestation certificate is exactly what
         // we expect. `submitBatch` will revert if any of these are wrong, so we should catch it early.
@@ -1217,11 +1246,22 @@ pub struct WithdrawalPage {
     pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
+/// Settlement ABI selected by the fork rules of the batch's imported Tempo block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementAbi {
+    /// Pre-T12 selector and EIP-712 statement.
+    Legacy,
+    /// T12 selector and token-enablement-bound EIP-712 statement.
+    T12,
+}
+
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
 /// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
 #[derive(Debug, Clone)]
 pub struct BatchData {
+    /// Portal ABI and attestation format active for this batch.
+    pub settlement_abi: SettlementAbi,
     /// Zone L2 height committed by this batch.
     pub zone_height: u64,
     /// Tempo L1 block number for EIP-2935 verification.
@@ -1271,6 +1311,8 @@ pub(crate) struct FinalizedBatchLog {
 
 /// Zone L2 state read at a specific block, used to populate [`BatchData`].
 pub(crate) struct ZoneBlockSnapshot {
+    /// Portal ABI selected by this block's `TempoAdvanced` event version.
+    pub settlement_abi: SettlementAbi,
     /// Latest Tempo L1 block number as seen by the zone.
     pub tempo_block_number: u64,
     /// Cumulative hash of all deposits processed by the zone up to this block.
@@ -1588,6 +1630,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
     let mut processed_token_count = None;
+    let mut settlement_abi = None;
 
     for receipt in receipts {
         for log in receipt.logs() {
@@ -1602,6 +1645,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                     let event = TempoAdvanced::decode_log(log).map_err(|err| {
                         eyre::eyre!("invalid post-Z1 TempoAdvanced log in block {number}: {err}")
                     })?;
+                    settlement_abi = Some(SettlementAbi::T12);
                     (
                         event.tempoBlockNumber,
                         event.newProcessedDepositQueueHash,
@@ -1612,6 +1656,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                     let event = LegacyTempoAdvanced::decode_log(log).map_err(|err| {
                         eyre::eyre!("invalid legacy TempoAdvanced log in block {number}: {err}")
                     })?;
+                    settlement_abi = Some(SettlementAbi::Legacy);
                     (
                         event.tempoBlockNumber,
                         event.newProcessedDepositQueueHash,
@@ -1633,6 +1678,8 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     }
 
     Ok(ZoneBlockSnapshot {
+        settlement_abi: settlement_abi
+            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its settlement ABI"))?,
         tempo_block_number: tempo_block_number
             .ok_or_else(|| eyre::eyre!("zone block {number} is missing TempoAdvanced"))?,
         processed_deposit_hash: processed_deposit_hash
@@ -1831,7 +1878,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi;
+    use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
     use alloy_consensus::Header as ConsensusHeader;
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
@@ -1847,6 +1894,17 @@ mod tests {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased()
+    }
+
+    #[test]
+    fn settlement_bindings_keep_legacy_and_t12_selectors_distinct() {
+        let legacy: [u8; 4] = keccak256(
+            "submitBatch(uint64,uint64,(bytes32,bytes32),(bytes32,bytes32,uint64,uint64),bytes32,bytes,bytes,uint256,bytes[])"
+        )[..4]
+            .try_into()
+            .unwrap();
+        assert_eq!(legacySubmitBatchCall::SELECTOR, legacy);
+        assert_ne!(legacySubmitBatchCall::SELECTOR, submitBatchCall::SELECTOR);
     }
 
     #[tokio::test]
@@ -2345,6 +2403,7 @@ mod tests {
             .erased();
         let mut submitter = BatchSubmitter::new(Address::ZERO, provider);
         let batch = BatchData {
+            settlement_abi: SettlementAbi::T12,
             zone_height: 1,
             tempo_block_number: 1,
             prev_block_hash: B256::ZERO,

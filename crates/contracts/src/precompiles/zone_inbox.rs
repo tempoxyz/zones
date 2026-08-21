@@ -137,7 +137,6 @@ crate::sol! {
             DecryptionData[] calldata decryptions,
             EnabledToken[] calldata enabledTokens
         ) external;
-
         /// Advance only the authenticated Tempo checkpoint. A block opened by this call may not
         /// contain any other transaction.
         function advanceTempoHeaders(bytes[] calldata headers) external;

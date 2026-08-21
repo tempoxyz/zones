@@ -16,8 +16,8 @@ use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolError;
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    EncodePrecompileResult, charge_input_cost, dispatch, error::TempoPrecompileError,
-    storage::Handler, view,
+    EncodePrecompileResult, charge_input_cost, dispatch, dispatch::unknown_selector_result,
+    error::TempoPrecompileError, storage::Handler, view,
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
@@ -211,7 +211,7 @@ impl TempoState {
                     #[schedule(until = T12)]
                     finalizeTempo_0(call) => {
                         if z1_active {
-                            tempo_precompiles::dispatch::unknown_selector_result(calldata)
+                            unknown_selector_result(calldata)
                         } else {
                             self.apply_checkpoints(
                                 l1,
@@ -226,7 +226,7 @@ impl TempoState {
                         if z1_active {
                             self.apply_checkpoints(l1, msg_sender, &call.headers, true)
                         } else {
-                            tempo_precompiles::dispatch::unknown_selector_result(calldata)
+                            unknown_selector_result(calldata)
                         }
                     },
                 }

@@ -40,7 +40,41 @@ sol! {
         SettlementAttestation attestation;
         bytes signature;
     }
+
 }
+
+mod legacy {
+    alloy_sol_types::sol! {
+        /// Settlement statement used by the pre-T12 portal ABI.
+        #[derive(Debug, PartialEq, Eq)]
+        struct SettlementAttestation {
+            uint32 zoneId;
+            uint64 sequencerSetVersion;
+            uint256 zoneHeight;
+            uint256 withdrawalBatchIndex;
+            address verifier;
+            uint64 tempoBlockNumber;
+            uint64 anchorBlockNumber;
+            bytes32 anchorBlockHash;
+            bytes32 blockTransitionHash;
+            bytes32 depositQueueTransitionHash;
+            bytes32 withdrawalQueueHash;
+            bytes32 verifierConfigHash;
+        }
+
+        /// Signed settlement statement used by the pre-T12 portal ABI.
+        #[derive(Debug, PartialEq, Eq)]
+        struct SignedSettlementAttestation {
+            SettlementAttestation attestation;
+            bytes signature;
+        }
+    }
+}
+
+use legacy::{
+    SettlementAttestation as LegacySettlementAttestation,
+    SignedSettlementAttestation as LegacySignedSettlementAttestation,
+};
 
 /// Immutable values that domain-separate one zone's attestations.
 #[derive(Debug, Clone, Copy)]
@@ -61,17 +95,67 @@ impl AttestationDomain {
     }
 
     pub fn settlement_digest(self, attestation: &SettlementAttestation) -> B256 {
-        attestation.eip712_signing_hash(&self.eip712())
+        if attestation.is_legacy() {
+            attestation.as_legacy().eip712_signing_hash(&self.eip712())
+        } else {
+            attestation.eip712_signing_hash(&self.eip712())
+        }
     }
 }
 
 impl SettlementAttestation {
+    /// Legacy attestations use a zero sentinel for the field absent from their wire format.
+    pub fn is_legacy(&self) -> bool {
+        self.tokenEnablementTransitionHash.is_zero()
+    }
+
+    fn as_legacy(&self) -> LegacySettlementAttestation {
+        LegacySettlementAttestation {
+            zoneId: self.zoneId,
+            sequencerSetVersion: self.sequencerSetVersion,
+            zoneHeight: self.zoneHeight,
+            withdrawalBatchIndex: self.withdrawalBatchIndex,
+            verifier: self.verifier,
+            tempoBlockNumber: self.tempoBlockNumber,
+            anchorBlockNumber: self.anchorBlockNumber,
+            anchorBlockHash: self.anchorBlockHash,
+            blockTransitionHash: self.blockTransitionHash,
+            depositQueueTransitionHash: self.depositQueueTransitionHash,
+            withdrawalQueueHash: self.withdrawalQueueHash,
+            verifierConfigHash: self.verifierConfigHash,
+        }
+    }
+
+    fn from_legacy(attestation: LegacySettlementAttestation) -> Self {
+        Self {
+            zoneId: attestation.zoneId,
+            sequencerSetVersion: attestation.sequencerSetVersion,
+            zoneHeight: attestation.zoneHeight,
+            withdrawalBatchIndex: attestation.withdrawalBatchIndex,
+            verifier: attestation.verifier,
+            tempoBlockNumber: attestation.tempoBlockNumber,
+            anchorBlockNumber: attestation.anchorBlockNumber,
+            anchorBlockHash: attestation.anchorBlockHash,
+            blockTransitionHash: attestation.blockTransitionHash,
+            depositQueueTransitionHash: attestation.depositQueueTransitionHash,
+            tokenEnablementTransitionHash: B256::ZERO,
+            withdrawalQueueHash: attestation.withdrawalQueueHash,
+            verifierConfigHash: attestation.verifierConfigHash,
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
-        self.abi_encode()
+        if self.is_legacy() {
+            self.as_legacy().abi_encode()
+        } else {
+            self.abi_encode()
+        }
     }
 
     pub fn decode(encoded: &[u8]) -> eyre::Result<Self> {
-        Self::abi_decode(encoded).wrap_err("invalid settlement proposal encoding")
+        Self::abi_decode(encoded)
+            .or_else(|_| LegacySettlementAttestation::abi_decode(encoded).map(Self::from_legacy))
+            .wrap_err("invalid settlement proposal encoding")
     }
 }
 
@@ -89,11 +173,26 @@ impl SignedSettlementAttestation {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        self.abi_encode()
+        if self.attestation.is_legacy() {
+            LegacySignedSettlementAttestation {
+                attestation: self.attestation.as_legacy(),
+                signature: self.signature.clone(),
+            }
+            .abi_encode()
+        } else {
+            self.abi_encode()
+        }
     }
 
     pub fn decode(encoded: &[u8]) -> eyre::Result<Self> {
-        Self::abi_decode(encoded).wrap_err("invalid settlement signature encoding")
+        Self::abi_decode(encoded)
+            .or_else(|_| {
+                LegacySignedSettlementAttestation::abi_decode(encoded).map(|signed| Self {
+                    attestation: SettlementAttestation::from_legacy(signed.attestation),
+                    signature: signed.signature,
+                })
+            })
+            .wrap_err("invalid settlement signature encoding")
     }
 
     pub fn recover_signer(&self, domain: AttestationDomain) -> eyre::Result<Address> {
@@ -399,6 +498,54 @@ mod tests {
             store.insert_settlement(domain, signer.address(), signed),
             (true, 1)
         );
+    }
+
+    #[test]
+    fn legacy_settlement_uses_pre_t12_wire_format_and_digest() {
+        const LEGACY_PORTAL_TYPE: &str = "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
+        assert_eq!(
+            LegacySettlementAttestation::eip712_encode_type(),
+            LEGACY_PORTAL_TYPE
+        );
+
+        let attestation = SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: 3,
+            zoneHeight: U256::from(120),
+            withdrawalBatchIndex: U256::from(1),
+            verifier: Address::repeat_byte(2),
+            tempoBlockNumber: 100,
+            anchorBlockNumber: 100,
+            anchorBlockHash: B256::repeat_byte(3),
+            blockTransitionHash: B256::repeat_byte(4),
+            depositQueueTransitionHash: B256::repeat_byte(5),
+            tokenEnablementTransitionHash: B256::ZERO,
+            withdrawalQueueHash: B256::repeat_byte(6),
+            verifierConfigHash: B256::repeat_byte(7),
+        };
+        let legacy = attestation.as_legacy();
+        assert_eq!(attestation.encode(), legacy.abi_encode());
+        assert_eq!(
+            SettlementAttestation::decode(&legacy.abi_encode()).unwrap(),
+            attestation
+        );
+        assert_eq!(
+            domain().settlement_digest(&attestation),
+            legacy.eip712_signing_hash(&domain().eip712())
+        );
+
+        let signer = PrivateKeySigner::random();
+        let signed = SignedSettlementAttestation::sign(attestation, domain(), &signer).unwrap();
+        let legacy_signed = LegacySignedSettlementAttestation {
+            attestation: legacy,
+            signature: signed.signature.clone(),
+        };
+        assert_eq!(signed.encode(), legacy_signed.abi_encode());
+        assert_eq!(
+            SignedSettlementAttestation::decode(&legacy_signed.abi_encode()).unwrap(),
+            signed
+        );
+        assert_eq!(signed.recover_signer(domain()).unwrap(), signer.address());
     }
 
     #[test]

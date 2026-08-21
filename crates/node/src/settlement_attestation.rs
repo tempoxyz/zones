@@ -11,7 +11,7 @@ use eyre::{OptionExt as _, WrapErr as _};
 use futures::StreamExt as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_provider::HeaderProvider;
-use reth_storage_api::{BlockNumReader, ReceiptProvider, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, ReceiptProvider};
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneOutbox, LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -22,7 +22,10 @@ use tracing::{debug, info};
 use zone_p2p::P2pCommand;
 
 use crate::replication::AttestationContext;
-use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
+use zone_sequencer::{
+    SettlementAbi,
+    attestation::{SettlementAttestation, SignedSettlementAttestation},
+};
 
 /// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
 const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -114,6 +117,7 @@ pub(crate) async fn validate_registered_sequencer_set(
 
 #[derive(Debug, Clone, Copy)]
 struct BlockCommitments {
+    settlement_abi: SettlementAbi,
     tempo_block_hash: B256,
     tempo_block_number: u64,
     processed_deposit_hash: B256,
@@ -137,6 +141,7 @@ where
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
     let mut processed_token_count = None;
+    let mut settlement_abi = None;
     let mut withdrawal = None;
 
     for receipt in receipts {
@@ -147,6 +152,7 @@ where
                         let event = TempoAdvanced::decode_log(log).wrap_err_with(|| {
                             format!("invalid post-Z1 TempoAdvanced log in block {number}")
                         })?;
+                        settlement_abi = Some(SettlementAbi::T12);
                         anchor_hash = Some(event.tempoBlockHash);
                         tempo_block_number = Some(event.tempoBlockNumber);
                         processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
@@ -157,6 +163,7 @@ where
                         let event = LegacyTempoAdvanced::decode_log(log).wrap_err_with(|| {
                             format!("invalid legacy TempoAdvanced log in block {number}")
                         })?;
+                        settlement_abi = Some(SettlementAbi::Legacy);
                         anchor_hash = Some(event.tempoBlockHash);
                         tempo_block_number = Some(event.tempoBlockNumber);
                         processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
@@ -182,6 +189,8 @@ where
     };
 
     Ok(Some(BlockCommitments {
+        settlement_abi: settlement_abi
+            .ok_or_eyre(format!("block {number} is missing its settlement ABI"))?,
         tempo_block_hash: anchor_hash
             .ok_or_eyre(format!("block {number} is missing TempoAdvanced"))?,
         tempo_block_number: tempo_block_number
@@ -196,9 +205,9 @@ where
     }))
 }
 
-/// Get the previous batch's (i.e the last block in the previous batch) block_hash,
-/// deposit_hash and processed deposit number. These values
-/// are used to identify the previous batch while submitting the current batch.
+/// Get the previous batch's (i.e. the last block in the previous batch) block hash,
+/// deposit hash, processed deposit number, and processed enabled-token count. These values are
+/// used to identify the previous batch while submitting the current batch.
 fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64, u64)>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
@@ -313,9 +322,12 @@ where
             )
                 .abi_encode(),
         ),
-        tokenEnablementTransitionHash: alloy_primitives::keccak256(
-            (previous_token_count, commitments.processed_token_count).abi_encode(),
-        ),
+        tokenEnablementTransitionHash: match commitments.settlement_abi {
+            SettlementAbi::Legacy => B256::ZERO,
+            SettlementAbi::T12 => alloy_primitives::keccak256(
+                (previous_token_count, commitments.processed_token_count).abi_encode(),
+            ),
+        },
         withdrawalQueueHash: withdrawal_queue_hash,
         verifierConfigHash: alloy_primitives::keccak256(Bytes::new()),
     }))
@@ -414,7 +426,6 @@ pub(crate) async fn collect_leader_settlements<P>(
         + BlockNumReader
         + HeaderProvider<Header = TempoHeader>
         + ReceiptProvider
-        + StateProviderFactory
         + Clone
         + Send
         + Sync
@@ -573,7 +584,7 @@ async fn propose_persisted_settlement_range<P>(
     end: u64,
 ) -> Option<u64>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
     scan_settlement_range(start, end, |candidate| {
         propose_settlement(provider, candidate, commands, context)
@@ -610,7 +621,7 @@ async fn propose_settlement<P>(
     context: &AttestationContext,
 ) -> eyre::Result<bool>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
     let Some(attestation) = build_settlement_attestation(provider, number, context, None).await?
     else {
@@ -668,6 +679,44 @@ mod tests {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         provider.add_receipts(1, Vec::new());
         assert!(block_commitments(&provider, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_tempo_advanced_selects_legacy_settlement() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let tempo_advanced = LegacyTempoAdvanced {
+            tempoBlockHash: B256::repeat_byte(0x21),
+            tempoBlockNumber: 101,
+            depositsProcessed: U256::ZERO,
+            newProcessedDepositQueueHash: B256::ZERO,
+            lastProcessedDepositNumber: 0,
+        };
+        let batch_finalized = IZoneOutbox::BatchFinalized {
+            withdrawalQueueHash: B256::ZERO,
+            withdrawalBatchIndex: 1,
+        };
+        provider.add_receipts(
+            1,
+            vec![TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs: vec![
+                    Log {
+                        address: ZONE_INBOX_ADDRESS,
+                        data: tempo_advanced.encode_log_data(),
+                    },
+                    Log {
+                        address: ZONE_OUTBOX_ADDRESS,
+                        data: batch_finalized.encode_log_data(),
+                    },
+                ],
+            }],
+        );
+
+        let commitments = block_commitments(&provider, 1).unwrap().unwrap();
+        assert_eq!(commitments.settlement_abi, SettlementAbi::Legacy);
+        assert_eq!(commitments.processed_token_count, 0);
     }
 
     #[test]
@@ -752,7 +801,8 @@ mod tests {
             }],
         );
 
-        assert!(block_commitments(&provider, 4).unwrap().is_some());
+        let commitments = block_commitments(&provider, 4).unwrap().unwrap();
+        assert_eq!(commitments.settlement_abi, SettlementAbi::T12);
         assert_eq!(
             previous_batch(&provider, 4).unwrap(),
             (first_boundary_hash, first_deposit_hash, 7, 9)
