@@ -596,7 +596,7 @@ async fn store_follower_settlement_signature<P>(
     store: &AttestationStore,
 ) -> eyre::Result<(u64, alloy_primitives::Address, usize)>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
     let signed = SignedSettlementAttestation::decode(signature)?;
     let signer = signed.recover_signer(attestation.domain)?;

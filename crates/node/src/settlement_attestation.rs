@@ -125,7 +125,7 @@ struct BlockCommitments {
 /// Extract commitments produced by the deterministic system transactions in a zone block.
 fn block_commitments<P>(provider: &P, number: u64) -> eyre::Result<Option<BlockCommitments>>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
+    P: ReceiptProvider,
 {
     let receipts = provider
         .receipts_by_block(BlockHashOrNumber::Number(number))?
@@ -230,7 +230,7 @@ pub(crate) async fn build_settlement_attestation<P>(
     proposed_anchor: Option<(u64, B256)>,
 ) -> eyre::Result<Option<SettlementAttestation>>
 where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider + StateProviderFactory,
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
     let Some(commitments) = block_commitments(provider, number)? else {
         return Ok(None);
