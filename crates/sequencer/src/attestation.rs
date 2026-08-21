@@ -29,6 +29,7 @@ sol! {
         bytes32 anchorBlockHash;
         bytes32 blockTransitionHash;
         bytes32 depositQueueTransitionHash;
+        bytes32 tokenEnablementTransitionHash;
         bytes32 withdrawalQueueHash;
         bytes32 verifierConfigHash;
     }
@@ -328,7 +329,7 @@ mod tests {
 
     #[test]
     fn settlement_type_and_signature_match_zone_portal() {
-        const PORTAL_TYPE: &str = "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
+        const PORTAL_TYPE: &str = "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
         assert_eq!(SettlementAttestation::eip712_encode_type(), PORTAL_TYPE);
 
         let attestation = SettlementAttestation {
@@ -342,6 +343,7 @@ mod tests {
             anchorBlockHash: B256::repeat_byte(3),
             blockTransitionHash: B256::repeat_byte(4),
             depositQueueTransitionHash: B256::repeat_byte(5),
+            tokenEnablementTransitionHash: B256::repeat_byte(8),
             withdrawalQueueHash: B256::repeat_byte(6),
             verifierConfigHash: B256::repeat_byte(7),
         };
@@ -358,6 +360,7 @@ mod tests {
                 attestation.anchorBlockHash,
                 attestation.blockTransitionHash,
                 attestation.depositQueueTransitionHash,
+                attestation.tokenEnablementTransitionHash,
                 attestation.withdrawalQueueHash,
                 attestation.verifierConfigHash,
             )
@@ -416,6 +419,7 @@ mod tests {
             anchorBlockHash: B256::repeat_byte(3),
             blockTransitionHash: B256::repeat_byte(4),
             depositQueueTransitionHash: B256::repeat_byte(5),
+            tokenEnablementTransitionHash: B256::repeat_byte(8),
             withdrawalQueueHash: B256::repeat_byte(6),
             verifierConfigHash: B256::repeat_byte(7),
         };
@@ -447,6 +451,7 @@ mod tests {
             anchorBlockHash: B256::repeat_byte(3),
             blockTransitionHash: B256::repeat_byte(4),
             depositQueueTransitionHash: B256::repeat_byte(5),
+            tokenEnablementTransitionHash: B256::repeat_byte(8),
             withdrawalQueueHash: B256::repeat_byte(6),
             verifierConfigHash: B256::repeat_byte(7),
         };

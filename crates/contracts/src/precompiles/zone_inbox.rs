@@ -124,16 +124,12 @@ crate::sol! {
         function processedDepositQueueHash() external view returns (bytes32);
         function processedDepositNumber() external view returns (uint64);
         function processedTokenEnablementHash() external view returns (bytes32);
+        /// Get the number of enabled tokens processed by the Zone Inbox. Active from Z1.
+        function processedEnabledTokenCount() external view returns (uint64);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
         function claimRefund(address token) external returns (uint128 amount);
-
-        /// Get the number of enabled tokens processed by the Zone Inbox. Active from Z1.
-        function processedEnabledTokenCount() external view returns (uint64);
-
-        /// Authenticate Tempo ancestry without processing portal work. Active from Z1.
-        function advanceTempoHeaders(bytes[] calldata headers) external;
 
         function advanceTempo(
             bytes calldata header,
@@ -141,6 +137,10 @@ crate::sol! {
             DecryptionData[] calldata decryptions,
             EnabledToken[] calldata enabledTokens
         ) external;
+
+        /// Advance only the authenticated Tempo checkpoint. A block opened by this call may not
+        /// contain any other transaction.
+        function advanceTempoHeaders(bytes[] calldata headers) external;
     }
 }
 

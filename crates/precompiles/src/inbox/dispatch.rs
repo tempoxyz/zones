@@ -3,7 +3,10 @@
 use alloy_primitives::{Address, Bytes};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    EncodePrecompileResult, charge_input_cost, dispatch, dispatch::typed, storage::Handler, view,
+    EncodePrecompileResult, charge_input_cost, dispatch,
+    dispatch::{typed, unknown_selector_result},
+    storage::Handler,
+    view,
 };
 use tempo_zone_contracts::IZoneInbox;
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -18,6 +21,7 @@ impl ZoneInbox {
         l1: &L1State<P>,
         calldata: &[u8],
         msg_sender: Address,
+        z1_active: bool,
     ) -> PrecompileResult
     where
         P: L1StorageReader,
@@ -39,6 +43,16 @@ impl ZoneInbox {
                     processedTokenEnablementHash(call) => {
                         view(call, |_| self.processed_token_enablement_hash.read())
                     },
+                    #[schedule(since = T12)]
+                    processedEnabledTokenCount(call) => {
+                        if z1_active {
+                            view(call, |_| self.processed_enabled_token_count.read())
+                        } else {
+                            // Preserve the pre-Z1 ABI exactly: before the cursor exists, this
+                            // selector must behave like any other unknown function.
+                            unknown_selector_result(calldata)
+                        }
+                    },
                     tempoPortal(call) => view(call, |_| Ok(l1.portal())),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     refunds(call) => typed::view(call, |call| {
@@ -47,19 +61,22 @@ impl ZoneInbox {
                     claimRefund(call) => crate::dispatch::mutate(call, msg_sender, |caller, call| {
                         self.claim_refund(caller, call.token)
                     }),
-                    #[schedule(since = T12)]
-                    processedEnabledTokenCount(_) => {
-                        tempo_precompiles::dispatch::unknown_selector_result(calldata)
-                    },
-                    #[schedule(since = T12)]
-                    advanceTempoHeaders(_) => {
-                        tempo_precompiles::dispatch::unknown_selector_result(calldata)
-                    },
                     advanceTempo(call) => {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
-                            self.advance_tempo(l1, l1.portal(), msg_sender, call)
+                            self.advance_tempo(l1, l1.portal(), msg_sender, call, z1_active)
+                                .encode_precompile_result(0, 0, |()| Bytes::new())
+                        }
+                    },
+                    #[schedule(since = T12)]
+                    advanceTempoHeaders(call) => {
+                        if !z1_active {
+                            unknown_selector_result(calldata)
+                        } else if self.storage.is_static() {
+                            Ok(self.storage.revert_output(Bytes::new()))
+                        } else {
+                            self.advance_tempo_headers(l1, msg_sender, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },
