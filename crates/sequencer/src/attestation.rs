@@ -10,7 +10,7 @@ use alloy_signer::SignerSync as _;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{Eip712Domain, SolStruct as _, SolValue as _, eip712_domain, sol};
 use eyre::WrapErr as _;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 
 type SettlementSignatures =
     BTreeMap<u64, BTreeMap<B256, BTreeMap<Address, SignedSettlementAttestation>>>;
@@ -119,7 +119,7 @@ pub struct SettlementCertificate {
 #[derive(Debug, Clone)]
 pub struct AttestationStore {
     settlements: Arc<RwLock<SettlementSignatures>>,
-    settlement_changed: Arc<Notify>,
+    settlement_revision: Arc<watch::Sender<u64>>,
     submitted_height: watch::Sender<u64>,
 }
 
@@ -128,7 +128,7 @@ impl Default for AttestationStore {
         let (submitted_height, _) = watch::channel(0);
         Self {
             settlements: Arc::default(),
-            settlement_changed: Arc::default(),
+            settlement_revision: Arc::new(watch::channel(0).0),
             submitted_height,
         }
     }
@@ -160,9 +160,7 @@ impl AttestationStore {
             (inserted, signatures.len())
         };
 
-        // There is one in-order batch submission waiter; notify_one retains a permit if insertion
-        // races between its store check and awaiting the notification.
-        self.settlement_changed.notify_one();
+        self.publish_settlement_change();
 
         (inserted, signature_count)
     }
@@ -224,8 +222,24 @@ impl AttestationStore {
             signatures.len()
         };
 
-        self.settlement_changed.notify_one();
+        self.publish_settlement_change();
         Ok(signature_count)
+    }
+
+    /// Subscribe to a monotonically increasing revision for settlement-store changes.
+    ///
+    /// Subscribe before querying [`Self::settlement_at`] so an insertion racing with the query
+    /// is retained by the watch receiver and cannot be lost.
+    pub fn subscribe_settlement_changes(&self) -> watch::Receiver<u64> {
+        self.settlement_revision.subscribe()
+    }
+
+    fn publish_settlement_change(&self) {
+        self.settlement_revision.send_modify(|revision| {
+            *revision = revision
+                .checked_add(1)
+                .expect("settlement revision overflow");
+        });
     }
 
     /// Wait until any statement at `height` has at least `quorum` distinct signatures, or return
@@ -236,23 +250,26 @@ impl AttestationStore {
         quorum: usize,
         shutdown: &tokio_util::sync::CancellationToken,
     ) -> Option<SettlementCertificate> {
+        let mut changes = self.subscribe_settlement_changes();
         tokio::select! {
             biased;
             () = shutdown.cancelled() => None,
             certificate = async {
                 loop {
-                    let notified = self.settlement_changed.notified();
                     if let Some(certificate) = self.settlement_at(height, quorum) {
                         break certificate;
                     }
-                    notified.await;
+                    if changes.changed().await.is_err() {
+                        // If this errors, wait and let the outer `cancelled()` branch handle shutdown.
+                        std::future::pending::<()>().await;
+                    }
                 }
             } => Some(certificate),
         }
     }
 
     /// Get the settlement certificate at the zone block height
-    fn settlement_at(&self, height: u64, quorum: usize) -> Option<SettlementCertificate> {
+    pub fn settlement_at(&self, height: u64, quorum: usize) -> Option<SettlementCertificate> {
         let all = self
             .settlements
             .read()
@@ -477,5 +494,37 @@ mod tests {
 
         store.remove_submitted(10);
         assert!(store.settlement_at(10, 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn settlement_revision_retains_update_between_subscribe_and_wait() {
+        let store = AttestationStore::default();
+        let mut changes = store.subscribe_settlement_changes();
+        let initial_revision = *changes.borrow();
+        let signer = PrivateKeySigner::random();
+        let attestation = SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: 3,
+            zoneHeight: U256::from(10),
+            withdrawalBatchIndex: U256::from(1),
+            verifier: Address::repeat_byte(2),
+            tempoBlockNumber: 100,
+            anchorBlockNumber: 100,
+            anchorBlockHash: B256::repeat_byte(3),
+            blockTransitionHash: B256::repeat_byte(4),
+            depositQueueTransitionHash: B256::repeat_byte(5),
+            withdrawalQueueHash: B256::repeat_byte(6),
+            verifierConfigHash: B256::repeat_byte(7),
+        };
+
+        store.insert_settlement(
+            domain(),
+            signer.address(),
+            SignedSettlementAttestation::sign(attestation, domain(), &signer).unwrap(),
+        );
+
+        changes.changed().await.unwrap();
+        assert_eq!(*changes.borrow(), initial_revision + 1);
+        assert!(store.settlement_at(10, 1).is_some());
     }
 }

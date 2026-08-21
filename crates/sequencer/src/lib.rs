@@ -38,7 +38,8 @@ pub use encryption_key::{
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
-    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
+    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatchSubmission,
+    resolve_portal_zone_anchor,
 };
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
