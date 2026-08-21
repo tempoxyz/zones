@@ -334,7 +334,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         let final_tempo_header = zone_inputs
             .blocks
             .last()
-            .map(|block| decode_tempo_header(&block.tempo_header_rlp))
+            .map(final_tempo_header)
             .transpose()?
             .unwrap_or_else(|| initial_tempo_header.clone());
         ensure!(
@@ -591,7 +591,7 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
         );
 
         let extracted_block = extract_zone_block(block)?;
-        let checkpoint = decode_tempo_header(&extracted_block.tempo_header_rlp)?.number();
+        let checkpoint = final_tempo_header(&extracted_block)?.number();
         checkpoint_by_zone_block.insert(number, checkpoint);
         extracted.push(extracted_block);
         expected_parent = canonical_hash;
@@ -613,6 +613,7 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
 fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
     let header = block.header();
     let mut tempo_header_rlp = None;
+    let mut tempo_headers_rlp = Vec::new();
     let mut deposits = Vec::new();
     let mut decryptions = Vec::new();
     let mut enabled_tokens = Vec::new();
@@ -633,17 +634,37 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                     "Zone block {} contains multiple advanceTempo calls",
                     header.number()
                 );
-                let call = ZoneInbox::advanceTempoCall::abi_decode(transaction.input())
-                    .wrap_err_with(|| {
-                        format!("decode advanceTempo in Zone block {}", header.number())
-                    })?;
-                decode_tempo_header(&call.header).wrap_err_with(|| {
-                    format!("decode Tempo checkpoint in Zone block {}", header.number())
-                })?;
-                tempo_header_rlp = Some(call.header);
-                deposits = call.deposits;
-                decryptions = call.decryptions;
-                enabled_tokens = call.enabledTokens;
+                if transaction
+                    .input()
+                    .starts_with(&ZoneInbox::advanceTempoCall::SELECTOR)
+                {
+                    let call = ZoneInbox::advanceTempoCall::abi_decode(transaction.input())
+                        .wrap_err_with(|| {
+                            format!("decode advanceTempo in Zone block {}", header.number())
+                        })?;
+                    decode_tempo_header(&call.header)?;
+                    tempo_header_rlp = Some(call.header);
+                    deposits = call.deposits;
+                    decryptions = call.decryptions;
+                    enabled_tokens = call.enabledTokens;
+                } else {
+                    let call = ZoneInbox::advanceTempoHeadersCall::abi_decode(transaction.input())
+                        .wrap_err_with(|| {
+                            format!(
+                                "decode advanceTempoHeaders in Zone block {}",
+                                header.number()
+                            )
+                        })?;
+                    ensure!(
+                        !call.headers.is_empty(),
+                        "checkpoint-only Zone block has no headers"
+                    );
+                    for encoded in &call.headers {
+                        decode_tempo_header(encoded)?;
+                    }
+                    tempo_headers_rlp = call.headers;
+                    tempo_header_rlp = Some(Bytes::new());
+                }
             }
             Some(to) if to == ZONE_OUTBOX_ADDRESS => {
                 ensure!(
@@ -686,6 +707,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         timestamp_millis_part: header.timestamp_millis_part,
         beneficiary: header.beneficiary(),
         tempo_header_rlp,
+        tempo_headers_rlp,
         deposits,
         decryptions,
         enabled_tokens,
@@ -693,6 +715,14 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         finalize_withdrawal_batch_encrypted_senders: finalize_encrypted_senders,
         transactions: user_transactions,
     })
+}
+
+fn final_tempo_header(block: &ZoneBlock) -> Result<TempoHeader> {
+    let encoded = block
+        .tempo_headers_rlp
+        .last()
+        .unwrap_or(&block.tempo_header_rlp);
+    decode_tempo_header(encoded)
 }
 
 fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
@@ -930,6 +960,20 @@ fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B
         batch.next_deposit_number
     );
     ensure!(
+        output.token_enablement_transition.prevProcessedTokenCount
+            == batch.prev_processed_token_count,
+        "previous token count mismatch: SPF {}, candidate {}",
+        output.token_enablement_transition.prevProcessedTokenCount,
+        batch.prev_processed_token_count
+    );
+    ensure!(
+        output.token_enablement_transition.nextProcessedTokenCount
+            == batch.next_processed_token_count,
+        "next token count mismatch: SPF {}, candidate {}",
+        output.token_enablement_transition.nextProcessedTokenCount,
+        batch.next_processed_token_count
+    );
+    ensure!(
         output.withdrawal_queue_hash == batch.withdrawal_queue_hash,
         "withdrawal queue hash mismatch: SPF {}, candidate {}",
         output.withdrawal_queue_hash,
@@ -973,6 +1017,9 @@ fn witness_size(witness: &BatchWitness) -> usize {
 mod tests {
     use super::*;
     use alloy_consensus::Header as ConsensusHeader;
+    use zone_spf::{
+        BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
+    };
 
     fn ancestry_header(number: u64, parent_hash: B256) -> (Bytes, B256) {
         let header = TempoHeader {
@@ -1016,5 +1063,51 @@ mod tests {
         let error = validate_prepared_anchor(&anchor, checkpoint_number, checkpoint_hash)
             .expect_err("terminal anchor mismatch must fail proving");
         assert!(error.to_string().contains("not prepared anchor hash"));
+    }
+
+    #[test]
+    fn shadow_output_comparison_preserves_raw_migration_cursor() {
+        let batch = BatchData {
+            zone_height: 1,
+            tempo_block_number: 1,
+            prev_block_hash: B256::repeat_byte(1),
+            next_block_hash: B256::repeat_byte(2),
+            prev_processed_deposit_hash: B256::repeat_byte(3),
+            next_processed_deposit_hash: B256::repeat_byte(4),
+            prev_deposit_number: 5,
+            next_deposit_number: 6,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 8,
+            withdrawal_queue_hash: B256::repeat_byte(9),
+            withdrawal_batch_index: 10,
+        };
+        let mut output = BatchOutput {
+            block_transition: BlockTransition {
+                prevBlockHash: batch.prev_block_hash,
+                nextBlockHash: batch.next_block_hash,
+            },
+            deposit_queue_transition: DepositQueueTransition {
+                prevProcessedHash: batch.prev_processed_deposit_hash,
+                nextProcessedHash: batch.next_processed_deposit_hash,
+                prevDepositNumber: batch.prev_deposit_number,
+                nextDepositNumber: batch.next_deposit_number,
+            },
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: batch.prev_processed_token_count,
+                nextProcessedTokenCount: batch.next_processed_token_count,
+            },
+            withdrawal_queue_hash: batch.withdrawal_queue_hash,
+            last_batch_commitment: LastBatchCommitment {
+                withdrawal_batch_index: batch.withdrawal_batch_index,
+            },
+        };
+        compare_output(&output, &batch, batch.prev_block_hash).unwrap();
+        output.token_enablement_transition.prevProcessedTokenCount = 7;
+        assert!(
+            compare_output(&output, &batch, batch.prev_block_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("previous token count mismatch")
+        );
     }
 }
