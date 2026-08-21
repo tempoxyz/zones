@@ -50,9 +50,7 @@ use crate::{
     settlement::{WithdrawalPage, find_processed_offset},
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
-use zone_primitives::constants::{
-    MAX_UNPROCESSED_DEPOSITS, WITHDRAWAL_BOUNCEBACK_RESERVE,
-};
+use zone_primitives::constants::{MAX_UNPROCESSED_DEPOSITS, WITHDRAWAL_BOUNCEBACK_RESERVE};
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
