@@ -173,7 +173,7 @@ impl ZoneInbox {
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.processed_deposit_number.write(processed_number)?;
 
-        self.emit_event(ZoneInboxEvent::tempo_advanced(
+        self.emit_event(ZoneInboxEvent::tempo_advanced_0(
             tempo_block_hash,
             tempo_block_number,
             U256::from(deposit_count),

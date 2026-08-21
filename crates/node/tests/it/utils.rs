@@ -1684,7 +1684,11 @@ impl L1TestNode {
     pub(crate) async fn assert_batch_submitted(&self, portal_address: Address) -> eyre::Result<()> {
         use tempo_zone_contracts::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
-        let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+        let events = portal
+            .BatchSubmitted_0_filter()
+            .from_block(0)
+            .query()
+            .await?;
         eyre::ensure!(
             !events.is_empty(),
             "expected at least one BatchSubmitted event on L1"

@@ -47,6 +47,13 @@ impl ZoneInbox {
                     claimRefund(call) => crate::dispatch::mutate(call, msg_sender, |caller, call| {
                         self.claim_refund(caller, call.token)
                     }),
+                    // The cumulative ABI exposes Z1 selectors before execution support lands.
+                    processedEnabledTokenCount(_) => {
+                        tempo_precompiles::dispatch::unknown_selector_result(calldata)
+                    },
+                    advanceTempoHeaders(_) => {
+                        tempo_precompiles::dispatch::unknown_selector_result(calldata)
+                    },
                     advanceTempo(call) => {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))

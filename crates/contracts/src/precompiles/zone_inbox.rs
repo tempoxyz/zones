@@ -3,6 +3,7 @@
 pub use IZoneInbox::{
     ChaumPedersenProof, DecryptionData, DepositType, EnabledToken,
     IZoneInboxErrors as ZoneInboxError, IZoneInboxEvents as ZoneInboxEvent, QueuedDeposit,
+    TempoAdvanced_0 as LegacyTempoAdvanced, TempoAdvanced_1 as TempoAdvanced,
     WithdrawalBounceBackDeposit,
 };
 
@@ -67,6 +68,16 @@ crate::sol! {
             uint64 lastProcessedDepositNumber
         );
 
+        /// Z1 Tempo advancement event with the processed enabled-token cursor.
+        event TempoAdvanced(
+            bytes32 indexed tempoBlockHash,
+            uint64 indexed tempoBlockNumber,
+            uint256 depositsProcessed,
+            bytes32 newProcessedDepositQueueHash,
+            uint64 lastProcessedDepositNumber,
+            uint64 lastProcessedEnabledTokenCount
+        );
+
         event DepositProcessed(
             bytes32 indexed depositHash,
             address indexed sender,
@@ -118,6 +129,12 @@ crate::sol! {
         function refunds(address token, address owner) external view returns (uint128);
         function claimRefund(address token) external returns (uint128 amount);
 
+        /// Get the number of enabled tokens processed by the Zone Inbox. Active from Z1.
+        function processedEnabledTokenCount() external view returns (uint64);
+
+        /// Authenticate Tempo ancestry without processing portal work. Active from Z1.
+        function advanceTempoHeaders(bytes[] calldata headers) external;
+
         function advanceTempo(
             bytes calldata header,
             QueuedDeposit[] calldata deposits,
@@ -127,29 +144,24 @@ crate::sol! {
     }
 }
 
-/// IZoneInbox ABI activated by the T12 hardfork.
-pub mod zone_inbox_t12 {
+/// IZoneInbox entries retired by the Z1 hardfork.
+mod pre_z1_retired {
     crate::sol! {
-        contract IZoneInboxT12 {
+        #[sol(abi)]
+        contract IZoneInboxZ0Retired {
             event TempoAdvanced(
                 bytes32 indexed tempoBlockHash,
                 uint64 indexed tempoBlockNumber,
                 uint256 depositsProcessed,
                 bytes32 newProcessedDepositQueueHash,
-                uint64 lastProcessedDepositNumber,
-                uint64 lastProcessedEnabledTokenCount
+                uint64 lastProcessedDepositNumber
             );
-
-            function processedEnabledTokenCount() external view returns (uint64);
-
-            /// Advance only the authenticated Tempo checkpoint. A block opened by this call may
-            /// not contain any other transaction.
-            function advanceTempoHeaders(bytes[] headers) external;
         }
     }
 }
 
-pub use zone_inbox_t12::IZoneInboxT12;
+#[doc(hidden)]
+pub use pre_z1_retired::IZoneInboxZ0Retired;
 
 impl EnabledToken {
     /// Hash this token enablement as the next link in the portal commitment.

@@ -947,7 +947,7 @@ mod tests {
         processed_deposit_hash: B256,
     ) -> TestZoneProvider {
         let provider = TestZoneProvider::new();
-        let event = abi::IZoneInbox::TempoAdvanced {
+        let event = abi::LegacyTempoAdvanced {
             tempoBlockHash: B256::repeat_byte(0x55),
             tempoBlockNumber: 123,
             depositsProcessed: U256::ZERO,
