@@ -1,0 +1,13 @@
+# Allow the sync-from-upstream workflow in zones-private-fork (scheduled and
+# manually dispatched runs on main) to mint a short-lived token to force-push
+# main. `workflows: write` is required because the synced commits touch
+# .github/workflows files.
+#
+# This file is mirrored into zones-private-fork by the sync itself, where it
+# authorizes tokens scoped to the fork. Note that its presence in this repo
+# also lets the fork's main-branch workflows mint a token scoped to
+# tempoxyz/zones, since a fork of this repo carries identical contents.
+subject: repo:tempoxyz@211589300/zones-private-fork@1329742643:ref:refs/heads/main
+permissions:
+  contents: write
+  workflows: write
