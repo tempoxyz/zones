@@ -10,6 +10,7 @@ use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
+use eyre::{Result, WrapErr as _};
 use reth_chain_state::CanonStateSubscriptions;
 use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
@@ -22,6 +23,7 @@ pub mod abi {
 
 pub mod attestation;
 pub mod batch_submission;
+mod candidate_monitor;
 mod encryption_key;
 mod metrics;
 pub mod monitor;
@@ -33,15 +35,14 @@ pub mod withdrawals;
 
 pub use attestation::AttestationStore;
 pub use batch_submission::{
-    BatchCandidate, BatchResync, BatchSubmissionActor, BatchSubmissionBackend,
-    BatchSubmissionHandle, BatchSubmissionRole, ConfirmedBatchSubmission, SubmissionAnchor,
-    batch_submission_actor,
+    BatchCandidate, BatchResync, BatchSubmissionBackend, BatchSubmissionHandle,
+    BatchSubmissionRole, ConfirmedBatchSubmission, PortalBatchSubmissionAdapter, SubmissionAnchor,
 };
 pub use encryption_key::{
     EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
     register_encryption_key,
 };
-pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
+pub use monitor::ZoneMonitorConfig;
 pub use prover::ShadowProverConfig;
 pub use settlement::{
     BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatchSubmission,
@@ -53,7 +54,7 @@ pub use withdrawals::{
     WithdrawalProcessorConfig, WithdrawalStore,
 };
 
-use crate::rpc::rpc_connection_config;
+use crate::{batch_submission::batch_submission_actor, rpc::rpc_connection_config};
 
 /// Native Zone node provider capabilities required by sequencer components.
 ///
@@ -90,7 +91,10 @@ impl<T> ZoneSequencerProvider for T where
 {
 }
 
-/// Upper bound for sequencer transaction fees on Tempo L1.
+/// Conservative Tempo L1 fee cap for sequencer transactions.
+///
+/// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
+/// explicitly avoids an `eth_feeHistory` request while remaining valid across those regimes.
 pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
     tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128;
 
@@ -121,48 +125,61 @@ pub struct ZoneSequencerConfig {
     pub attestation_store: Option<AttestationStore>,
 }
 
-/// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
+/// Handles returned by [`spawn_zone_sequencer_generation`] for managing background tasks.
 pub struct ZoneSequencerHandle {
     /// Join handle for the withdrawal processor task.
     pub withdrawal_handle: tokio::task::JoinHandle<()>,
-    /// Join handle for the zone monitor task (which also handles batch submission).
-    pub monitor_handle: tokio::task::JoinHandle<()>,
 }
 
-/// Spawn all zone sequencer background tasks.
-///
-/// This is the top-level POC entrypoint that starts:
-/// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
-///   events into the shared store, builds [`crate::BatchData`], and submits each batch
-///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
-///   submission.
-/// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
-///   `processWithdrawals` for each pending withdrawal.
-/// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates
-///   observationally without delaying or changing settlement.
-///
-/// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
-/// when submitting concurrent L1 transactions.
-///
-/// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
-/// in-flight L1 transaction resolves before teardown.
-pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
-    config: ZoneSequencerConfig,
+/// Resources shared by the persistent submission actor and generation-scoped sequencer tasks.
+#[derive(Clone)]
+pub struct PersistentBatchSubmissionResources {
+    pub l1_provider: DynProvider<TempoNetwork>,
+    pub batch_submission: BatchSubmissionHandle,
+    pub withdrawal_store: SharedWithdrawalStore,
+    pub withdrawal_notify: Arc<Notify>,
+    pub withdrawal_repair_notify: Arc<Notify>,
+    pub sequencer_address: Address,
+}
+
+/// Node-lifetime actor task and the resources handed to leader generations.
+pub struct PersistentBatchSubmissionRuntime {
+    pub resources: PersistentBatchSubmissionResources,
+    pub actor_handle: tokio_util::task::AbortOnDropHandle<Result<()>>,
+}
+
+/// Connect the shared L1 provider and spawn the batch actor once for the node lifetime.
+pub async fn spawn_persistent_batch_submission<P: ZoneSequencerProvider>(
+    config: &ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
     prover_config: Option<ShadowProverConfig>,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle {
-    // Build a single shared L1 provider with the sequencer wallet.
-    // Both the batch submitter (inside the zone monitor) and the withdrawal
-    // processor use this provider, ensuring nonces are tracked in one place.
+) -> Result<PersistentBatchSubmissionRuntime> {
+    let sequencer_address = signer.address();
     let l1_provider = connect_l1_provider(
         &config.l1_rpc_url,
         config.retry_connection_interval,
         signer.clone(),
     )
     .await
-    .expect("valid L1 RPC URL");
+    .wrap_err("failed to connect persistent batch submission L1 provider")?;
+    let withdrawal_store = SharedWithdrawalStore::new();
+    let withdrawal_notify = Arc::new(Notify::new());
+    let withdrawal_repair_notify = Arc::new(Notify::new());
+    let monitor_config = ZoneMonitorConfig {
+        outbox_address: config.outbox_address,
+        inbox_address: config.inbox_address,
+        poll_interval: config.zone_poll_interval,
+        portal_address: config.portal_address,
+        batch_anchor_config: config.batch_anchor_config,
+        attestation_store: config.attestation_store.clone(),
+    };
+    let backend = PortalBatchSubmissionAdapter::new(
+        &monitor_config,
+        zone_provider.clone(),
+        l1_provider.clone(),
+        signer,
+    );
     let shadow_prover = prover_config.map(|prover_config| {
         prover::spawn_shadow_prover(
             prover_config,
@@ -172,11 +189,46 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
             l1_provider.clone(),
         )
     });
-    let sequencer_address = signer.address();
+    let candidate_source =
+        candidate_monitor::CandidateMonitor::new(monitor_config, zone_provider, shadow_prover);
+    let (actor, batch_submission) = batch_submission_actor(
+        backend,
+        candidate_source,
+        config.attestation_store.clone(),
+        withdrawal_store.clone(),
+        withdrawal_notify.clone(),
+        withdrawal_repair_notify.clone(),
+    );
+    let actor_handle = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(actor.run()));
+    Ok(PersistentBatchSubmissionRuntime {
+        resources: PersistentBatchSubmissionResources {
+            l1_provider,
+            batch_submission,
+            withdrawal_store,
+            withdrawal_notify,
+            withdrawal_repair_notify,
+            sequencer_address,
+        },
+        actor_handle,
+    })
+}
 
-    let withdrawal_store: SharedWithdrawalStore = Default::default();
-    let withdrawal_notify = Arc::new(Notify::new());
-    let withdrawal_repair_notify = Arc::new(Notify::new());
+/// Spawn generation-scoped Zone sequencer background tasks.
+///
+/// Batch submission and shadow proving live for the node lifetime. The persistent actor controls
+/// a discovery session for each leader generation; withdrawal processing remains a
+/// generation-scoped task and stops gracefully after an in-flight L1 transaction resolves.
+pub async fn spawn_zone_sequencer_generation(
+    config: ZoneSequencerConfig,
+    resources: PersistentBatchSubmissionResources,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> ZoneSequencerHandle {
+    let l1_provider = resources.l1_provider.clone();
+    let sequencer_address = resources.sequencer_address;
+
+    let withdrawal_store = resources.withdrawal_store;
+    let withdrawal_notify = resources.withdrawal_notify;
+    let withdrawal_repair_notify = resources.withdrawal_repair_notify;
 
     let withdrawal_config = WithdrawalProcessorConfig {
         portal_address: config.portal_address,
@@ -185,41 +237,15 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         batch_limits: config.withdrawal_batch_limits,
     };
 
-    let monitor_config = ZoneMonitorConfig {
-        outbox_address: config.outbox_address,
-        inbox_address: config.inbox_address,
-        poll_interval: config.zone_poll_interval,
-        portal_address: config.portal_address,
-        batch_anchor_config: config.batch_anchor_config,
-        attestation_store: config.attestation_store,
-    };
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
-        l1_provider.clone(),
-        withdrawal_store.clone(),
-        withdrawal_notify.clone(),
-        withdrawal_repair_notify.clone(),
-        shutdown.clone(),
-    );
-    let monitor_shared_state = ZoneMonitorSharedState::new(
+        l1_provider,
         withdrawal_store,
         withdrawal_notify,
         withdrawal_repair_notify,
-    );
-    let monitor_handle = monitor::spawn_zone_monitor(
-        monitor_config,
-        zone_provider,
-        l1_provider,
-        signer,
-        monitor_shared_state,
-        shadow_prover,
         shutdown,
     );
-
-    ZoneSequencerHandle {
-        withdrawal_handle,
-        monitor_handle,
-    }
+    ZoneSequencerHandle { withdrawal_handle }
 }
 
 /// Build the shared L1 provider used by all sequencer-side L1 transaction tasks.

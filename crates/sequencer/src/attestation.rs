@@ -119,7 +119,7 @@ pub struct SettlementCertificate {
 #[derive(Debug, Clone)]
 pub struct AttestationStore {
     settlements: Arc<RwLock<SettlementSignatures>>,
-    settlement_revision: Arc<watch::Sender<u64>>,
+    settlement_revision: watch::Sender<u64>,
     submitted_height: watch::Sender<u64>,
 }
 
@@ -128,7 +128,7 @@ impl Default for AttestationStore {
         let (submitted_height, _) = watch::channel(0);
         Self {
             settlements: Arc::default(),
-            settlement_revision: Arc::new(watch::channel(0).0),
+            settlement_revision: watch::channel(0).0,
             submitted_height,
         }
     }
@@ -240,32 +240,6 @@ impl AttestationStore {
                 .checked_add(1)
                 .expect("settlement revision overflow");
         });
-    }
-
-    /// Wait until any statement at `height` has at least `quorum` distinct signatures, or return
-    /// `None` when the leader generation is cancelled.
-    pub async fn wait_for_settlement(
-        &self,
-        height: u64,
-        quorum: usize,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) -> Option<SettlementCertificate> {
-        let mut changes = self.subscribe_settlement_changes();
-        tokio::select! {
-            biased;
-            () = shutdown.cancelled() => None,
-            certificate = async {
-                loop {
-                    if let Some(certificate) = self.settlement_at(height, quorum) {
-                        break certificate;
-                    }
-                    if changes.changed().await.is_err() {
-                        // If this errors, wait and let the outer `cancelled()` branch handle shutdown.
-                        std::future::pending::<()>().await;
-                    }
-                }
-            } => Some(certificate),
-        }
     }
 
     /// Get the settlement certificate at the zone block height
@@ -448,8 +422,8 @@ mod tests {
         assert!(signed.recover_signer(domain).is_err());
     }
 
-    #[tokio::test]
-    async fn waits_for_quorum_and_removes_confirmed_attestations() {
+    #[test]
+    fn returns_quorum_and_removes_confirmed_attestations() {
         let store = AttestationStore::default();
         let signer_a = PrivateKeySigner::random();
         let signer_b = PrivateKeySigner::random();
@@ -472,24 +446,14 @@ mod tests {
             signer_a.address(),
             SignedSettlementAttestation::sign(attestation.clone(), domain(), &signer_a).unwrap(),
         );
-
-        let waiting = {
-            let store = store.clone();
-            tokio::spawn(async move {
-                store
-                    .wait_for_settlement(10, 2, &tokio_util::sync::CancellationToken::new())
-                    .await
-            })
-        };
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
+        assert!(store.settlement_at(10, 2).is_none());
 
         store.insert_settlement(
             domain(),
             signer_b.address(),
             SignedSettlementAttestation::sign(attestation, domain(), &signer_b).unwrap(),
         );
-        let certificate = waiting.await.unwrap().unwrap();
+        let certificate = store.settlement_at(10, 2).unwrap();
         assert_eq!(certificate.signatures.len(), 2);
 
         store.remove_submitted(10);

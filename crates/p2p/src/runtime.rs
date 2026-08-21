@@ -290,13 +290,15 @@ impl P2pHandle {
         } = self.parts.take().expect("P2P handle already consumed");
         shutdown.cancel();
 
-        // Close the caller-side channels while the runtime is winding down.
+        // Stop accepting outbound commands, but keep inbound receivers alive until the runtime
+        // observes cancellation. An event already in flight must not turn graceful shutdown into
+        // a spurious "event channel closed" failure.
         drop(commands);
-        drop(events);
-        drop(backfill);
         let stopped_result = stopped.await;
 
         join_runtime_thread(thread).await?;
+        drop(events);
+        drop(backfill);
         stopped_result
             .map_err(|err| eyre::eyre!("P2P runtime dropped its completion channel: {err}"))?
             .map_err(|err| eyre::eyre!("P2P runtime failed: {err}"))
@@ -816,7 +818,7 @@ mod tests {
         spawn_p2p, validate_ip_check_configuration,
     };
     use crate::{
-        P2pHandle, P2pHandleParts, P2pNetworkId, ZoneManifest,
+        P2pNetworkId, ZoneManifest,
         identity::{Ed25519Identity, Secp256k1Identity},
         network::MAX_TRANSACTION_MESSAGE_SIZE,
         routing::RoutingMembership,
@@ -907,34 +909,6 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
-    }
-
-    /// Stop a peer that may still be receiving traffic.
-    ///
-    /// Unlike [`P2pHandle::shutdown`], this keeps the event receiver alive until the runtime
-    /// observes cancellation, so an in-flight `BlockReceived` cannot fail the runtime with
-    /// "P2P event channel closed" during mid-test peer restarts.
-    async fn shutdown_while_receiving(handle: P2pHandle) -> eyre::Result<()> {
-        let P2pHandleParts {
-            shutdown,
-            stopped,
-            thread,
-            commands,
-            events,
-            backfill,
-        } = handle.into_parts();
-        shutdown.cancel();
-        drop(commands);
-        drop(backfill);
-        let stopped_result = stopped.await;
-        tokio::task::spawn_blocking(move || thread.join())
-            .await
-            .map_err(|err| eyre::eyre!("failed joining P2P runtime thread: {err}"))?
-            .map_err(|_| eyre::eyre!("P2P runtime thread panicked"))?;
-        drop(events);
-        stopped_result
-            .map_err(|err| eyre::eyre!("P2P runtime dropped its completion channel: {err}"))?
-            .map_err(|err| eyre::eyre!("P2P runtime failed: {err}"))
     }
 
     /// Drain events for `duration`, failing if any of them satisfies `forbidden`.
@@ -2013,13 +1987,10 @@ mod tests {
         }
         initial_broadcaster.abort();
 
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            shutdown_while_receiving(follower_b),
-        )
-        .await
-        .expect("stopped follower did not shut down")
-        .expect("stopped follower runtime failed");
+        tokio::time::timeout(Duration::from_secs(10), follower_b.shutdown())
+            .await
+            .expect("stopped follower did not shut down")
+            .expect("stopped follower runtime failed");
 
         // While the peer is down, the remaining follower must keep receiving broadcasts.
         let offline_block = vec![0xf8, 0x02, 0x80];

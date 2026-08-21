@@ -144,7 +144,7 @@ pub(crate) struct ZoneMonitorMetrics {
     /// Successful batch submissions.
     pub batch_submit_success_total: Counter,
 
-    /// Failed batch submissions after exhausting retries.
+    /// Failed operations during batch submission attempts.
     pub batch_submit_failure_total: Counter,
 
     /// Retry attempts for batch submissions.

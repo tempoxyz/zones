@@ -1,6 +1,6 @@
 //! E2E tests for zone sequencer restart resilience.
 //!
-//! These tests verify that the zone monitor and withdrawal processor correctly
+//! These tests verify that batch submission and withdrawal processing correctly
 //! resume from on-chain portal state after a restart, covering:
 //!
 //! - Batch submission resumes from the portal's `blockHash()` (not block 0)
@@ -9,6 +9,7 @@
 
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::{Address, U256};
+use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 /// Longer timeout for real L1 tests.
@@ -77,6 +78,17 @@ async fn abort_task(handle: tokio::task::JoinHandle<()>) {
     let _ = handle.await;
 }
 
+async fn abort_sequencer(handle: crate::utils::TestSequencerHandle) {
+    let crate::utils::TestSequencerHandle {
+        withdrawal_handle,
+        batch_submission_handle,
+    } = handle;
+    tokio::join!(
+        abort_task(withdrawal_handle),
+        abort_task(batch_submission_handle)
+    );
+}
+
 /// Sequencer restart after a successful batch + withdrawal cycle.
 ///
 /// 1. Start L1 + zone, deposit, spawn sequencer, withdraw, wait for L1 processing.
@@ -126,8 +138,7 @@ async fn test_sequencer_restart_resumes_batch_submission() -> eyre::Result<()> {
     );
 
     // --- Phase 2: Restart sequencer ---
-    seq_handle.monitor_handle.abort();
-    seq_handle.withdrawal_handle.abort();
+    abort_sequencer(seq_handle).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // Respawn — should resume from portal's blockHash, not block 0
@@ -183,9 +194,9 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     l1.fund_user(account.address(), deposit_amount).await?;
     account.deposit(deposit_amount, L1_TIMEOUT, &zone).await?;
 
-    let zone_sequencer::ZoneSequencerHandle {
+    let crate::utils::TestSequencerHandle {
         withdrawal_handle,
-        monitor_handle,
+        batch_submission_handle,
     } = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     // Keep batch submission running, but stop L1 processing so the portal queue
@@ -219,7 +230,7 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     );
 
     // --- Abort sequencer BEFORE the withdrawal is processed ---
-    abort_task(monitor_handle).await;
+    abort_task(batch_submission_handle).await;
 
     // --- Respawn sequencer (fetch_pending_withdrawals runs during init) ---
     let seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
@@ -234,8 +245,8 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
             let l1 = &l1;
             let seq_handle2 = &seq_handle2;
             async move {
-                if seq_handle2.monitor_handle.is_finished() {
-                    eyre::bail!("restarted monitor task exited before restoring the pending withdrawal");
+                if seq_handle2.batch_submission_handle.is_finished() {
+                    eyre::bail!("restarted sequencer task exited before restoring the pending withdrawal");
                 }
                 if seq_handle2.withdrawal_handle.is_finished() {
                     eyre::bail!(
@@ -255,14 +266,21 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
 
     // Request a NEW withdrawal after restart to verify normal operation continues.
     let second_withdrawal: u128 = 400_000;
+    // Snapshot before requesting the withdrawal. `wait_for_withdrawal_on_l1` normally takes its
+    // baseline when it is called, which races with the fast restarted processor: if processing
+    // finishes first, it waits for a second credit that will never arrive.
+    let balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(second_withdrawal).await?;
-    l1.wait_for_withdrawal_on_l1(
-        portal_address,
+    l1.wait_for_balance(
+        PATH_USD_ADDRESS,
         account.address(),
-        second_withdrawal,
+        balance_before + U256::from(second_withdrawal),
         WITHDRAWAL_TIMEOUT,
     )
     .await?;
+    l1.assert_batch_submitted(portal_address).await?;
+    l1.assert_withdrawal_processed(portal_address, account.address(), second_withdrawal)
+        .await?;
 
     // Portal queue should have advanced further
     let (head_after, tail_after) = portal_queue_state(&l1, portal_address).await?;
@@ -308,8 +326,7 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     )
     .await?;
 
-    seq1.monitor_handle.abort();
-    seq1.withdrawal_handle.abort();
+    abort_sequencer(seq1).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // --- Cycle 2 ---
@@ -324,8 +341,7 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     )
     .await?;
 
-    seq2.monitor_handle.abort();
-    seq2.withdrawal_handle.abort();
+    abort_sequencer(seq2).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // --- Cycle 3 (final) ---
@@ -399,8 +415,7 @@ async fn test_batch_only_restart_no_withdrawals() -> eyre::Result<()> {
     let batches_before = batch_submitted_count(&l1, portal_address).await?;
 
     // Restart
-    seq1.monitor_handle.abort();
-    seq1.withdrawal_handle.abort();
+    abort_sequencer(seq1).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let _seq2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
@@ -473,8 +488,7 @@ async fn test_finalized_withdrawal_survives_sequencer_restart() -> eyre::Result<
     );
 
     // Restart the batch submitter after proving the request block finalized its withdrawal.
-    seq_handle.monitor_handle.abort();
-    seq_handle.withdrawal_handle.abort();
+    abort_sequencer(seq_handle).await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     let _seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 

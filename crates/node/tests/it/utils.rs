@@ -434,6 +434,12 @@ fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8
     } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
         let index = input.get(4..36).map(U256::from_be_slice)?.to::<u64>() as usize;
         enabled_tokens.get(index).map(|token| token.abi_encode())
+    } else if input.starts_with(&ZonePortal::withdrawalQueueHeadCall::SELECTOR)
+        || input.starts_with(&ZonePortal::withdrawalQueueTailCall::SELECTOR)
+    {
+        // Synthetic P2P clusters have no portal withdrawals, but the persistent batch actor
+        // still reconstructs the empty queue before acknowledging leader activation.
+        Some(U256::ZERO.abi_encode())
     } else {
         None
     }
@@ -610,7 +616,12 @@ pub(crate) trait TestNodeHandle: Send {
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
         signer: alloy_signer_local::PrivateKeySigner,
-    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = TestSequencerHandle> + Send + '_>>;
+}
+
+pub(crate) struct TestSequencerHandle {
+    pub(crate) withdrawal_handle: tokio::task::JoinHandle<()>,
+    pub(crate) batch_submission_handle: tokio::task::JoinHandle<()>,
 }
 
 impl<Node, AddOns> TestNodeHandle for NodeHandle<Node, AddOns>
@@ -635,17 +646,48 @@ where
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
         signer: alloy_signer_local::PrivateKeySigner,
-    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = TestSequencerHandle> + Send + '_>> {
         let provider = self.node.provider().clone();
         Box::pin(async move {
-            zone_sequencer::spawn_zone_sequencer(
-                config,
+            let mut runtime = zone_sequencer::spawn_persistent_batch_submission(
+                &config,
                 signer,
-                provider,
+                provider.clone(),
                 None,
-                tokio_util::sync::CancellationToken::new(),
             )
             .await
+            .expect("test persistent batch submission configuration must be valid");
+            runtime
+                .resources
+                .batch_submission
+                .set_role(zone_sequencer::BatchSubmissionRole::leader(1))
+                .await
+                .expect("test persistent batch submission actor must start");
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let handle = zone_sequencer::spawn_zone_sequencer_generation(
+                config,
+                runtime.resources.clone(),
+                shutdown,
+            )
+            .await;
+            let batch_submission = runtime.resources.batch_submission;
+            let mut actor = runtime.actor_handle;
+            let batch_submission_handle = tokio::spawn(async move {
+                // Keep the role handle alive while this standalone test actor runs.
+                let _batch_submission = batch_submission;
+                let result = (&mut actor).await;
+                match result {
+                    Ok(Ok(())) => {
+                        tracing::error!("Test batch submission actor stopped unexpectedly")
+                    }
+                    Ok(Err(error)) => tracing::error!(%error, "Test batch submission actor failed"),
+                    Err(error) => tracing::error!(%error, "Test batch submission actor panicked"),
+                }
+            });
+            TestSequencerHandle {
+                withdrawal_handle: handle.withdrawal_handle,
+                batch_submission_handle,
+            }
         })
     }
 }
@@ -705,7 +747,7 @@ impl ZoneTestNode {
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
         signer: alloy_signer_local::PrivateKeySigner,
-    ) -> zone_sequencer::ZoneSequencerHandle {
+    ) -> TestSequencerHandle {
         self.node_handle.spawn_sequencer(config, signer).await
     }
 
@@ -3529,7 +3571,7 @@ pub(crate) async fn spawn_sequencer(
     zone: &ZoneTestNode,
     portal_address: Address,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
-) -> zone_sequencer::ZoneSequencerHandle {
+) -> TestSequencerHandle {
     spawn_sequencer_with_config(
         l1,
         zone,
@@ -3549,7 +3591,7 @@ pub(crate) async fn spawn_sequencer_with_config(
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
     batch_anchor_config: zone_sequencer::BatchAnchorConfig,
     withdrawal_batch_limits: zone_sequencer::WithdrawalBatchLimits,
-) -> zone_sequencer::ZoneSequencerHandle {
+) -> TestSequencerHandle {
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {

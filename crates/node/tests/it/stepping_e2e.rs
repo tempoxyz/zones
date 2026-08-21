@@ -146,8 +146,8 @@ async fn test_current_tip_batch_submission_lands_in_successor_block() -> eyre::R
             let seq = &seq;
             let l1 = &l1;
             async move {
-                if seq.monitor_handle.is_finished() {
-                    eyre::bail!("monitor task exited before submitting the current-tip batch");
+                if seq.batch_submission_handle.is_finished() {
+                    eyre::bail!("sequencer task exited before submitting the current-tip batch");
                 }
                 if seq.withdrawal_handle.is_finished() {
                     eyre::bail!(
@@ -283,8 +283,8 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
             let portal = &portal;
             let seq = &seq;
             async move {
-                if seq.monitor_handle.is_finished() {
-                    eyre::bail!("monitor task exited before submitting a batch");
+                if seq.batch_submission_handle.is_finished() {
+                    eyre::bail!("sequencer task exited before submitting a batch");
                 }
 
                 if seq.withdrawal_handle.is_finished() {
@@ -388,8 +388,8 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
             let portal = &portal;
             let seq = &seq;
             async move {
-                if seq.monitor_handle.is_finished() {
-                    eyre::bail!("monitor task exited before submitting a batch");
+                if seq.batch_submission_handle.is_finished() {
+                    eyre::bail!("sequencer task exited before submitting a batch");
                 }
 
                 if seq.withdrawal_handle.is_finished() {
@@ -497,8 +497,8 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
             let seq = &seq;
             let l1 = &l1;
             async move {
-                if seq.monitor_handle.is_finished() {
-                    eyre::bail!("monitor task exited before submitting boundary batches");
+                if seq.batch_submission_handle.is_finished() {
+                    eyre::bail!("sequencer task exited before submitting boundary batches");
                 }
 
                 if seq.withdrawal_handle.is_finished() {
@@ -631,8 +631,8 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
             let seq = &seq;
             let l1 = &l1;
             async move {
-                if seq.monitor_handle.is_finished() {
-                    eyre::bail!("monitor task exited before submitting a batch");
+                if seq.batch_submission_handle.is_finished() {
+                    eyre::bail!("sequencer task exited before submitting a batch");
                 }
 
                 if seq.withdrawal_handle.is_finished() {

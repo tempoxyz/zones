@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
+use std::{collections::BTreeMap, fmt, sync::OnceLock};
 
 use crate::{
     ZoneSequencerProvider,
@@ -45,16 +45,13 @@ use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
-use tempo_primitives::{Block, TempoReceipt};
-use tokio_util::sync;
+use tempo_primitives::{Block, TempoReceipt, TempoTxEnvelope};
 use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 #[derive(Debug)]
 pub enum BatchSubmitError {
-    Cancelled,
-    PortalAdvanced,
     Other(eyre::Report),
 }
 
@@ -67,10 +64,6 @@ impl From<eyre::Report> for BatchSubmitError {
 impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
-            Self::PortalAdvanced => {
-                formatter.write_str("portal advanced while waiting for settlement quorum")
-            }
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -82,9 +75,6 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
-
-/// How often a quorum wait rechecks whether another leader has advanced the portal.
-const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
@@ -304,66 +294,6 @@ impl BatchSubmitter {
     /// Attach the shared store populated by leader and follower settlement signatures.
     pub fn set_attestation_store(&mut self, store: Option<AttestationStore>) {
         self.attestation_store = store;
-    }
-
-    /// Submit a batch to the ZonePortal on Tempo L1.
-    ///
-    /// Resolves the anchor mode based on how old `tempo_block_number` is:
-    ///
-    /// - **Direct** — `tempo_block_number` is within the configured effective window,
-    ///   the portal reads its hash directly from EIP-2935.
-    /// - **Ancestry** — `tempo_block_number` is outside the effective window. A
-    ///   recent anchor block is used and ancestry headers are collected (for
-    ///   future prover integration).
-    ///
-    /// `verifierConfig` and `proof` are empty until real proof generation is
-    /// implemented.
-    ///
-    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
-    /// settlement quorum is cancelled when the leader generation shuts down.
-    // TODO: pass real proof bytes once proof generation is implemented.
-    #[instrument(skip_all, fields(
-        portal = %self.portal_address,
-        tempo_block = batch.tempo_block_number,
-        prev_block_hash = %batch.prev_block_hash,
-        next_block_hash = %batch.next_block_hash,
-        withdrawal_queue_hash = %batch.withdrawal_queue_hash,
-        withdrawal_batch_index = batch.withdrawal_batch_index,
-    ))]
-    pub async fn submit_batch(
-        &self,
-        batch: &BatchData,
-        shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
-        let signer = self.signer.as_ref();
-        let metadata = self
-            .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
-            .await?;
-        self.validate_submission_metadata(batch, metadata)?;
-        let certificate = if let Some(store) = &self.attestation_store {
-            let threshold = metadata.sequencer_threshold as usize;
-            info!(
-                zone_height = batch.zone_height,
-                threshold, "Waiting for settlement quorum"
-            );
-            Some(
-                self.wait_for_settlement_or_portal_progress(
-                    store,
-                    batch.zone_height,
-                    threshold,
-                    batch.prev_block_hash,
-                    shutdown,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        let prepared = self
-            .prepare_submission_with_metadata(batch, certificate, metadata)
-            .await?;
-        self.send_prepared(prepared).await
     }
 
     /// Return the current settlement threshold after validating mutable portal metadata for
@@ -591,42 +521,6 @@ impl BatchSubmitter {
         );
 
         Ok(event)
-    }
-
-    /// Wait for a local quorum while periodically checking that the proposal still extends the
-    /// portal tip. A portal change means another submission won the handoff race and the monitor
-    /// must resynchronize before attempting more work.
-    async fn wait_for_settlement_or_portal_progress(
-        &self,
-        store: &AttestationStore,
-        height: u64,
-        threshold: usize,
-        expected_portal_hash: B256,
-        shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<SettlementCertificate, BatchSubmitError> {
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => {
-                    return Err(BatchSubmitError::Cancelled);
-                }
-                certificate = store.wait_for_settlement(height, threshold, shutdown) => {
-                    return certificate.ok_or(BatchSubmitError::Cancelled);
-                }
-                () = tokio::time::sleep(SETTLEMENT_PORTAL_POLL_INTERVAL) => {}
-            }
-
-            let portal_hash = tokio::select! {
-                biased;
-                () = shutdown.cancelled() => {
-                    return Err(BatchSubmitError::Cancelled);
-                }
-                result = self.read_portal_block_hash() => result?,
-            };
-            if portal_hash != expected_portal_hash {
-                return Err(BatchSubmitError::PortalAdvanced);
-            }
-        }
     }
 
     fn sign_settlement_attestation(
@@ -902,12 +796,10 @@ impl BatchSubmitter {
                 attestation.anchorBlockNumber > batch.tempo_block_number,
                 "certificate ancestry anchor does not follow its Tempo block"
             );
-            let ancestry_headers = self
-                .fetch_ancestry_headers(batch.tempo_block_number, attestation.anchorBlockNumber)
+            self.fetch_ancestry_headers(batch.tempo_block_number, attestation.anchorBlockNumber)
                 .await?;
             Ok(AnchorMode::Ancestry {
                 anchor_block: attestation.anchorBlockNumber,
-                ancestry_headers,
             })
         }
     }
@@ -957,13 +849,7 @@ impl BatchSubmitter {
             "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
         );
 
-        Ok((
-            AnchorMode::Ancestry {
-                anchor_block,
-                ancestry_headers,
-            },
-            current_l1_block,
-        ))
+        Ok((AnchorMode::Ancestry { anchor_block }, current_l1_block))
     }
 
     /// Fetch and RLP-encode L1 block headers from `from + 1` to `to` (inclusive),
@@ -1395,23 +1281,17 @@ struct ResolvedAncestry {
 /// `submit_batch` can use ancestry mode when the batch-final block's
 /// `tempoBlockNumber` has fallen outside the configured direct-submission
 /// window.
-#[allow(dead_code)]
-// Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
 #[derive(Debug, Clone)]
 enum AnchorMode {
     /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
     /// reads its hash directly. No extra proof data required.
     Direct,
     /// `tempoBlockNumber` is outside the effective window. A recent L1 block is
-    /// used as anchor, and the collected headers prove the parent-hash chain.
+    /// used as anchor after validating the parent-hash chain locally.
     Ancestry {
         /// Recent L1 block number within the EIP-2935 window, used as the
         /// on-chain anchor for hash verification.
         anchor_block: u64,
-        /// RLP-encoded L1 block headers from `tempo_block_number + 1` to
-        /// `anchor_block`, in ascending order. Available for the prover to
-        /// consume when integrated.
-        ancestry_headers: Vec<Bytes>,
     },
 }
 
@@ -1639,6 +1519,19 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     number: u64,
 ) -> Result<ZoneBlockSnapshot> {
     let (_, receipts) = block_with_receipts(provider, number)?;
+    let block_hash = provider
+        .block_hash(number)?
+        .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?;
+    read_zone_block_snapshot_from_receipts(inbox_address, number, block_hash, &receipts)
+}
+
+/// Read the settlement commitments from receipts already attached to a canonical notification.
+pub(crate) fn read_zone_block_snapshot_from_receipts(
+    inbox_address: Address,
+    number: u64,
+    block_hash: B256,
+    receipts: &[TempoReceipt],
+) -> Result<ZoneBlockSnapshot> {
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
@@ -1669,9 +1562,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
             .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit commitment"))?,
         processed_deposit_number: processed_deposit_number
             .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit number"))?,
-        block_hash: provider
-            .block_hash(number)?
-            .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?,
+        block_hash,
     })
 }
 
@@ -1702,6 +1593,32 @@ pub(crate) async fn fetch_finalized_batch_boundaries<P: ZoneSequencerProvider>(
     Ok(boundaries)
 }
 
+/// Fetch the first finalized withdrawal boundary in `[from, to]`.
+pub(crate) fn fetch_next_finalized_batch_boundary<P: ZoneSequencerProvider>(
+    provider: &P,
+    outbox_address: Address,
+    from: u64,
+    to: u64,
+) -> Result<Option<FinalizedBatchLog>> {
+    for block_number in from..=to {
+        let (block, receipts) = block_with_receipts(provider, block_number)?;
+        let mut boundaries = finalized_batch_boundaries_from_parts(
+            block_number,
+            &block.body.transactions,
+            &receipts,
+            outbox_address,
+        )?;
+        eyre::ensure!(
+            boundaries.len() <= 1,
+            "zone block {block_number} contains more than one BatchFinalized event"
+        );
+        if let Some(boundary) = boundaries.pop() {
+            return Ok(Some(boundary));
+        }
+    }
+    Ok(None)
+}
+
 /// Fetch one finalized L2 withdrawal batch.
 ///
 /// The submitted hash and index come from the supplied `BatchFinalized` event.
@@ -1714,8 +1631,31 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
     target: &FinalizedBatchLog,
 ) -> Result<FinalizedBatch> {
     let (block, receipts) = block_with_receipts(zone_provider, target.block_number)?;
+    finalized_batch_from_parts(
+        target.block_number,
+        &block.body.transactions,
+        &receipts,
+        outbox_address,
+        target,
+    )
+}
+
+/// Reconstruct a finalized withdrawal batch from a block and receipts already in memory.
+pub(crate) fn finalized_batch_from_parts(
+    block_number: u64,
+    transactions: &[TempoTxEnvelope],
+    receipts: &[TempoReceipt],
+    outbox_address: Address,
+    target: &FinalizedBatchLog,
+) -> Result<FinalizedBatch> {
+    eyre::ensure!(
+        block_number == target.block_number,
+        "finalized batch boundary for zone block {} was paired with block {block_number}",
+        target.block_number
+    );
+    validate_transaction_receipts(transactions, receipts, block_number)?;
     let mut requests = Vec::new();
-    for (tx, receipt) in block.body.transactions.iter().zip(&receipts) {
+    for (tx, receipt) in transactions.iter().zip(receipts) {
         for log in receipt.logs() {
             if log.address != outbox_address
                 || log.topics().first() != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
@@ -1734,9 +1674,7 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
         }
     }
 
-    let finalize_tx = block
-        .body
-        .transactions
+    let finalize_tx = transactions
         .iter()
         .find(|tx| *tx.tx_hash() == target.tx_hash)
         .ok_or_else(|| {
@@ -1823,35 +1761,62 @@ fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
     let mut finalized_batches = Vec::new();
     for block_number in from..=to {
         let (block, receipts) = block_with_receipts(provider, block_number)?;
-        for (tx_index, (tx, receipt)) in block
-            .body
-            .transactions
-            .iter()
-            .zip(receipts.iter())
-            .enumerate()
-        {
-            for (log_index, log) in receipt.logs().iter().enumerate() {
-                if log.address != outbox_address
-                    || log.topics().first() != Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
-                {
-                    continue;
-                }
-                let event = IZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
-                    eyre::eyre!("invalid BatchFinalized log in zone block {block_number}: {err}")
-                })?;
-                finalized_batches.push(FinalizedBatchLog {
-                    block_number,
-                    tx_index: tx_index as u64,
-                    log_index: log_index as u64,
-                    tx_hash: *tx.tx_hash(),
-                    withdrawal_queue_hash: event.withdrawalQueueHash,
-                    withdrawal_batch_index: event.withdrawalBatchIndex,
-                });
-            }
-        }
+        finalized_batches.extend(finalized_batch_boundaries_from_parts(
+            block_number,
+            &block.body.transactions,
+            &receipts,
+            outbox_address,
+        )?);
     }
     finalized_batches.sort_by_key(|batch| (batch.block_number, batch.tx_index, batch.log_index));
     Ok(finalized_batches)
+}
+
+/// Find finalized withdrawal boundaries in one block whose receipts are already in memory.
+pub(crate) fn finalized_batch_boundaries_from_parts(
+    block_number: u64,
+    transactions: &[TempoTxEnvelope],
+    receipts: &[TempoReceipt],
+    outbox_address: Address,
+) -> Result<Vec<FinalizedBatchLog>> {
+    validate_transaction_receipts(transactions, receipts, block_number)?;
+    let mut finalized_batches = Vec::new();
+    for (tx_index, (tx, receipt)) in transactions.iter().zip(receipts.iter()).enumerate() {
+        for (log_index, log) in receipt.logs().iter().enumerate() {
+            if log.address != outbox_address
+                || log.topics().first() != Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
+            {
+                continue;
+            }
+            let event = IZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
+                eyre::eyre!("invalid BatchFinalized log in zone block {block_number}: {err}")
+            })?;
+            finalized_batches.push(FinalizedBatchLog {
+                block_number,
+                tx_index: tx_index as u64,
+                log_index: log_index as u64,
+                tx_hash: *tx.tx_hash(),
+                withdrawal_queue_hash: event.withdrawalQueueHash,
+                withdrawal_batch_index: event.withdrawalBatchIndex,
+            });
+        }
+    }
+    Ok(finalized_batches)
+}
+
+fn validate_transaction_receipts(
+    transactions: &[TempoTxEnvelope],
+    receipts: &[TempoReceipt],
+    block_number: u64,
+) -> Result<()> {
+    if transactions.len() != receipts.len() {
+        return Err(eyre::eyre!(
+            "zone block {block_number} has {} transactions but {} receipts",
+            transactions.len(),
+            receipts.len()
+        ));
+    }
+    Ok(())
 }
 
 fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
@@ -1922,29 +1887,6 @@ mod tests {
 
         assert_eq!(anchor.block_hash, B256::ZERO);
         assert_eq!(anchor.block_number, 0);
-    }
-
-    #[tokio::test]
-    async fn quorum_wait_stops_when_the_portal_advances() {
-        let l1 = Asserter::new();
-        let advanced_hash = B256::repeat_byte(0x42);
-        l1.push_success(&Bytes::copy_from_slice(advanced_hash.as_slice()));
-        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
-        let store = AttestationStore::default();
-
-        let error = submitter
-            .wait_for_settlement_or_portal_progress(
-                &store,
-                120,
-                2,
-                B256::repeat_byte(0x24),
-                &sync::CancellationToken::new(),
-            )
-            .await
-            .expect_err("portal progress must invalidate the stale quorum wait");
-
-        assert!(matches!(error, BatchSubmitError::PortalAdvanced));
-        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]

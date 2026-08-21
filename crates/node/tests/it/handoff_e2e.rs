@@ -449,13 +449,13 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
         sender,
         amount,
     )])?;
-    cluster.wait_all_at(4, DEFAULT_TIMEOUT).await?;
+    cluster.wait_all_at(4, HANDOFF_TIMEOUT).await?;
     cluster.nodes[2]
         .wait_for_balance(
             PATH_USD_ADDRESS,
             sender,
             U256::from(amount),
-            DEFAULT_TIMEOUT,
+            HANDOFF_TIMEOUT,
         )
         .await?;
 

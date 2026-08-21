@@ -282,7 +282,7 @@ struct EarnZoneFixture {
     contribution_controller: Address,
     access_policy: Option<EarnAccessPolicy>,
     user: ZoneAccount,
-    _sequencer: zone_sequencer::ZoneSequencerHandle,
+    _sequencer: crate::utils::TestSequencerHandle,
 }
 
 impl EarnZoneFixture {

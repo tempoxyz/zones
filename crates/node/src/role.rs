@@ -38,8 +38,9 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
+    BatchSubmissionRole, PersistentBatchSubmissionResources, PersistentBatchSubmissionRuntime,
     ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer,
+    spawn_persistent_batch_submission, spawn_zone_sequencer_generation,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -59,6 +60,8 @@ use crate::{
 
 /// Backoff after a transient role or promotion-readiness derivation failure.
 const ROLE_DECISION_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+/// Maximum delay between persistent L1 runtime initialization attempts.
+const PERSISTENT_BATCH_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 /// How long a stopping generation may take before its remaining tasks are aborted.
 ///
 /// Must cover the longest in-flight L1 confirmation (`processWithdrawals` and `submitBatch`
@@ -324,31 +327,21 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
-///
-/// An unexpected child exit must restart the whole generation immediately. During an intentional
-/// generation stop, however, both children retain the graceful shutdown window needed to finish
-/// in-flight L1 transactions.
+/// Supervise generation-scoped withdrawal processing.
 async fn supervise_sequencer_tasks(
     handle: ZoneSequencerHandle,
     stop: CancellationToken,
 ) -> TaskEnd {
     let mut withdrawal = AbortOnDropHandle::new(handle.withdrawal_handle);
-    let mut monitor = AbortOnDropHandle::new(handle.monitor_handle);
 
     tokio::select! {
         biased;
         () = stop.cancelled() => {
-            // Both children observe the same token at their poll boundaries. Keep both handles
-            // alive until they finish; the outer generation timeout will abort this supervisor
-            // and AbortOnDropHandle will then abort either child that is still stuck.
-            let (withdrawal_result, monitor_result) =
-                tokio::join!(&mut withdrawal, &mut monitor);
+            // Keep the handle alive until graceful shutdown finishes. The outer generation
+            // timeout aborts this supervisor if the processor remains stuck.
+            let withdrawal_result = (&mut withdrawal).await;
             if let Err(err) = withdrawal_result {
                 warn!(target: "zone::role", %err, "Withdrawal processor task failed during shutdown");
-            }
-            if let Err(err) = monitor_result {
-                warn!(target: "zone::role", %err, "Zone monitor task failed during shutdown");
             }
             TaskEnd::SequencerStopped
         }
@@ -357,17 +350,7 @@ async fn supervise_sequencer_tasks(
                 Ok(()) => warn!(target: "zone::role", "Withdrawal processor task stopped unexpectedly"),
                 Err(err) => warn!(target: "zone::role", %err, "Withdrawal processor task failed"),
             }
-            // Returning drops and aborts the monitor handle. The role controller observes
-            // TaskEnd::Ended and restarts the complete generation.
             TaskEnd::Ended("withdrawal-processor")
-        }
-        result = &mut monitor => {
-            match result {
-                Ok(()) => warn!(target: "zone::role", "Zone monitor task stopped unexpectedly"),
-                Err(err) => warn!(target: "zone::role", %err, "Zone monitor task failed"),
-            }
-            // Returning drops and aborts the withdrawal handle before the generation restarts.
-            TaskEnd::Ended("zone-monitor")
         }
     }
 }
@@ -476,6 +459,26 @@ impl RunningGeneration {
         }
         outcome
     }
+}
+
+/// Fence the persistent batch actor before ending or replacing a generation.
+async fn fence_batch_submission(
+    persistent_batch: &mut Option<PersistentBatchSubmissionRuntime>,
+    inactive_generation: u64,
+) -> bool {
+    let Some(runtime) = persistent_batch.as_mut() else {
+        return true;
+    };
+    if let Err(error) = runtime
+        .resources
+        .batch_submission
+        .set_role(BatchSubmissionRole::inactive(inactive_generation))
+        .await
+    {
+        error!(target: "zone::role", %error, "Failed to fence batch submission actor");
+        return false;
+    }
+    true
 }
 
 /// Stop the active generation and keep the controller fenced if its teardown is unproven.
@@ -619,6 +622,7 @@ where
 pub(crate) async fn run_role_controller<P, Pool>(
     context: RoleControllerContext<P, Pool>,
     sinks: EventSinks,
+    shutdown: CancellationToken,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -634,6 +638,10 @@ pub(crate) async fn run_role_controller<P, Pool>(
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
 {
     let mut schedule_changes = context.schedule.subscribe();
+
+    // Followers do not need the batch runtime. Initialize it lazily on the first promotion so an
+    // L1 outage cannot prevent a sequencer-capable node from starting as a follower.
+    let mut persistent_batch = None;
 
     let mut generation_id: u64 = 0;
     let mut current: Option<RunningGeneration> = None;
@@ -698,11 +706,73 @@ pub(crate) async fn run_role_controller<P, Pool>(
             .as_ref()
             .is_some_and(|generation| generation.role.same_variant(desired))
         {
+            if matches!(desired, DesiredRole::Leader { .. }) && persistent_batch.is_none() {
+                let sequencer = context
+                    .sequencer
+                    .as_ref()
+                    .expect("leader role requires sequencer configuration");
+                let signer = sequencer
+                    .config
+                    .l1_transaction_signer
+                    .clone()
+                    .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
+                let mut delay = ROLE_DECISION_RETRY_BACKOFF;
+                loop {
+                    let initialization = spawn_persistent_batch_submission(
+                        &sequencer.sequencer_config,
+                        signer.clone(),
+                        context.provider.clone(),
+                        sequencer.prover_config.clone(),
+                    );
+                    let result = tokio::select! {
+                        biased;
+                        () = shutdown.cancelled() => return,
+                        result = initialization => result,
+                    };
+                    match result {
+                        Ok(runtime) => {
+                            persistent_batch = Some(runtime);
+                            break;
+                        }
+                        Err(error) => {
+                            warn!(
+                                target: "zone::role",
+                                %error,
+                                delay_secs = delay.as_secs_f64(),
+                                "Failed to initialize persistent batch submission; retrying"
+                            );
+                            tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => return,
+                                () = tokio::time::sleep(delay) => {}
+                            }
+                            delay = delay
+                                .saturating_mul(2)
+                                .min(PERSISTENT_BATCH_MAX_RETRY_BACKOFF);
+                        }
+                    }
+                }
+            }
+            let next_generation = generation_id + 1;
+            if !fence_batch_submission(&mut persistent_batch, next_generation).await {
+                return;
+            }
             if !stop_current_generation(&mut current, &sinks).await {
                 return;
             }
-            generation_id += 1;
-            match start_generation(&context, &sinks, desired, generation_id).await {
+            generation_id = next_generation;
+            match start_generation(
+                &context,
+                &sinks,
+                desired,
+                generation_id,
+                &shutdown,
+                persistent_batch
+                    .as_mut()
+                    .map(|runtime| &mut runtime.resources),
+            )
+            .await
+            {
                 Ok(generation) => {
                     current = Some(generation);
                 }
@@ -723,6 +793,9 @@ pub(crate) async fn run_role_controller<P, Pool>(
                         %err,
                         "Role generation failed to start; fencing before retry"
                     );
+                    if !fence_batch_submission(&mut persistent_batch, generation_id).await {
+                        return;
+                    }
                 }
             }
 
@@ -798,6 +871,9 @@ pub(crate) async fn run_role_controller<P, Pool>(
                         // Stop here rather than letting the next iteration notice the role
                         // change, so the broadcaster drains this leader's final blocks before
                         // the successor starts producing.
+                        if !fence_batch_submission(&mut persistent_batch, generation_id + 1).await {
+                            return;
+                        }
                         if !stop_current_generation(&mut current, &sinks).await {
                             return;
                         }
@@ -809,6 +885,9 @@ pub(crate) async fn run_role_controller<P, Pool>(
                             tempo_anchor,
                             "Engine fenced on an ungoverned anchor"
                         );
+                        if !fence_batch_submission(&mut persistent_batch, generation_id + 1).await {
+                            return;
+                        }
                         if !stop_current_generation(&mut current, &sinks).await {
                             return;
                         }
@@ -820,6 +899,9 @@ pub(crate) async fn run_role_controller<P, Pool>(
                         // A generation task ended while its generation is still desired:
                         // restart the whole generation to keep the task graph coherent.
                         error!(target: "zone::role", task = name, "Generation task ended unexpectedly; restarting generation");
+                        if !fence_batch_submission(&mut persistent_batch, generation_id + 1).await {
+                            return;
+                        }
                         if !stop_current_generation(&mut current, &sinks).await {
                             return;
                         }
@@ -827,6 +909,9 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     }
                     Some(Err(err)) => {
                         error!(target: "zone::role", %err, "Generation task panicked; restarting generation");
+                        if !fence_batch_submission(&mut persistent_batch, generation_id + 1).await {
+                            return;
+                        }
                         if !stop_current_generation(&mut current, &sinks).await {
                             return;
                         }
@@ -835,6 +920,32 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     // Unreachable: join_next() is only polled while the set is non-empty.
                     None => {}
                 }
+            }
+            () = shutdown.cancelled() => {
+                let _ = fence_batch_submission(&mut persistent_batch, generation_id + 1).await;
+                let _ = stop_current_generation(&mut current, &sinks).await;
+                if let Some(runtime) = persistent_batch.as_mut() {
+                    runtime.resources.batch_submission.shutdown();
+                    match (&mut runtime.actor_handle).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => warn!(target: "zone::role", %error, "Batch submission actor failed during shutdown"),
+                        Err(error) => warn!(target: "zone::role", %error, "Batch submission actor panicked during shutdown"),
+                    }
+                }
+                return;
+            }
+            actor_result = async {
+                match persistent_batch.as_mut() {
+                    Some(runtime) => (&mut runtime.actor_handle).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match actor_result {
+                    Ok(Ok(())) => error!(target: "zone::role", "Batch submission actor stopped unexpectedly"),
+                    Ok(Err(error)) => error!(target: "zone::role", %error, "Batch submission actor failed"),
+                    Err(error) => error!(target: "zone::role", %error, "Batch submission actor panicked"),
+                }
+                return;
             }
             _ = async {
                 if retry_decision {
@@ -852,6 +963,8 @@ async fn start_generation<P, Pool>(
     sinks: &EventSinks,
     desired: DesiredRole,
     id: u64,
+    shutdown: &CancellationToken,
+    persistent_batch: Option<&mut PersistentBatchSubmissionResources>,
 ) -> eyre::Result<RunningGeneration>
 where
     P: BlockNumReader
@@ -955,17 +1068,30 @@ where
                 .as_ref()
                 .expect("leader generation requires sequencer resources");
 
-            // Acquire every fallible prerequisite before installing sinks or spawning any
+            // Acquire every fallible local prerequisite before installing sinks or spawning any
             // leader task. Otherwise a transient head-read failure could leave a partial
             // generation classified as Leader without its canonical head writer.
             let last_header = latest_sealed_header(&context.provider)?;
-            let portal_anchor = resolve_portal_zone_anchor(
-                &context.provider,
-                context.portal_address,
-                &context.attestation.l1_provider,
-            )
-            .await
-            .wrap_err("failed to resolve portal-confirmed Zone height for leader recovery")?;
+
+            let resources = persistent_batch
+                .expect("leader generation requires persistent batch submission resources");
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    eyre::bail!("role controller shut down during batch submission promotion");
+                }
+                result = resources
+                    .batch_submission
+                    .set_role(BatchSubmissionRole::leader(id)) => {
+                    result.wrap_err("failed promoting persistent batch submission actor")?;
+                }
+            }
+            let portal_anchor = resources
+                .batch_submission
+                .current_progress()
+                .ok_or_else(|| {
+                    eyre::eyre!("batch submission promotion published no portal anchor")
+                })?;
 
             // The outgoing leader may have one final submitBatch in flight while leadership
             // rotates. That can make this anchor one boundary stale, but rotations fence the old
@@ -974,11 +1100,11 @@ where
 
             // Remove any submitted attestations for the portal-confirmed anchor, so the new leader
             // can start from here.
-            let portal_confirmed_height = portal_anchor.block_number;
+            let portal_confirmed_height = portal_anchor.zone_height;
             info!(
                 target: "zone::role",
                 portal_confirmed_height,
-                portal_block_hash = %portal_anchor.block_hash,
+                portal_zone_block_hash = %portal_anchor.zone_block_hash,
                 "Seeded leader settlement recovery from the portal anchor"
             );
             context
@@ -1059,24 +1185,15 @@ where
                 }
             });
 
-            // Sequencer background tasks (batch submission + withdrawal processing) stop
-            // gracefully: they observe the token at their poll boundaries, letting in-flight
-            // L1 transactions resolve before teardown.
+            // Generation-scoped withdrawal processing stops gracefully, letting an in-flight L1
+            // transaction resolve before teardown. Batch submission is fenced separately above.
             let sequencer_config = sequencer.sequencer_config.clone();
-            let signer = sequencer
-                .config
-                .l1_transaction_signer
-                .clone()
-                .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
-            let zone_provider = context.provider.clone();
-            let prover_config = sequencer.prover_config.clone();
             let sequencer_token = token.clone();
+            let persistent_resources = resources.clone();
             tasks.spawn(async move {
-                let handle = spawn_zone_sequencer(
+                let handle = spawn_zone_sequencer_generation(
                     sequencer_config,
-                    signer,
-                    zone_provider,
-                    prover_config,
+                    persistent_resources,
                     sequencer_token.clone(),
                 )
                 .await;
@@ -1134,7 +1251,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, time::Duration};
+    use std::time::Duration;
 
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_primitives_traits::SealedHeader;
@@ -1149,16 +1266,6 @@ mod tests {
         EventSinks, TaskEnd, canonical_recovery_height, latest_sealed_header,
         route_backfill_requests, route_backfill_responses, supervise_sequencer_tasks,
     };
-
-    struct DropSignal(Option<oneshot::Sender<()>>);
-
-    impl Drop for DropSignal {
-        fn drop(&mut self) {
-            if let Some(signal) = self.0.take() {
-                let _ = signal.send(());
-            }
-        }
-    }
 
     #[test]
     fn unavailable_canonical_head_fails_leader_prerequisite() {
@@ -1202,90 +1309,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequencer_supervisor_reports_panicking_child_without_waiting_for_sibling() {
-        let (monitor_started_tx, monitor_started_rx) = oneshot::channel();
-        let (monitor_dropped_tx, monitor_dropped_rx) = oneshot::channel();
-        let monitor_handle = tokio::spawn(async move {
-            let _drop_signal = DropSignal(Some(monitor_dropped_tx));
-            let _ = monitor_started_tx.send(());
-            pending::<()>().await;
-        });
-        monitor_started_rx
-            .await
-            .expect("monitor task must start before the panic");
-
-        let withdrawal_handle = tokio::spawn(async move {
-            panic!("simulated withdrawal processor panic");
-        });
-        let handle = ZoneSequencerHandle {
-            withdrawal_handle,
-            monitor_handle,
-        };
-
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(1),
-            supervise_sequencer_tasks(handle, CancellationToken::new()),
-        )
-        .await
-        .expect("supervisor waited for the healthy long-running sibling");
-        assert!(matches!(outcome, TaskEnd::Ended("withdrawal-processor")));
-        tokio::time::timeout(Duration::from_secs(1), monitor_dropped_rx)
-            .await
-            .expect("sibling was not aborted when the supervisor returned")
-            .expect("monitor drop signal was lost");
-    }
-
-    #[tokio::test]
-    async fn sequencer_supervisor_waits_for_both_children_during_graceful_stop() {
+    async fn sequencer_supervisor_waits_for_graceful_withdrawal_stop() {
         let stop = CancellationToken::new();
-        let (ready_tx, mut ready_rx) = mpsc::channel(2);
-
+        let (stopping_tx, stopping_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
         let withdrawal_stop = stop.clone();
-        let withdrawal_ready = ready_tx.clone();
         let withdrawal_handle = tokio::spawn(async move {
-            withdrawal_ready.send(()).await.unwrap();
             withdrawal_stop.cancelled().await;
+            let _ = stopping_tx.send(());
+            let _ = release_rx.await;
         });
-
-        let monitor_stop = stop.clone();
-        let (monitor_stopping_tx, monitor_stopping_rx) = oneshot::channel();
-        let (release_monitor_tx, release_monitor_rx) = oneshot::channel();
-        let monitor_handle = tokio::spawn(async move {
-            ready_tx.send(()).await.unwrap();
-            monitor_stop.cancelled().await;
-            let _ = monitor_stopping_tx.send(());
-            let _ = release_monitor_rx.await;
-        });
-
-        for _ in 0..2 {
-            tokio::time::timeout(Duration::from_secs(1), ready_rx.recv())
-                .await
-                .expect("sequencer child did not start")
-                .expect("sequencer child readiness channel closed");
-        }
-
         let supervisor = tokio::spawn(supervise_sequencer_tasks(
-            ZoneSequencerHandle {
-                withdrawal_handle,
-                monitor_handle,
-            },
+            ZoneSequencerHandle { withdrawal_handle },
             stop.clone(),
         ));
         stop.cancel();
-        tokio::time::timeout(Duration::from_secs(1), monitor_stopping_rx)
+        tokio::time::timeout(Duration::from_secs(1), stopping_rx)
             .await
-            .expect("monitor did not observe graceful shutdown")
-            .expect("monitor stopping signal was lost");
+            .expect("withdrawal processor did not observe graceful shutdown")
+            .expect("withdrawal stopping signal was lost");
         tokio::task::yield_now().await;
         assert!(
             !supervisor.is_finished(),
-            "supervisor aborted the slower child during graceful shutdown"
+            "supervisor did not wait for the withdrawal processor"
         );
 
-        let _ = release_monitor_tx.send(());
+        let _ = release_tx.send(());
         let outcome = tokio::time::timeout(Duration::from_secs(1), supervisor)
             .await
-            .expect("supervisor did not finish after both children stopped")
+            .expect("supervisor did not finish after withdrawal processor stopped")
             .expect("supervisor task panicked");
         assert!(matches!(outcome, TaskEnd::SequencerStopped));
     }

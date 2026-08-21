@@ -692,8 +692,8 @@ async fn test_many_concurrent_withdrawals_are_batched() -> eyre::Result<()> {
             let sequencer = &sequencer;
             async move {
                 eyre::ensure!(
-                    !sequencer.monitor_handle.is_finished(),
-                    "zone monitor exited while processing concurrent withdrawals"
+                    !sequencer.batch_submission_handle.is_finished(),
+                    "batch submission actor exited while processing concurrent withdrawals"
                 );
                 eyre::ensure!(
                     !sequencer.withdrawal_handle.is_finished(),

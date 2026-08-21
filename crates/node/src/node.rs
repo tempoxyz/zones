@@ -4,7 +4,6 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
-    ZoneEngine,
     replication::{
         AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, PeerTipRegistry, serve_backfill_requests,
     },
@@ -73,6 +72,7 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -93,7 +93,7 @@ use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
+    ZoneSequencerConfig, attestation::AttestationDomain,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -517,6 +517,7 @@ where
         let chain_spec = ctx.node.provider().chain_spec();
         let chain_id = chain_spec.genesis().config.chain_id;
         let genesis_zone_id = chain_spec.zone_id();
+
         // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
         // explicit sentinel because they have no on-chain portal to bind against.
         if self.portal_address.is_zero() {
@@ -722,10 +723,6 @@ where
                 peer_tips,
                 backfill_requests_rx,
             ));
-        } else if let Some(ref config) = self.sequencer_config {
-            // Legacy single-sequencer mode keeps the static engine.
-            let sequencer_addr = config.sequencer_signer.address();
-            self.spawn_zone_engine(&ctx, sequencer_addr)?;
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
@@ -736,7 +733,6 @@ where
             .get()
             .saturating_mul(1024 * 1024) as usize;
         let provider = ctx.node.provider().clone();
-        let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
         let engine_handle = ctx.beacon_engine_handle.clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
@@ -851,8 +847,22 @@ where
                 peer_tips,
                 status: role_status,
             };
-            task_executor
-                .spawn_critical_task("zone-role-controller", run_role_controller(context, sinks));
+            task_executor.spawn_critical_with_graceful_shutdown_signal(
+                "zone-role-controller",
+                |shutdown| async move {
+                    let stop = CancellationToken::new();
+                    let controller = run_role_controller(context, sinks, stop.clone());
+                    tokio::pin!(controller);
+                    tokio::select! {
+                        () = &mut controller => {}
+                        guard = shutdown => {
+                            stop.cancel();
+                            controller.await;
+                            drop(guard);
+                        }
+                    }
+                },
+            );
 
             // Flush unpersisted blocks on shutdown.
             let engine_shutdown = handle.engine_shutdown.clone();
@@ -866,22 +876,11 @@ where
                     }
                 },
             );
-        } else if let Some(config) = self.sequencer_config.take() {
-            let sequencer_addr = config.sequencer_signer.address();
-
-            Self::launch_sequencer_tasks(
-                config,
-                &handle,
-                zone_provider,
-                &task_executor,
-                self.l1_config.l1_rpc_url,
-                self.l1_config.portal_address,
-                self.l1_config.retry_connection_interval,
-                sequencer_addr,
-                None,
-                prover_config,
-            )
-            .await?;
+        } else if self.sequencer_config.is_some() {
+            eyre::bail!(
+                "sequencer mode requires a Zone manifest and P2P configuration; \
+                 standalone sequencer startup is no longer supported"
+            );
         }
 
         Ok(handle)
@@ -1330,37 +1329,6 @@ where
         Ok(())
     }
 
-    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
-    fn spawn_zone_engine(
-        &self,
-        ctx: &AddOnsContext<'_, N>,
-        fee_recipient: Address,
-    ) -> eyre::Result<()> {
-        let provider = ctx.node.provider();
-        let last_header = provider
-            .sealed_header(provider.best_block_number()?)?
-            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-        let engine = ZoneEngine::new(
-            provider.chain_spec(),
-            ctx.beacon_engine_handle.clone(),
-            ctx.node.payload_builder_handle().clone(),
-            self.deposit_queue.clone(),
-            self.l1_config.block_tracker.clone(),
-            last_header,
-            fee_recipient,
-            self.l1_config
-                .encryption_keys
-                .clone()
-                .expect("sequencer mode configures deposit decryption keys"),
-            self.portal_address,
-        );
-        ctx.node
-            .task_executor()
-            .spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned");
-        Ok(())
-    }
-
     /// Launch the redacted RPC server.
     async fn launch_redacted_rpc(
         config: ZoneRedactedRpcConfig,
@@ -1396,75 +1364,6 @@ where
         ));
         let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
-
-        Ok(())
-    }
-
-    /// Launch sequencer background tasks: batch submission, withdrawal processing,
-    /// and engine shutdown hook.
-    async fn launch_sequencer_tasks(
-        config: ZoneSequencerAddOnsConfig,
-        handle: &<Self as NodeAddOns<N>>::Handle,
-        zone_provider: N::Provider,
-        task_executor: &reth_tasks::TaskExecutor,
-        l1_rpc_url: String,
-        portal_address: Address,
-        retry_connection_interval: Duration,
-        sequencer_addr: Address,
-        attestation_store: Option<AttestationStore>,
-        prover_config: Option<ShadowProverConfig>,
-    ) -> eyre::Result<()> {
-        info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
-        let sequencer_config = ZoneSequencerConfig {
-            portal_address,
-            l1_rpc_url,
-            retry_connection_interval,
-            zone_poll_interval: config.zone_poll_interval,
-            withdrawal_poll_interval: config.withdrawal_poll_interval,
-            withdrawal_batch_limits: config.withdrawal_batch_limits,
-            outbox_address: ZONE_OUTBOX_ADDRESS,
-            inbox_address: ZONE_INBOX_ADDRESS,
-            batch_anchor_config: config.batch_anchor_config,
-            attestation_store,
-        };
-        let l1_transaction_signer = config
-            .l1_transaction_signer
-            .unwrap_or(config.sequencer_signer);
-        // Legacy single-sequencer mode: the tasks run for the process lifetime.
-        let seq_handle = spawn_zone_sequencer(
-            sequencer_config,
-            l1_transaction_signer,
-            zone_provider,
-            prover_config,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-        info!(target: "reth::cli", "Sequencer tasks spawned");
-
-        // Critical task — node shuts down if either exits.
-        task_executor.spawn_critical_task("zone-monitor", async move {
-            tokio::select! {
-                res = seq_handle.withdrawal_handle => {
-                    tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
-                }
-                res = seq_handle.monitor_handle => {
-                    tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
-                }
-            }
-        });
-
-        // Flush unpersisted blocks on shutdown.
-        let engine_shutdown = handle.engine_shutdown.clone();
-        task_executor.spawn_critical_with_graceful_shutdown_signal(
-            "zone-engine-shutdown",
-            |shutdown| async move {
-                let _guard = shutdown.await;
-                info!(target: "reth::cli", "Shutdown signal received — flushing engine state");
-                if let Some(done) = engine_shutdown.shutdown() {
-                    let _ = done.await;
-                }
-            },
-        );
 
         Ok(())
     }
