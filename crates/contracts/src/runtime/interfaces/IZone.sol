@@ -86,6 +86,12 @@ struct DepositQueueTransition {
     uint64 nextDepositNumber; // deposit counter at nextProcessedHash
 }
 
+/// @notice Processed prefix transition for the portal's append-only enabled-token array.
+struct TokenEnablementTransition {
+    uint64 prevProcessedTokenCount;
+    uint64 nextProcessedTokenCount;
+}
+
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
@@ -326,6 +332,7 @@ interface IVerifier {
         uint64 expectedWithdrawalBatchIndex,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
+        TokenEnablementTransition calldata tokenEnablementTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
@@ -424,7 +431,8 @@ interface IZonePortal {
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         bytes32 withdrawalQueueHash,
-        uint64 lastProcessedDepositNumber
+        uint64 lastProcessedDepositNumber,
+        uint64 lastProcessedEnabledTokenCount
     );
 
     event WithdrawalProcessed(
@@ -596,11 +604,11 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
-    /// @notice Maximum deposits accepted by this portal in one Tempo block.
-    function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+    /// @notice Maximum deposits that may remain outstanding on this portal.
+    function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
 
-    /// @notice Maximum tokens enabled by this portal in one Tempo block.
-    function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+    /// @notice Maximum token enablements that may remain outstanding on this portal.
+    function MAX_UNPROCESSED_TOKEN_ENABLEMENTS() external view returns (uint64);
 
     /// @notice Maximum byte length accepted for each bridged token metadata string.
     function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
@@ -719,6 +727,10 @@ interface IZonePortal {
 
     /// @notice Get the number of enabled tokens
     function enabledTokenCount() external view returns (uint256);
+
+    function lastProcessedEnabledTokenCount() external view returns (uint64);
+
+    function tokenEnablementCursorInitialized() external view returns (bool);
 
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
@@ -904,6 +916,7 @@ interface IZonePortal {
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
+        TokenEnablementTransition calldata tokenEnablementTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof,
@@ -990,10 +1003,10 @@ interface ITempoState {
     function tempoBlockNumber() external view returns (uint64);
 
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity and exact timestamp alignment with the Zone block.
+    /// @dev Validates chain continuity and that the Zone timestamp is not before the final header.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
-    /// @param header RLP-encoded Tempo header
-    function finalizeTempo(bytes calldata header) external;
+    /// @param headers Consecutive RLP-encoded Tempo headers
+    function finalizeTempo(bytes[] calldata headers) external;
 
     /// @notice Read a storage slot from a Tempo contract
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
@@ -1018,7 +1031,8 @@ interface IZoneInbox {
         uint64 indexed tempoBlockNumber,
         uint256 depositsProcessed,
         bytes32 newProcessedDepositQueueHash,
-        uint64 lastProcessedDepositNumber
+        uint64 lastProcessedDepositNumber,
+        uint64 lastProcessedEnabledTokenCount
     );
 
     /// @notice Emitted when a deposit is processed (decrypted and credited)
@@ -1067,6 +1081,11 @@ interface IZoneInbox {
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
     error Unauthorized();
+
+    function processedEnabledTokenCount() external view returns (uint64);
+
+    /// @notice Authenticate Tempo ancestry without processing portal work.
+    function advanceTempoHeaders(bytes[] calldata headers) external;
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     function tempoPortal() external view returns (address);

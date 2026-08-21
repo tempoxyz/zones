@@ -5,6 +5,7 @@ pub use IZoneInbox::{
     IZoneInboxErrors as ZoneInboxError, IZoneInboxEvents as ZoneInboxEvent, QueuedDeposit,
     WithdrawalBounceBackDeposit,
 };
+pub use legacy_zone_inbox::TempoAdvanced as LegacyTempoAdvanced;
 
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::SolValue;
@@ -64,7 +65,8 @@ crate::sol! {
             uint64 indexed tempoBlockNumber,
             uint256 depositsProcessed,
             bytes32 newProcessedDepositQueueHash,
-            uint64 lastProcessedDepositNumber
+            uint64 lastProcessedDepositNumber,
+            uint64 lastProcessedEnabledTokenCount
         );
 
         event DepositProcessed(
@@ -113,6 +115,7 @@ crate::sol! {
         function processedDepositQueueHash() external view returns (bytes32);
         function processedDepositNumber() external view returns (uint64);
         function processedTokenEnablementHash() external view returns (bytes32);
+        function processedEnabledTokenCount() external view returns (uint64);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
@@ -124,6 +127,23 @@ crate::sol! {
             DecryptionData[] calldata decryptions,
             EnabledToken[] calldata enabledTokens
         ) external;
+
+        /// Advance only the authenticated Tempo checkpoint. A block opened by this call may not
+        /// contain any other transaction.
+        function advanceTempoHeaders(bytes[] calldata headers) external;
+    }
+}
+
+/// Pre-Z1 event ABI retained for decoding historical Zone blocks and emitting legacy logs.
+pub mod legacy_zone_inbox {
+    crate::sol! {
+        event TempoAdvanced(
+            bytes32 indexed tempoBlockHash,
+            uint64 indexed tempoBlockNumber,
+            uint256 depositsProcessed,
+            bytes32 newProcessedDepositQueueHash,
+            uint64 lastProcessedDepositNumber
+        );
     }
 }
 

@@ -6,6 +6,7 @@ use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::UnknownFunctionSelector;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     receive_policy_guard::ReceivePolicyGuard,
@@ -20,7 +21,8 @@ use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
-    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
+    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_env_at_zone_hardfork,
+    test_storage_provider,
 };
 
 const GAS: u64 = 30_000_000;
@@ -409,6 +411,39 @@ fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<(
     assert_eq!(output.bytes, IZoneInbox::OnlySequencer {}.abi_encode());
     assert_eq!(harness.l1_state.get_anchor(), None);
     assert!(harness.l1.storage_requests().is_empty());
+    Ok(())
+}
+
+#[test]
+fn processed_enabled_token_count_activates_at_z1() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let calldata = IZoneInbox::processedEnabledTokenCountCall {}.abi_encode();
+
+    let pre_z1 = harness.call(ALICE, &calldata)?;
+    assert!(pre_z1.is_revert());
+    let error = UnknownFunctionSelector::abi_decode(&pre_z1.bytes)?;
+    assert_eq!(
+        error.selector.as_slice(),
+        &IZoneInbox::processedEnabledTokenCountCall::SELECTOR
+    );
+
+    let z1_env = test_env_at_zone_hardfork(&harness.ctx, zone_hardfork::ZoneHardfork::Z1);
+    let z1_precompile = ZoneInbox::create(harness.l1_state.clone(), &z1_env);
+    let post_z1 = call_precompile(
+        &mut harness.ctx,
+        &z1_precompile,
+        ALICE,
+        &calldata,
+        GAS,
+        true,
+        ZONE_INBOX_ADDRESS,
+        ZONE_INBOX_ADDRESS,
+    )?;
+    assert!(post_z1.is_success());
+    assert_eq!(
+        IZoneInbox::processedEnabledTokenCountCall::abi_decode_returns(&post_z1.bytes)?,
+        0
+    );
     Ok(())
 }
 

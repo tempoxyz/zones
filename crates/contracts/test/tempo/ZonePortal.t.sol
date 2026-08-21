@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ISignatureVerifier } from "tempo-std/interfaces/ISignatureVerifier.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
@@ -23,6 +24,7 @@ import {
     PORTAL_LEADER_SLOT,
     PORTAL_ROLE_SLOT,
     Role,
+    TokenEnablementTransition,
     Withdrawal,
     WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
@@ -540,7 +542,7 @@ contract ZonePortalTest is BaseTest {
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
     bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
-        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
 
     uint256 internal constant SIGNER_A_KEY = 2;
@@ -581,6 +583,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 anchorBlockHash;
         BlockTransition blockTransition;
         DepositQueueTransition depositQueueTransition;
+        TokenEnablementTransition tokenEnablementTransition;
         bytes32 withdrawalQueueHash;
         bytes verifierConfig;
     }
@@ -661,6 +664,52 @@ contract ZonePortalTest is BaseTest {
         _mockTokenPolicyMigration(token, true);
     }
 
+    function _submitTokenEnablementTransition(TokenEnablementTransition memory transition)
+        internal
+    {
+        _submitTokenEnablementTransition(transition, bytes4(0));
+    }
+
+    function _submitTokenEnablementTransition(
+        TokenEnablementTransition memory transition,
+        bytes4 expectedRevert
+    )
+        internal
+    {
+        vm.roll(block.number + 1);
+        uint64 tempoBlockNumber = uint64(block.number - 1);
+        bytes32 previousBlockHash = portal.blockHash();
+        uint256 nextZoneHeight = portal.zoneHeight() + 1;
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = hex"01";
+        vm.mockCall(
+            address(StdPrecompiles.SIGNATURE_VERIFIER),
+            abi.encodeWithSelector(ISignatureVerifier.recover.selector),
+            abi.encode(sequencer)
+        );
+        if (expectedRevert != bytes4(0)) vm.expectRevert(expectedRevert);
+        portal.submitBatch(
+            tempoBlockNumber,
+            0,
+            BlockTransition({
+                prevBlockHash: previousBlockHash,
+                nextBlockHash: keccak256(abi.encode("token-cursor", nextZoneHeight))
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            transition,
+            bytes32(0),
+            "",
+            "",
+            nextZoneHeight,
+            signatures
+        );
+    }
+
     function _sequencerSet() internal returns (address[] memory signers) {
         signers = new address[](3);
         signers[0] = vm.addr(SIGNER_A_KEY);
@@ -738,6 +787,7 @@ contract ZonePortalTest is BaseTest {
                 anchorBlockHash: anchorBlockHash,
                 blockTransition: blockTransition,
                 depositQueueTransition: depositQueueTransition,
+                tokenEnablementTransition: _currentTokenEnablementTransition(portal),
                 withdrawalQueueHash: withdrawalQueueHash,
                 verifierConfig: verifierConfig
             })
@@ -775,6 +825,7 @@ contract ZonePortalTest is BaseTest {
                 attestation.anchorBlockHash,
                 keccak256(abi.encode(attestation.blockTransition)),
                 keccak256(abi.encode(attestation.depositQueueTransition)),
+                keccak256(abi.encode(attestation.tokenEnablementTransition)),
                 attestation.withdrawalQueueHash,
                 keccak256(attestation.verifierConfig)
             )
@@ -867,6 +918,7 @@ contract ZonePortalTest is BaseTest {
             anchorBlockHash: getBlockHash(batch.tempoBlockNumber),
             blockTransition: batch.blockTransition,
             depositQueueTransition: batch.depositQueueTransition,
+            tokenEnablementTransition: _currentTokenEnablementTransition(portal),
             withdrawalQueueHash: batch.withdrawalQueueHash,
             verifierConfig: batch.verifierConfig
         });
@@ -886,6 +938,7 @@ contract ZonePortalTest is BaseTest {
             batch.recentTempoBlockNumber,
             batch.blockTransition,
             batch.depositQueueTransition,
+            _currentTokenEnablementTransition(target),
             batch.withdrawalQueueHash,
             batch.verifierConfig,
             "",
@@ -1402,6 +1455,7 @@ contract ZonePortalTest is BaseTest {
             0,
             blockTransition,
             depositQueueTransition,
+            _currentTokenEnablementTransition(portal),
             keccak256("substituted-withdrawal-root"),
             "",
             "",
@@ -1886,17 +1940,22 @@ contract ZonePortalTest is BaseTest {
         assertFalse(portal.isTokenEnabled(token));
     }
 
-    function test_enableToken_enforcesPerTempoBlockCapAndResets() public {
-        uint64 maximum = portal.MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK();
+    function test_enableToken_enforcesOutstandingCapAcrossTempoBlocks() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_TOKEN_ENABLEMENTS();
         assertEq(maximum, 8);
-        assertEq(portal.enabledTokenCount(), 1, "initializer must consume one enablement");
+        assertFalse(portal.tokenEnablementCursorInitialized());
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 1 })
+        );
+        assertTrue(portal.tokenEnablementCursorInitialized());
+        assertEq(portal.lastProcessedEnabledTokenCount(), 1);
 
-        for (uint256 i = 1; i < maximum; ++i) {
+        for (uint256 i; i < maximum; ++i) {
             address token = _createEnablementToken("Token", "T", "USD", bytes32(uint256(1000 + i)));
             vm.prank(admin);
             portal.enableToken(token);
         }
-        assertEq(portal.enabledTokenCount(), maximum);
+        assertEq(portal.enabledTokenCount(), maximum + 1);
 
         address overflowToken =
             _createEnablementToken("Overflow", "OVER", "USD", bytes32("overflow"));
@@ -1911,8 +1970,59 @@ contract ZonePortalTest is BaseTest {
 
         vm.roll(block.number + 1);
         vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.TokenEnablementBlockCapacityExceeded.selector, maximum
+            )
+        );
+        portal.enableToken(overflowToken);
+        assertFalse(portal.isTokenEnabled(overflowToken));
+    }
+
+    function test_z0BatchDoesNotInitializeTokenCursorAndKeepsLegacyAdmission() public {
+        assertFalse(portal.tokenEnablementCursorInitialized());
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 0 })
+        );
+        assertFalse(portal.tokenEnablementCursorInitialized());
+        assertEq(portal.lastProcessedEnabledTokenCount(), 0);
+
+        uint64 maximum = portal.MAX_UNPROCESSED_TOKEN_ENABLEMENTS();
+        for (uint256 i; i < maximum; ++i) {
+            address token =
+                _createEnablementToken("Legacy", "LEG", "USD", bytes32(uint256(2000 + i)));
+            vm.prank(admin);
+            portal.enableToken(token);
+        }
+
+        address overflowToken =
+            _createEnablementToken("Overflow", "OVER", "USD", bytes32("legacy-overflow"));
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.TokenEnablementBlockCapacityExceeded.selector, maximum
+            )
+        );
+        portal.enableToken(overflowToken);
+
+        vm.roll(block.number + 1);
+        vm.prank(admin);
         portal.enableToken(overflowToken);
         assertTrue(portal.isTokenEnabled(overflowToken));
+        assertFalse(portal.tokenEnablementCursorInitialized());
+    }
+
+    function test_tokenCursorInitializationRequiresCompletePrefix() public {
+        address token = _createEnablementToken("Legacy", "LEG", "USD", bytes32("legacy"));
+        vm.prank(admin);
+        portal.enableToken(token);
+        assertEq(portal.enabledTokenCount(), 2);
+
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 1 }),
+            IZonePortal.InvalidProof.selector
+        );
+        assertFalse(portal.tokenEnablementCursorInitialized());
     }
 
     function test_sequencerGovernance_revertsIfAdminLacksSequencerRole() public {
@@ -1939,6 +2049,7 @@ contract ZonePortalTest is BaseTest {
                 prevDepositNumber: 0,
                 nextDepositNumber: 0
             }),
+            _currentTokenEnablementTransition(portal),
             bytes32(0),
             "",
             "",
@@ -2316,8 +2427,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
     }
 
-    function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+    function test_deposit_enforcesOutstandingCapAcrossDepositTypes() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
         uint64 maximumPublicDeposits = maximum - 20;
         assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
@@ -2348,10 +2459,15 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
 
         vm.roll(block.number + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
         _deposit(portal, address(pathUSD), bob, amount, bytes32("next block"), bob);
         vm.stopPrank();
 
-        assertEq(portal.depositCount(), maximumPublicDeposits + 1);
+        assertEq(portal.depositCount(), maximumPublicDeposits);
     }
 
     function test_withdrawalBounceBack_usesReservedBatchCapacityWithoutBlockingQueue() public {
@@ -2398,7 +2514,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
         uint64 maximumPublicDeposits = maximum - uint64(reserve);
         vm.startPrank(alice);
         pathUSD.approve(address(portal), maximum);
@@ -2604,7 +2720,7 @@ contract ZonePortalTest is BaseTest {
         // Batch with no withdrawals: no queue slot consumed, sentinel emitted.
         vm.expectEmit(true, true, false, true);
         emit IZonePortal.BatchSubmitted(
-            1, NO_QUEUE_INDEX, bytes32(0), keccak256("state1"), bytes32(0), 0
+            1, NO_QUEUE_INDEX, bytes32(0), keccak256("state1"), bytes32(0), 0, 0
         );
         _submitBatch(
             portal,
@@ -2630,7 +2746,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 withdrawalHash = keccak256(abi.encode(w, bytes32(0)));
 
         vm.expectEmit(true, true, false, true);
-        emit IZonePortal.BatchSubmitted(2, 0, bytes32(0), keccak256("state2"), withdrawalHash, 0);
+        emit IZonePortal.BatchSubmitted(2, 0, bytes32(0), keccak256("state2"), withdrawalHash, 0, 0);
         _submitBatch(
             portal,
             uint64(block.number - 1),
@@ -2686,7 +2802,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 nextHash = keccak256("next-batch");
         vm.expectEmit(true, true, false, true);
         emit IZonePortal.BatchSubmitted(
-            uint64(TEST_QUEUE_LENGTH + 1), TEST_QUEUE_LENGTH, bytes32(0), nextState, nextHash, 0
+            uint64(TEST_QUEUE_LENGTH + 1), TEST_QUEUE_LENGTH, bytes32(0), nextState, nextHash, 0, 0
         );
         _submitBatch(
             portal,

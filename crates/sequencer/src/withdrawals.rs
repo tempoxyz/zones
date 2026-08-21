@@ -50,6 +50,7 @@ use crate::{
     settlement::{WithdrawalPage, find_processed_offset},
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
+use zone_primitives::constants::MAX_UNPROCESSED_DEPOSITS;
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -578,14 +579,37 @@ impl WithdrawalProcessor {
                 return Ok(());
             }
 
-            let batches =
-                build_withdrawal_batches(remaining, self.config.batch_limits.max_batch_gas);
+            let (deposit_count, last_processed_deposit_number): (u64, u64) = self
+                .provider
+                .multicall()
+                .add(self.portal.depositCount())
+                .add(self.portal.lastProcessedDepositNumber())
+                .aggregate()
+                .await?;
+            let headroom =
+                withdrawal_deposit_headroom(deposit_count, last_processed_deposit_number)?;
+            if headroom == 0 {
+                debug!(
+                    deposit_count,
+                    last_processed_deposit_number,
+                    "Portal deposit backlog leaves no withdrawal bounce-back headroom"
+                );
+                return Ok(());
+            }
+            let admitted = remaining.len().min(headroom);
+            let fully_admitted = admitted == remaining.len();
+            let batches = build_withdrawal_batches(
+                &remaining[..admitted],
+                self.config.batch_limits.max_batch_gas,
+            );
             let total_gas = batches
                 .iter()
                 .fold(0u64, |total, batch| total.saturating_add(batch.gas_limit));
             info!(
                 slot = head_val,
                 withdrawals = remaining.len(),
+                admitted,
+                deposit_headroom = headroom,
                 transactions = batches.len(),
                 total_gas,
                 "Processing withdrawal batches"
@@ -611,12 +635,21 @@ impl WithdrawalProcessor {
 
             match outcome {
                 SubmitOutcome::Confirmed => {
-                    self.store.lock().remove_batch(head_val);
-                    info!(
-                        slot = head_val,
-                        count = remaining.len(),
-                        "Slot fully processed and removed from store"
-                    );
+                    if fully_admitted {
+                        self.store.lock().remove_batch(head_val);
+                        info!(
+                            slot = head_val,
+                            count = remaining.len(),
+                            "Slot fully processed and removed from store"
+                        );
+                    } else {
+                        info!(
+                            slot = head_val,
+                            processed = admitted,
+                            remaining = remaining.len() - admitted,
+                            "Processed portal-capacity-limited withdrawal prefix"
+                        );
+                    }
                 }
                 SubmitOutcome::Retry => {
                     // A lower nonce may have succeeded, changing every later batch's expected
@@ -824,6 +857,21 @@ impl WithdrawalProcessor {
             .slot_processing_duration_seconds
             .record(duration.as_secs_f64());
     }
+}
+
+fn withdrawal_deposit_headroom(
+    deposit_count: u64,
+    last_processed_deposit_number: u64,
+) -> eyre::Result<usize> {
+    let outstanding = deposit_count.checked_sub(last_processed_deposit_number).ok_or_else(|| {
+        eyre::eyre!(
+            "portal lastProcessedDepositNumber {last_processed_deposit_number} exceeds depositCount {deposit_count}"
+        )
+    })?;
+    let maximum =
+        u64::try_from(MAX_UNPROCESSED_DEPOSITS).expect("MAX_UNPROCESSED_DEPOSITS fits in u64");
+    Ok(usize::try_from(maximum.saturating_sub(outstanding))
+        .expect("withdrawal headroom fits in usize"))
 }
 
 struct SubmitBatches<'a> {
@@ -1139,6 +1187,15 @@ mod tests {
                 .iter()
                 .all(|batch| batch.len() <= PORTAL_BOUNCEBACK_RESERVE)
         );
+    }
+
+    #[test]
+    fn withdrawal_admission_respects_global_deposit_headroom() {
+        assert_eq!(withdrawal_deposit_headroom(0, 0).unwrap(), 230);
+        assert_eq!(withdrawal_deposit_headroom(229, 0).unwrap(), 1);
+        assert_eq!(withdrawal_deposit_headroom(230, 0).unwrap(), 0);
+        assert_eq!(withdrawal_deposit_headroom(300, 100).unwrap(), 30);
+        assert!(withdrawal_deposit_headroom(9, 10).is_err());
     }
 
     #[test]

@@ -114,12 +114,12 @@ impl<P> L1State<P> {
         }
     }
 
-    /// Selects the child anchor after `TempoState.finalizeTempo` validates the header transition.
+    /// Selects the final anchor after `TempoState.finalizeTempo` validates a contiguous range.
     ///
     /// Advancement is valid only before any L1 read has selected an anchor and only from a parent
-    /// to its direct child.
+    /// to a later checkpoint.
     pub fn advance_anchor(&self, from: u64, to: u64) -> Result<(), L1StateError> {
-        if from.checked_add(1) != Some(to) {
+        if to <= from {
             return Err(L1StateError::AdvanceTempoConflict { from, to });
         } else if let Some(current) = self.get_anchor() {
             return Err(L1StateError::AnchorConflict { current, new: to });
@@ -187,6 +187,26 @@ impl<P: L1StorageReader> L1State<P> {
     ) -> tempo_precompiles::Result<T> {
         let portal = ZonePortal::new(self.portal_address);
         self.read_l1(select_slot(&portal))
+    }
+
+    /// Reads the length of the portal's append-only `_enabledTokens` array (storage slot 7).
+    pub fn portal_enabled_token_count(&self) -> tempo_precompiles::Result<usize> {
+        let slot = Slot::<U256>::new(U256::from(7), self.portal_address);
+        usize::try_from(self.read_l1(&slot)?).map_err(|_| TempoPrecompileError::under_overflow())
+    }
+
+    /// Reads the length of the portal's active `_sequencers` array (storage slot 18).
+    pub fn portal_sequencer_count(&self) -> tempo_precompiles::Result<usize> {
+        let slot = Slot::<U256>::new(U256::from(18), self.portal_address);
+        usize::try_from(self.read_l1(&slot)?).map_err(|_| TempoPrecompileError::under_overflow())
+    }
+
+    /// Reads one entry from the portal's append-only `_enabledTokens` array.
+    pub fn portal_enabled_token(&self, index: usize) -> tempo_precompiles::Result<Address> {
+        let data_start =
+            U256::from_be_bytes(alloy_primitives::keccak256(U256::from(7).to_be_bytes::<32>()).0);
+        let slot = Slot::<Address>::new(data_start + U256::from(index), self.portal_address);
+        self.read_l1(&slot)
     }
 
     /// Returns whether `account` has `expected` in the configured ZonePortal's role mapping.
@@ -399,9 +419,14 @@ mod tests {
     }
 
     #[test]
-    fn l1_state_rejects_non_contiguous_advance() {
+    fn l1_state_accepts_forward_range_and_rejects_non_forward_advance() {
         let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
-        assert!(l1.advance_anchor(10, 12).is_err());
+        l1.advance_anchor(10, 12).unwrap();
+        assert_eq!(l1.get_anchor(), Some(12));
+
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        assert!(l1.advance_anchor(10, 10).is_err());
+        assert!(l1.advance_anchor(10, 9).is_err());
         assert_eq!(l1.get_anchor(), None);
     }
 

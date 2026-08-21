@@ -1,8 +1,8 @@
 //! `ZonePortal` — deployed on Tempo L1.
 
 pub use ZonePortal::{
-    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, Withdrawal,
-    ZonePortalErrors as ZonePortalError,
+    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, TokenEnablementTransition,
+    Withdrawal, ZonePortalErrors as ZonePortalError,
 };
 
 use crate::{IZoneOutbox, ZoneInboxEvent};
@@ -10,9 +10,13 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 
 /// Maximum number of deposits accepted by a portal in one Tempo block.
-pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
+pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+#[deprecated(note = "use MAX_UNPROCESSED_DEPOSITS")]
+pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = MAX_UNPROCESSED_DEPOSITS;
 /// Maximum number of token enablements imported from one Tempo block.
-pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
+pub const MAX_UNPROCESSED_TOKEN_ENABLEMENTS: usize = 8;
+#[deprecated(note = "use MAX_UNPROCESSED_TOKEN_ENABLEMENTS")]
+pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = MAX_UNPROCESSED_TOKEN_ENABLEMENTS;
 /// Maximum UTF-8 byte length of each enabled token metadata string.
 pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
@@ -88,6 +92,11 @@ crate::sol! {
             uint64 nextDepositNumber;
         }
 
+        struct TokenEnablementTransition {
+            uint64 prevProcessedTokenCount;
+            uint64 nextProcessedTokenCount;
+        }
+
         // -- Events --
 
         event DepositMade(
@@ -133,7 +142,8 @@ crate::sol! {
             bytes32 nextProcessedDepositQueueHash,
             bytes32 nextBlockHash,
             bytes32 withdrawalQueueHash,
-            uint64 lastProcessedDepositNumber
+            uint64 lastProcessedDepositNumber,
+            uint64 lastProcessedEnabledTokenCount
         );
 
         event WithdrawalProcessed(
@@ -280,13 +290,13 @@ crate::sol! {
         function lastProcessedDepositNumber() external view returns (uint64);
         function FIXED_DEPOSIT_GAS() external view returns (uint64);
         function MAX_GAS_FEE_RATE() external view returns (uint128);
-        function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
         function areDepositsActive(address token) external view returns (bool);
         function tokenConfig(address token) external view returns (TokenConfig memory);
         function initialize(uint32 zoneId, address initialToken, bool accessMode, bool gatewayMode, address[] calldata allowedAccounts, address[] calldata zoneGateways, address admin, address messenger, address[] calldata sequencers, uint8 threshold, address verifier, string calldata rpcUrl) external;
         function deliverWithdrawal(address to, address token, uint128 amount, bytes32 memo, uint64 gasLimit, bytes calldata callbackData) external;
-        function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+        function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
+        function MAX_UNPROCESSED_TOKEN_ENABLEMENTS() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function paused() external view returns (bool);
         function pauseExpiry() external view returns (uint64);
@@ -304,6 +314,7 @@ crate::sol! {
             uint64 recentTempoBlockNumber,
             BlockTransition calldata blockTransition,
             DepositQueueTransition calldata depositQueueTransition,
+            TokenEnablementTransition calldata tokenEnablementTransition,
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
             bytes calldata proof,
@@ -353,6 +364,8 @@ crate::sol! {
 
         function isTokenEnabled(address token) external view returns (bool);
         function enabledTokenCount() external view returns (uint256);
+        function lastProcessedEnabledTokenCount() external view returns (uint64);
+        function tokenEnablementCursorInitialized() external view returns (bool);
         function enabledTokenAt(uint256 index) external view returns (address);
         function tokenEnablementHash() external view returns (bytes32);
         function zoneGasRate() external view returns (uint128);
@@ -376,6 +389,22 @@ crate::sol! {
         function claimRefund(address token) external returns (uint128 amount);
     }
 }
+
+/// Pre-T11 event ABI retained for decoding historical Tempo blocks.
+pub mod legacy_zone_portal {
+    crate::sol! {
+        event BatchSubmitted(
+            uint64 indexed withdrawalBatchIndex,
+            uint256 indexed withdrawalQueueIndex,
+            bytes32 nextProcessedDepositQueueHash,
+            bytes32 nextBlockHash,
+            bytes32 withdrawalQueueHash,
+            uint64 lastProcessedDepositNumber
+        );
+    }
+}
+
+pub use legacy_zone_portal::BatchSubmitted as LegacyBatchSubmitted;
 
 #[cfg(feature = "rpc")]
 impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
