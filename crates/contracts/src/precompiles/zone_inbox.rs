@@ -127,6 +127,30 @@ crate::sol! {
     }
 }
 
+/// IZoneInbox ABI activated by the T12 hardfork.
+pub mod zone_inbox_t12 {
+    crate::sol! {
+        contract IZoneInboxT12 {
+            event TempoAdvanced(
+                bytes32 indexed tempoBlockHash,
+                uint64 indexed tempoBlockNumber,
+                uint256 depositsProcessed,
+                bytes32 newProcessedDepositQueueHash,
+                uint64 lastProcessedDepositNumber,
+                uint64 lastProcessedEnabledTokenCount
+            );
+
+            function processedEnabledTokenCount() external view returns (uint64);
+
+            /// Advance only the authenticated Tempo checkpoint. A block opened by this call may
+            /// not contain any other transaction.
+            function advanceTempoHeaders(bytes[] headers) external;
+        }
+    }
+}
+
+pub use zone_inbox_t12::IZoneInboxT12;
+
 impl EnabledToken {
     /// Hash this token enablement as the next link in the portal commitment.
     pub fn hash_with_previous(&self, previous_hash: B256) -> B256 {

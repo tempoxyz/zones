@@ -20,3 +20,14 @@ crate::sol! {
         function finalizeTempo(bytes calldata header) external;
     }
 }
+
+/// TempoState ABI activated by the T12 hardfork.
+pub mod tempo_state_t12 {
+    crate::sol! {
+        contract TempoStateT12 {
+            function finalizeTempo(bytes[] headers) external;
+        }
+    }
+}
+
+pub use tempo_state_t12::TempoStateT12;

@@ -377,6 +377,60 @@ crate::sol! {
     }
 }
 
+/// ZonePortal ABI activated by the T12 hardfork.
+pub mod zone_portal_t12 {
+    crate::sol! {
+        contract ZonePortalT12 {
+            struct BlockTransition {
+                bytes32 prevBlockHash;
+                bytes32 nextBlockHash;
+            }
+
+            struct DepositQueueTransition {
+                bytes32 prevProcessedHash;
+                bytes32 nextProcessedHash;
+                uint64 prevDepositNumber;
+                uint64 nextDepositNumber;
+            }
+
+            struct TokenEnablementTransition {
+                uint64 prevProcessedTokenCount;
+                uint64 nextProcessedTokenCount;
+            }
+
+            event BatchSubmitted(
+                uint64 indexed withdrawalBatchIndex,
+                uint256 indexed withdrawalQueueIndex,
+                bytes32 nextProcessedDepositQueueHash,
+                bytes32 nextBlockHash,
+                bytes32 withdrawalQueueHash,
+                uint64 lastProcessedDepositNumber,
+                uint64 lastProcessedEnabledTokenCount
+            );
+
+            function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
+            function MAX_UNPROCESSED_TOKEN_ENABLEMENTS() external view returns (uint64);
+            function lastProcessedEnabledTokenCount() external view returns (uint64);
+            function tokenEnablementCursorInitialized() external view returns (bool);
+
+            function submitBatch(
+                uint64 tempoBlockNumber,
+                uint64 recentTempoBlockNumber,
+                BlockTransition blockTransition,
+                DepositQueueTransition depositQueueTransition,
+                TokenEnablementTransition tokenEnablementTransition,
+                bytes32 withdrawalQueueHash,
+                bytes verifierConfig,
+                bytes proof,
+                uint256 nextZoneHeight,
+                bytes[] signatures
+            ) external;
+        }
+    }
+}
+
+pub use zone_portal_t12::ZonePortalT12;
+
 #[cfg(feature = "rpc")]
 impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     ZonePortal::ZonePortalInstance<P, N>
