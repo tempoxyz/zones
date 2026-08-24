@@ -2,8 +2,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    sync::Arc,
+    fmt, io,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context as TaskContext, Poll},
     time::Instant,
 };
 
@@ -12,7 +14,7 @@ use alloy_eips::{BlockId, eip2718::Encodable2718 as _};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rlp::Decodable as _;
-use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_rpc_types_eth::{BlockNumberOrTag, EIP1186AccountProofResponse};
 use alloy_sol_types::SolCall as _;
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
@@ -22,10 +24,17 @@ use tempo_primitives::{Block, TempoHeader};
 use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
+    sync::mpsc::{self, error::TrySendError},
+};
 use tracing::{debug, error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
+use zone_prover::{
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+};
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
@@ -51,6 +60,8 @@ pub struct ShadowProverConfig {
     pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
+    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    pub prover_address: Option<String>,
 }
 
 impl fmt::Debug for ShadowProverConfig {
@@ -61,6 +72,7 @@ impl fmt::Debug for ShadowProverConfig {
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
+            .field("prover_address", &self.prover_address)
             .finish()
     }
 }
@@ -81,6 +93,10 @@ struct ProverJob {
 #[derive(Debug)]
 struct ValidationStats {
     witness_bytes: usize,
+    blocks: usize,
+    deposits: usize,
+    withdrawals: usize,
+    transactions: usize,
     zone_state_nodes: usize,
     tempo_state_nodes: usize,
 }
@@ -107,6 +123,46 @@ struct Anchor {
     ancestry_headers: Vec<Bytes>,
 }
 
+/// I/O wrapper that records when the first response byte is read.
+struct FirstReadTimed<T> {
+    inner: T,
+    first_read_at: Arc<OnceLock<Instant>>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for FirstReadTimed<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Ok(()))) && buf.filled().len() > filled_before {
+            let _ = this.first_read_at.set(Instant::now());
+        }
+        result
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
     portal: Address,
@@ -117,6 +173,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     info!(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
+        prover_address = ?config.prover_address,
         queue_capacity = SHADOW_PROVER_QUEUE_CAPACITY,
         "Shadow prover enabled"
     );
@@ -144,6 +201,14 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                 Ok(stats) => {
                     metrics.validation_success_total.increment(1);
                     metrics.witness_bytes.record(stats.witness_bytes as f64);
+                    metrics.batch_size_blocks.record(stats.blocks as f64);
+                    metrics.deposits_per_batch.record(stats.deposits as f64);
+                    metrics
+                        .withdrawals_per_batch
+                        .record(stats.withdrawals as f64);
+                    metrics
+                        .transactions_per_batch
+                        .record(stats.transactions as f64);
                     metrics
                         .zone_state_nodes
                         .record(stats.zone_state_nodes as f64);
@@ -158,6 +223,10 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         next_block_hash = %job.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
                         witness_bytes = stats.witness_bytes,
+                        blocks = stats.blocks,
+                        deposits = stats.deposits,
+                        withdrawals = stats.withdrawals,
+                        transactions = stats.transactions,
                         zone_state_nodes = stats.zone_state_nodes,
                         tempo_state_nodes = stats.tempo_state_nodes,
                         "Shadow prover validated finalized batch candidate"
@@ -322,13 +391,17 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_ancestry_headers: anchor.ancestry_headers,
     };
 
-    let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
     let started = Instant::now();
-    let attempt = witness.clone();
-    let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
-        .await
-        .context("SPF worker panicked")?
-        .context("SPF rejected generated witness")?;
+    let output = if let Some(address) = &context.config.prover_address {
+        verify_remotely(address, context.config.zone_id, job, &witness, metrics).await?
+    } else {
+        let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
+        let attempt = witness.clone();
+        tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
+            .await
+            .context("SPF worker panicked")?
+            .context("SPF rejected generated witness")?
+    };
     metrics
         .spf_execution_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -341,9 +414,125 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     Ok(ValidationStats {
         witness_bytes: witness_size(&witness),
+        blocks: witness.zone_blocks.len(),
+        deposits: witness
+            .zone_blocks
+            .iter()
+            .map(|block| block.deposits.len())
+            .sum(),
+        withdrawals: witness
+            .zone_blocks
+            .iter()
+            .map(|block| block.finalize_withdrawal_batch_encrypted_senders.len())
+            .sum(),
+        transactions: witness
+            .zone_blocks
+            .iter()
+            .map(|block| block.transactions.len())
+            .sum(),
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     })
+}
+
+async fn verify_remotely(
+    address: &str,
+    zone_id: u32,
+    job: &ProverJob,
+    witness: &BatchWitness,
+    metrics: &ProverMetrics,
+) -> Result<BatchOutput> {
+    let request = VerifyRequest {
+        version: PROTOCOL_VERSION,
+        request_id: format!(
+            "zone-{zone_id}-{}-{}-{}",
+            job.from, job.to, job.batch.next_block_hash
+        ),
+        witness: witness.clone(),
+    };
+    let started = Instant::now();
+    let stream = TcpStream::connect(address).await;
+    metrics
+        .spf_remote_connect_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+    let stream = stream.wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+
+    let first_read_at = Arc::new(OnceLock::new());
+    let stream = FirstReadTimed {
+        inner: stream,
+        first_read_at: Arc::clone(&first_read_at),
+    };
+    let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+
+    let started = Instant::now();
+    let send_result = connection.send(&request).await;
+    metrics
+        .spf_remote_request_send_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+    send_result.wrap_err_with(|| format!("send request to remote prover at {address}"))?;
+
+    let response_started = Instant::now();
+    let response_result = connection.receive();
+    let response_result = response_result.await;
+    let response_finished = Instant::now();
+    if let Some(first_read_at) = first_read_at.get().copied() {
+        metrics
+            .spf_remote_response_wait_duration_seconds
+            .record(first_read_at.duration_since(response_started).as_secs_f64());
+        metrics.spf_remote_response_receive_duration_seconds.record(
+            response_finished
+                .duration_since(first_read_at)
+                .as_secs_f64(),
+        );
+    } else {
+        // EOF or an I/O failure before any response bytes still belongs to the wait phase.
+        metrics.spf_remote_response_wait_duration_seconds.record(
+            response_finished
+                .duration_since(response_started)
+                .as_secs_f64(),
+        );
+    }
+    let response: VerifyResponse = response_result
+        .wrap_err_with(|| format!("read response from remote prover at {address}"))?
+        .ok_or_else(|| eyre::eyre!("remote prover closed the connection without a response"))?;
+
+    match response {
+        VerifyResponse::Ok {
+            version,
+            request_id,
+            output,
+        } => {
+            ensure!(
+                version == PROTOCOL_VERSION,
+                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+            );
+            ensure!(
+                request_id == request.request_id,
+                "remote prover response request ID {request_id:?} does not match {:?}",
+                request.request_id
+            );
+            Ok(output)
+        }
+        VerifyResponse::Error {
+            version,
+            request_id,
+            code,
+            message,
+        } => {
+            ensure!(
+                version == PROTOCOL_VERSION,
+                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+            );
+            if let Some(response_id) = request_id {
+                ensure!(
+                    response_id == request.request_id,
+                    "remote prover error request ID {response_id:?} does not match {:?}",
+                    request.request_id
+                );
+            }
+            bail!("remote prover rejected request ({code:?}): {message}")
+        }
+    }
 }
 
 fn build_zone_inputs<P: ZoneSequencerProvider>(
@@ -503,6 +692,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         number: header.number(),
         parent_hash: header.parent_hash(),
         timestamp: header.timestamp(),
+        timestamp_millis_part: header.timestamp_millis_part,
         beneficiary: header.beneficiary(),
         tempo_header_rlp,
         deposits,
@@ -610,32 +800,39 @@ async fn tempo_state_witness(
 ) -> Result<TempoStateWitness> {
     let requests = reads
         .into_iter()
-        .flat_map(|(block, accounts)| {
-            accounts.into_iter().map(move |(account, slots)| {
-                (block, account, slots.into_iter().collect::<Vec<_>>())
-            })
+        .map(|(block, accounts)| {
+            let targets = accounts
+                .into_iter()
+                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            (block, targets)
         })
         .collect::<Vec<_>>();
     let proofs = stream::iter(requests)
-        .map(|(block, account, slots)| async move {
+        .map(|(block, targets)| async move {
             provider
-                .get_proof(account, slots)
-                .block_id(BlockId::number(block))
+                .client()
+                .request::<_, Vec<EIP1186AccountProofResponse>>(
+                    "eth_getMultiProof",
+                    (targets, BlockId::number(block)),
+                )
                 .await
-                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))
+                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
 
     let mut nodes = BTreeMap::new();
-    for proof in proofs {
-        for node in proof.account_proof {
-            nodes.entry(keccak256(&node)).or_insert(node);
-        }
-        for storage in proof.storage_proof {
-            for node in storage.proof {
+    for block_proofs in proofs {
+        for proof in block_proofs {
+            for node in proof.account_proof {
                 nodes.entry(keccak256(&node)).or_insert(node);
+            }
+            for storage in proof.storage_proof {
+                for node in storage.proof {
+                    nodes.entry(keccak256(&node)).or_insert(node);
+                }
             }
         }
     }

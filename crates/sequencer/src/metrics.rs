@@ -35,8 +35,20 @@ pub(crate) struct ProverMetrics {
     /// Time spent fetching and combining Tempo state proofs.
     pub(crate) tempo_witness_duration_seconds: Histogram,
 
-    /// Time spent executing the SPF over a generated batch witness.
+    /// Time spent verifying a generated batch witness locally or remotely.
     pub(crate) spf_execution_duration_seconds: Histogram,
+
+    /// Time spent establishing a TCP connection to the remote prover.
+    pub(crate) spf_remote_connect_duration_seconds: Histogram,
+
+    /// Time spent serializing and sending a request to the remote prover.
+    pub(crate) spf_remote_request_send_duration_seconds: Histogram,
+
+    /// Time from sending a remote prover request until the first response byte arrives.
+    pub(crate) spf_remote_response_wait_duration_seconds: Histogram,
+
+    /// Time from the first response byte until the response is fully read and decoded.
+    pub(crate) spf_remote_response_receive_duration_seconds: Histogram,
 
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,
@@ -49,6 +61,18 @@ pub(crate) struct ProverMetrics {
 
     /// Encoded witness size for a successfully validated batch candidate.
     pub(crate) witness_bytes: Histogram,
+
+    /// Number of Zone blocks in a successfully validated batch witness.
+    pub(crate) batch_size_blocks: Histogram,
+
+    /// Number of deposits in a successfully validated batch witness.
+    pub(crate) deposits_per_batch: Histogram,
+
+    /// Number of withdrawals in a successfully validated batch witness.
+    pub(crate) withdrawals_per_batch: Histogram,
+
+    /// Number of user transactions in a successfully validated batch witness.
+    pub(crate) transactions_per_batch: Histogram,
 
     /// Number of Zone state trie nodes in a successfully validated batch witness.
     pub(crate) zone_state_nodes: Histogram,

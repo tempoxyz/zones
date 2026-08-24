@@ -16,8 +16,7 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
-    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal as IZonePortal,
-    ZonePortalError,
+    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal::Role, ZonePortalError,
 };
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -67,7 +66,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        if caller != Address::ZERO && !l1.read_portal(|portal| &portal.is_sequencer[caller])? {
+        if caller != Address::ZERO && !l1.has_portal_role(caller, Role::Sequencer)? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -84,6 +83,11 @@ impl ZoneOutbox {
             return Err(ZonePortalError::token_not_enabled().into());
         }
 
+        let pause_expiry = l1.read_portal(|portal| &portal.pause_expiry)?;
+        if self.storage.timestamp().to::<u64>() < pause_expiry {
+            return Err(ZonePortalError::portal_is_paused().into());
+        }
+
         let access_enforced = l1.read_portal(|portal| &portal.is_access_enforced)?;
         let gateway_enforced = l1.read_portal(|portal| &portal.is_gateway_enforced)?;
 
@@ -92,17 +96,13 @@ impl ZoneOutbox {
                 return Ok(());
             }
 
-            let role = l1.read_portal(|portal| &portal.role[to])?;
-            if gateway_enforced && role == IZonePortal::Role::CallbackGateway as u8 {
+            if gateway_enforced && l1.has_portal_role(to, Role::CallbackGateway)? {
                 return Err(ZonePortalError::invalid_callback_target().into());
             }
-            if access_enforced && role != IZonePortal::Role::Account as u8 {
+            if access_enforced && !l1.has_portal_role(to, Role::Account)? {
                 return Err(ZonePortalError::account_not_allowed(to).into());
             }
-        } else if gateway_enforced
-            && l1.read_portal(|portal| &portal.role[to])?
-                != IZonePortal::Role::CallbackGateway as u8
-        {
+        } else if gateway_enforced && !l1.has_portal_role(to, Role::CallbackGateway)? {
             return Err(ZonePortalError::invalid_callback_target().into());
         }
 
@@ -144,9 +144,9 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn enqueue(&mut self, pending: PendingWithdrawal) -> ZoneResult<()> {
+    fn enqueue(&mut self, pending: PendingWithdrawal, fee: u128) -> ZoneResult<()> {
         let index = self.next_withdrawal_index.read()?;
-        self.emit_event(pending.requested_event(index))?;
+        self.emit_event(pending.requested_event(index, fee))?;
 
         self.pending_withdrawals.push(pending)?;
         self.next_withdrawal_index.write(
@@ -213,13 +213,10 @@ impl ZoneOutbox {
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.last_fallback_nonce.write(fallback_nonce)?;
         self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
-        self.enqueue(PendingWithdrawal::from_request(
-            caller,
-            current_tx_hash,
+        self.enqueue(
+            PendingWithdrawal::from_request(caller, current_tx_hash, fallback_nonce, call),
             fee,
-            fallback_nonce,
-            call,
-        ))
+        )
     }
 
     fn transfer_and_burn(
@@ -252,7 +249,7 @@ impl ZoneOutbox {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
 
-        self.enqueue(PendingWithdrawal::from_bounce_back(call))
+        self.enqueue(PendingWithdrawal::from_bounce_back(call), 0)
     }
 
     pub(crate) fn consume_fallback_recipient(
@@ -411,7 +408,6 @@ struct PendingWithdrawal {
     tx_hash: B256,
     to: Address,
     amount: u128,
-    fee: u128,
     memo: B256,
     gas_limit: u64,
     fallback_nonce: u64,
@@ -423,7 +419,6 @@ impl PendingWithdrawal {
     fn from_request(
         sender: Address,
         tx_hash: B256,
-        fee: u128,
         fallback_nonce: u64,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> Self {
@@ -433,7 +428,6 @@ impl PendingWithdrawal {
             tx_hash,
             to: call.to,
             amount: call.amount,
-            fee,
             memo: call.memo,
             gas_limit: call.gasLimit,
             fallback_nonce,
@@ -451,14 +445,14 @@ impl PendingWithdrawal {
         }
     }
 
-    fn requested_event(&self, index: u64) -> ZoneOutboxEvent {
+    fn requested_event(&self, index: u64, fee: u128) -> ZoneOutboxEvent {
         ZoneOutboxEvent::withdrawal_requested(
             index,
             self.sender,
             self.token,
             self.to,
             self.amount,
-            self.fee,
+            fee,
             self.memo,
             self.gas_limit,
             self.fallback_nonce,

@@ -58,7 +58,7 @@ struct MalformedTempoHeadersFixture {
 fn deposit_hash_fixture() -> DepositHashFixture {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../specs/ref-impls/test/fixtures/depositHashChain.json"
+        "/testdata/depositHashChain.json"
     )))
     .expect("deposit hash fixture JSON should decode")
 }
@@ -66,7 +66,7 @@ fn deposit_hash_fixture() -> DepositHashFixture {
 fn malformed_tempo_headers_fixture() -> MalformedTempoHeadersFixture {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../specs/ref-impls/test/fixtures/malformedTempoHeaders.json"
+        "/testdata/malformedTempoHeaders.json"
     )))
     .expect("malformed Tempo headers fixture JSON should decode")
 }
@@ -1644,6 +1644,51 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     let (events, _) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
+}
+
+#[test]
+fn pause_events_invalidate_cached_portal_storage() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let portal = subscriber.config.portal_address;
+    let account = address!("0x0000000000000000000000000000000000000123");
+    let pause_slot = B256::with_last_byte(25);
+    {
+        let mut cache = subscriber.config.l1_state_cache.lock();
+        cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
+    }
+    let logs = vec![
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: crate::abi::ZonePortal::PortalPaused { account }.encode_log_data(),
+            },
+            ..Default::default()
+        },
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: crate::abi::ZonePortal::AbdicationScheduled {
+                    capability: crate::abi::ZonePortal::Capability::PausePortal,
+                    effectiveAt: 0,
+                }
+                .encode_log_data(),
+            },
+            ..Default::default()
+        },
+    ];
+    let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
+
+    let (_, invalidated) = subscriber.extract_events(1, &[receipt]).unwrap();
+    assert!(invalidated.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &invalidated);
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .lock()
+            .get(portal, pause_slot, 1),
+        None
+    );
 }
 
 #[tokio::test]

@@ -16,10 +16,10 @@ use zone_precompiles::L1StorageReader;
 /// Trusted network configuration for Zone execution.
 ///
 /// This is deliberately separate from [`BatchWitness`]: it is selected by the
-/// verifier for the network it serves, not supplied by the prover. The zone
-/// chain specification provides the parent Tempo hard-fork schedule. Block gas
-/// limits and other inherited execution fields come from the canonical parent
-/// Tempo header carried by the witness.
+/// verifier for the Zone it serves, not supplied by the prover. The chain
+/// specification contains the actual Zone genesis and the parent Tempo hard-fork
+/// schedule. Block gas limits and other inherited execution fields come from the
+/// canonical parent Tempo header carried by the witness.
 #[derive(Debug, Clone)]
 pub struct SpfConfig {
     chain_spec: Arc<ZoneChainSpec>,
@@ -44,7 +44,7 @@ impl SpfConfig {
 
     /// Crates a [`ZoneEvmConfig`] for the given L1 storage reader.
     pub fn evm_config<L1: L1StorageReader>(&self, l1_provider: L1) -> ZoneEvmConfig<L1> {
-        ZoneEvmConfig::from_composed_chain_spec(self.chain_spec.clone(), l1_provider, self.portal)
+        ZoneEvmConfig::new(self.chain_spec.clone(), l1_provider, self.portal)
     }
 }
 
@@ -98,6 +98,7 @@ pub struct ZoneBlock {
     pub number: u64,
     pub parent_hash: B256,
     pub timestamp: u64,
+    pub timestamp_millis_part: u64,
     pub beneficiary: Address,
     /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`.
     pub tempo_header_rlp: Bytes,

@@ -1,25 +1,18 @@
 use alloy::{
     genesis::{ChainConfig, Genesis, GenesisAccount},
-    primitives::{Address, Bytes, TxKind, U256, address},
-    sol_types::SolValue,
+    primitives::{Address, Bytes, U256, address},
 };
 use eyre::{WrapErr as _, eyre};
 use reth_evm::{
     Evm as _, EvmEnv, EvmFactory,
     revm::{
         DatabaseCommit,
-        context::{
-            TxEnv,
-            result::{ExecutionResult, Output},
-        },
+        context::JournalTr,
         database::{CacheDB, EmptyDB},
         state::{AccountInfo, Bytecode},
     },
 };
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::PathBuf};
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_T0_BASE_FEE};
 use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
@@ -40,9 +33,10 @@ use tempo_precompiles::{
     tip403_registry::TIP403Registry,
 };
 use tempo_primitives::TempoHeader;
-use tempo_revm::{TempoBlockEnv, TempoTxEnv};
+use tempo_revm::TempoBlockEnv;
 use zone_precompiles::{
-    TempoState as NativeTempoState, ZoneFeeManager, ZoneOutbox as NativeZoneOutbox,
+    TempoState as NativeTempoState, ZoneFeeManager, ZoneInbox as NativeZoneInbox,
+    ZoneOutbox as NativeZoneOutbox,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -65,9 +59,6 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long, default_value_t = 30_000_000)]
     pub(crate) gas_limit: u64,
 
-    #[arg(long)]
-    pub(crate) tempo_portal: Address,
-
     /// Canonical fee token used when a zone transaction omits `fee_token`.
     #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     pub(crate) default_fee_token: Address,
@@ -82,9 +73,6 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long)]
     pub(crate) sequencer: Option<Address>,
 
-    #[arg(long, default_value = "specs/ref-impls/out")]
-    pub(crate) specs_out: PathBuf,
-
     /// Include CreateX factory in genesis.
     #[arg(long)]
     pub(crate) with_createx: bool,
@@ -98,16 +86,6 @@ pub(crate) struct GenerateZoneGenesis {
     /// controls whether it remains in the final genesis state.
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
-}
-
-#[derive(serde::Deserialize)]
-struct FoundryArtifact {
-    bytecode: BytecodeField,
-}
-
-#[derive(serde::Deserialize)]
-struct BytecodeField {
-    object: String,
 }
 
 impl GenerateZoneGenesis {
@@ -148,22 +126,12 @@ impl GenerateZoneGenesis {
         initialize_receive_policy_guard(&mut evm)?;
         initialize_storage_credits(&mut evm)?;
 
-        let nonce = 0u64;
-
         initialize_tempo_state(&mut evm, &header_rlp)?;
+        initialize_zone_inbox(&mut evm)?;
         initialize_zone_outbox(&mut evm)?;
 
-        let zone_inbox_bytecode = load_artifact(&self.specs_out, "ZoneInbox")?;
-        let zone_inbox_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
-        deploy_contract(
-            &mut evm,
-            &zone_inbox_bytecode,
-            &zone_inbox_args,
-            ZONE_INBOX_ADDRESS,
-            "ZoneInbox",
-            self.chain_id,
-            nonce,
-        )?;
+        let native_state = evm.ctx_mut().journaled_state.finalize();
+        evm.db_mut().commit(native_state);
 
         let db = evm.db_mut();
         for (name, addr) in [
@@ -316,77 +284,6 @@ fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<CacheDB<EmptyDB>> {
     factory.create_evm(db, env)
 }
 
-fn load_artifact(specs_out: &Path, name: &str) -> eyre::Result<Vec<u8>> {
-    let path = specs_out
-        .join(format!("{name}.sol"))
-        .join(format!("{name}.json"));
-    let content = std::fs::read_to_string(&path)
-        .wrap_err_with(|| format!("failed to read artifact at `{}`", path.display()))?;
-    let artifact: FoundryArtifact = serde_json::from_str(&content)
-        .wrap_err_with(|| format!("failed to parse artifact at `{}`", path.display()))?;
-    const_hex::decode(&artifact.bytecode.object).wrap_err("failed to decode bytecode hex")
-}
-
-fn deploy_contract(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    creation_bytecode: &[u8],
-    constructor_args: &[u8],
-    predeploy_addr: Address,
-    name: &str,
-    chain_id: u64,
-    nonce: u64,
-) -> eyre::Result<()> {
-    let mut initcode = Vec::with_capacity(creation_bytecode.len() + constructor_args.len());
-    initcode.extend_from_slice(creation_bytecode);
-    initcode.extend_from_slice(constructor_args);
-
-    let tx = TempoTxEnv {
-        inner: TxEnv {
-            caller: DEPLOYER,
-            gas_price: 0,
-            gas_limit: 30_000_000,
-            kind: TxKind::Create,
-            data: initcode.into(),
-            chain_id: Some(chain_id),
-            nonce,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let result = evm
-        .transact_raw(tx)
-        .map_err(|e| eyre!("{name} deployment tx failed: {e:?}"))?;
-
-    let created_addr = match &result.result {
-        ExecutionResult::Success { output, .. } => match output {
-            Output::Create(_, Some(addr)) => *addr,
-            _ => return Err(eyre!("{name} deployment did not return a created address")),
-        },
-        ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("{name} deployment reverted: {output}"));
-        }
-        ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("{name} deployment halted: {reason:?}"));
-        }
-    };
-
-    evm.db_mut().commit(result.state);
-
-    let db = evm.db_mut();
-    if let Some(mut created_account) = db.cache.accounts.remove(&created_addr) {
-        created_account.info.nonce = 1;
-        db.cache.accounts.insert(predeploy_addr, created_account);
-    } else {
-        return Err(eyre!(
-            "{name} deployed to {created_addr} but account not found in CacheDB"
-        ));
-    }
-
-    println!("Deployed {name} at {predeploy_addr} (created at {created_addr})");
-    Ok(())
-}
-
 /// Deploys the Arachnid CREATE2 factory by directly inserting it into the EVM state.
 fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
     println!("Deploying Arachnid CREATE2 factory at {ARACHNID_CREATE2_FACTORY_ADDRESS}");
@@ -436,6 +333,21 @@ fn initialize_tempo_state(
         || NativeTempoState::new().initialize(header_rlp),
     )?;
     println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
+    Ok(())
+}
+
+/// Initialize the native ZoneInbox account marker and storage.
+fn initialize_zone_inbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || NativeZoneInbox::new().initialize(),
+    )?;
+    println!("Initialized native ZoneInbox at {ZONE_INBOX_ADDRESS}");
     Ok(())
 }
 

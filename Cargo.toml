@@ -14,12 +14,14 @@ members = [
   "crates/chainspec",
   "crates/contracts",
   "crates/evm",
+  "crates/hardfork",
   "crates/l1",
   "crates/node",
   "crates/p2p",
   "crates/payload",
   "crates/precompiles",
   "crates/primitives",
+  "crates/prover",
   "crates/rpc",
   "crates/sequencer",
   "crates/spf",
@@ -98,38 +100,39 @@ incremental = false
 
 [workspace.dependencies]
 # tempo (from upstream)
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72" }
-tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false, features = [
+tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
+tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false, features = [
   "serde",
 ] }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72" }
-tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72" }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false, features = [
+tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
+tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false, features = [
   "reth",
   "serde",
   "serde-bincode-compat",
   "reth-codec",
 ] }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
-tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72", default-features = false }
+tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
 
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
-tempo-zone-prover-enclave = { path = "bin/prover/enclave" }
 zone-chainspec = { path = "crates/chainspec" }
 zone-evm = { path = "crates/evm" }
+zone-hardfork = { path = "crates/hardfork", default-features = false }
 zone-l1 = { path = "crates/l1" }
 zone-node = { path = "crates/node" }
 zone-p2p = { path = "crates/p2p" }
 zone-payload = { path = "crates/payload" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
+zone-prover = { path = "crates/prover" }
 zone-rpc = { path = "crates/rpc" }
 zone-sequencer = { path = "crates/sequencer" }
 zone-spf = { path = "crates/spf" }
@@ -181,11 +184,13 @@ revm = { version = "42.0.1", features = [
 # alloy
 alloy = { version = "2.3.0", default-features = false }
 alloy-chains = "0.2.36"
+alloy-hardforks = { version = "0.4.7", default-features = false }
 alloy-consensus = { version = "2.3.0", default-features = false }
 alloy-contract = { version = "2.3.0", default-features = false }
 alloy-eips = { version = "2.3.0", default-features = false }
 alloy-evm = { version = "0.38.0", default-features = false }
 alloy-genesis = { version = "2.3.0", default-features = false }
+alloy-json-abi = "1.6.1"
 alloy-network = { version = "2.3.0", default-features = false }
 alloy-primitives = { version = "1.6.1", default-features = false }
 alloy-provider = { version = "2.3.0", default-features = false }

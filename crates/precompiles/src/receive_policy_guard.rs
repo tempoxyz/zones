@@ -46,14 +46,11 @@ impl CallRules for ReceivePolicyGuardRules {
             return CallCheck::Continue;
         }
 
-        if matches!(
-            AddressRegistry::new().resolve_recipient(receipt.recipient),
-            Ok(receiver) if caller == receiver
-        ) {
-            return CallCheck::Continue;
+        match AddressRegistry::new().resolve_recipient(receipt.recipient) {
+            Ok(receiver) if caller == receiver => CallCheck::Continue,
+            Ok(_) => CallCheck::Revert(Unauthorized {}.abi_encode().into()),
+            Err(error) => CallCheck::Error(error),
         }
-
-        CallCheck::Revert(Unauthorized {}.abi_encode().into())
     }
 }
 
@@ -75,9 +72,8 @@ mod tests {
         tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID, TIP403Registry},
     };
 
-    use crate::{
-        create_receive_policy_guard_precompile,
-        test_utils::{TestContext, call_precompile, test_context, test_env, test_storage_provider},
+    use crate::test_utils::{
+        TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
 
     const ADMIN: Address = address!("0x00000000000000000000000000000000000000a1");
@@ -168,6 +164,31 @@ mod tests {
     }
 
     #[test]
+    fn balance_admission_preserves_recipient_resolution_errors() -> eyre::Result<()> {
+        let rules = ReceivePolicyGuardRules;
+        let mut ctx = test_context();
+        ctx.cfg.spec = tempo_chainspec::hardfork::TempoHardfork::T8;
+
+        let virtual_recipient = {
+            let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || {
+                let (_, virtual_recipient) = register_virtual_master(&mut AddressRegistry::new())?;
+                Ok::<_, eyre::Report>(virtual_recipient)
+            })?
+        };
+        let receipt = receipt(virtual_recipient, Address::ZERO);
+        let mut storage = test_storage_provider(&mut ctx, 0, true);
+
+        StorageCtx::enter(&mut storage, || {
+            assert!(matches!(
+                rules.admit(&balance_call(&receipt), OUTSIDER),
+                CallCheck::Error(tempo_precompiles::error::TempoPrecompileError::OutOfGas)
+            ));
+        });
+        Ok(())
+    }
+
+    #[test]
     fn non_balance_calls_and_malformed_receipts_retain_upstream_dispatch() {
         let rules = ReceivePolicyGuardRules;
         let claim = IReceivePolicyGuard::claimCall {
@@ -243,7 +264,11 @@ mod tests {
             let receipt = receipt(RECEIVER, RECEIVER);
             assert_eq!(receipt.version, BLOCKED_RECEIPT_VERSION);
             let env = test_env(&ctx);
-            let precompile = create_receive_policy_guard_precompile(&env);
+            let precompile = zone_precompile!(
+                env,
+                tempo_precompiles::receive_policy_guard::ReceivePolicyGuard,
+                ReceivePolicyGuardRules
+            );
             Ok(Self {
                 ctx,
                 precompile,

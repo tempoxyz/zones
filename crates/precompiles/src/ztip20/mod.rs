@@ -15,8 +15,7 @@ use tempo_zone_contracts::Unauthorized;
 
 use crate::{
     execution::{CallCheck, CallRules},
-    privacy::check_caller_or_sequencer,
-    storage::{L1State, L1StorageReader},
+    privacy::check_caller,
 };
 
 alloy_sol_types::sol! {
@@ -41,17 +40,9 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
-pub(crate) struct TIP20Rules<P> {
-    l1: L1State<P>,
-}
+pub(crate) struct TIP20Rules;
 
-impl<P> TIP20Rules<P> {
-    pub(crate) fn new(l1: L1State<P>) -> Self {
-        Self { l1 }
-    }
-}
-
-impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
+impl CallRules for TIP20Rules {
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
         selector
             .is_some_and(|selector| TIP20_FIXED_GAS_SELECTORS.contains(&selector))
@@ -63,13 +54,13 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
+                    check_caller(caller, &[call.account])
                 }
                 ITIP20::ITIP20Calls::allowance(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
+                    check_caller(caller, &[call.owner, call.spender])
                 }
                 ITIP20::ITIP20Calls::nonces(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+                    check_caller(caller, &[call.owner])
                 }
                 // Transfers are disabled during the initial permissioned Zone phase.
                 // Private asset movement is limited to the protocol-managed inbox and outbox paths.
@@ -176,18 +167,18 @@ mod tests {
     const TEMPO_BLOCK_NUMBER: u64 = 7;
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
 
-    fn rules() -> TIP20Rules<MockL1Reader> {
-        TIP20Rules::new(L1State::new(MockL1Reader::default(), PORTAL_ADDRESS))
+    fn rules() -> TIP20Rules {
+        TIP20Rules
     }
 
-    fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
+    fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
             rules.admit(&call.abi_encode(), caller),
             CallCheck::Continue
         ));
     }
 
-    fn assert_unauthorized(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
+    fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
             rules.admit(&call.abi_encode(), caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
@@ -216,7 +207,6 @@ mod tests {
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
             let l1_reader = MockL1Reader::default();
             l1_reader.seed_active_sequencer(PORTAL_ADDRESS, TEMPO_BLOCK_NUMBER, sequencer);
-            let l1 = L1State::new(l1_reader.clone(), PORTAL_ADDRESS);
             let mut ctx = test_context();
 
             {
@@ -239,7 +229,7 @@ mod tests {
             }
 
             let env = test_env(&ctx);
-            let precompile = crate::create_tip20_precompile(token, &env, l1);
+            let precompile = crate::create_tip20_precompile(token, &env);
 
             Ok(Self {
                 ctx,
@@ -290,32 +280,31 @@ mod tests {
     }
 
     #[test]
-    fn read_privacy_rules_allow_owner_spender_and_sequencer() {
+    fn read_privacy_rules_allow_only_owner_and_spender() {
         let owner = Address::repeat_byte(0x11);
         let spender = Address::repeat_byte(0x22);
         let sequencer = Address::repeat_byte(0x33);
         let outsider = Address::repeat_byte(0x44);
-        let reader = MockL1Reader::default();
-        reader.seed_active_sequencer(PORTAL_ADDRESS, 0, sequencer);
-        let rules = TIP20Rules::new(L1State::new(reader, PORTAL_ADDRESS));
+        let rules = TIP20Rules;
         let mut ctx = test_context();
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || {
             let balance = ITIP20::balanceOfCall { account: owner };
             assert_allowed(&rules, balance.clone(), owner);
-            assert_allowed(&rules, balance.clone(), sequencer);
+            assert_unauthorized(&rules, balance.clone(), sequencer);
             assert_unauthorized(&rules, balance, outsider);
 
             let allowance = ITIP20::allowanceCall { owner, spender };
-            for caller in [owner, spender, sequencer] {
+            for caller in [owner, spender] {
                 assert_allowed(&rules, allowance.clone(), caller);
             }
+            assert_unauthorized(&rules, allowance.clone(), sequencer);
             assert_unauthorized(&rules, allowance, outsider);
 
             let nonce = ITIP20::noncesCall { owner };
             assert_allowed(&rules, nonce.clone(), owner);
-            assert_allowed(&rules, nonce.clone(), sequencer);
+            assert_unauthorized(&rules, nonce.clone(), sequencer);
             assert_unauthorized(&rules, nonce, outsider);
         });
     }
@@ -460,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn sequencer_privacy_access_uses_portal_storage_handler() -> eyre::Result<()> {
+    fn sequencer_privacy_access_is_denied_regardless_of_portal_state() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
         let next_sequencer = Address::repeat_byte(0x77);
         let calldata: Bytes = ITIP20::balanceOfCall {
@@ -472,7 +461,7 @@ mod tests {
         assert!(
             harness
                 .call(harness.sequencer, calldata.clone(), 100_000, true)?
-                .is_success()
+                .is_revert()
         );
         assert!(
             harness
@@ -482,14 +471,16 @@ mod tests {
 
         harness.l1_reader.with_storage(TEMPO_BLOCK_NUMBER, || {
             let mut portal = ZonePortal::new(PORTAL_ADDRESS);
-            portal.is_sequencer[harness.sequencer].write(false)?;
-            portal.is_sequencer[next_sequencer].write(true)
+            portal.role[harness.sequencer]
+                .write(u8::from(tempo_zone_contracts::ZonePortal::Role::None))?;
+            portal.role[next_sequencer]
+                .write(u8::from(tempo_zone_contracts::ZonePortal::Role::Sequencer))
         })?;
 
         assert!(
             harness
                 .call(next_sequencer, calldata.clone(), 100_000, true)?
-                .is_success()
+                .is_revert()
         );
         assert!(
             harness
@@ -573,11 +564,7 @@ mod tests {
         let spender = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
         let env = test_env(&ctx);
-        let precompile = crate::create_tip20_precompile(
-            token,
-            &env,
-            L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
-        );
+        let precompile = crate::create_tip20_precompile(token, &env);
         let calldata: Bytes = ITIP20::approveCall {
             spender,
             amount: U256::from(1u64),

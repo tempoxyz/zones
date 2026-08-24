@@ -62,11 +62,11 @@ use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
     types::{
-        ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
-        LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
-        SequencerProgress, SequencerReadiness, SetLeaderResponse,
-        TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness, ZoneInfoResponse, internal,
-        raw_null, raw_zero, to_raw,
+        ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoundDecryptionKey, BoxEyreFut, BoxFut,
+        DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalSequencerInfo, PeerTipInfo,
+        SequencerInfoResponse, SequencerPeerInfo, SequencerProgress, SequencerReadiness,
+        SetLeaderResponse, TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness,
+        ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
     },
 };
 
@@ -86,6 +86,8 @@ pub struct SequencerRpcContext {
     pub(crate) peer_tips: PeerTipRegistry,
     /// Validated static topology manifest.
     pub manifest: Arc<ZoneManifest>,
+    /// Portal sequencer-set version validated against the manifest at startup.
+    pub pinned_sequencer_set_version: Option<u64>,
     /// This node's individual secp256k1 address (the `setLeader` relayer identity).
     ///
     /// `None` on an rpc-only member: it holds no individual key, so it cannot relay.
@@ -94,6 +96,8 @@ pub struct SequencerRpcContext {
     pub local_ed25519_public_key: zone_p2p::P2pPeerId,
     /// Wallet-backed L1 provider signing with the individual key, when this node holds one.
     pub relayer: Option<DynProvider<TempoNetwork>>,
+    /// Publicly reportable view of locally loaded deposit-decryption keys.
+    pub encryption_keys: zone_l1::EncryptionKeyRing,
 }
 
 impl SequencerRpcContext {
@@ -103,18 +107,22 @@ impl SequencerRpcContext {
         status: SharedRoleStatus,
         peer_tips: PeerTipRegistry,
         manifest: Arc<ZoneManifest>,
+        pinned_sequencer_set_version: Option<u64>,
         local_secp256k1_address: Option<Address>,
         local_ed25519_public_key: zone_p2p::P2pPeerId,
         relayer: Option<DynProvider<TempoNetwork>>,
+        encryption_keys: zone_l1::EncryptionKeyRing,
     ) -> Self {
         Self {
             schedule,
             status,
             peer_tips,
             manifest,
+            pinned_sequencer_set_version,
             local_secp256k1_address,
             local_ed25519_public_key,
             relayer,
+            encryption_keys,
         }
     }
 }
@@ -192,6 +200,7 @@ where
 
 /// Build the unauthenticated Zone extension installed on the node's operator HTTP RPC.
 pub(crate) fn operator_zone_rpc_module<P>(
+    zone_id: u32,
     portal_address: Address,
     sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
     provider: P,
@@ -214,7 +223,7 @@ where
         let sequencer = sequencer.clone();
         let provider = provider.clone();
         async move {
-            get_sequencer_info(portal_address, sequencer.as_ref(), &provider)
+            get_sequencer_info(zone_id, portal_address, sequencer.as_ref(), &provider)
                 .map_err(operator_rpc_error)
         }
     })?;
@@ -416,6 +425,7 @@ async fn encryption_key(
 }
 
 fn get_sequencer_info<P>(
+    zone_id: u32,
     portal_address: Address,
     sequencer: &std::sync::OnceLock<SequencerRpcContext>,
     provider: &P,
@@ -428,6 +438,10 @@ where
         return Ok(SequencerInfoResponse {
             mode: "single".to_owned(),
             portal: portal_address,
+            manifest_zone_id: None,
+            manifest_sequencer_set_version: None,
+            manifest_membership_digest: None,
+            decryption_keys: None,
             local: None,
             active_leader: None,
             local_tip: None,
@@ -482,6 +496,31 @@ where
     Ok(SequencerInfoResponse {
         mode: "multi".to_owned(),
         portal: portal_address,
+        manifest_zone_id: Some(U64::from(zone_id)),
+        manifest_sequencer_set_version: context.pinned_sequencer_set_version.map(U64::from),
+        manifest_membership_digest: Some(context.manifest.membership_digest()),
+        decryption_keys: Some({
+            let status = context.encryption_keys.public_status();
+            DecryptionKeyStatus {
+                candidates: status
+                    .candidates
+                    .into_iter()
+                    .map(|key| DecryptionKeyCandidate {
+                        x: key.x,
+                        y_parity: key.y_parity,
+                    })
+                    .collect(),
+                bound: status
+                    .bound
+                    .into_iter()
+                    .map(|key| BoundDecryptionKey {
+                        key_index: key.key_index,
+                        x: key.x,
+                        y_parity: key.y_parity,
+                    })
+                    .collect(),
+            }
+        }),
         local: Some(LocalSequencerInfo {
             name: local_node
                 .map(|node| node.name().to_owned())
@@ -1481,6 +1520,7 @@ mod tests {
     #[tokio::test]
     async fn operator_rpc_module_exposes_sequencer_methods_without_auth() {
         let module = operator_zone_rpc_module(
+            7,
             Address::repeat_byte(0x11),
             Arc::new(std::sync::OnceLock::new()),
             Arc::new(reth_provider::test_utils::MockEthProvider::default()),

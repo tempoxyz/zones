@@ -23,18 +23,15 @@ build binary extra_args="":
     {{cargo_build_binary}} build {{extra_args}} --bin {{binary}}
 
 [group('zone')]
-[doc('Regenerates the bundled zone dev genesis from the current Solidity artifacts')]
+[doc('Regenerates the bundled zone dev genesis')]
 regen-zone-dev-genesis:
     #!/bin/bash
     set -euo pipefail
     rm -rf {{zone_dev_genesis_tmp}}
-    forge build --root specs/ref-impls --no-lint
     cargo run -p tempo-xtask -- generate-zone-genesis \
         --output {{zone_dev_genesis_tmp}} \
         --chain-id 1337 \
-        --tempo-portal 0x0000000000000000000000000000000000000000 \
         --admin 0xaAaAaAaa00000000000000000000000000000000 \
-        --specs-out specs/ref-impls/out \
         --with-createx \
         --with-safe-deployer \
         --with-create2-factory
@@ -141,8 +138,8 @@ create-zone name token="" access_enforced="false" gateway_enforced="false":
     SEQUENCER_ADDR=$(cast wallet address "$SEQ_KEY")
     OUTPUT="generated/{{name}}"
     mkdir -p "$OUTPUT"
-    echo "Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    echo "Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
@@ -195,8 +192,8 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
         exit 1
     fi
-    echo "Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    echo "Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- deploy-router \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
@@ -464,6 +461,63 @@ pause-deposits token:
 [doc('Resumes deposits for a previously paused TIP-20 on the ZonePortal. Token can be an address or alias. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars.')]
 resume-deposits token:
     just _portal-admin-token-call resumeDeposits {{token}}
+
+[group('zone')]
+[doc('Pauses batch submissions, all new deposits, and L1 withdrawal processing for 30 days. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY.')]
+pause-portal:
+    cargo run -p tempo-xtask -- pause-portal
+
+[group('zone')]
+[doc('Enables or disables closed-loop account enforcement. Pass true to close access or false to open it. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-access-mode enforced:
+    #!/bin/bash
+    set -euo pipefail
+    ENFORCED="{{enforced}}"
+    case "$ENFORCED" in
+        true) ARGS=(--enforced) ;;
+        false) ARGS=() ;;
+        *) echo "Error: enforced must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-access-mode "${ARGS[@]}"
+
+[group('zone')]
+[doc('Enables or disables callback gateway enforcement. Pass true to enforce registered gateways or false to allow arbitrary targets. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway-mode enforced:
+    #!/bin/bash
+    set -euo pipefail
+    ENFORCED="{{enforced}}"
+    case "$ENFORCED" in
+        true) ARGS=(--enforced) ;;
+        false) ARGS=() ;;
+        *) echo "Error: enforced must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-gateway-mode "${ARGS[@]}"
+
+[group('zone')]
+[doc('Adds or removes an account from closed-loop portal flows. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-allowed-account account allowed:
+    #!/bin/bash
+    set -euo pipefail
+    ALLOWED="{{allowed}}"
+    case "$ALLOWED" in
+        true) ARGS=(--allowed) ;;
+        false) ARGS=() ;;
+        *) echo "Error: allowed must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-allowed-account "{{account}}" "${ARGS[@]}"
+
+[group('zone')]
+[doc('Adds or removes a callback gateway. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway account allowed:
+    #!/bin/bash
+    set -euo pipefail
+    ALLOWED="{{allowed}}"
+    case "$ALLOWED" in
+        true) ARGS=(--allowed) ;;
+        false) ARGS=() ;;
+        *) echo "Error: allowed must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-gateway "{{account}}" "${ARGS[@]}"
 
 [group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
@@ -806,9 +860,9 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     echo "  Sequencer funded: https://explore.moderato.tempo.xyz/address/$SEQUENCER_ADDR"
     echo ""
 
-    # Step 3: Build Solidity specs
-    echo "Step 3: Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    # Step 3: Build Solidity contracts
+    echo "Step 3: Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     echo ""
 
     # Step 4: Create zone on L1 and generate genesis
@@ -958,11 +1012,11 @@ docs-check:
     cd docs && bun run check && bun run check:types
 
 [group('docs')]
-[doc('Run Solidity specs tests')]
+[doc('Run Solidity contract tests')]
 docs-specs-test:
-    cd specs/ref-impls && forge test -vvv
+    cd crates/contracts && forge test -vvv
 
 [group('docs')]
-[doc('Build Solidity specs')]
+[doc('Build Solidity contracts')]
 docs-specs-build:
-    cd specs/ref-impls && forge build --sizes
+    cd crates/contracts && forge build --sizes

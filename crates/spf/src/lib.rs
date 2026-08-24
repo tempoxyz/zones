@@ -7,18 +7,15 @@
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::{B256, U256, keccak256};
 use alloy_rlp::Decodable as _;
+use reth_chainspec::EthChainSpec as _;
 use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::noop::NoopProvider;
 use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
 use tempo_evm::{TempoBlockAssembler, TempoEvmConfig};
 use tempo_primitives::{TempoHeader, TempoPrimitives};
-use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_HASH_SLOT,
-    ZONE_INBOX_PROCESSED_NUMBER_SLOT, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_LAST_BATCH_HASH_SLOT,
-    ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT,
-};
+use zone_precompiles::{inbox, outbox, tempo_state};
+use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 mod execution;
 mod mpt;
@@ -40,6 +37,17 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // state root selects the initial Zone state.
     if witness.zone_blocks.is_empty() {
         return Err(Error::EmptyZoneBatch);
+    }
+    let expected_chain_id = zone_primitives::constants::zone_chain_id(
+        witness.public_inputs.parent_chain_id,
+        witness.public_inputs.zone_id,
+    )?;
+    let configured_chain_id = config.chain_spec().chain().id();
+    if configured_chain_id != expected_chain_id {
+        return Err(Error::ChainIdMismatch {
+            expected: configured_chain_id,
+            actual: expected_chain_id,
+        });
     }
     if witness.public_inputs.portal != config.portal() {
         return Err(Error::PortalMismatch {
@@ -66,14 +74,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         read_zone_storage(
             &mut zone_state,
             ZONE_INBOX_ADDRESS,
-            ZONE_INBOX_PROCESSED_HASH_SLOT,
+            inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
         )?
         .to_be_bytes::<32>(),
     );
     let previous_processed_number = read_zone_storage(
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
-        ZONE_INBOX_PROCESSED_NUMBER_SLOT,
+        inbox::slots::PROCESSED_DEPOSIT_NUMBER,
     )?
     .to::<u64>();
 
@@ -87,14 +95,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         read_zone_storage(
             &mut zone_state,
             TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state_slots::TEMPO_BLOCK_HASH),
+            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
         )?
         .to_be_bytes::<32>(),
     );
     let zone_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state_slots::TEMPO_BLOCK_NUMBER),
+        U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER),
     )?
     .to::<u64>();
     if (zone_tempo_number, zone_tempo_hash) != (witnessed_tempo_number, witnessed_tempo_hash) {
@@ -150,8 +158,6 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             execution::evm::BlockReplayContext {
                 parent: &previous_header,
                 block_index,
-                parent_chain_id: witness.public_inputs.parent_chain_id,
-                zone_id: witness.public_inputs.zone_id,
             },
             block,
         );
@@ -206,14 +212,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         read_zone_storage(
             &mut zone_state,
             ZONE_INBOX_ADDRESS,
-            ZONE_INBOX_PROCESSED_HASH_SLOT,
+            inbox::slots::PROCESSED_DEPOSIT_QUEUE_HASH,
         )?
         .to_be_bytes::<32>(),
     );
     let next_processed_number = read_zone_storage(
         &mut zone_state,
         ZONE_INBOX_ADDRESS,
-        ZONE_INBOX_PROCESSED_NUMBER_SLOT,
+        inbox::slots::PROCESSED_DEPOSIT_NUMBER,
     )?
     .to::<u64>();
     let has_withdrawal_finalization = witness
@@ -225,14 +231,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             read_zone_storage(
                 &mut zone_state,
                 ZONE_OUTBOX_ADDRESS,
-                ZONE_OUTBOX_LAST_BATCH_HASH_SLOT,
+                outbox::slots::WITHDRAWAL_QUEUE_HASH,
             )?
             .to_be_bytes::<32>(),
         );
         let index_slot = read_zone_storage(
             &mut zone_state,
             ZONE_OUTBOX_ADDRESS,
-            ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT,
+            outbox::slots::WITHDRAWAL_BATCH_INDEX,
         )?;
         // The index occupies the low 64 bits of a packed Solidity slot.
         (hash, index_slot.as_limbs()[0])
@@ -246,14 +252,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         read_zone_storage(
             &mut zone_state,
             TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state_slots::TEMPO_BLOCK_HASH),
+            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH),
         )?
         .to_be_bytes::<32>(),
     );
     let final_tempo_number = read_zone_storage(
         &mut zone_state,
         TEMPO_STATE_ADDRESS,
-        U256::from(tempo_state_slots::TEMPO_BLOCK_NUMBER),
+        U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER),
     )?
     .to::<u64>();
 
@@ -427,6 +433,9 @@ pub enum Error {
     /// A batch must execute at least one Zone block.
     #[error("zone batch contains no blocks")]
     EmptyZoneBatch,
+    /// The witness identifies a Zone other than the verifier-selected chain specification.
+    #[error("Zone chain ID mismatch: expected {expected}, got {actual}")]
+    ChainIdMismatch { expected: u64, actual: u64 },
     /// The prover supplied a portal other than the verifier-selected portal.
     #[error("Zone portal mismatch: expected {expected:?}, got {actual:?}")]
     PortalMismatch {
@@ -604,7 +613,10 @@ mod tests {
 
     fn test_config() -> SpfConfig {
         let tempo_chain_spec = tempo_chainspec::spec::MODERATO.clone();
-        let zone_chain_spec = Arc::new(zone_chainspec::ZoneChainSpec::from(tempo_chain_spec));
+        let mut genesis = tempo_chain_spec.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain().id(), 1).unwrap();
+        let zone_chain_spec =
+            Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
         SpfConfig::new(zone_chain_spec, Address::repeat_byte(0x11))
     }
 
@@ -615,13 +627,13 @@ mod tests {
                 gas_limit: 30_000_000,
                 ..Default::default()
             },
-            shared_gas_limit: 30_000_000,
+            shared_gas_limit: 0,
             ..Default::default()
         };
 
         BatchWitness {
             public_inputs: PublicInputs {
-                parent_chain_id: 1_337,
+                parent_chain_id: tempo_chainspec::spec::MODERATO.chain().id(),
                 zone_id: 1,
                 portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
@@ -727,6 +739,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::new(),
             deposits: Vec::new(),
@@ -742,6 +755,35 @@ mod tests {
             Err(Error::PortalMismatch {
                 expected: Address::repeat_byte(0x11),
                 actual: Address::repeat_byte(0x22),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_witness_for_a_different_zone_chain() {
+        let config = test_config();
+        let mut witness = minimal_batch_witness();
+        witness.public_inputs.zone_id = 2;
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash_slow(),
+            timestamp: 0,
+            timestamp_millis_part: 0,
+            beneficiary: Address::ZERO,
+            tempo_header_rlp: Bytes::new(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        });
+
+        assert_eq!(
+            prove_zone_batch(&config, witness),
+            Err(Error::ChainIdMismatch {
+                expected: config.chain_spec().chain().id(),
+                actual: zone_chain_id(tempo_chainspec::spec::MODERATO.chain().id(), 2).unwrap(),
             })
         );
     }
@@ -818,21 +860,11 @@ mod tests {
         tempo_database: TempoWitnessDatabase,
         parent: &TempoHeader,
         block: &ZoneBlock,
-        parent_chain_id: u64,
-        zone_id: u32,
     ) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
         let attributes = next_block_env_attributes(config.chain_spec().as_ref(), parent, block)?;
-        let mut env = ZoneEvmConfig::from_composed_chain_spec(
-            config.chain_spec().clone(),
-            tempo_database,
-            config.portal(),
-        )
-        .next_evm_env(parent, &attributes)
-        .map_err(|_| Error::EvmEnvironment)?;
-
-        // ZoneEvmConfig applies these overrides after delegating environment
-        // construction to TempoEvmConfig. Keep replay identical to production.
-        env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
+        let env = ZoneEvmConfig::new(config.chain_spec().clone(), tempo_database, config.portal())
+            .next_evm_env(parent, &attributes)
+            .map_err(|_| Error::EvmEnvironment)?;
         Ok(env)
     }
 
@@ -1003,6 +1035,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 321,
             beneficiary: Address::ZERO,
             tempo_header_rlp: witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
             deposits: Vec::new(),
@@ -1025,32 +1058,15 @@ mod tests {
         assert_eq!(attributes.suggested_fee_recipient, Address::ZERO);
         assert_eq!(attributes.gas_limit, 30_000_000);
         assert_eq!(attributes.general_gas_limit, 0);
-        assert_eq!(
-            attributes.shared_gas_limit,
-            witness.parent_header.inner.gas_limit
-        );
-        assert_eq!(attributes.timestamp_millis_part, 0);
+        assert_eq!(attributes.shared_gas_limit, 0);
+        assert_eq!(attributes.timestamp_millis_part, 321);
 
         let tempo_database =
             TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness.clone())
                 .unwrap();
-        let env = next_block_evm_env(
-            &config,
-            tempo_database,
-            &witness.parent_header,
-            &block,
-            witness.public_inputs.parent_chain_id,
-            witness.public_inputs.zone_id,
-        )
-        .unwrap();
-        assert_eq!(
-            env.cfg_env.chain_id,
-            zone_primitives::constants::zone_chain_id(
-                witness.public_inputs.parent_chain_id,
-                witness.public_inputs.zone_id,
-            )
-            .unwrap()
-        );
+        let env =
+            next_block_evm_env(&config, tempo_database, &witness.parent_header, &block).unwrap();
+        assert_eq!(env.cfg_env.chain_id, config.chain_spec().chain().id());
         assert_eq!(env.block_env.inner.basefee, 0);
     }
 
@@ -1061,6 +1077,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
@@ -1081,6 +1098,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
@@ -1109,6 +1127,7 @@ mod tests {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
+            timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
             tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),

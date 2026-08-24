@@ -11,7 +11,7 @@ use crate::{
 };
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Address, B256, Bytes, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolError;
 use revm::precompile::PrecompileResult;
@@ -86,8 +86,9 @@ impl TempoState {
 
     /// Validate and apply a finalized Tempo checkpoint transition.
     ///
-    /// IMPORTANT: this operation only enforces local continuity: the decoded block number must
-    /// increment by one and its parent hash must match the previously stored Tempo hash.
+    /// IMPORTANT: this operation only enforces local continuity and Zone-time alignment: the
+    /// decoded block number must increment by one, its parent hash must match the previously stored
+    /// Tempo hash, and its timestamp must not exceed the executing Zone block's timestamp.
     ///
     /// Canonicality is a separate proof obligation: the batch proof must bind the imported header
     /// hash and state root to the canonical settlement anchor and authenticate every Tempo storage
@@ -108,6 +109,12 @@ impl TempoState {
         if !header_cursor.is_empty() {
             return Err(TempoStateError::invalid_rlp_data().into());
         }
+        self.storage.with_block_env(|zone_block| {
+            if zone_block.timestamp_millis() < U256::from(header.timestamp_millis()) {
+                return Err(TempoStateError::invalid_timestamp());
+            }
+            Ok(())
+        })?;
         if header.parent_hash() != prev_block_hash {
             return Err(TempoStateError::invalid_parent_hash().into());
         }
@@ -192,6 +199,7 @@ mod tests {
 
     struct TempoStateHarness {
         ctx: TestContext,
+        l1: L1State<MockL1Reader>,
         precompile: DynPrecompile,
     }
 
@@ -204,8 +212,17 @@ mod tests {
                 StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             }
             let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
-            let precompile = TempoState::create(l1, &test_env(&ctx));
-            Ok(Self { ctx, precompile })
+            let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
+            Ok(Self {
+                ctx,
+                l1,
+                precompile,
+            })
+        }
+
+        fn set_block_timestamp(&mut self, header: &TempoHeader) {
+            self.ctx.block.inner.timestamp = U256::from(header.timestamp());
+            self.ctx.block.timestamp_millis_part = header.timestamp_millis_part;
         }
 
         fn call(
@@ -334,10 +351,63 @@ mod tests {
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
+        harness.set_block_timestamp(&child);
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
         harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+    }
+
+    #[test]
+    fn finalize_tempo_accepts_zone_timestamp_after_anchor() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 1);
+        harness.set_block_timestamp(&child);
+        harness.ctx.block.inner.timestamp += U256::ONE;
+
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_success());
+        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_when_zone_timestamp_precedes_anchor_seconds() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 1);
+        harness.set_block_timestamp(&child);
+        harness.ctx.block.inner.timestamp -= U256::ONE;
+
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_revert());
+        assert_eq!(
+            output.bytes,
+            TempoStateAbi::InvalidTimestamp {}.abi_encode()
+        );
+        assert_eq!(harness.l1.get_anchor(), None);
+        harness.assert_checkpoint(genesis_hash, genesis.number())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_when_zone_timestamp_precedes_anchor_millis() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 1);
+        harness.set_block_timestamp(&child);
+        harness.ctx.block.timestamp_millis_part -= 1;
+
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_revert());
+        assert_eq!(
+            output.bytes,
+            TempoStateAbi::InvalidTimestamp {}.abi_encode()
+        );
+        assert_eq!(harness.l1.get_anchor(), None);
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
@@ -418,11 +488,13 @@ mod tests {
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(B256::ZERO, 1);
+        harness.set_block_timestamp(&child);
 
-        assert!(
-            harness
-                .finalize(ZONE_INBOX_ADDRESS, &child, false)?
-                .is_revert()
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_revert());
+        assert_eq!(
+            output.bytes,
+            TempoStateAbi::InvalidParentHash {}.abi_encode()
         );
         harness.assert_checkpoint(genesis_hash, genesis.number())
     }
@@ -433,11 +505,13 @@ mod tests {
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 2);
+        harness.set_block_timestamp(&child);
 
-        assert!(
-            harness
-                .finalize(ZONE_INBOX_ADDRESS, &child, false)?
-                .is_revert()
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_revert());
+        assert_eq!(
+            output.bytes,
+            TempoStateAbi::InvalidBlockNumber {}.abi_encode()
         );
         harness.assert_checkpoint(genesis_hash, genesis.number())
     }

@@ -31,6 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_eips::eip1559::Eip1559Estimation;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider};
@@ -39,6 +40,7 @@ use parking_lot::Mutex;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt};
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tokio::sync::Notify;
+use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
@@ -50,6 +52,14 @@ use crate::{
 use tempo_alloy::rpc::TempoCallBuilderExt;
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn bound_l1_fees(fees: Eip1559Estimation) -> Eip1559Estimation {
+    let max_fee_per_gas = fees.max_fee_per_gas.min(crate::TEMPO_L1_MAX_FEE_PER_GAS);
+    Eip1559Estimation {
+        max_fee_per_gas,
+        max_priority_fee_per_gas: fees.max_priority_fee_per_gas.min(max_fee_per_gas),
+    }
+}
 
 // These planner allowances were calibrated against the current ZonePortal/ZoneMessenger bytecode.
 // Pre-refund T1 dev-L1 traces used 553,703, 1,068,088, and 1,348,063 gas for one, two, and four
@@ -374,7 +384,7 @@ impl WithdrawalProcessor {
     /// token is observed at the wait boundary so an in-flight processing cycle completes
     /// first.
     #[instrument(skip_all, fields(portal = %self.config.portal_address))]
-    pub async fn run(&self, shutdown: &tokio_util::sync::CancellationToken) {
+    pub async fn run(&self, shutdown: &sync::CancellationToken) {
         info!("Withdrawal processor started");
 
         loop {
@@ -392,8 +402,13 @@ impl WithdrawalProcessor {
                 }
             }
 
-            if let Err(e) = self.process_queue().await {
+            if let Err(e) = self.process_queue(shutdown).await {
                 error!(error = %e, "Withdrawal processing cycle failed");
+            }
+
+            if shutdown.is_cancelled() {
+                debug!("Withdrawal processor stopped after draining submitted transactions");
+                return;
             }
 
             if let Err(error) = self.update_sequencer_metrics().await {
@@ -426,9 +441,21 @@ impl WithdrawalProcessor {
     /// ([`find_processed_offset`]), so a crash, timeout, or restart mid-slot
     /// resumes exactly where the portal is.
     #[instrument(skip_all)]
-    async fn process_queue(&self) -> eyre::Result<()> {
+    async fn process_queue(&self, shutdown: &sync::CancellationToken) -> eyre::Result<()> {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+
+        if self.portal.paused().call().await? {
+            debug!("Portal is paused; withdrawal processor is idle");
+            return Ok(());
+        }
         // loop through all the slots
         loop {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+
             let (head, tail): (U256, U256) = self
                 .provider
                 .multicall()
@@ -564,8 +591,21 @@ impl WithdrawalProcessor {
                 "Processing withdrawal batches"
             );
             let slot_started_at = Instant::now();
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
             let outcome = self
-                .submit_and_confirm_batches(head_val, offset, first_nonce, remaining, batches)
+                .submit_and_confirm_batches(
+                    SubmitBatches {
+                        slot: head_val,
+                        offset,
+                        first_nonce,
+                        withdrawals: remaining,
+                        batches,
+                    },
+                    shutdown,
+                    || {},
+                )
                 .await?;
             self.record_slot_duration(slot_started_at.elapsed());
 
@@ -583,6 +623,7 @@ impl WithdrawalProcessor {
                     // queue suffix. The next poll reconciles the slot before retrying.
                     return Ok(());
                 }
+                SubmitOutcome::Cancelled => return Ok(()),
             }
         }
     }
@@ -594,12 +635,17 @@ impl WithdrawalProcessor {
     /// on-chain queue and retries only the unfinished suffix.
     async fn submit_and_confirm_batches(
         &self,
-        slot: u64,
-        offset: usize,
-        first_nonce: u64,
-        withdrawals: &[abi::Withdrawal],
-        batches: Vec<WithdrawalBatch>,
+        submission: SubmitBatches<'_>,
+        shutdown: &sync::CancellationToken,
+        mut on_batch_drained: impl FnMut(),
     ) -> eyre::Result<SubmitOutcome> {
+        let SubmitBatches {
+            slot,
+            offset,
+            first_nonce,
+            withdrawals,
+            batches,
+        } = submission;
         let nonce_count = u64::try_from(batches.len())
             .map_err(|_| eyre::eyre!("processWithdrawals batch count overflow"))?;
         first_nonce.checked_add(nonce_count).ok_or_else(|| {
@@ -612,9 +658,13 @@ impl WithdrawalProcessor {
         let mut in_flight = FuturesUnordered::new();
         let mut submitted = 0usize;
         let mut retry = false;
+        let fees = bound_l1_fees(self.provider.estimate_eip1559_fees().await?);
 
         loop {
-            while !retry && in_flight.len() < limits.max_in_flight_batches {
+            while !retry
+                && !shutdown.is_cancelled()
+                && in_flight.len() < limits.max_in_flight_batches
+            {
                 let Some(batch) = batches.next() else {
                     break;
                 };
@@ -650,10 +700,11 @@ impl WithdrawalProcessor {
                 let call = self
                     .portal
                     .processWithdrawals(batch_withdrawals, remaining_queue)
+                    .from(self.config.sequencer_address)
                     .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY)
                     .nonce(nonce)
-                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
-                    .max_priority_fee_per_gas(0)
+                    .max_fee_per_gas(fees.max_fee_per_gas)
+                    .max_priority_fee_per_gas(fees.max_priority_fee_per_gas)
                     .gas(batch.gas_limit);
 
                 in_flight.push(async move {
@@ -734,6 +785,7 @@ impl WithdrawalProcessor {
                     retry = true;
                 }
             }
+            on_batch_drained();
         }
 
         if retry {
@@ -744,6 +796,14 @@ impl WithdrawalProcessor {
                 "Withdrawal processing incomplete; retrying from reconciled on-chain state"
             );
             Ok(SubmitOutcome::Retry)
+        } else if submitted < batch_count {
+            debug!(
+                slot,
+                submitted,
+                total_batches = batch_count,
+                "Withdrawal processing stopped admitting batches after cancellation"
+            );
+            Ok(SubmitOutcome::Cancelled)
         } else {
             debug_assert_eq!(submitted, batch_count);
             Ok(SubmitOutcome::Confirmed)
@@ -766,6 +826,14 @@ impl WithdrawalProcessor {
     }
 }
 
+struct SubmitBatches<'a> {
+    slot: u64,
+    offset: usize,
+    first_nonce: u64,
+    withdrawals: &'a [abi::Withdrawal],
+    batches: Vec<WithdrawalBatch>,
+}
+
 /// Spawn the withdrawal processor as a background task.
 ///
 /// The processor waits for notifications from the batch submitter (via `notify`) and then
@@ -778,7 +846,7 @@ pub fn spawn_withdrawal_processor(
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let processor = WithdrawalProcessor::new(config, provider, store, notify, repair_notify);
@@ -871,6 +939,9 @@ enum SubmitOutcome {
     /// At least one transaction failed to send, reverted, or could not be confirmed. The next
     /// cycle reconciles the on-chain queue and retries the unfinished suffix.
     Retry,
+    /// Cancellation stopped admission of new transactions. Transactions submitted before
+    /// cancellation were still drained, and the unfinished suffix remains for reconciliation.
+    Cancelled,
 }
 
 #[cfg(test)]
@@ -878,13 +949,14 @@ mod tests {
     use super::*;
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_provider::{Provider, ProviderBuilder};
+    use alloy_rpc_types_eth::FeeHistory;
     use alloy_sol_types::SolValue;
     use alloy_transport::mock::Asserter;
     use tempo_alloy::TempoNetwork;
     use tokio::time::timeout;
 
     fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
-        ProviderBuilder::new_with_network::<TempoNetwork>()
+        ProviderBuilder::<_, _, TempoNetwork>::default()
             .connect_mocked_client(asserter)
             .erased()
     }
@@ -895,6 +967,35 @@ mod tests {
 
     fn abi_encode_multicall(values: Vec<Bytes>) -> Bytes {
         (U256::ZERO, values).abi_encode_params().into()
+    }
+
+    fn successful_receipt(tx_byte: u8) -> serde_json::Value {
+        serde_json::json!({
+            "transactionHash": B256::repeat_byte(tx_byte),
+            "transactionIndex": "0x0",
+            "blockHash": B256::repeat_byte(0xbb),
+            "blockNumber": "0x1",
+            "from": Address::repeat_byte(0x77),
+            "to": address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
+            "cumulativeGasUsed": "0x5208",
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x0",
+            "contractAddress": null,
+            "logs": [],
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "status": "0x1",
+            "type": "0x0",
+            "feePayer": Address::repeat_byte(0x77),
+        })
+    }
+
+    fn fee_history() -> FeeHistory {
+        FeeHistory {
+            base_fee_per_gas: vec![1, 1],
+            gas_used_ratio: vec![0.5],
+            reward: Some(vec![vec![1]]),
+            ..Default::default()
+        }
     }
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
@@ -914,6 +1015,20 @@ mod tests {
     #[test]
     fn empty_queue_hash_is_zero() {
         assert_eq!(abi::Withdrawal::queue_hash(&[]), B256::ZERO);
+    }
+
+    #[test]
+    fn bounds_l1_fee_estimate() {
+        let fees = bound_l1_fees(Eip1559Estimation {
+            max_fee_per_gas: u128::MAX,
+            max_priority_fee_per_gas: u128::MAX,
+        });
+
+        assert_eq!(fees.max_fee_per_gas, crate::TEMPO_L1_MAX_FEE_PER_GAS);
+        assert_eq!(
+            fees.max_priority_fee_per_gas,
+            crate::TEMPO_L1_MAX_FEE_PER_GAS
+        );
     }
 
     #[test]
@@ -1218,6 +1333,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_requests_head_page_refill_when_slot_missing() {
         let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(0));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(51),
             abi_encode_u64(71),
@@ -1230,7 +1346,10 @@ mod tests {
             repair_notify.clone(),
         );
 
-        processor.process_queue().await.unwrap();
+        processor
+            .process_queue(&sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
@@ -1239,8 +1358,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_processor_does_not_start_a_queue_slot() {
+        let l1 = Asserter::new();
+        let processor = test_processor(
+            l1.clone(),
+            SharedWithdrawalStore::new(),
+            Arc::new(Notify::new()),
+        );
+        let shutdown = sync::CancellationToken::new();
+        shutdown.cancel();
+
+        processor.process_queue(&shutdown).await.unwrap();
+
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_refill_but_drains_submitted_batches() {
+        let l1 = Asserter::new();
+        l1.push_success(&fee_history());
+
+        let mut processor = test_processor(
+            l1.clone(),
+            SharedWithdrawalStore::new(),
+            Arc::new(Notify::new()),
+        );
+        processor.config.batch_limits = WithdrawalBatchLimits {
+            max_batch_gas: PROCESS_WITHDRAWAL_TX_OVERHEAD_GAS
+                + PROCESS_SIMPLE_WITHDRAWAL_ITEM_OVERHEAD_GAS,
+            max_in_flight_batches: 2,
+        };
+        l1.push_success(&successful_receipt(1));
+        l1.push_success(&successful_receipt(2));
+        l1.push_success(&successful_receipt(3));
+
+        let withdrawals = simple_withdrawals(3);
+        let batches =
+            build_withdrawal_batches(&withdrawals, processor.config.batch_limits.max_batch_gas);
+        assert_eq!(batches.len(), 3);
+
+        let shutdown = sync::CancellationToken::new();
+        let mut drained = 0;
+        let outcome = processor
+            .submit_and_confirm_batches(
+                SubmitBatches {
+                    slot: 7,
+                    offset: 0,
+                    first_nonce: 10,
+                    withdrawals: &withdrawals,
+                    batches,
+                },
+                &shutdown,
+                || {
+                    drained += 1;
+                    if drained == 1 {
+                        shutdown.cancel();
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(outcome, SubmitOutcome::Cancelled),
+            "expected cancellation after draining {drained} batches with {} mock responses left",
+            l1.read_q().len()
+        );
+        assert_eq!(
+            drained, 2,
+            "both transactions admitted before cancellation must drain"
+        );
+        assert_eq!(
+            l1.read_q().len(),
+            1,
+            "the third response must remain unused because cancellation prevented a refill"
+        );
+    }
+
+    #[tokio::test]
     async fn process_queue_requests_refill_when_store_data_mismatches_slot_hash() {
         let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(0));
         // head = 5, tail = 6, slot hash that matches no suffix of the stored batch.
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(5),
@@ -1261,7 +1459,10 @@ mod tests {
         let repair_notify = Arc::new(Notify::new());
         let processor = test_processor(l1.clone(), store, repair_notify.clone());
 
-        processor.process_queue().await.unwrap();
+        processor
+            .process_queue(&sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
@@ -1272,6 +1473,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_skips_cycle_when_head_slot_already_consumed() {
         let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(0));
         // head = 5, tail = 6, but slot 5 is already cleared because head advanced
         // between our bounds read and the slot read.
         l1.push_success(&abi_encode_multicall(vec![
@@ -1293,7 +1495,10 @@ mod tests {
         let repair_notify = Arc::new(Notify::new());
         let processor = test_processor(l1.clone(), store.clone(), repair_notify.clone());
 
-        processor.process_queue().await.unwrap();
+        processor
+            .process_queue(&sync::CancellationToken::new())
+            .await
+            .unwrap();
 
         // No repair requested and the batch stays in the store.
         assert!(
@@ -1303,5 +1508,29 @@ mod tests {
         );
         assert!(store.lock().has_batch(5));
         assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_queue_is_idle_while_portal_is_paused() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(1));
+        let repair_notify = Arc::new(Notify::new());
+        let processor = test_processor(
+            l1.clone(),
+            SharedWithdrawalStore::new(),
+            repair_notify.clone(),
+        );
+
+        processor
+            .process_queue(&sync::CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(l1.read_q().is_empty());
+        assert!(
+            timeout(Duration::from_millis(50), repair_notify.notified())
+                .await
+                .is_err()
+        );
     }
 }

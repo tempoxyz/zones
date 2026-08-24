@@ -222,7 +222,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///    |<-- withdraw AlphaUSD -----------|  ✓ AlphaUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
+/// NOTE: Requires `forge build` in `crates/contracts/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -301,6 +301,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
     let alpha_withdrawal: u128 = 1_000_000; // 1 AlphaUSD
+    let alpha_balance_before = l1.balance_of(l1_alpha_usd, account.address()).await?;
     account
         .withdraw_token(l2_alpha_usd, alpha_withdrawal)
         .await?;
@@ -310,6 +311,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
         portal_address,
         l1_alpha_usd,
         account.address(),
+        alpha_balance_before,
         alpha_withdrawal,
         withdrawal_timeout,
     )

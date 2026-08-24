@@ -72,7 +72,7 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value_t = 1)]
     threshold: u8,
 
-    /// Admin address that controls token enablement and deposit pause/resume.
+    /// Admin address that controls token enablement and deposit pause/unpause.
     /// Pass the sequencer address explicitly when both roles should use the same key.
     #[arg(long)]
     admin: Address,
@@ -95,10 +95,6 @@ pub(crate) struct CreateZone {
     /// Genesis block gas limit for the zone L2.
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
-
-    /// Path to the Foundry compiled output directory containing zone contract artifacts.
-    #[arg(long, default_value = "specs/ref-impls/out")]
-    specs_out: PathBuf,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
@@ -310,12 +306,10 @@ impl CreateZone {
             chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
-            tempo_portal: portal,
             default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
             sequencer: Some(leader),
-            specs_out: self.specs_out.clone(),
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
@@ -403,7 +397,6 @@ mod tests {
             private_key: String::new(),
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
-            specs_out: PathBuf::new(),
         };
 
         let params = command.factory_params();

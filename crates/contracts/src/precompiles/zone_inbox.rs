@@ -10,6 +10,7 @@ use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::SolValue;
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract IZoneInbox {
         // -- Shared types --
@@ -40,6 +41,7 @@ crate::sol! {
         struct QueuedDeposit {
             DepositType depositType;
             bytes depositData;
+            bool rejected;
         }
 
         /// Chaum-Pedersen proof for ECDH shared secret derivation.

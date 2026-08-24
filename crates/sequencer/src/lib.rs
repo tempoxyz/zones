@@ -31,7 +31,10 @@ pub mod settlement;
 pub mod withdrawals;
 
 pub use attestation::AttestationStore;
-pub use encryption_key::register_encryption_key;
+pub use encryption_key::{
+    EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
+    register_encryption_key,
+};
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
@@ -80,10 +83,7 @@ impl<T> ZoneSequencerProvider for T where
 {
 }
 
-/// Conservative Tempo L1 fee cap for sequencer transactions.
-///
-/// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
-/// explicitly avoids an `eth_feeHistory` request while remaining valid across those regimes.
+/// Upper bound for sequencer transaction fees on Tempo L1.
 pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
     tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128;
 

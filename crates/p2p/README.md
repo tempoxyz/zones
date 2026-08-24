@@ -12,15 +12,25 @@ is retained in an activation-indexed `LeadershipSchedule`.
 
 For manual crashed-leader recovery, the operator stops the nodes, selects a canonical tip shared by
 the survivors, adds the same `[forced_recovery]` directive to every manifest, and restarts them.
-Each node verifies that its local canonical head has the configured hash before any role task
-starts. The selected replacement governs from the next Tempo anchor until the first subsequent
-finalized portal transition reaches its activation anchor. Nodes never submit that transition
-automatically: the operator may call the ordinary `zone_setLeader` RPC whenever the zone is ready
-to return to the on-chain schedule.
+Each node verifies that the configured hash remains in its local canonical chain before any role
+task starts. On the initial recovery start it should be the canonical head shared by every
+survivor. On a later restart it may be an ancestor of the local head; the node reconstructs the
+original recovery anchor and epoch instead of starting a new recovery window. The selected
+replacement governs from the next Tempo anchor until the first subsequent finalized portal
+transition reaches its activation anchor. Nodes never submit that transition automatically: the
+operator may call the ordinary `zone_setLeader` RPC whenever the zone is ready to return to the
+on-chain schedule.
 
-The configured hash must be the local canonical head at startup. After a normal portal transition
-ends recovery, the operator must remove the directive before restarting the nodes. Restarting with
-the directive after the replacement has produced past `recovery_block_hash` is unsupported.
+Restarting during recovery assumes every participating node's descendants of
+`recovery_block_hash` belong to the same chain produced by the selected, non-equivocating recovery
+leader. Canonical ancestry is local evidence and cannot prove cross-node convergence; operators
+must compare the survivors' heads before restarting if that assumption is in doubt. The configured
+L1 RPC must also serve historical Portal state at the Tempo block embedded in the recovery
+checkpoint. A node fails closed if the checkpoint is unknown or non-canonical, historical state is
+unavailable, or skipped Portal epochs make the recovery boundary ambiguous.
+
+After a normal Portal transition ends recovery, a restart skips the completed stale directive and
+logs a removal warning. Operators should still remove the directive from every manifest promptly.
 
 If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
 behavior.
@@ -77,8 +87,6 @@ The manifest is TOML and must contain at least three quorum nodes. The following
 the configuration shape:
 
 ```toml
-zone_id = 7
-sequencer_set_version = 0
 leader_ed25519_public_key = "0xleader..."
 
 [[nodes]]
@@ -120,11 +128,6 @@ quorum, cannot be selected by `zone_setLeader` or `[forced_recovery]`, and are n
 the Portal's current registered sequencer set. Once every retained checkpoint and replay window is
 past that leader's last epoch, the entry can be removed.
 
-`sequencer_set_version` must exactly match the value reported by `ZonePortal`. Version `0` is
-valid for the initial sequencer set installed atomically by `ZoneFactory`; later
-`setSequencerSet` calls increment it. The field defaults to `1` for compatibility with existing
-manifests that omitted it.
-
 To recover a crashed leader, add this top-level table before restarting the fleet:
 
 ```toml
@@ -133,9 +136,11 @@ leader = "follower-a"
 recovery_block_hash = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 ```
 
-`leader` is a manifest node name and must identify a quorum member. Because the configured hash
-must be the current head, the first recovery anchor and portal epoch are taken from the node's
-persisted checkpoint; no independently configured height or epoch can disagree with the hash.
+`leader` is a manifest node name and must identify a quorum member. The hash must be the shared
+canonical head on the first recovery start. On subsequent restarts it may be a canonical ancestor;
+the first recovery anchor and Portal epoch are recovered from the zone state and historical Portal
+state at that checkpoint, so no independently configured height or epoch can disagree with the
+hash.
 
 An `rpc_only` entry declares no `secp256k1_address` and the node is started without
 `--secp256k1.key`. It never signs a settlement attestation, so the key would be dead weight —
@@ -152,7 +157,6 @@ The manifest loader validates that:
   their Ed25519 identities do not alias an `rpc_only` node;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
-- the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
 
 At P2P startup, the node requires the configured `ZonePortal` to be deployed at the current L1 tip,

@@ -88,6 +88,7 @@ impl L1Deposit {
         match self {
             Self::WithdrawalBounceBack(d) => abi::QueuedDeposit {
                 depositType: abi::DepositType::WithdrawalBounceBack,
+                rejected: false,
                 depositData: abi::WithdrawalBounceBackDeposit {
                     token: d.token,
                     to: d.to,
@@ -98,6 +99,7 @@ impl L1Deposit {
             },
             Self::Deposit(d) => abi::QueuedDeposit {
                 depositType: abi::DepositType::Deposit,
+                rejected: false,
                 depositData: AbiDeposit {
                     token: d.token,
                     sender: d.sender,

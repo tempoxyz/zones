@@ -10,6 +10,7 @@ use std::{net::TcpListener, time::Duration};
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
+use alloy_network::ReceiptResponse;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
@@ -21,6 +22,7 @@ use tempo_zone_contracts::{
     ZONE_OUTBOX_ADDRESS,
 };
 use zone_l1::ChainTempoStateExt;
+use zone_primitives::constants::zone_chain_id;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
@@ -602,8 +604,8 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     // Start two zones with different chain IDs
-    let zone1 = ZoneTestNode::start_local_with_chain_id(71001).await?;
-    let zone2 = ZoneTestNode::start_local_with_chain_id(71002).await?;
+    let zone1 = ZoneTestNode::start_local_with_chain_id(zone_chain_id(1_337, 1)?).await?;
+    let zone2 = ZoneTestNode::start_local_with_chain_id(zone_chain_id(1_337, 2)?).await?;
 
     // Shared L1 fixture — same header timeline for both zones
     let mut fixture = L1Fixture::new();

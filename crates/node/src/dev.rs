@@ -61,8 +61,8 @@ pub struct ProvisionedZone {
 /// Provisions a fresh zone on a Tempo dev L1.
 ///
 /// Funds the dev account via `tempo_fundAddress` when needed, verifies TIP-1091's
-/// `ZoneFactory`, calls `createZone` with the dev account as
-/// both admin and sequencer, registers the sequencer encryption key on the portal, and
+/// `ZoneFactory`, calls `createZone` with the dev account as both admin and sequencer,
+/// registers the sequencer encryption key on the portal, and
 /// builds a genesis anchored immediately before `createZone` so the zone replays the
 /// portal's initial `TokenEnabled` event.
 pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<ProvisionedZone> {
@@ -146,7 +146,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     register_encryption_key(&provider, portal, &dev_key).await?;
 
     let (mut genesis, anchor_block_number) =
-        crate::genesis::l1_anchored_genesis(&anchor_header, portal, initial_token)?;
+        crate::genesis::l1_anchored_genesis(&anchor_header, initial_token)?;
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {
@@ -425,8 +425,6 @@ mod command {
                 &self.l1_rpc_url,
                 "--l1.portal-address",
                 &provisioned.portal.to_string(),
-                "--zone.id",
-                &provisioned.zone_id.to_string(),
                 "--http",
                 "--http.addr",
                 &self.http_addr,

@@ -8,12 +8,12 @@
 //! This crate is `no_std` compatible so these precompiles can run inside the
 //! SP1 prover guest (RISC-V) as well as in the zone node.
 //!
-//! ## Crypto precompiles
+//! ## Cryptography
 //!
-//! - **Chaum-Pedersen Verify** ([`chaum_pedersen`]) — verifies DLOG equality proofs
-//!   for ECDH shared secret derivation.
-//! - **AES-256-GCM Decrypt** ([`aes_gcm`]) — decrypts ECIES ciphertext and verifies
-//!   the GCM authentication tag.
+//! - **Chaum-Pedersen verification** ([`chaum_pedersen`]) — verifies DLOG equality proofs
+//!   for ECDH shared secret derivation inside the native inbox.
+//! - **AES-256-GCM decryption** ([`aes_gcm`]) — decrypts ECIES ciphertext and verifies
+//!   the GCM authentication tag inside the native inbox.
 //! - **ECIES** ([`ecies`]) — sequencer-side ECIES decryption logic.
 //!
 //! ## Policy/token precompiles
@@ -31,6 +31,22 @@
 #![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
+
+macro_rules! zone_precompile {
+    ($env:expr, $precompile:path) => {
+        zone_precompile!($env, $precompile, $crate::execution::NoCallRules)
+    };
+    ($env:expr, $precompile:path, $rules:expr) => {
+        $crate::execution::create_precompile(
+            stringify!($precompile),
+            &$env,
+            $rules,
+            |data, caller| {
+                tempo_precompiles::Precompile::call(&mut <$precompile>::new(), data, caller)
+            },
+        )
+    };
+}
 
 pub mod error;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
@@ -65,8 +81,8 @@ pub mod zone_fee_manager;
 pub mod zone_state;
 pub mod ztip20;
 
-pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
-pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
+pub use aes_gcm::AesGcmDecrypt;
+pub use chaum_pedersen::ChaumPedersenVerify;
 pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};
 pub use outbox::{ZoneOutbox, is_finalize_withdrawal_batch_calldata};
 pub use storage::{L1State, L1StateError, L1StorageReader};
@@ -74,27 +90,95 @@ pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
-use alloy_evm::precompiles::DynPrecompile;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+
+use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
+use revm::context::CfgEnv;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
-    Precompile as _,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _,
+    RECEIVE_POLICY_GUARD_ADDRESS, STORAGE_CREDITS_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
-    receive_policy_guard::ReceivePolicyGuard as TempoReceivePolicyGuard,
-    storage_credits::StorageCredits,
-    tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
+    receive_policy_guard::ReceivePolicyGuard,
+    storage::actions::StorageActions,
+    storage_credits::{NonCreditableSlots, StorageCredits},
+    tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token, is_tip20_prefix},
     tip403_registry::TIP403Registry,
 };
+#[cfg(feature = "std")]
+use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+use zone_hardfork::ZoneHardfork;
 
-/// Creates the zone-native fee manager precompile.
-pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "ZoneFeeManager",
-        env,
-        execution::NoCallRules,
-        |data, caller| ZoneFeeManager::new().call(data, caller),
-    )
+/// Registers every precompile that is available to a Zone EVM.
+///
+/// The Zone wrappers all share one [`ZonePrecompileEnv`] and one execution-local [`L1State`].
+/// Sharing those values is important: the database overlay and the L1-backed precompiles must use
+/// the same Tempo anchor and the same storage-credit accounting state during a transaction.
+///
+/// Existing Tempo precompiles that are not supported by Zones are explicitly removed here.
+pub fn extend_zone_precompiles<P>(
+    precompiles: &mut PrecompilesMap,
+    cfg: &CfgEnv<TempoHardfork>,
+    zone_hardfork: ZoneHardfork,
+    l1: L1State<P>,
+    actions: StorageActions,
+    non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
+) where
+    P: L1StorageReader,
+{
+    let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
+
+    precompiles.set_precompile_lookup(move |address: &Address| {
+        #[cfg(feature = "std")]
+        if *address == ZONE_OUTBOX_ADDRESS {
+            return Some(create_outbox_precompile(l1.clone(), &env));
+        }
+
+        if is_tip20_prefix(*address) {
+            Some(create_tip20_precompile(*address, &env))
+        } else if *address == TEMPO_STATE_ADDRESS {
+            Some(TempoState::create(l1.clone(), &env))
+        } else if *address == ZONE_INBOX_ADDRESS {
+            Some(ZoneInbox::create(l1.clone(), &env))
+        } else if *address == ZONE_FEE_MANAGER_ADDRESS {
+            Some(zone_precompile!(env, ZoneFeeManager))
+        } else if *address == TIP403_REGISTRY_ADDRESS {
+            Some(zone_precompile!(
+                env,
+                TIP403Registry,
+                tip403_proxy::Tip403Rules
+            ))
+        } else if *address == NONCE_PRECOMPILE_ADDRESS {
+            Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
+        } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+            Some(zone_precompile!(
+                env,
+                AccountKeychain,
+                account_keychain::AccountKeychainRules
+            ))
+        } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
+            Some(zone_precompile!(
+                env,
+                ReceivePolicyGuard,
+                receive_policy_guard::ReceivePolicyGuardRules
+            ))
+        } else if *address == STORAGE_CREDITS_ADDRESS {
+            Some(zone_precompile!(
+                env,
+                StorageCredits,
+                storage_credits::StorageCreditsRules
+            ))
+        } else {
+            // unsupported L1 precompiles:
+            // TIP20Factory, TipFeeManager, TIP20ChannelReserve, StablecoinDEX
+            None
+        }
+    });
 }
 
 /// Creates the native ZoneOutbox over ordinary Zone storage and the L1-mirrored portal account.
@@ -115,80 +199,8 @@ where
     )
 }
 
-/// Creates upstream TIP-403 execution with zone read-only rules and adapter-backed L1 reads.
-pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "ZoneTip403Registry",
-        env,
-        tip403_proxy::Tip403Rules,
-        |data, caller| TIP403Registry::new().call(data, caller),
-    )
-}
-
-/// Creates upstream receive-policy guard execution with Zone receipt-read privacy rules.
-pub fn create_receive_policy_guard_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
-    execution::create_precompile(
-        "ReceivePolicyGuard",
-        env,
-        receive_policy_guard::ReceivePolicyGuardRules,
-        |data, caller| TempoReceivePolicyGuard::new().call(data, caller),
-    )
-}
-
-/// Creates upstream NonceManager execution with Zone account-scoped read rules.
-pub fn create_nonce_manager_precompile<P>(env: &ZonePrecompileEnv, l1: L1State<P>) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
-    execution::create_precompile(
-        "NonceManager",
-        env,
-        nonce::NonceRules::new(l1),
-        |data, caller| NonceManager::new().call(data, caller),
-    )
-}
-
-/// Creates upstream AccountKeychain execution with Zone account-scoped read rules.
-pub fn create_account_keychain_precompile<P>(
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
-    execution::create_precompile(
-        "AccountKeychain",
-        env,
-        account_keychain::AccountKeychainRules::new(l1),
-        |data, caller| AccountKeychain::new().call(data, caller),
-    )
-}
-
-/// Creates upstream StorageCredits execution with Zone account-scoped read rules.
-pub fn create_storage_credits_precompile<P>(
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
-    execution::create_precompile(
-        "StorageCredits",
-        env,
-        storage_credits::StorageCreditsRules::new(l1),
-        |data, caller| StorageCredits::new().call(data, caller),
-    )
-}
-
 /// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
-pub fn create_tip20_precompile<P>(
-    address: Address,
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_tip20_precompile(address: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
     // Redacts TIP20 transfer from reverts that reveal user balances to the spender.
     let redact = |mut res: revm::precompile::PrecompileOutput| {
         if res.is_revert() && res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
@@ -200,7 +212,7 @@ where
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules::new(l1),
+        ztip20::TIP20Rules,
         move |data, caller| {
             TIP20Token::from_address_unchecked(address)
                 .call(data, caller)

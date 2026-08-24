@@ -46,7 +46,10 @@ use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{BuiltPayload, PayloadKind};
 use reth_primitives_traits::SealedHeader;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tempo_primitives::TempoHeader;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -329,10 +332,20 @@ impl ZoneEngine {
     async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
         let l1_num_hash = l1_block.header.num_hash();
 
-        // Zone block timestamp is locked to the L1 block's timestamp so the
-        // two chains stay in lockstep.
-        let timestamp_secs = l1_block.header.timestamp();
-        let timestamp_millis_part = l1_block.header.timestamp_millis_part;
+        // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
+        // fork cannot predate it. Use wall-clock time to avoid backdating transactions during
+        // catch-up, and advance by at least one millisecond to keep consecutive blocks monotonic.
+        let wall_clock_timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let timestamp_millis = zone_timestamp_millis(
+            l1_block.header.timestamp_millis(),
+            self.last_header.timestamp_millis(),
+            wall_clock_timestamp_millis,
+        );
+        let timestamp_secs = timestamp_millis / 1000;
+        let timestamp_millis_part = timestamp_millis % 1000;
 
         let l1_block = self.prepare_l1_block(l1_block).await?;
 
@@ -426,11 +439,37 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 }
 
+/// Select a Zone timestamp that preserves the L1 lower bound without backdating user activity.
+fn zone_timestamp_millis(
+    l1_timestamp_millis: u64,
+    parent_timestamp_millis: u64,
+    wall_clock_timestamp_millis: u64,
+) -> u64 {
+    l1_timestamp_millis
+        .max(wall_clock_timestamp_millis)
+        .max(parent_timestamp_millis.saturating_add(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn zone_timestamp_uses_l1_timestamp_as_a_lower_bound() {
+        assert_eq!(zone_timestamp_millis(2_000, 999, 1_500), 2_000);
+    }
+
+    #[test]
+    fn zone_timestamp_uses_wall_clock_during_catch_up() {
+        assert_eq!(zone_timestamp_millis(1_000, 999, 2_000), 2_000);
+    }
+
+    #[test]
+    fn zone_timestamp_advances_past_parent_when_catching_up_in_same_millisecond() {
+        assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_001);
+    }
 
     struct PausedDrain {
         pending: VecDeque<u64>,

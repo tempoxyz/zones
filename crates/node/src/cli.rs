@@ -5,9 +5,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
-use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
-use reth_tracing::tracing::info;
+use reth_tracing::tracing::{info, warn};
+use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -96,16 +96,22 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
     let components = |spec: Arc<ZoneChainSpec>| {
         (
-            ZoneEvmConfig::new_without_l1(spec),
-            NoopConsensus::default(),
+            ZoneEvmConfig::new_without_l1(spec.clone()),
+            TempoConsensus::new(spec),
         )
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
         info!(target: "reth::cli", "Launching Tempo Zone node");
 
+        if args.block_interval_ms.is_some() {
+            warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
+        }
+
         validate_l1_rpc_url(&args.l1_rpc_url)?;
         validate_portal_address(args.portal_address)?;
+        let zone_id = builder.config().chain.zone_id();
+        validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
         let p2p_config = args
             .sequencer_manifest
@@ -122,7 +128,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     args.secp256k1_key.as_ref(),
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
-                    args.zone_id,
+                    zone_id,
                     args.sequencer_role,
                 )
             })
@@ -187,7 +193,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
         .with_redacted_rpc(ZoneRedactedRpcConfig {
             redacted_rpc_port: args.redacted_rpc_port,
-            zone_id: args.zone_id,
+            zone_id,
             max_auth_token_validity: Duration::from_secs(
                 args.redacted_rpc_max_auth_token_validity_secs,
             ),
@@ -207,7 +213,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,
-                zone_id: args.zone_id,
+                zone_id,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_anchor_config: BatchAnchorConfig::default(),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
@@ -216,6 +222,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     max_in_flight_batches: args.withdrawal_max_in_flight_batches,
                 },
                 enable_prover: args.enable_prover,
+                prover_address: args.prover_address,
             });
         }
         if let Some(config) = p2p_config {
@@ -292,13 +299,13 @@ pub struct ZoneArgs {
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
     pub portal_address: Address,
 
-    /// Block building interval in milliseconds.
+    /// Deprecated compatibility flag. Ignored.
     #[arg(
         long = "block.interval-ms",
         env = "BLOCK_INTERVAL_MS",
-        default_value_t = 250
+        help = "Deprecated: no longer has any effect and will be removed in the next release."
     )]
-    pub block_interval_ms: u64,
+    pub block_interval_ms: Option<u64>,
 
     /// Path to a file or FIFO containing the shared sequencer private key.
     ///
@@ -442,9 +449,9 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    /// Zone ID used for chain identity and redacted RPC authentication.
-    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u32,
+    /// Deprecated: validates the Zone ID encoded in the genesis chain ID.
+    #[arg(long = "zone.id", env = "ZONE_ID")]
+    pub zone_id: Option<u32>,
 
     /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
@@ -475,6 +482,15 @@ pub struct ZoneArgs {
     /// Validate finalized batch candidates with the SPF without changing settlement.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
+
+    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    #[arg(
+        long = "sequencer.prover-address",
+        env = "SEQUENCER_PROVER_ADDRESS",
+        value_name = "HOST:PORT",
+        requires = "enable_prover"
+    )]
+    pub prover_address: Option<String>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -526,6 +542,16 @@ fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
     Ok(())
 }
 
+fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
+    if let Some(configured) = configured {
+        eyre::ensure!(
+            configured == derived,
+            "deprecated --zone.id value {configured} does not match zone ID {derived} encoded in the genesis chain ID"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Write as _, process::Command, thread, time::Duration};
@@ -534,7 +560,8 @@ mod tests {
 
     use super::{
         Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
-        validate_l1_rpc_url, validate_p2p_transaction_size_limit, validate_portal_address,
+        validate_deprecated_zone_id, validate_l1_rpc_url, validate_p2p_transaction_size_limit,
+        validate_portal_address,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -562,6 +589,28 @@ mod tests {
     fn portal_address_must_be_nonzero() {
         assert!(validate_portal_address(alloy_primitives::Address::ZERO).is_err());
         assert!(validate_portal_address(alloy_primitives::Address::repeat_byte(0x11)).is_ok());
+    }
+
+    #[test]
+    fn deprecated_args_are_accepted_and_validated() {
+        assert!(validate_deprecated_zone_id(None, 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
+
+        let parsed = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "7",
+            "--block.interval-ms",
+            "500",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zone.zone_id, Some(7));
+        assert_eq!(parsed.zone.block_interval_ms, Some(500));
     }
 
     #[test]

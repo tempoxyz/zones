@@ -102,12 +102,13 @@ fn setup_commonware_config(
 pub(crate) fn instantiate(
     context: &commonware_runtime::tokio::Context,
     manifest: &ZoneManifest,
+    zone_id: u32,
     ed25519_private_key: PrivateKey,
     listen: SocketAddr,
     bypass_ip_check: bool,
     network_id: P2pNetworkId,
 ) -> eyre::Result<(Network, Oracle, AddressableTrackedPeers<PublicKey>)> {
-    let namespace = namespace(manifest.zone_id(), network_id);
+    let namespace = namespace(zone_id, network_id);
     // Logged, not bound into the namespace: a mismatch between nodes stalls settlement loudly at
     // the next batch boundary, and making it a handshake failure would turn every membership edit
     // into a coordinated fleet restart. Compare this across nodes to diagnose one.
@@ -208,7 +209,7 @@ mod tests {
 
     fn manifest_with_rpc_follower() -> ZoneManifest {
         let mut manifest = format!(
-            "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
+            "leader_ed25519_public_key = \"{}\"\n",
             ed25519_public_key(1)
         );
         for seed in 1..=3 {

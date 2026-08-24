@@ -21,7 +21,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
 | `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash` starts at zero, and the first proof starts with the canonical genesis block derived from `zoneId` before transitioning through at least one non-genesis block | 🔴 | The zone may bootstrap from an attacker-chosen genesis state |
 | `TEMPO-ZONE-FIRST-TEMPO-ANCHOR` | The first proof contains at least two blocks, and its first non-genesis block imports Tempo and proves the portal's `sequencer` slot is non-zero at that block | 🔴 | The zone may settle an unanchored bootstrap state or anchor to Tempo state from before its portal existed |
-| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
+| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, and `TempoStateReader` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
 ### Access Control and Configuration
 
@@ -123,8 +123,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-ADVANCE-TEMPO-FIRST` | When present, `advanceTempo` is the first transaction in a zone block | 🟡 | User transactions can execute against the wrong Tempo binding or stale config |
 | `TEMPO-ZONE-CONTRACT-CREATION-DISABLED` | User `CREATE` and `CREATE2` always revert on zones | 🟡 | Users can deploy contracts that bypass privacy and system-token assumptions |
-| `TEMPO-ZONE-BALANCE-ALLOWANCE-PRIVACY` | `balanceOf` and `allowance` reveal values only to authorized callers or the sequencer | 🟡 | Account balances and approvals leak through token precompiles |
-| `TEMPO-ZONE-ACCOUNT-GETTER-PRIVACY` | Account-indexed `NonceManager` and `AccountKeychain` getters reveal values only when their immediate caller owns the queried account or is an active sequencer | 🟡 | Forwarding contracts or ordinary users can expose another account's nonce activity, keys, limits, call scopes, or authorization metadata |
+| `TEMPO-ZONE-BALANCE-ALLOWANCE-PRIVACY` | `balanceOf(account)` reveals values only to `account`; `allowance(owner, spender)` reveals values only to `owner` or `spender` | 🟡 | Account balances and approvals leak through token precompiles |
+| `TEMPO-ZONE-ACCOUNT-GETTER-PRIVACY` | Account-indexed `NonceManager` and `AccountKeychain` getters reveal values only when their immediate caller owns the queried account | 🟡 | Forwarding contracts or ordinary users can expose another account's nonce activity, keys, limits, call scopes, or authorization metadata |
 | `TEMPO-ZONE-REFUND-READ-PRIVACY` | `ZoneInbox.refunds(token, owner)` reveals a value only when its immediate caller is `owner` or an active sequencer | 🟡 | Forwarding contracts can expose another account's pending refund balance |
 | `TEMPO-ZONE-FIXED-TOKEN-GAS` | TIP-20 transfer and approve operations charge fixed gas independent of account storage layout | 🟢 | Gas timing leaks whether addresses have prior token activity |
 | `TEMPO-ZONE-BLOCK-TIMESTAMP-MONOTONIC` | Zone block timestamps are non-decreasing and block numbers increment by one | 🟢 | Time-dependent application logic and proof replay assumptions can break |

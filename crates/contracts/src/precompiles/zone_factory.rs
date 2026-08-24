@@ -16,6 +16,7 @@ pub const ZONE_VERIFIER_ADDRESS: Address = address!("0x5a56000000000000000000000
 pub const ZONE_MESSENGER_ADDRESS: Address = address!("0x5A4d000000000000000000000000000000000000");
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug)]
     contract ZoneFactory {
         struct ZoneInfo {
@@ -56,6 +57,9 @@ crate::sol! {
         error NotOwner();
         error InvalidAdmin();
         error InvalidSequencerSet();
+        error InvalidClosedLoopConfig();
+        error DuplicateAllowedAccount();
+        error DuplicateZoneGateway();
         function owner() external view returns (address);
         function transferOwnership(address newOwner) external;
         function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);

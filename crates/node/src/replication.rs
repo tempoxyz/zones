@@ -20,8 +20,8 @@ use std::{
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tokio_util::sync;
+use tracing::{debug, info};
 use zone_l1::{DepositQueue, L1BlockTracker, L1PortalEvents, TempoStateExt as _};
 use zone_p2p::{
     BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
@@ -47,6 +47,8 @@ use crate::settlement_attestation::build_settlement_attestation;
 #[derive(Clone)]
 pub(crate) struct AttestationContext {
     pub(crate) domain: AttestationDomain,
+    /// Portal sequencer-set version validated against the manifest at startup.
+    pub(crate) pinned_sequencer_set_version: Option<u64>,
     /// `None` on an rpc-only member: it holds no individual key and never signs.
     pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
@@ -58,6 +60,7 @@ pub(crate) struct AttestationContext {
 impl AttestationContext {
     pub(crate) fn new(
         domain: AttestationDomain,
+        pinned_sequencer_set_version: Option<u64>,
         signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
         store: AttestationStore,
@@ -66,6 +69,7 @@ impl AttestationContext {
     ) -> Self {
         Self {
             domain,
+            pinned_sequencer_set_version,
             signer,
             addresses,
             store,
@@ -350,6 +354,7 @@ where
 
 const BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BLOCK_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
+const PEER_ANCHOR_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_BLOCKS: usize = 128;
 const BACKFILL_PAGE_SIZE: u64 = 64;
 /// Bounds queued requests at the process-lifetime backfill server. Requesters keep at most
@@ -641,7 +646,7 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
     provider: P,
     mut events: mpsc::Receiver<P2pEvent>,
     attestation: AttestationContext,
-    stop: CancellationToken,
+    stop: sync::CancellationToken,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -715,7 +720,7 @@ pub(crate) async fn run_follower_block_sync<P>(
     attestation: AttestationContext,
     schedule: LeadershipSchedule,
     peer_tips: PeerTipRegistry,
-    stop: CancellationToken,
+    stop: sync::CancellationToken,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -764,7 +769,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                         inactivity
                             .as_mut()
                             .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                        process_follower_block(
+                        if !process_follower_block(
                             &provider,
                             &engine,
                             &l1_block_tracker,
@@ -775,8 +780,12 @@ pub(crate) async fn run_follower_block_sync<P>(
                             number,
                             block,
                             None,
+                            &stop,
                         )
-                        .await;
+                        .await
+                        {
+                            return;
+                        }
                     }
                     BackfillResponse::Completed { peer, tip } => {
                         peer_tips.record(peer.clone(), tip);
@@ -869,7 +878,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                         inactivity
                             .as_mut()
                             .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                        process_follower_block(
+                        if !process_follower_block(
                             &provider,
                             &engine,
                             &l1_block_tracker,
@@ -880,8 +889,12 @@ pub(crate) async fn run_follower_block_sync<P>(
                             number,
                             block,
                             live_sender,
+                            &stop,
                         )
-                        .await;
+                        .await
+                        {
+                            return;
+                        }
                     }
                     P2pEvent::TransactionReceived { .. } => {
                         debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
@@ -943,7 +956,9 @@ async fn process_follower_block<P>(
     number: u64,
     block: Vec<u8>,
     live_sender: Option<P2pPeerId>,
-) where
+    stop: &sync::CancellationToken,
+) -> bool
+where
     P: BlockNumReader
         + BlockReader<Block = Block>
         + HeaderProvider<Header = TempoHeader>
@@ -958,7 +973,7 @@ async fn process_follower_block<P>(
         Ok(best) => best,
         Err(err) => {
             tracing::error!(target: "zone::p2p", %err, "Failed reading local head");
-            return;
+            return true;
         }
     };
     let peer_block = PendingPeerBlock {
@@ -966,19 +981,27 @@ async fn process_follower_block<P>(
         live_sender,
     };
     if number <= best {
-        if let Err(err) = import_peer_block(
+        match import_peer_block(
             provider,
             engine,
             l1_block_tracker,
             deposit_queue,
             schedule,
             &peer_block,
+            stop,
         )
         .await
         {
-            tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
+            Ok(PeerBlockImportOutcome::Cancelled) => return false,
+            Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
+                tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
+            }
+            Ok(PeerBlockImportOutcome::Imported) => {}
+            Err(err) => {
+                tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
+            }
         }
-        return;
+        return true;
     }
     backfill.observe_block(number, best);
     if let Some(dropped) = buffer_pending_block(pending, number, peer_block) {
@@ -987,28 +1010,42 @@ async fn process_follower_block<P>(
     if number > best.saturating_add(1) {
         info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
     }
-    if let Err(err) = drain_pending_blocks(
+    match drain_pending_blocks(
         provider,
         engine,
         l1_block_tracker,
         deposit_queue,
         schedule,
         pending,
+        stop,
     )
     .await
     {
-        tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
-        backfill.needed = true;
-    } else {
-        let best = match provider.best_block_number() {
-            Ok(best) => best,
-            Err(err) => {
-                tracing::error!(target: "zone::p2p", %err, "Failed reading local head after importing peer blocks");
-                return;
-            }
-        };
-        backfill.refresh_after_import(best, pending.first_key_value().map(|(&number, _)| number));
+        Ok(PeerBlockImportOutcome::Cancelled) => return false,
+        Ok(PeerBlockImportOutcome::TimedOut {
+            block_number,
+            anchor,
+        }) => {
+            tracing::warn!(target: "zone::p2p", block_number, anchor_number = anchor.number, anchor_hash = ?anchor.hash, "Dropping peer block whose L1 anchor was not observed before the import deadline");
+            backfill.needed = true;
+        }
+        Ok(PeerBlockImportOutcome::Imported) => {
+            let best = match provider.best_block_number() {
+                Ok(best) => best,
+                Err(err) => {
+                    tracing::error!(target: "zone::p2p", %err, "Failed reading local head after importing peer blocks");
+                    return true;
+                }
+            };
+            backfill
+                .refresh_after_import(best, pending.first_key_value().map(|(&number, _)| number));
+        }
+        Err(err) => {
+            tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
+            backfill.needed = true;
+        }
     }
+    true
 }
 
 async fn drain_pending_blocks<P>(
@@ -1018,7 +1055,8 @@ async fn drain_pending_blocks<P>(
     deposit_queue: &DepositQueue,
     schedule: &LeadershipSchedule,
     pending: &mut BTreeMap<u64, PendingPeerBlock>,
-) -> eyre::Result<()>
+    stop: &sync::CancellationToken,
+) -> eyre::Result<PeerBlockImportOutcome>
 where
     P: reth_storage_api::BlockNumReader
         + reth_storage_api::HeaderProvider<Header = TempoHeader>
@@ -1031,7 +1069,7 @@ where
     loop {
         let next = provider.best_block_number()?.saturating_add(1);
         let Some(block) = pending.remove(&next) else {
-            return Ok(());
+            return Ok(PeerBlockImportOutcome::Imported);
         };
         import_peer_block(
             provider,
@@ -1040,6 +1078,7 @@ where
             deposit_queue,
             schedule,
             &block,
+            stop,
         )
         .await?;
     }
@@ -1052,7 +1091,8 @@ async fn import_peer_block<P>(
     deposit_queue: &DepositQueue,
     schedule: &LeadershipSchedule,
     peer_block: &PendingPeerBlock,
-) -> eyre::Result<()>
+    stop: &sync::CancellationToken,
+) -> eyre::Result<PeerBlockImportOutcome>
 where
     P: BlockNumReader
         + HeaderProvider<Header = TempoHeader>
@@ -1082,7 +1122,7 @@ where
         })?;
         if existing.hash() == hash {
             debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate peer block");
-            return Ok(());
+            return Ok(PeerBlockImportOutcome::Imported);
         }
         eyre::bail!(
             "peer block conflicts with canonical block at height {block_number}: local={}, received={hash}",
@@ -1133,15 +1173,31 @@ where
         anchor.number,
         block_number,
     )?;
-    let observed = wait_for_validated_peer_anchor(
+    let observed = match wait_for_validated_peer_anchor(
         l1_block_tracker,
         schedule,
         &portal_inputs,
         peer_block.live_sender.as_ref(),
         anchor,
         block_number,
+        stop,
+        PEER_ANCHOR_WAIT_TIMEOUT,
     )
-    .await?;
+    .await
+    {
+        Ok(observed) => observed,
+        Err(PeerAnchorWaitError::Cancelled) => return Ok(PeerBlockImportOutcome::Cancelled),
+        Err(PeerAnchorWaitError::TimedOut {
+            block_number,
+            anchor,
+        }) => {
+            return Ok(PeerBlockImportOutcome::TimedOut {
+                block_number,
+                anchor,
+            });
+        }
+        Err(PeerAnchorWaitError::Other(error)) => return Err(error),
+    };
 
     // The subscriber normally enqueues immediately after recording this observation. Enqueueing
     // here as well closes that small scheduling window and makes follower import self-contained;
@@ -1178,7 +1234,7 @@ where
     schedule.record_applied_anchor(anchor.number);
 
     info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
-    Ok(())
+    Ok(PeerBlockImportOutcome::Imported)
 }
 
 fn validate_live_block_sender(
@@ -1212,34 +1268,47 @@ async fn wait_for_validated_peer_anchor(
     live_sender: Option<&P2pPeerId>,
     anchor: NumHash,
     block_number: u64,
-) -> eyre::Result<L1PortalEvents> {
-    let observed = loop {
-        match tokio::time::timeout(
-            Duration::from_secs(30),
+    stop: &sync::CancellationToken,
+    wait_timeout: Duration,
+) -> Result<L1PortalEvents, PeerAnchorWaitError> {
+    let observed = tokio::select! {
+        biased;
+        () = stop.cancelled() => return Err(PeerAnchorWaitError::Cancelled),
+        observed = tokio::time::timeout(
+            wait_timeout,
             l1_block_tracker.wait_for_portal_events(anchor),
-        )
-        .await
-        {
-            Ok(observed) => {
-                let observed = observed?;
-                portal_inputs.validate(&observed)?;
-                break observed;
-            }
-            Err(_) => warn!(
-                target: "zone::p2p",
+        ) => match observed {
+            Ok(observed) => observed.map_err(PeerAnchorWaitError::Other)?,
+            Err(_) => return Err(PeerAnchorWaitError::TimedOut {
                 block_number,
-                l1_block = anchor.number,
-                l1_hash = ?anchor.hash,
-                "Peer block import is waiting for local L1 observation of its anchor"
-            ),
-        }
+                anchor,
+            }),
+        },
     };
+    portal_inputs
+        .validate(&observed)
+        .map_err(PeerAnchorWaitError::Other)?;
 
     // The L1 subscriber publishes any transition finalized by this anchor before recording the
     // anchor in the tracker. Re-read the schedule now so the pre-wait decision cannot authorize a
     // sender that this anchor demoted.
-    validate_live_block_sender(schedule, live_sender, anchor.number, block_number)?;
+    validate_live_block_sender(schedule, live_sender, anchor.number, block_number)
+        .map_err(PeerAnchorWaitError::Other)?;
     Ok(observed)
+}
+
+#[derive(Debug)]
+enum PeerBlockImportOutcome {
+    Imported,
+    Cancelled,
+    TimedOut { block_number: u64, anchor: NumHash },
+}
+
+#[derive(Debug)]
+enum PeerAnchorWaitError {
+    Cancelled,
+    TimedOut { block_number: u64, anchor: NumHash },
+    Other(eyre::Report),
 }
 
 struct AdvanceTempoPortalInputs {
@@ -1330,19 +1399,24 @@ fn decode_advance_tempo(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use alloy_eips::NumHash;
     use futures::{StreamExt as _, stream};
     use tokio::sync::{oneshot, watch};
+    use tokio_util::sync;
 
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
-        MAX_PENDING_BLOCKS, PersistedBlockSource, PersistedTip, broadcast_persisted_blocks,
-        buffer_pending_block, validate_live_block_sender, wait_for_validated_peer_anchor,
+        MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PersistedBlockSource, PersistedTip,
+        broadcast_persisted_blocks, buffer_pending_block, validate_live_block_sender,
+        wait_for_validated_peer_anchor,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
@@ -1451,7 +1525,7 @@ mod tests {
             decryptions: vec![],
             enabled_tokens: vec![],
         };
-        let tx = zone_payload::build_advance_tempo_tx(&prepared);
+        let tx = zone_payload::build_advance_tempo_tx(&prepared, 1337);
         let block = SealedBlock::seal_slow(Block {
             header: TempoHeader::default(),
             body: alloy_consensus::BlockBody {
@@ -1544,7 +1618,7 @@ mod tests {
             enabled_tokens: vec![],
         };
         let TempoTxEnvelope::Legacy(system_tx) =
-            zone_payload::build_advance_tempo_tx(&prepared).into_inner()
+            zone_payload::build_advance_tempo_tx(&prepared, 1337).into_inner()
         else {
             unreachable!("advanceTempo builder must produce a legacy transaction")
         };
@@ -1706,6 +1780,8 @@ mod tests {
                     Some(&outgoing),
                     anchor,
                     ZONE_BLOCK_NUMBER,
+                    &sync::CancellationToken::new(),
+                    PEER_ANCHOR_WAIT_TIMEOUT,
                 )
                 .await
             })
@@ -1724,10 +1800,69 @@ mod tests {
             .await
             .expect("anchor waiter must not panic")
             .expect_err("the post-observation sender check must reject the outgoing leader");
+        let super::PeerAnchorWaitError::Other(error) = error else {
+            panic!("sender validation must fail as an operational error");
+        };
         let message = error.to_string();
         assert!(message.contains(&outgoing.to_string()));
         assert!(message.contains(&incoming.to_string()));
         assert!(message.contains("schedule assigns that anchor"));
+    }
+
+    #[tokio::test]
+    async fn peer_anchor_wait_stops_promptly_on_generation_cancellation() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+        let leader = PrivateKey::from_seed(1).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, leader, 0));
+        let tracker = L1BlockTracker::default();
+        let stop = sync::CancellationToken::new();
+        stop.cancel();
+
+        let error = wait_for_validated_peer_anchor(
+            &tracker,
+            &schedule,
+            &AdvanceTempoPortalInputs {
+                deposits: vec![],
+                enabled_tokens: vec![],
+            },
+            None,
+            NumHash::new(10, B256::repeat_byte(0x10)),
+            7,
+            &stop,
+            PEER_ANCHOR_WAIT_TIMEOUT,
+        )
+        .await
+        .expect_err("cancelled generation must stop waiting for its peer anchor");
+
+        assert!(matches!(error, super::PeerAnchorWaitError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn peer_anchor_wait_has_one_finite_deadline() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+        let leader = PrivateKey::from_seed(1).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, leader, 0));
+        let tracker = L1BlockTracker::default();
+
+        let error = wait_for_validated_peer_anchor(
+            &tracker,
+            &schedule,
+            &AdvanceTempoPortalInputs {
+                deposits: vec![],
+                enabled_tokens: vec![],
+            },
+            None,
+            NumHash::new(10, B256::repeat_byte(0x10)),
+            7,
+            &sync::CancellationToken::new(),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("missing peer anchor must reach its import deadline");
+
+        assert!(matches!(error, super::PeerAnchorWaitError::TimedOut { .. }));
     }
 
     #[test]

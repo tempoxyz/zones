@@ -17,7 +17,7 @@ use alloy::{
 };
 use reth_chainspec::EthChainSpec as _;
 use reth_trie_common::{EMPTY_ROOT_HASH, HashBuilder, Nibbles, TrieAccount, proof::ProofRetainer};
-use tempo_chainspec::spec::{DEV, TEMPO_T0_BASE_FEE};
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     storage::StorageKey as _,
@@ -100,7 +100,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         .expect("second raw user transaction");
 
     let (state_root, zone_state_witness) = zone_state_witness(&genesis);
-    assert_eq!(state_root, genesis_block.header.state_root);
+    assert_eq!(state_root, genesis_block.header.state_root());
     let tempo_header = TempoHeader::default();
     let tempo_header_rlp = Bytes::from(alloy_rlp::encode(&tempo_header));
     let config = spf_config(&genesis);
@@ -121,10 +121,11 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         },
         zone_blocks: vec![
             ZoneBlock {
-                number: first_built_block.header.number,
+                number: first_built_block.header.number(),
                 parent_hash,
-                timestamp: first_built_block.header.timestamp,
-                beneficiary: first_built_block.header.beneficiary,
+                timestamp: first_built_block.header.timestamp(),
+                timestamp_millis_part: first_built_block.header.timestamp_millis_part,
+                beneficiary: first_built_block.header.beneficiary(),
                 tempo_header_rlp: Bytes::from(alloy_rlp::encode(&first_tempo_block.header)),
                 deposits: vec![],
                 decryptions: vec![],
@@ -134,10 +135,11 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 transactions: vec![first_raw_transaction],
             },
             ZoneBlock {
-                number: second_built_block.header.number,
+                number: second_built_block.header.number(),
                 parent_hash: first_hash,
-                timestamp: second_built_block.header.timestamp,
-                beneficiary: second_built_block.header.beneficiary,
+                timestamp: second_built_block.header.timestamp(),
+                timestamp_millis_part: second_built_block.header.timestamp_millis_part,
+                beneficiary: second_built_block.header.beneficiary(),
                 tempo_header_rlp: Bytes::from(alloy_rlp::encode(&second_tempo_block.header)),
                 deposits: vec![],
                 decryptions: vec![],
@@ -206,7 +208,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn spf_rejects_uncomposed_spec_for_migrated_policy_transaction() -> eyre::Result<()> {
+async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Result<()> {
     let mut genesis = funded_zone_genesis();
     // Model a TIP-1092 migration: T9 reads the parent Tempo registry binding, while older forks
     // fall back to this legacy TIP-20 slot. Removing it makes the wrong fork choice observable.
@@ -241,20 +243,6 @@ async fn spf_rejects_uncomposed_spec_for_migrated_policy_transaction() -> eyre::
     let config = spf_config(&genesis);
     let witness = built.batch_witness(&config, zone_state_witness, tempo_state_nodes);
 
-    let uncomposed_config = SpfConfig::new(
-        Arc::new(ZoneChainSpec::from_genesis(genesis.clone())),
-        Address::ZERO,
-    );
-    let uncomposed = prove_zone_batch(&uncomposed_config, witness.clone());
-    assert_eq!(
-        uncomposed,
-        Err(zone_spf::Error::TransactionExecution {
-            block_index: 0,
-            transaction_index: 0,
-        }),
-        "pre-T9 replay must fail the successful migrated-policy transaction"
-    );
-
     let output = prove_zone_batch(&config, witness)?;
 
     assert_eq!(
@@ -268,6 +256,7 @@ struct BuiltTransactionBlock {
     genesis_state_root: B256,
     zone_number: u64,
     zone_timestamp: u64,
+    zone_timestamp_millis_part: u64,
     zone_beneficiary: Address,
     zone_hash: B256,
     tempo_header: TempoHeader,
@@ -299,6 +288,7 @@ impl BuiltTransactionBlock {
                 number: self.zone_number,
                 parent_hash,
                 timestamp: self.zone_timestamp,
+                timestamp_millis_part: self.zone_timestamp_millis_part,
                 beneficiary: self.zone_beneficiary,
                 tempo_header_rlp: Bytes::from(alloy_rlp::encode(&self.tempo_header)),
                 deposits: vec![],
@@ -374,10 +364,11 @@ async fn build_single_transaction_block(
         .await?;
 
     Ok(BuiltTransactionBlock {
-        genesis_state_root: genesis_block.header.state_root,
-        zone_number: built_block.header.number,
-        zone_timestamp: built_block.header.timestamp,
-        zone_beneficiary: built_block.header.beneficiary,
+        genesis_state_root: genesis_block.header.state_root(),
+        zone_number: built_block.header.number(),
+        zone_timestamp: built_block.header.timestamp(),
+        zone_timestamp_millis_part: built_block.header.timestamp_millis_part,
+        zone_beneficiary: built_block.header.beneficiary(),
         zone_hash: built_block.header.hash,
         tempo_header: l1_block.header,
         raw_user_transaction,
@@ -411,8 +402,10 @@ fn funded_zone_genesis() -> Genesis {
 }
 
 fn spf_config(genesis: &Genesis) -> SpfConfig {
-    let chain_spec =
-        ZoneChainSpec::from_genesis(genesis.clone()).with_tempo_hardforks_from(DEV.as_ref());
+    let mut genesis = genesis.clone();
+    genesis.config.chain_id = zone_primitives::constants::zone_chain_id(1_337, ZONE_ID)
+        .expect("valid zone genesis chain ID");
+    let chain_spec = ZoneChainSpec::from_genesis(genesis).expect("valid zone genesis chain ID");
     SpfConfig::new(Arc::new(chain_spec), Address::ZERO)
 }
 

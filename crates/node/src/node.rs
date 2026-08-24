@@ -10,8 +10,8 @@ use crate::{
     },
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
-        route_backfill_requests, route_backfill_responses, route_events_to_generations,
-        run_role_controller,
+        canonical_recovery_height, route_backfill_requests, route_backfill_responses,
+        route_events_to_generations, run_role_controller,
     },
     rpc::{
         NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi, SequencerRpcContext,
@@ -35,7 +35,7 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
         NoopNetworkBuilder, PoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
@@ -57,8 +57,7 @@ use reth_transaction_pool::{
 };
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoInvalidTransaction;
+use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -90,30 +89,12 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
     ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
 };
-
-/// Returns a known Tempo chain spec for an L1 chain ID.
-///
-/// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
-///
-/// Additional dev-schedule L1 chain IDs (devnets that activate all Tempo
-/// hardforks at genesis) can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
-/// environment variable as a comma-separated list.
-fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
-    chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
-        1337 | 31337 => Some(DEV.clone()),
-        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
-            .ok()?
-            .split(',')
-            .any(|id| id.trim().parse() == Ok(chain_id))
-            .then(|| DEV.clone()),
-    })
-}
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
     let expected = zone_chain_id(parent_chain_id, zone_id)?;
@@ -207,6 +188,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// Run the SPF over finalized candidates in detached, observational mode.
     pub enable_prover: bool,
+    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    pub prover_address: Option<String>,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -407,47 +390,6 @@ impl ZoneNode {
     pub fn deposit_decryption_keys(&self) -> Option<EncryptionKeyRing> {
         self.l1_config.encryption_keys.clone()
     }
-    /// Returns a [`ComponentsBuilder`] configured for a Zone node.
-    pub fn components<N>(
-        executor_builder: ZoneExecutorBuilder,
-    ) -> ComponentsBuilder<
-        N,
-        ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
-        NoopNetworkBuilder<ZoneNetworkPrimitives>,
-        ZoneExecutorBuilder,
-        NoopConsensusBuilder,
-    >
-    where
-        N: FullNodeTypes<Types = Self>,
-    {
-        Self::components_with_payload_factory(executor_builder, ZonePayloadFactory::default())
-    }
-
-    fn components_with_payload_factory<N>(
-        executor_builder: ZoneExecutorBuilder,
-        payload_factory: ZonePayloadFactory,
-    ) -> ComponentsBuilder<
-        N,
-        ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
-        NoopNetworkBuilder<ZoneNetworkPrimitives>,
-        ZoneExecutorBuilder,
-        NoopConsensusBuilder,
-    >
-    where
-        N: FullNodeTypes<Types = Self>,
-    {
-        ComponentsBuilder::default()
-            .node_types::<N>()
-            .pool(ZonePoolBuilder::new(
-                executor_builder.enabled_tokens.clone(),
-            ))
-            .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(payload_factory))
-            .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
-            .noop_consensus()
-    }
 }
 
 impl NodeTypes for ZoneNode {
@@ -572,7 +514,9 @@ where
             .await?
             .erased();
         let l1_chain_id = l1_provider.get_chain_id().await?;
-        let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let chain_spec = ctx.node.provider().chain_spec();
+        let chain_id = chain_spec.genesis().config.chain_id;
+        let genesis_zone_id = chain_spec.zone_id();
         // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
         // explicit sentinel because they have no on-chain portal to bind against.
         if self.portal_address.is_zero() {
@@ -592,8 +536,9 @@ where
                     )
                 })?;
 
+            validate_configured_zone_id("genesis", genesis_zone_id, portal_zone_id)?;
             validate_configured_zone_id(
-                "--zone.id/redacted RPC configuration",
+                "redacted RPC configuration",
                 self.redacted_rpc_config.zone_id,
                 portal_zone_id,
             )?;
@@ -605,7 +550,7 @@ where
                 )?;
             }
             if let Some(config) = self.p2p_config.as_ref() {
-                validate_configured_zone_id("P2P manifest", config.zone_id(), portal_zone_id)?;
+                validate_configured_zone_id("P2P configuration", config.zone_id(), portal_zone_id)?;
             }
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
@@ -652,10 +597,13 @@ where
             schedule.record_applied_anchor(snapshot_anchor);
             install_manifest_forced_recovery(
                 ctx.node.provider(),
+                &l1_provider,
+                self.portal_address,
                 snapshot_anchor,
                 p2p.manifest(),
                 &schedule,
-            )?;
+            )
+            .await?;
             self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
                 schedule,
                 manifest: p2p.manifest().clone(),
@@ -680,8 +628,7 @@ where
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
                 portal_address: self.portal_address,
-                zone_id: config.zone_id(),
-                sequencer_set_version: config.sequencer_set_version(),
+                zone_id: genesis_zone_id,
             };
             let anchor_config = self
                 .sequencer_config
@@ -692,15 +639,17 @@ where
             // decides whose signatures count and how many are needed. Reconcile them before any
             // role task starts, so a disagreement fails at startup instead of stalling
             // settlement at the next batch boundary.
-            crate::settlement_attestation::validate_registered_sequencer_set(
-                config.manifest(),
-                self.portal_address,
-                &l1_provider,
-            )
-            .await?;
+            let pinned_sequencer_set_version =
+                crate::settlement_attestation::validate_registered_sequencer_set(
+                    config.manifest(),
+                    self.portal_address,
+                    &l1_provider,
+                )
+                .await?;
             // Every node holds an attestation store so it can be promoted anytime.
             let attestation = AttestationContext::new(
                 attestation_domain,
+                pinned_sequencer_set_version,
                 config.block_attestation_signer(),
                 config.block_attestation_addresses(),
                 AttestationStore::default(),
@@ -755,9 +704,11 @@ where
                     role_status.clone(),
                     peer_tips.clone(),
                     manifest,
+                    pinned_sequencer_set_version,
                     local_secp256k1_address,
                     local_ed25519_public_key.clone(),
                     relayer,
+                    self.l1_config.encryption_keys.clone().unwrap_or_default(),
                 ))
                 .expect("the sequencer RPC context is installed exactly once");
             p2p_runtime = Some((
@@ -814,6 +765,7 @@ where
                     NodeZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
                 )?;
                 container.modules.merge_http(operator_zone_rpc_module(
+                    genesis_zone_id,
                     portal_address,
                     operator_rpc_slot,
                     operator_rpc_provider,
@@ -830,6 +782,7 @@ where
                 zone_id: config.zone_id,
                 chain_spec: evm_chain_spec,
                 debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+                prover_address: config.prover_address.clone(),
             });
 
         Self::launch_redacted_rpc(
@@ -988,44 +941,74 @@ impl LeadershipSink for ScheduleLeadershipSink {
 
 /// Install the manifest's temporary runtime authority before any role-dependent task starts.
 ///
-/// The selected block must be the persisted canonical head. The schedule was seeded from the
-/// portal at that block's Tempo anchor immediately before this call, so its latest epoch is the
-/// portal state being overridden.
-fn install_manifest_forced_recovery<P>(
+/// The selected block must remain in the persisted canonical chain. Its historical state restores
+/// the original Tempo anchor and portal epoch, while the current portal snapshot distinguishes an
+/// in-progress recovery from a completed directive left in the manifest after restart.
+///
+/// Canonical ancestry is intentionally a local restart check. Cross-node convergence still relies
+/// on the operational invariant that every descendant was produced on the same chain by the
+/// selected, non-equivocating recovery leader.
+async fn install_manifest_forced_recovery<P>(
     provider: &P,
+    l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+    portal_address: Address,
     snapshot_anchor: u64,
     manifest: &ZoneManifest,
     schedule: &LeadershipSchedule,
 ) -> eyre::Result<()>
 where
-    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader> + StateProviderFactory,
 {
     let Some(recovery) = manifest.forced_recovery() else {
         return Ok(());
     };
-    let portal_epoch = schedule.latest().map(|record| record.epoch).ok_or_else(|| {
+    let portal_leadership = schedule.latest().ok_or_else(|| {
         eyre::eyre!(
             "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint"
         )
     })?;
-    let zone_height = provider.best_block_number()?;
-    let zone_header = provider
-        .sealed_header(zone_height)?
-        .ok_or_else(|| eyre::eyre!("local canonical zone header {zone_height} is missing"))?;
-    eyre::ensure!(
-        zone_header.hash() == recovery.recovery_block_hash(),
-        "forced recovery block hash {} does not equal local canonical head {} at height {}",
-        recovery.recovery_block_hash(),
-        zone_header.hash(),
-        zone_height,
-    );
-
-    let recovery_start_tempo_block = snapshot_anchor
+    let recovery_zone_height = canonical_recovery_height(provider, recovery.recovery_block_hash())?;
+    let recovery_anchor = provider
+        .history_by_block_number(recovery_zone_height)?
+        .tempo_block_number()?;
+    let recovery_start_tempo_block = recovery_anchor
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
-    let recovery_epoch = portal_epoch
+
+    let recovery_portal_epoch = if recovery_anchor == snapshot_anchor {
+        portal_leadership.epoch
+    } else {
+        ZonePortal::new(portal_address, l1_provider)
+            .leaderEpoch()
+            .block(alloy_rpc_types_eth::BlockId::number(recovery_anchor))
+            .call()
+            .await
+            .map_err(|err| {
+                eyre::eyre!(
+                    "failed to read portal epoch at recovery Tempo block {recovery_anchor}: {err}"
+                )
+            })?
+    };
+    let recovery_epoch = recovery_portal_epoch
         .checked_add(1)
         .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
+
+    if portal_leadership.epoch >= recovery_epoch {
+        warn!(
+            target: "reth::cli",
+            leader = %recovery.leader(),
+            recovery_epoch,
+            recovery_zone_height,
+            recovery_zone_hash = %recovery.recovery_block_hash(),
+            snapshot_anchor,
+            portal_epoch = portal_leadership.epoch,
+            portal_activation_tempo_block = portal_leadership.activation_tempo_block,
+            "Skipping completed manifest forced recovery; remove the stale directive"
+        );
+        metrics::counter!("zone_forced_recovery_directives_total", "result" => "completed")
+            .increment(1);
+        return Ok(());
+    }
     schedule.install_forced_recovery(
         recovery_epoch,
         recovery.leader().clone(),
@@ -1035,10 +1018,11 @@ where
     info!(
         target: "reth::cli",
         leader = %recovery.leader(),
-        portal_epoch,
-        recovery_zone_height = zone_height,
+        recovery_portal_epoch,
+        recovery_zone_height,
         recovery_zone_hash = %recovery.recovery_block_hash(),
         recovery_start_tempo_block,
+        resumed = snapshot_anchor >= recovery_start_tempo_block,
         "Installed manifest forced recovery"
     );
     Ok(())
@@ -1103,7 +1087,8 @@ async fn seed_leadership_schedule(
              historical manifest identity; refusing to start without an authenticated leader"
             )
         })?;
-    schedule.publish(LeadershipState::new(epoch, leader_peer.clone(), activation))?;
+    let leadership = LeadershipState::new(epoch, leader_peer.clone(), activation);
+    schedule.publish(leadership)?;
     info!(
         target: "reth::cli",
         snapshot_anchor,
@@ -1532,7 +1517,7 @@ where
         BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        NoopConsensusBuilder,
+        ZoneConsensusBuilder,
     >;
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
@@ -1546,7 +1531,15 @@ where
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
             payload_factory = payload_factory.with_withdrawal_reveal_encryptor(encryptor);
         }
-        Self::components_with_payload_factory(executor_builder, payload_factory)
+        ComponentsBuilder::default()
+            .node_types::<N>()
+            .pool(ZonePoolBuilder::new(
+                executor_builder.enabled_tokens.clone(),
+            ))
+            .executor(executor_builder)
+            .payload(BasicPayloadServiceBuilder::new(payload_factory))
+            .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
+            .consensus(ZoneConsensusBuilder::default())
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -1621,6 +1614,28 @@ impl ZoneExecutorBuilder {
     }
 }
 
+/// Builds Tempo consensus from the Zone chain spec with Tempo fork activations inherited from L1.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZoneConsensusBuilder;
+
+impl Default for ZoneConsensusBuilder {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<Node> ConsensusBuilder<Node> for ZoneConsensusBuilder
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type Consensus = TempoConsensus<ZoneChainSpec>;
+
+    async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
+        Ok(TempoConsensus::new(ctx.chain_spec()))
+    }
+}
+
 impl<Node> ExecutorBuilder<Node> for ZoneExecutorBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
@@ -1638,15 +1653,12 @@ where
         .await?;
 
         let l1_chain_id = l1_provider.chain_id().await?;
-        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
-            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
-        // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
-        let evm_config = ZoneEvmConfig::new(
-            ctx.chain_spec(),
-            tempo_chain_spec,
-            l1_provider,
-            portal_address,
+        let genesis_l1_chain_id = decode_l1_chain_id(ctx.chain_spec().genesis().config.chain_id)?;
+        eyre::ensure!(
+            l1_chain_id == genesis_l1_chain_id,
+            "L1 chain ID mismatch: genesis requires {genesis_l1_chain_id}, but L1 RPC reports {l1_chain_id}"
         );
+        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, portal_address);
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)
@@ -1815,6 +1827,7 @@ mod tests {
     use tempo_primitives::transaction::{
         AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
     };
+    use zone_chainspec::tempo_chain_spec_for_l1;
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
         TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))
@@ -1933,6 +1946,48 @@ mod tests {
         assert!(validate_configured_zone_id("test", 7, 7).is_ok());
         assert!(validate_configured_zone_id("test", 0, 7).is_err());
         assert!(validate_configured_zone_id("test", 8, 7).is_err());
+    }
+
+    #[test]
+    fn forced_recovery_restart_preserves_one_window_across_different_heads() {
+        let recovery_leader = PrivateKey::from_seed(2).public_key();
+        let portal_leader = PrivateKey::from_seed(3).public_key();
+        let recovery_epoch = 2;
+        let recovery_start = 23_333;
+        let recovery_hash = alloy_primitives::B256::repeat_byte(0x42);
+
+        let restart_schedule = |snapshot_anchor| {
+            let portal = LeadershipState::new(1, portal_leader.clone(), 0);
+            let schedule = LeadershipSchedule::seeded(LeadershipState::new(
+                portal.epoch,
+                portal_leader.clone(),
+                portal.activation_tempo_block,
+            ));
+            schedule.record_applied_anchor(snapshot_anchor);
+            schedule
+                .install_forced_recovery(
+                    recovery_epoch,
+                    recovery_leader.clone(),
+                    recovery_hash,
+                    recovery_start,
+                )
+                .unwrap();
+            schedule
+        };
+
+        let lagging = restart_schedule(24_284);
+        let advanced = restart_schedule(26_000);
+
+        for (schedule, next_anchor) in [(lagging, 24_285), (advanced, 26_001)] {
+            let recovery = schedule.forced_recovery().unwrap();
+            assert_eq!(recovery.epoch, recovery_epoch);
+            assert_eq!(recovery.recovery_start_tempo_block, recovery_start);
+            assert_eq!(recovery.recovery_block_hash, recovery_hash);
+            assert_eq!(
+                schedule.leader_for(next_anchor).unwrap().leader,
+                recovery_leader
+            );
+        }
     }
 
     #[test]

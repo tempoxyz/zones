@@ -4199,9 +4199,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -11352,7 +11352,7 @@ dependencies = [
 [[package]]
 name = "tempo-alloy"
 version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -11398,7 +11398,7 @@ dependencies = [
 [[package]]
 name = "tempo-chainspec"
 version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-eips",
  "alloy-evm",
@@ -11410,7 +11410,6 @@ dependencies = [
  "once_cell",
  "paste",
  "reth-chainspec",
- "reth-cli",
  "reth-network-peers",
  "serde",
  "serde_json",
@@ -11422,7 +11421,7 @@ dependencies = [
 [[package]]
 name = "tempo-contracts"
 version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-contract",
  "alloy-primitives",
@@ -11434,7 +11433,7 @@ dependencies = [
 [[package]]
 name = "tempo-dkg-onchain-artifacts"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -11446,7 +11445,7 @@ dependencies = [
 [[package]]
 name = "tempo-evm"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -11481,7 +11480,7 @@ dependencies = [
 [[package]]
 name = "tempo-hardfork"
 version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-eips",
  "alloy-evm",
@@ -11493,7 +11492,7 @@ dependencies = [
 [[package]]
 name = "tempo-node"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -11553,7 +11552,7 @@ dependencies = [
 [[package]]
 name = "tempo-payload-builder"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -11591,7 +11590,7 @@ dependencies = [
 [[package]]
 name = "tempo-payload-types"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -11611,18 +11610,22 @@ dependencies = [
 [[package]]
 name = "tempo-precompiles"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy",
  "alloy-evm",
+ "alloy-json-abi",
  "alloy-primitives",
  "bitflags 2.13.0",
  "commonware-codec",
  "commonware-cryptography",
  "derive_more",
+ "itertools 0.14.0",
  "paste",
  "revm",
  "scoped-tls",
+ "serde",
+ "serde_json",
  "tempo-chainspec",
  "tempo-contracts",
  "tempo-precompiles-macros",
@@ -11634,7 +11637,7 @@ dependencies = [
 [[package]]
 name = "tempo-precompiles-macros"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy",
  "proc-macro2",
@@ -11645,7 +11648,7 @@ dependencies = [
 [[package]]
 name = "tempo-primitives"
 version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11677,7 +11680,7 @@ dependencies = [
 [[package]]
 name = "tempo-revm"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -11700,7 +11703,7 @@ dependencies = [
 [[package]]
 name = "tempo-transaction-pool"
 version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72#ebdd6e95a0c08f0eac6a1b92b272a3f9df4b5b72"
+source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11779,8 +11782,12 @@ dependencies = [
  "tempo-revm",
  "tempo-zone-contracts",
  "tokio",
+ "toml",
+ "zeroize",
+ "zone-p2p",
  "zone-precompiles",
  "zone-primitives",
+ "zone-rpc",
  "zone-sequencer",
 ]
 
@@ -11821,19 +11828,17 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "clap",
- "futures",
  "reth-trie-common",
- "serde",
  "serde_json",
  "tempo-chainspec",
  "tempo-primitives",
- "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "tokio-vsock",
  "tracing",
  "tracing-subscriber",
  "zone-chainspec",
+ "zone-primitives",
+ "zone-prover",
  "zone-spf",
 ]
 
@@ -11843,7 +11848,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
- "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
@@ -11855,14 +11859,13 @@ dependencies = [
  "const-hex",
  "eyre",
  "futures",
- "reqwest",
+ "reth-cli",
  "serde",
  "serde_json",
  "tempo-alloy",
  "tempo-chainspec",
  "tempo-primitives",
  "tempo-zone-contracts",
- "tempo-zone-prover-enclave",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -11870,6 +11873,7 @@ dependencies = [
  "zone-evm",
  "zone-precompiles",
  "zone-primitives",
+ "zone-prover",
  "zone-rpc",
  "zone-spf",
 ]
@@ -13703,8 +13707,12 @@ dependencies = [
  "reth-chainspec",
  "reth-cli",
  "reth-network-peers",
+ "serde_json",
  "tempo-chainspec",
  "tempo-primitives",
+ "thiserror 2.0.18",
+ "zone-hardfork",
+ "zone-primitives",
 ]
 
 [[package]]
@@ -13713,6 +13721,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
+ "alloy-genesis",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rlp",
@@ -13723,6 +13732,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-revm",
  "revm",
+ "serde_json",
  "tempo-alloy",
  "tempo-chainspec",
  "tempo-evm",
@@ -13734,9 +13744,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "zone-chainspec",
+ "zone-hardfork",
  "zone-l1",
  "zone-precompiles",
  "zone-primitives",
+]
+
+[[package]]
+name = "zone-hardfork"
+version = "0.1.0"
+dependencies = [
+ "alloy-hardforks",
+ "paste",
 ]
 
 [[package]]
@@ -13815,7 +13834,6 @@ dependencies = [
  "reqwest",
  "reth-chain-state",
  "reth-chainspec",
- "reth-consensus",
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",
@@ -13957,6 +13975,7 @@ dependencies = [
  "paste",
  "rand 0.8.7",
  "revm",
+ "serde",
  "sha2 0.10.9",
  "tempo-chainspec",
  "tempo-contracts",
@@ -13965,7 +13984,7 @@ dependencies = [
  "tempo-primitives",
  "tempo-zone-contracts",
  "thiserror 2.0.18",
- "tracing",
+ "zone-hardfork",
  "zone-primitives",
 ]
 
@@ -13976,6 +13995,25 @@ dependencies = [
  "alloy-primitives",
  "tempo-hardfork",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "zone-prover"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "futures",
+ "reth-trie-common",
+ "serde",
+ "serde_json",
+ "tempo-chainspec",
+ "tempo-primitives",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "zone-spf",
 ]
 
 [[package]]
@@ -14058,6 +14096,7 @@ dependencies = [
  "tracing",
  "zone-chainspec",
  "zone-l1",
+ "zone-prover",
  "zone-rpc",
  "zone-spf",
 ]

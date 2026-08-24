@@ -17,13 +17,21 @@ pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
 pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
     contract ZonePortal {
         // -- Shared types --
         enum Role {
             None,
+            Sequencer,
             Account,
-            CallbackGateway
+            CallbackGateway,
+            PauseGuardian
+        }
+
+        enum Capability {
+            PausePortal,
+            AccessPolicy
         }
 
         struct Withdrawal {
@@ -63,6 +71,11 @@ crate::sol! {
             uint64 activationBlock;
         }
 
+        struct TokenConfig {
+            bool enabled;
+            bool depositsActive;
+        }
+
         struct BlockTransition {
             bytes32 prevBlockHash;
             bytes32 nextBlockHash;
@@ -98,6 +111,9 @@ crate::sol! {
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
         event DepositsPaused(address indexed token);
         event DepositsResumed(address indexed token);
+        event PortalPaused(address indexed account);
+        event PortalResumed(address indexed account);
+        event AbdicationScheduled(Capability indexed capability, uint64 effectiveAt);
         event RpcUrlUpdated(string rpcUrl);
 
         event SequencerEncryptionKeyUpdated(
@@ -183,10 +199,39 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
+        error NotPauseAuthority();
+        error CapabilityAbdicated(Capability capability);
+        error AbdicationAlreadyScheduled(Capability capability);
+        error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
-        error PolicyForbids();
+        error NotFactory();
+        error NotSelf();
+        error AlreadyInitialized();
+        error MustDelegateCall();
+        error CallbackRejected();
+        error TransferFailed();
+        error ReentrantWithdrawal();
+        error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+        error InvalidEncryptionKeyIndex(uint256 keyIndex);
+        error NoEncryptionKeySet();
+        error NoEncryptionKeyAtBlock(uint64 blockNumber);
+        error InvalidEphemeralPubkey();
+        error InvalidCiphertextLength(uint256 actual, uint256 expected);
+        error InvalidProofOfPossession();
+        error DepositTooSmall();
+        error TokenEnablementBlockCapacityExceeded(uint64 maximum);
+        error TokenMetadataTooLong();
+        error GasFeeRateTooHigh();
+        error DepositsNotActive();
+        error TokenAlreadyEnabled();
+        error TokenTransferPolicyNotSet();
+        error InvalidDepositTransition();
+        error InvalidSequencerSet();
+        error SequencerConfigurationUnchanged();
+        error InvalidQuorumCertificate();
+        error CallbackDidNotReturnToZone();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
         error DepositBlockCapacityExceeded(uint64 maximum);
@@ -206,10 +251,10 @@ crate::sol! {
         function setAccessMode(bool enforced) external;
         function isGatewayOpen() external view returns (bool);
         function setGatewayMode(bool enforced) external;
-        function role(address account) external view returns (Role);
-        function setRole(address account, Role role) external;
+        function hasRole(address account, Role role) external view returns (bool);
         function setAllowedAccount(address account, bool allowed) external;
         function setGateway(address account, bool allowed) external;
+        function setPauseGuardian(address account, bool allowed) external;
         function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
@@ -233,12 +278,26 @@ crate::sol! {
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
         function lastProcessedDepositNumber() external view returns (uint64);
+        function FIXED_DEPOSIT_GAS() external view returns (uint64);
+        function MAX_GAS_FEE_RATE() external view returns (uint128);
+        function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+        function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
+        function areDepositsActive(address token) external view returns (bool);
+        function tokenConfig(address token) external view returns (TokenConfig memory);
+        function initialize(uint32 zoneId, address initialToken, bool accessMode, bool gatewayMode, address[] calldata allowedAccounts, address[] calldata zoneGateways, address admin, address messenger, address[] calldata sequencers, uint8 threshold, address verifier, string calldata rpcUrl) external;
+        function deliverWithdrawal(address to, address token, uint128 amount, bytes32 memo, uint64 gasLimit, bytes calldata callbackData) external;
         function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
+        function paused() external view returns (bool);
+        function pauseExpiry() external view returns (uint64);
+        function abdicationEffectiveAt(Capability capability) external view returns (uint64);
 
         // -- State-changing functions --
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
+        function pause() external;
+        function resume() external;
+        function abdicate(Capability capability) external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -557,10 +616,13 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
+            Self::NotPauseAuthority(_) => f.write_str("NotPauseAuthority"),
+            Self::CapabilityAbdicated(_) => f.write_str("CapabilityAbdicated"),
+            Self::AbdicationAlreadyScheduled(_) => f.write_str("AbdicationAlreadyScheduled"),
+            Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
-            Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
             Self::DepositBlockCapacityExceeded(_) => f.write_str("DepositBlockCapacityExceeded"),
@@ -570,6 +632,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::ActiveLeaderRemoved(_) => f.write_str("ActiveLeaderRemoved"),
             Self::LeaderAlreadyUpdatedThisBlock(_) => f.write_str("LeaderAlreadyUpdatedThisBlock"),
             Self::StaleLeadershipEpoch(_) => f.write_str("StaleLeadershipEpoch"),
+            _ => f.write_str("ZonePortalError"),
         }
     }
 }

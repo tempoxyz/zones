@@ -637,4 +637,36 @@ mod tests {
         ));
         assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
     }
+
+    #[tokio::test]
+    async fn expired_keychain_key_is_classified_as_expired() {
+        let root_account = Address::repeat_byte(0x55);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let (signature, key_id) =
+            sign_keychain_signature(digest, &access_signer, root_account, 0x04)
+                .expect("keychain signing failed");
+        let token = build_token_with_signature(signature, &fields);
+        let api = TestApi::with_key_info(
+            root_account,
+            key_id,
+            KeyInfo {
+                signatureType: KeyInfoSignatureType::P256,
+                keyId: key_id,
+                expiry: now,
+                enforceLimits: false,
+                isRevoked: false,
+            },
+        );
+
+        let err = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect_err("expired key should fail authentication");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::ExpiredKeychainKey)
+        ));
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
 }

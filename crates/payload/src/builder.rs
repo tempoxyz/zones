@@ -16,7 +16,7 @@ use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
-use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
     ConfigureEvm, Database, NextBlockEnvAttributes,
@@ -195,6 +195,7 @@ where
             .build();
 
         let chain_spec = self.provider.chain_spec();
+        let chain_id = chain_spec.chain().id();
 
         let block_gas_limit = parent_header.gas_limit();
 
@@ -209,10 +210,9 @@ where
                 extra_data: attributes.extra_data(),
                 slot_number: attributes.slot_number(),
             },
-            // Zones don't use L1 gas sections. These fields are required
-            // by TempoNextBlockEnvAttributes but ignored by the zone executor.
+            // Zones don't use Tempo L1 gas sections.
             general_gas_limit: 0,
-            shared_gas_limit: block_gas_limit,
+            shared_gas_limit: 0,
             timestamp_millis_part: attributes.timestamp_millis_part(),
             consensus_context: None,
             subblock_fee_recipients: Default::default(),
@@ -236,7 +236,7 @@ where
 
         // Execute advanceTempo system transaction — exactly one per zone block.
         builder
-            .execute_transaction(build_advance_tempo_tx(prepared))
+            .execute_transaction(build_advance_tempo_tx(prepared, chain_id))
             .map(|_| ())
             .map_err(PayloadBuilderError::evm)
             .map_err(|err| {
@@ -278,6 +278,7 @@ where
             block_number,
             self.withdrawal_batch_interval_blocks,
             self.withdrawal_reveal_encryptor.as_deref(),
+            chain_id,
         )?;
 
         let BlockBuilderOutcome {
@@ -535,6 +536,7 @@ fn finalize_withdrawal_batch_if_needed<B>(
     block_number: u64,
     interval_blocks: u64,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
+    chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
 where
     B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
@@ -574,7 +576,8 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     let count = U256::from(pending_withdrawals.len());
-    let finalize_tx = build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
+    let finalize_tx =
+        build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders, chain_id);
     builder
         .execute_transaction(finalize_tx)
         .map(|_| ())
@@ -604,6 +607,7 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     count: U256,
     block_number: u64,
     encrypted_senders: Vec<Bytes>,
+    chain_id: u64,
 ) -> Recovered<TempoTxEnvelope> {
     let calldata = abi::IZoneOutbox::finalizeWithdrawalBatchCall {
         count,
@@ -613,7 +617,7 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     .abi_encode();
 
     let tx = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -679,7 +683,10 @@ where
 /// Takes a [`PreparedL1Block`] where all ECIES decryption and ABI encoding have
 /// already been performed. TIP-403 policy is enforced during `advanceTempo` when
 /// the deposits mint TIP-20 tokens.
-pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEnvelope> {
+pub fn build_advance_tempo_tx(
+    prepared: &PreparedL1Block,
+    chain_id: u64,
+) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
     let mut header_rlp = Vec::new();
     prepared.header.header().encode(&mut header_rlp);
@@ -693,7 +700,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
     .abi_encode();
 
     let tx = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -871,6 +878,7 @@ mod tests {
             queued_deposits: vec![
                 abi::QueuedDeposit {
                     depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: alloy_primitives::Bytes::from(
                         alloy_sol_types::SolValue::abi_encode(&abi::WithdrawalBounceBackDeposit {
                             token,
@@ -881,6 +889,7 @@ mod tests {
                 },
                 abi::QueuedDeposit {
                     depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: alloy_primitives::Bytes::from(
                         alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
                             token,
@@ -910,12 +919,15 @@ mod tests {
             enabled_tokens: vec![],
         };
 
-        let recovered_tx = super::build_advance_tempo_tx(&prepared);
+        let recovered_tx = super::build_advance_tempo_tx(&prepared, 1337);
 
         // Decode the calldata to verify structure.
         let envelope = recovered_tx.inner();
         let input = match envelope {
-            tempo_primitives::TempoTxEnvelope::Legacy(signed) => &signed.tx().input,
+            tempo_primitives::TempoTxEnvelope::Legacy(signed) => {
+                assert_eq!(signed.tx().chain_id, Some(1337));
+                &signed.tx().input
+            }
             _ => panic!("expected Legacy tx"),
         };
         let decoded = IZoneInbox::advanceTempoCall::abi_decode(input)

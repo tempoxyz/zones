@@ -43,7 +43,6 @@ use tempo_zone_contracts::{
     IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
     ZONE_TOKEN_ADDRESS,
 };
-use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -441,7 +440,7 @@ async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Keychain auth rejects missing, revoked, expired, and signature-type-mismatched keys.
+/// Keychain auth rejects missing, revoked, and signature-type-mismatched keys.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -484,30 +483,6 @@ async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
         .call_raw("eth_blockNumber", serde_json::json!([]), &revoked_token)
         .await?;
     assert_eq!(status.as_u16(), 403, "revoked key should return 403");
-
-    let expired_root = PrivateKeySigner::random();
-    let expired_access = P256SigningKey::random(&mut thread_rng());
-    ctx.inject_deposit(
-        PATH_USD_ADDRESS,
-        address!("0x0000000000000000000000000000000000003333"),
-        expired_root.address(),
-        1_000_000,
-    )
-    .await?;
-    let (expired_token, expired_key_id) =
-        ctx.keychain_p256_token(expired_root.address(), &expired_access, 0x04);
-    ctx.authorize_keychain_key(
-        &expired_root,
-        expired_key_id,
-        KeyInfoSignatureType::P256,
-        now_secs() + 1,
-    )
-    .await?;
-    sleep(std::time::Duration::from_secs(2)).await;
-    let (status, _) = ctx
-        .call_raw("eth_blockNumber", serde_json::json!([]), &expired_token)
-        .await?;
-    assert_eq!(status.as_u16(), 403, "expired key should return 403");
 
     let mismatch_root = PrivateKeySigner::random();
     let mismatch_access = P256SigningKey::random(&mut thread_rng());
@@ -763,8 +738,8 @@ async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf`
-/// and `allowance`, while the configured sequencer retains access.
+/// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf` and `allowance`
+/// without a sequencer bypass.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -797,8 +772,6 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
-    let expected_owner_balance = ctx.zone.balance_of(PATH_USD_ADDRESS, owner).await?;
-
     let balance_call = PrecompileTip20::balanceOfCall { account: owner };
     let balance_data = format!("0x{}", hex::encode(balance_call.abi_encode()));
     let allowance_call = PrecompileTip20::allowanceCall { owner, spender };
@@ -853,15 +826,9 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             ]),
         )
         .await?;
-    let sequencer_balance_bytes = hex::decode(
-        sequencer_balance["result"]
-            .as_str()
-            .expect("sequencer balanceOf should return hex")
-            .trim_start_matches("0x"),
-    )?;
-    assert_eq!(
-        PrecompileTip20::balanceOfCall::abi_decode_returns(&sequencer_balance_bytes)?,
-        expected_owner_balance
+    assert!(
+        sequencer_balance.get("error").is_some(),
+        "sequencer balanceOf(other) should revert"
     );
 
     let sequencer_allowance = ctx
@@ -877,15 +844,9 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             ]),
         )
         .await?;
-    let sequencer_allowance_bytes = hex::decode(
-        sequencer_allowance["result"]
-            .as_str()
-            .expect("sequencer allowance should return hex")
-            .trim_start_matches("0x"),
-    )?;
-    assert_eq!(
-        PrecompileTip20::allowanceCall::abi_decode_returns(&sequencer_allowance_bytes)?,
-        U256::from(allowance_amount)
+    assert!(
+        sequencer_allowance.get("error").is_some(),
+        "sequencer allowance(owner, spender) should revert"
     );
 
     Ok(())

@@ -950,7 +950,6 @@ provision_up() {
         --chain "$zone_genesis" --datadir "$zone_db" \
         --l1.rpc-url ws://127.0.0.1:8545 \
         --l1.portal-address "$portal" \
-        --zone.id "$zone_id" \
         --http --http.addr 127.0.0.1 --http.port 8546 \
         --http.api all \
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
@@ -991,6 +990,7 @@ provision_up() {
         ZONE_PRIVATE_RPC_URL "$zone_redacted_rpc" \
         ZONE_REDACTED_RPC_URL "$zone_redacted_rpc" \
         ZONES_BENCH_TEMPO_GENESIS "$patched_genesis" \
+        ZONES_BENCH_ZONE_GENESIS "$zone_genesis" \
         ZONES_BENCH_TOKEN "$zone_token" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \
