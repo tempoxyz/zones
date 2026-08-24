@@ -38,7 +38,7 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
+    SettlementProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
     resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
@@ -116,7 +116,7 @@ pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
-    pub prover_config: Option<ShadowProverConfig>,
+    pub prover_config: Option<SettlementProverConfig>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
