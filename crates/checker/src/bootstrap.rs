@@ -7,6 +7,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::SolEvent as _;
+use futures::{StreamExt as _, TryStreamExt as _, stream};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_alloy::TempoNetwork;
@@ -24,13 +25,49 @@ use crate::{
 
 const GENESIS_BLOCK: u64 = 0;
 const LOG_QUERY_BLOCKS: u64 = 10_000;
+const LOG_QUERY_CONCURRENCY: usize = 8;
 
-/// Discover and authenticate the checkpoint encoded by local Zone genesis.
+/// Authenticated Zone genesis and Portal identity, without replayed accounting state.
+pub(crate) struct Bootstrap {
+    identity: persistence::Identity,
+    zone: persistence::BlockRef,
+    tempo: persistence::BlockRef,
+    initial_token: Address,
+}
+
+impl Bootstrap {
+    pub(crate) const fn identity(&self) -> persistence::Identity {
+        self.identity
+    }
+
+    pub(crate) const fn zone(&self) -> persistence::BlockRef {
+        self.zone
+    }
+
+    /// Replay the authenticated pre-genesis history only when a database must be created or reset.
+    pub(crate) async fn checkpoint(
+        &self,
+        provider: &DynProvider<TempoNetwork>,
+        config: &CheckerConfig,
+    ) -> Result<Checkpoint, AttemptError> {
+        let creation = BlockNumHash::from(self.identity.creation);
+        let tempo = BlockNumHash::from(self.tempo);
+        let state = initial_state(provider, config, creation, tempo, self.initial_token).await?;
+        Ok(Checkpoint {
+            identity: self.identity,
+            zone: self.zone,
+            tempo: self.tempo,
+            state,
+        })
+    }
+}
+
+/// Discover and authenticate the identity encoded by local Zone genesis.
 pub(crate) async fn build<P>(
     provider: &P,
     l1: &DynProvider<TempoNetwork>,
     config: &CheckerConfig,
-) -> Result<Checkpoint, AttemptError>
+) -> Result<Bootstrap, AttemptError>
 where
     P: BlockNumReader + ChainSpecProvider + StateProviderFactory + ?Sized,
     P::ChainSpec: TempoHardforks,
@@ -70,8 +107,7 @@ where
         )));
     }
 
-    let state = initial_state(l1, config, creation, tempo, initial_token).await?;
-    Ok(Checkpoint {
+    Ok(Bootstrap {
         identity: persistence::Identity {
             l1_chain_id,
             zone_chain_id,
@@ -81,7 +117,7 @@ where
         },
         zone: persistence::BlockRef::new(GENESIS_BLOCK, zone_hash),
         tempo: persistence::BlockRef::from(tempo),
-        state,
+        initial_token,
     })
 }
 
@@ -130,22 +166,23 @@ async fn discover_creation(
         .get_block_number()
         .await
         .map_err(classify_rpc_error)?;
-    let mut candidates = Vec::new();
-    let mut start = 0;
-    while start <= head {
-        let end = start.saturating_add(LOG_QUERY_BLOCKS - 1).min(head);
-        let filter = Filter::new()
+    let filters = (0..=head).step_by(LOG_QUERY_BLOCKS as usize).map(|start| {
+        Filter::new()
             .address(ZONE_FACTORY_ADDRESS)
             .event_signature(ZoneFactory::ZoneCreated::SIGNATURE_HASH)
             .topic1(B256::from(U256::from(config.zone_id)))
             .topic2(config.portal_address.into_word())
             .from_block(start)
-            .to_block(end);
-        for log in provider
-            .get_logs(&filter)
-            .await
-            .map_err(classify_rpc_error)?
-        {
+            .to_block(start.saturating_add(LOG_QUERY_BLOCKS - 1).min(head))
+    });
+    let pages = stream::iter(filters)
+        .map(|filter| async move { provider.get_logs(&filter).await.map_err(classify_rpc_error) })
+        .buffer_unordered(LOG_QUERY_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut candidates = Vec::new();
+    for page in pages {
+        for log in page {
             if !log.removed {
                 candidates.push(log.block_hash.ok_or_else(|| {
                     AttemptError::disable(eyre::eyre!(
@@ -154,10 +191,6 @@ async fn discover_creation(
                 })?);
             }
         }
-        start = match end.checked_add(1) {
-            Some(next) => next,
-            None => break,
-        };
     }
     candidates.sort_unstable();
     candidates.dedup();

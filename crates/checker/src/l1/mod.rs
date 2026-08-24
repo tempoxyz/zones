@@ -15,8 +15,8 @@ use zone_l1::L1BlockTracker;
 
 use crate::AttemptError;
 
+use events::EventCollector;
 pub(crate) use events::L1PortalEvent;
-use events::{EventCollector, L1Events};
 
 /// Bound on concurrent Portal balance reads for one token set.
 const BALANCE_CONCURRENCY: usize = 8;
@@ -54,7 +54,7 @@ impl From<L1ReadError> for AttemptError {
 #[derive(Debug)]
 pub(crate) struct L1BlockEvidence {
     block: BlockNumHash,
-    events: L1Events,
+    events: Vec<L1PortalEvent>,
 }
 
 impl L1BlockEvidence {
@@ -64,7 +64,7 @@ impl L1BlockEvidence {
 
     /// Return authenticated Portal events in receipt order.
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
-        self.events.events.iter()
+        self.events.iter()
     }
 }
 
