@@ -473,6 +473,19 @@ where
     }
 }
 
+/// P2P services that continue running after the network is initialized.
+struct P2PRuntime {
+    sinks: EventSinks,
+    commands: tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>,
+    backfill_commands: tokio::sync::mpsc::Sender<BackfillCommand>,
+    attestation: AttestationContext,
+    schedule: LeadershipSchedule,
+    local_ed25519_public_key: zone_p2p::P2pPeerId,
+    role_status: SharedRoleStatus,
+    peer_tips: PeerTipRegistry,
+    backfill_requests_rx: tokio::sync::mpsc::Receiver<BackfillRequest>,
+}
+
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
@@ -711,7 +724,7 @@ where
                     self.l1_config.encryption_keys.clone().unwrap_or_default(),
                 ))
                 .expect("the sequencer RPC context is installed exactly once");
-            p2p_runtime = Some((
+            p2p_runtime = Some(P2PRuntime {
                 sinks,
                 commands,
                 backfill_commands,
@@ -721,7 +734,7 @@ where
                 role_status,
                 peer_tips,
                 backfill_requests_rx,
-            ));
+            });
         } else if let Some(ref config) = self.sequencer_config {
             // Legacy single-sequencer mode keeps the static engine.
             let sequencer_addr = config.sequencer_signer.address();
@@ -797,7 +810,7 @@ where
         )
         .await?;
 
-        if let Some((
+        if let Some(P2PRuntime {
             sinks,
             commands,
             backfill_commands,
@@ -807,7 +820,7 @@ where
             role_status,
             peer_tips,
             backfill_requests_rx,
-        )) = p2p_runtime
+        }) = p2p_runtime
         {
             // Backfill serving is role-neutral: every role serves the same canonical
             // provider, so the server outlives role generations and a leadership handoff
