@@ -19,6 +19,7 @@ import {
     IWithdrawalReceiver,
     IZoneMessenger,
     IZonePortal,
+    PORTAL_ENABLED_TOKENS_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT,
     PORTAL_LEADER_SLOT,
@@ -668,6 +669,12 @@ contract ZonePortalTest is BaseTest {
         internal
     {
         _submitTokenEnablementTransition(transition, bytes4(0));
+    }
+
+    function _initializeTokenCursor() internal {
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 1 })
+        );
     }
 
     function _submitTokenEnablementTransition(
@@ -1826,6 +1833,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_migratesPolicyBinding() public {
+        _initializeTokenCursor();
         address token = address(token1);
         address[] memory tokens = new address[](1);
         tokens[0] = token;
@@ -1857,6 +1865,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_skipsMigrationIfPolicyBindingIsSet() public {
+        _initializeTokenCursor();
         address token = address(token1);
         address[] memory tokens = new address[](1);
         tokens[0] = token;
@@ -1878,6 +1887,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_revertsIfPolicyBindingIsNotSet() public {
+        _initializeTokenCursor();
         address token = address(token1);
         _mockTokenPolicyMigration(token, false);
 
@@ -1887,6 +1897,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_acceptsMaximumMetadataLengths() public {
+        _initializeTokenCursor();
         uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             _stringOfLength(maximum),
@@ -1902,6 +1913,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_rejectsOversizedName() public {
+        _initializeTokenCursor();
         uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token =
             _createEnablementToken(_stringOfLength(maximum + 1), "T", "USD", bytes32("long name"));
@@ -1914,6 +1926,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_rejectsOversizedSymbol() public {
+        _initializeTokenCursor();
         uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             "Token", _stringOfLength(maximum + 1), "USD", bytes32("long symbol")
@@ -1927,6 +1940,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_enableToken_rejectsOversizedCurrency() public {
+        _initializeTokenCursor();
         uint256 maximum = portal.MAX_TOKEN_METADATA_BYTES();
         address token = _createEnablementToken(
             "Token", "T", _stringOfLength(maximum + 1), bytes32("long currency")
@@ -1978,43 +1992,37 @@ contract ZonePortalTest is BaseTest {
         assertFalse(portal.isTokenEnabled(overflowToken));
     }
 
-    function test_z0BatchDoesNotInitializeTokenCursorAndKeepsLegacyAdmission() public {
+    function test_enableToken_revertsUntilTokenCursorInitialized() public {
         assertFalse(portal.tokenEnablementCursorInitialized());
+        address token = _createEnablementToken("Token", "T", "USD", bytes32("frozen"));
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.TokenEnablementCursorNotInitialized.selector);
+        portal.enableToken(token);
+        assertFalse(portal.isTokenEnabled(token));
+
         _submitTokenEnablementTransition(
             TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 0 })
         );
         assertFalse(portal.tokenEnablementCursorInitialized());
         assertEq(portal.lastProcessedEnabledTokenCount(), 0);
 
-        uint64 maximum = portal.MAX_UNPROCESSED_TOKEN_ENABLEMENTS();
-        for (uint256 i; i < maximum; ++i) {
-            address token =
-                _createEnablementToken("Legacy", "LEG", "USD", bytes32(uint256(2000 + i)));
-            vm.prank(admin);
-            portal.enableToken(token);
-        }
-
-        address overflowToken =
-            _createEnablementToken("Overflow", "OVER", "USD", bytes32("legacy-overflow"));
         vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IZonePortal.TokenEnablementBlockCapacityExceeded.selector, maximum
-            )
+        vm.expectRevert(IZonePortal.TokenEnablementCursorNotInitialized.selector);
+        portal.enableToken(token);
+
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 1 })
         );
-        portal.enableToken(overflowToken);
+        assertTrue(portal.tokenEnablementCursorInitialized());
 
-        vm.roll(block.number + 1);
         vm.prank(admin);
-        portal.enableToken(overflowToken);
-        assertTrue(portal.isTokenEnabled(overflowToken));
-        assertFalse(portal.tokenEnablementCursorInitialized());
+        portal.enableToken(token);
+        assertTrue(portal.isTokenEnabled(token));
     }
 
     function test_tokenCursorInitializationAcceptsHistoricalPrefix() public {
-        address token = _createEnablementToken("Legacy", "LEG", "USD", bytes32("legacy"));
-        vm.prank(admin);
-        portal.enableToken(token);
+        vm.store(address(portal), PORTAL_ENABLED_TOKENS_SLOT, bytes32(uint256(2)));
         assertEq(portal.enabledTokenCount(), 2);
 
         _submitTokenEnablementTransition(
@@ -2026,6 +2034,25 @@ contract ZonePortalTest is BaseTest {
         _submitTokenEnablementTransition(
             TokenEnablementTransition({ prevProcessedTokenCount: 1, nextProcessedTokenCount: 2 })
         );
+        assertEq(portal.lastProcessedEnabledTokenCount(), 2);
+    }
+
+    function test_tokenCursorInitializationRejectsOversizedHistoricalSuffix() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_TOKEN_ENABLEMENTS();
+        vm.store(
+            address(portal), PORTAL_ENABLED_TOKENS_SLOT, bytes32(uint256(maximum) + uint256(2))
+        );
+
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 1 }),
+            IZonePortal.InvalidTokenEnablementTransition.selector
+        );
+        assertFalse(portal.tokenEnablementCursorInitialized());
+
+        _submitTokenEnablementTransition(
+            TokenEnablementTransition({ prevProcessedTokenCount: 0, nextProcessedTokenCount: 2 })
+        );
+        assertTrue(portal.tokenEnablementCursorInitialized());
         assertEq(portal.lastProcessedEnabledTokenCount(), 2);
     }
 

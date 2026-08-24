@@ -246,6 +246,7 @@ crate::sol! {
         error DepositsNotActive();
         error TokenAlreadyEnabled();
         error TokenTransferPolicyNotSet();
+        error TokenEnablementCursorNotInitialized();
         error InvalidDepositTransition();
         error InvalidTokenEnablementTransition();
         error InvalidSequencerSet();

@@ -570,6 +570,7 @@ interface IZonePortal {
     error DepositsNotActive();
     error TokenAlreadyEnabled();
     error TokenTransferPolicyNotSet();
+    error TokenEnablementCursorNotInitialized();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
     error InvalidTokenEnablementTransition();
@@ -761,6 +762,7 @@ interface IZonePortal {
 
     /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
+    /// @notice Enable a token after a Zone batch authenticates the enabled-token cursor.
     function enableToken(address token) external;
 
     /// @notice Pause deposits for a token. Only callable by admin.

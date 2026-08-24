@@ -59,7 +59,7 @@ contract ZonePortal is IZonePortal {
     ///      below the buffered 200,000,000 gas ceiling.
     uint64 public constant MAX_UNPROCESSED_DEPOSITS = 230;
 
-    /// @notice Maximum tokens that may be enabled for this portal in one Tempo block.
+    /// @notice Maximum enabled tokens that may remain unprocessed by the Zone.
     /// @dev Under T9, processing 230 worst-case deposits plus 8 token enablements with maximum
     ///      metadata uses 214,832,282 gas, below the buffered 225,000,000 gas ceiling.
     uint64 public constant MAX_UNPROCESSED_TOKEN_ENABLEMENTS = 8;
@@ -209,7 +209,7 @@ contract ZonePortal is IZonePortal {
     uint64 internal _depositCountBlock;
     uint64 internal _depositsInCurrentBlock;
 
-    /// @dev Per-Tempo-block token-enablement admission counter. Appended for upgrade safety.
+    /// @dev Retired per-Tempo-block token-enablement counters, retained for storage compatibility.
     uint64 internal _tokenEnableCountBlock;
     uint64 internal _tokensEnabledInCurrentBlock;
 
@@ -285,9 +285,8 @@ contract ZonePortal is IZonePortal {
             emit RoleUpdated(account, Role.None, Role.Account);
         }
 
-        // Enable the initial token. The cursor remains uninitialized until a Zone batch
-        // authenticates the complete enabled-token prefix; a Z0 Zone reports a legacy 0 -> 0
-        // transition and must retain the per-Tempo-block admission rule until Z1 activates.
+        // Enable the initial token. Operational token enablement remains frozen until a Zone batch
+        // authenticates a nonzero enabled-token prefix and initializes the cursor.
         _enableTokenInternal(_initialToken);
     }
 
@@ -653,11 +652,19 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
-    /// @dev Irreversible: once enabled, a token cannot be disabled.
+    /// @dev Irreversible: once enabled, a token cannot be disabled. Frozen until the first Zone
+    ///      batch authenticates the enabled-token cursor.
     function enableToken(address _token) external onlyAdmin {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
             revert TokenNotEnabled();
+        }
+        if (!tokenEnablementCursorInitialized) revert TokenEnablementCursorNotInitialized();
+        if (
+            _enabledTokens.length - lastProcessedEnabledTokenCount
+                >= MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+        ) {
+            revert TokenEnablementBlockCapacityExceeded(MAX_UNPROCESSED_TOKEN_ENABLEMENTS);
         }
         _enableTokenInternal(_token);
     }
@@ -679,8 +686,6 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
-        _recordTokenEnablement();
-
         // Bound the metadata copied into the zone before mutating portal or policy state. The zone
         // must initialize every token emitted in this block inside advanceTempo's fixed gas budget.
         string memory name = ITIP20(_token).name();
@@ -712,29 +717,6 @@ contract ZonePortal is IZonePortal {
         _enabledTokens.push(_token);
 
         emit TokenEnabled(_token, name, symbol, currency);
-    }
-
-    function _recordTokenEnablement() internal {
-        if (!tokenEnablementCursorInitialized) {
-            uint64 currentBlock = uint64(block.number);
-            if (_tokenEnableCountBlock != currentBlock) {
-                _tokenEnableCountBlock = currentBlock;
-                _tokensEnabledInCurrentBlock = 0;
-            }
-            if (_tokensEnabledInCurrentBlock >= MAX_UNPROCESSED_TOKEN_ENABLEMENTS) {
-                revert TokenEnablementBlockCapacityExceeded(MAX_UNPROCESSED_TOKEN_ENABLEMENTS);
-            }
-            unchecked {
-                ++_tokensEnabledInCurrentBlock;
-            }
-            return;
-        }
-        if (
-            _enabledTokens.length - lastProcessedEnabledTokenCount
-                >= MAX_UNPROCESSED_TOKEN_ENABLEMENTS
-        ) {
-            revert TokenEnablementBlockCapacityExceeded(MAX_UNPROCESSED_TOKEN_ENABLEMENTS);
-        }
     }
 
     /// @notice Update the zone's operator RPC endpoint.
@@ -1396,6 +1378,14 @@ contract ZonePortal is IZonePortal {
                 || tokenEnablementTransition.nextProcessedTokenCount
                     < tokenEnablementTransition.prevProcessedTokenCount
                 || tokenEnablementTransition.nextProcessedTokenCount > enabledCount
+        ) {
+            revert InvalidTokenEnablementTransition();
+        }
+        if (
+            !tokenEnablementCursorInitialized
+                && tokenEnablementTransition.nextProcessedTokenCount != 0
+                && enabledCount - tokenEnablementTransition.nextProcessedTokenCount
+                    > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
         ) {
             revert InvalidTokenEnablementTransition();
         }
