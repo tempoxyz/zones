@@ -1,5 +1,7 @@
 //! Authenticates Zone genesis and its Portal creation on Tempo.
 
+use std::collections::BTreeSet;
+
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockId, BlockNumHash};
 use alloy_network::{BlockResponse as _, ReceiptResponse as _};
@@ -7,7 +9,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::SolEvent as _;
-use futures::{StreamExt as _, TryStreamExt as _, stream};
+use futures::{StreamExt as _, stream};
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_alloy::TempoNetwork;
@@ -252,13 +254,12 @@ async fn discover_creation(
             .from_block(start)
             .to_block(start.saturating_add(LOG_QUERY_BLOCKS - 1).min(head))
     });
-    let pages = stream::iter(filters)
+    let mut pages = stream::iter(filters)
         .map(|filter| async move { provider.get_logs(&filter).await.map_err(classify_rpc_error) })
-        .buffer_unordered(LOG_QUERY_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-    let mut candidates = Vec::new();
-    for page in pages {
+        .buffer_unordered(LOG_QUERY_CONCURRENCY);
+    let mut candidates = BTreeSet::new();
+    while let Some(page) = pages.next().await {
+        let page = page?;
         for log in page {
             if !log.removed {
                 let number = log.block_number.ok_or_else(|| {
@@ -271,32 +272,30 @@ async fn discover_creation(
                         "ZoneCreated discovery result has no block hash"
                     ))
                 })?;
-                candidates.push(persistence::BlockRef::new(number, hash));
+                candidates.insert(persistence::BlockRef::new(number, hash));
             }
         }
     }
-    candidates.sort_unstable();
-    candidates.dedup();
-    let creation = match candidates.as_slice() {
-        [creation] => *creation,
-        [] => {
-            return Err(AttemptError::retry(eyre::eyre!(
-                "creation block is not yet available for Zone {} and Portal {} after genesis anchor {}",
-                config.zone_id,
-                config.portal_address,
-                anchor_number,
-            )));
-        }
-        _ => {
-            return Err(AttemptError::disable(eyre::eyre!(
-                "expected one creation block for Zone {} and Portal {}, found {}",
-                config.zone_id,
-                config.portal_address,
-                candidates.len()
-            )));
-        }
-    };
-    Ok(creation)
+    if candidates.is_empty() {
+        return Err(AttemptError::retry(eyre::eyre!(
+            "creation block is not yet available for Zone {} and Portal {} after genesis anchor {}",
+            config.zone_id,
+            config.portal_address,
+            anchor_number,
+        )));
+    }
+    if candidates.len() != 1 {
+        return Err(AttemptError::disable(eyre::eyre!(
+            "expected one creation block for Zone {} and Portal {}, found {}",
+            config.zone_id,
+            config.portal_address,
+            candidates.len()
+        )));
+    }
+    Ok(candidates
+        .into_iter()
+        .next()
+        .expect("one creation coordinate was found"))
 }
 
 /// Require one matching `ZoneCreated` event with authenticated receipt provenance.
