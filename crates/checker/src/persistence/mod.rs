@@ -75,6 +75,16 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    /// Read the identity bound to an existing checker database.
+    pub(crate) fn inspect_identity(path: &Path) -> Result<Identity, PersistenceError> {
+        let db = DatabaseEnv::open(path, DatabaseEnvKind::RO, DatabaseArguments::default())?;
+        let tx = db.tx()?;
+        validate_schema(&tx)?;
+        let identity = read_metadata(&tx)?.identity;
+        tx.commit()?;
+        Ok(identity)
+    }
+
     /// Open an existing database or atomically create it from an authenticated checkpoint.
     pub(crate) fn open_or_create(
         path: &Path,
@@ -178,20 +188,7 @@ impl Store {
     /// Load the active row state directly without replaying retained deltas.
     pub(crate) fn load(&self) -> Result<Snapshot, PersistenceError> {
         let tx = self.db.tx()?;
-        let version = match tx.get::<Meta>(MetaKey::Version)? {
-            Some(MetaValue::Version(version)) => version,
-            _ => {
-                return Err(PersistenceError::Invalid(
-                    "schema version is missing".into(),
-                ));
-            }
-        };
-        if version != SCHEMA_VERSION {
-            return Err(PersistenceError::Schema {
-                expected: SCHEMA_VERSION,
-                actual: version,
-            });
-        }
+        validate_schema(&tx)?;
         let metadata = read_metadata(&tx)?;
         if metadata.identity != self.identity {
             return Err(PersistenceError::Identity);
@@ -327,6 +324,24 @@ impl Store {
             state: Arc::clone(&prior.state),
         })
     }
+}
+
+fn validate_schema<T: DbTx>(tx: &T) -> Result<(), PersistenceError> {
+    let version = match tx.get::<Meta>(MetaKey::Version)? {
+        Some(MetaValue::Version(version)) => version,
+        _ => {
+            return Err(PersistenceError::Invalid(
+                "schema version is missing".into(),
+            ));
+        }
+    };
+    if version != SCHEMA_VERSION {
+        return Err(PersistenceError::Schema {
+            expected: SCHEMA_VERSION,
+            actual: version,
+        });
+    }
+    Ok(())
 }
 
 fn read_metadata<T: DbTx>(tx: &T) -> Result<Metadata, PersistenceError> {

@@ -21,12 +21,19 @@ use crate::{
     bootstrap,
     l1::{L1ReadError, classify_rpc_error, collect_l1_block_at, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
-    persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
+    persistence::{
+        AppliedStatus, BlockRef, CandidateTransition, Checkpoint, Finding, Snapshot, Status, Store,
+    },
     telemetry::{self, CheckerMetrics},
 };
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Maximum delay between Tempo acquisition attempts.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// Retry bound for unavailable local Zone state.
 const MAX_STATE_ATTEMPTS: u32 = 30;
+/// Retry bound for Tempo acquisition.
+const MAX_L1_ATTEMPTS: u32 = 10;
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 /// `NodePrimitives` whose transaction and receipt types the checker can process.
@@ -88,9 +95,9 @@ where
 
 /// Bootstrap or open durable state, then verify each append-only notification in turn.
 ///
-/// Transient acquisition failures are retried. An authenticated divergence is
-/// persisted until the checker is rebuilt, while deterministic checker failures
-/// return so the outer runtime can disable verification and drain.
+/// Transient acquisition failures are retried up to a fixed bound. An authenticated
+/// divergence is persisted until the checker is rebuilt, while exhausted or
+/// deterministic failures return so the outer runtime can disable and drain.
 async fn run_inner<Node>(
     config: CheckerConfig,
     ctx: &mut ExExContext<Node>,
@@ -103,13 +110,32 @@ where
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     tracing::info!(target: "zone::checker", "checker started");
+    let persisted_identity = config
+        .database_path
+        .exists()
+        .then(|| Store::inspect_identity(&config.database_path))
+        .transpose()?;
     let l1 = connect(&config.l1_rpc_url).await?;
-    let checkpoint = retry_transient(
-        || bootstrap::build(ctx.provider(), &l1, &config),
-        "checker bootstrap failed",
+    let bootstrap = retry_transient(
+        || async {
+            match persisted_identity {
+                Some(identity) => {
+                    bootstrap::authenticate(ctx.provider(), &l1, &config, identity).await
+                }
+                None => bootstrap::discover(ctx.provider(), &l1, &config).await,
+            }
+        },
+        "checker bootstrap",
     )
     .await?;
-    let (store, mut snapshot) = Store::open_or_create(&config.database_path, &checkpoint)?;
+    let mut checkpoint = None;
+    let (store, mut snapshot) = if persisted_identity.is_some() {
+        Store::open(&config.database_path, bootstrap.identity())?
+    } else {
+        let checkpoint =
+            authenticated_checkpoint(&mut checkpoint, &bootstrap, &l1, &config).await?;
+        Store::open_or_create(&config.database_path, checkpoint)?
+    };
     let verified = snapshot.metadata.verified_zone;
     if ctx.provider().block_hash(verified.number)? != Some(verified.hash) {
         tracing::warn!(
@@ -118,7 +144,9 @@ where
             zone_hash = %verified.hash,
             "checker tip is not in local Zone history; rebuilding"
         );
-        snapshot = store.reset(&checkpoint)?;
+        let checkpoint =
+            authenticated_checkpoint(&mut checkpoint, &bootstrap, &l1, &config).await?;
+        snapshot = store.reset(checkpoint)?;
         metrics.recovery_rebuilds_total.increment(1);
     }
     metrics.update(&snapshot);
@@ -128,10 +156,12 @@ where
 
     while let Some(notification) = ctx.notifications.try_next().await? {
         if !matches!(&notification, ExExNotification::ChainCommitted { .. }) {
-            snapshot = store.reset(&checkpoint)?;
+            let checkpoint =
+                authenticated_checkpoint(&mut checkpoint, &bootstrap, &l1, &config).await?;
+            snapshot = store.reset(checkpoint)?;
             metrics.recovery_rebuilds_total.increment(1);
             metrics.update(&snapshot);
-            ctx.catch_up_notifications_with_head(ExExHead::new(checkpoint.zone.into()))?;
+            ctx.catch_up_notifications_with_head(ExExHead::new(bootstrap.zone().into()))?;
             tracing::warn!(target: "zone::checker", "unexpected Zone revert; rebuilding from genesis");
             continue;
         }
@@ -146,72 +176,44 @@ where
         snapshot = store.observe(&snapshot, delivered_tip.into())?;
         metrics.update(&snapshot);
 
-        let mut state_retry = None;
-        loop {
-            let previous_verified = snapshot.metadata.verified_zone.number;
-            match process_notification(
-                &notification,
-                ctx.provider(),
-                &l1,
-                &store,
-                snapshot,
-                &config,
-            )
-            .await
-            {
-                Ok(next) => {
-                    let next = *next;
-                    let verified = next
-                        .metadata
-                        .verified_zone
-                        .number
-                        .saturating_sub(previous_verified);
-                    snapshot = next;
-                    metrics.verified_zone_blocks_total.increment(verified);
-                    metrics.update(&snapshot);
-                    ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
-                    break;
-                }
-                Err(BlockError::Finding { zone, error }) => {
-                    snapshot = store.load()?;
-                    tracing::error!(target: "zone::checker", %error, zone_block = zone.number, zone_hash = %zone.hash, "checker divergence");
-                    snapshot = store.record_finding(
-                        &snapshot,
-                        Finding {
-                            zone,
-                            summary: error.to_string(),
-                        },
-                    )?;
-                    metrics.update(&snapshot);
-                    ctx.send_finished_height(delivered_tip)?;
-                    break;
-                }
-                Err(BlockError::Retry(error)) => {
-                    snapshot = store.load()?;
-                    metrics.acquisition_retries_total.increment(1);
-                    metrics.update(&snapshot);
-                    tracing::warn!(target: "zone::checker", %error, "checker block processing failed; retrying");
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-                Err(BlockError::StateUnavailable { zone, error }) => {
-                    metrics.acquisition_retries_total.increment(1);
-                    let attempts = state_attempts_for_block(&mut state_retry, zone);
-                    record_state_attempt(attempts, error)?;
-                    let attempt = *attempts;
-                    snapshot = store.load()?;
-                    metrics.update(&snapshot);
-                    tracing::warn!(
-                        target: "zone::checker",
-                        zone_block = zone.number,
-                        zone_hash = %zone.hash,
-                        attempt,
-                        max_attempts = MAX_STATE_ATTEMPTS,
-                        "checker local state unavailable; retrying"
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-                Err(BlockError::Disable(error)) => return Err(error),
+        let previous_verified = snapshot.metadata.verified_zone.number;
+        match process_notification(
+            &notification,
+            ctx.provider(),
+            &l1,
+            &store,
+            snapshot,
+            &config,
+            metrics,
+        )
+        .await
+        {
+            Ok(next) => {
+                let next = *next;
+                let verified = next
+                    .metadata
+                    .verified_zone
+                    .number
+                    .saturating_sub(previous_verified);
+                snapshot = next;
+                metrics.verified_zone_blocks_total.increment(verified);
+                metrics.update(&snapshot);
+                ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
             }
+            Err(BlockError::Finding { zone, error }) => {
+                snapshot = store.load()?;
+                tracing::error!(target: "zone::checker", %error, zone_block = zone.number, zone_hash = %zone.hash, "checker divergence");
+                snapshot = store.record_finding(
+                    &snapshot,
+                    Finding {
+                        zone,
+                        summary: error.to_string(),
+                    },
+                )?;
+                metrics.update(&snapshot);
+                ctx.send_finished_height(delivered_tip)?;
+            }
+            Err(BlockError::Disable(error)) => return Err(error),
         }
     }
     tracing::info!(target: "zone::checker", "checker notification stream closed");
@@ -229,10 +231,30 @@ async fn connect(url: &str) -> eyre::Result<DynProvider<TempoNetwork>> {
                 .connect_client(client)
                 .erased())
         },
-        "Tempo RPC unavailable",
+        "Tempo RPC connection",
     )
     .await?;
     Ok(provider)
+}
+
+async fn authenticated_checkpoint<'a>(
+    checkpoint: &'a mut Option<Checkpoint>,
+    bootstrap: &bootstrap::Bootstrap,
+    l1: &DynProvider<TempoNetwork>,
+    config: &CheckerConfig,
+) -> eyre::Result<&'a Checkpoint> {
+    if checkpoint.is_none() {
+        *checkpoint = Some(
+            retry_transient(
+                || bootstrap.checkpoint(l1, config),
+                "checker initial-state replay",
+            )
+            .await?,
+        );
+    }
+    Ok(checkpoint
+        .as_ref()
+        .expect("checkpoint is initialized before it is returned"))
 }
 
 fn rpc_connection_config() -> ConnectionConfig {
@@ -243,18 +265,27 @@ fn rpc_connection_config() -> ConnectionConfig {
     )
 }
 
-/// Retry transient failure and return failures that disable the checker.
-async fn retry_transient<T, F, Fut>(mut attempt: F, message: &str) -> eyre::Result<T>
+/// Retry transient failures up to the acquisition bound.
+async fn retry_transient<T, F, Fut>(mut attempt: F, operation: &str) -> eyre::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, AttemptError>>,
 {
+    let mut backoff = Backoff::new();
     loop {
         match attempt().await {
             Ok(value) => return Ok(value),
             Err(AttemptError::Retry(error)) => {
-                tracing::warn!(target: "zone::checker", %error, "{message}; retrying");
-                tokio::time::sleep(RETRY_DELAY).await;
+                backoff.record(&error, operation)?;
+                tracing::warn!(
+                    target: "zone::checker",
+                    %error,
+                    operation,
+                    attempt = backoff.attempts,
+                    max_attempts = MAX_L1_ATTEMPTS,
+                    "checker acquisition failed; retrying"
+                );
+                backoff.wait().await;
             }
             Err(AttemptError::Disable(error)) => return Err(error),
         }
@@ -280,31 +311,56 @@ fn notification_tip<N: NodePrimitives>(notification: &ExExNotification<N>) -> Op
 
 /// Failure processing one block.
 enum BlockError {
-    /// Transient failure; retry without advancing.
-    Retry(eyre::Report),
-    /// Local state is temporarily unavailable; retry only up to the configured safety bound.
-    StateUnavailable { zone: BlockRef, error: eyre::Report },
     /// Authenticated divergence to persist as a finding.
     Finding { zone: BlockRef, error: eyre::Report },
-    /// Deterministic checker failure that cannot be resolved by retrying.
+    /// Failure that cannot be resolved within the acquisition bound.
     Disable(eyre::Report),
 }
 
-fn state_attempts_for_block(retry: &mut Option<(BlockRef, u32)>, zone: BlockRef) -> &mut u32 {
-    if !matches!(retry, Some((failed, _)) if *failed == zone) {
-        *retry = Some((zone, 0));
-    }
-    &mut retry.as_mut().expect("retry state was initialized").1
+struct VerificationContext<'a> {
+    config: &'a CheckerConfig,
+    metrics: &'a CheckerMetrics,
 }
 
-fn record_state_attempt(attempts: &mut u32, error: eyre::Report) -> eyre::Result<()> {
+fn record_retry_attempt(
+    attempts: &mut u32,
+    max_attempts: u32,
+    error: &eyre::Report,
+    operation: &str,
+) -> eyre::Result<()> {
     *attempts = attempts.saturating_add(1);
-    if *attempts >= MAX_STATE_ATTEMPTS {
+    if *attempts >= max_attempts {
         return Err(eyre::eyre!(
-            "local Zone state remained unavailable after {attempts} attempts; checker requires unpruned state for notified blocks: {error:#}"
+            "{operation} retry budget exhausted after {attempts} failed attempts: {error:#}"
         ));
     }
     Ok(())
+}
+
+/// Bounded backoff for Tempo acquisition.
+struct Backoff {
+    attempts: u32,
+    delay: Duration,
+}
+
+impl Backoff {
+    const fn new() -> Self {
+        Self {
+            attempts: 0,
+            delay: RETRY_DELAY,
+        }
+    }
+
+    /// Record one failed attempt.
+    fn record(&mut self, error: &eyre::Report, operation: &str) -> eyre::Result<()> {
+        record_retry_attempt(&mut self.attempts, MAX_L1_ATTEMPTS, error, operation)
+    }
+
+    /// Wait and increase the next delay.
+    async fn wait(&mut self) {
+        tokio::time::sleep(self.delay).await;
+        self.delay = self.delay.saturating_mul(2).min(MAX_RETRY_DELAY);
+    }
 }
 
 /// Verify one append-only notification's blocks.
@@ -315,6 +371,7 @@ async fn process_notification<N, P>(
     store: &Store,
     snapshot: Snapshot,
     config: &CheckerConfig,
+    metrics: &CheckerMetrics,
 ) -> Result<Box<Snapshot>, BlockError>
 where
     N: CheckedPrimitives,
@@ -330,12 +387,13 @@ where
             )));
         }
     };
+    let context = VerificationContext { config, metrics };
     for (block, receipts) in new.blocks_and_receipts() {
         if already_applied(&current, block.header().number(), block.hash())? {
             continue;
         }
         current =
-            verify_block::<N, _>(provider, l1, store, current, config, block, receipts).await?;
+            verify_block::<N, _>(provider, l1, store, current, &context, block, receipts).await?;
     }
     Ok(Box::new(current))
 }
@@ -362,7 +420,7 @@ async fn verify_block<N, P>(
     l1: &DynProvider<TempoNetwork>,
     store: &Store,
     prior: Snapshot,
-    config: &CheckerConfig,
+    context: &VerificationContext<'_>,
     block: &RecoveredBlock<N::Block>,
     receipts: &[N::Receipt],
 ) -> Result<Snapshot, BlockError>
@@ -371,6 +429,7 @@ where
     P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
+    let VerificationContext { config, metrics } = context;
     let number = block.number();
     let hash = block.hash();
     let parent_hash = block.parent_hash();
@@ -382,15 +441,10 @@ where
     let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
-    let tempo_block = collect_l1_block_at(
-        l1,
-        &config.l1_block_tracker,
-        config.portal_address,
-        tempo_parent,
-        tempo,
-    )
-    .await
-    .map_err(|error| classify_block_l1_error(error, zone))?;
+    let mut l1_backoff = Backoff::new();
+    let tempo_block =
+        collect_l1_block_with_retry(l1, tempo_parent, tempo, zone, context, &mut l1_backoff)
+            .await?;
     let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
     let candidate = CandidateTransition::derive(
@@ -413,14 +467,34 @@ where
     let spec = provider
         .chain_spec()
         .tempo_hardfork_at(block.header().timestamp());
-    let observed = read_accounting_state(provider, &accounts, zone.into(), spec).map_err(
-        |error| match error {
-            AccountingStateError::Unavailable(error) => {
-                BlockError::StateUnavailable { zone, error }
+    let mut state_attempts = 0;
+    let observed = loop {
+        match read_accounting_state(provider, &accounts, zone.into(), spec) {
+            Ok(observed) => break observed,
+            Err(AccountingStateError::Unavailable(error)) => {
+                metrics.acquisition_retries_total.increment(1);
+                record_retry_attempt(
+                    &mut state_attempts,
+                    MAX_STATE_ATTEMPTS,
+                    &error,
+                    "local Zone state acquisition (checker requires unpruned state for notified blocks)",
+                )
+                .map_err(BlockError::Disable)?;
+                tracing::warn!(
+                    target: "zone::checker",
+                    zone_block = zone.number,
+                    zone_hash = %zone.hash,
+                    attempt = state_attempts,
+                    max_attempts = MAX_STATE_ATTEMPTS,
+                    "checker local state unavailable; retrying"
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
             }
-            AccountingStateError::Disable(error) => BlockError::Disable(error),
-        },
-    )?;
+            Err(AccountingStateError::Disable(error)) => {
+                return Err(BlockError::Disable(error));
+            }
+        }
+    };
     state
         .verify_zone_state(
             observed
@@ -429,9 +503,28 @@ where
         )
         .map_err(|error| fail(error.into()))?;
 
-    let balances = portal_balances(l1, config.portal_address, tokens, tempo.hash)
+    let balances = loop {
+        match portal_balances(
+            l1,
+            config.portal_address,
+            tokens.iter().copied(),
+            tempo.hash,
+        )
         .await
-        .map_err(|error| classify_block_l1_error(error, zone))?;
+        {
+            Ok(balances) => break balances,
+            Err(L1ReadError::Unavailable(error)) => {
+                record_l1_retry(
+                    metrics,
+                    &mut l1_backoff,
+                    &error,
+                    "Portal balance acquisition",
+                )?;
+                l1_backoff.wait().await;
+            }
+            Err(error) => return Err(classify_block_l1_error(error, zone)),
+        }
+    };
     state
         .verify_portal_balances(balances)
         .map_err(|error| fail(error.into()))?;
@@ -445,10 +538,60 @@ where
 
 fn classify_block_l1_error(error: L1ReadError, zone: BlockRef) -> BlockError {
     match error {
-        L1ReadError::Unavailable(error) => BlockError::Retry(error),
+        L1ReadError::Unavailable(error) => BlockError::Disable(error),
         L1ReadError::Finding(error) => BlockError::Finding { zone, error },
         L1ReadError::Disable(error) => BlockError::Disable(error),
     }
+}
+
+async fn collect_l1_block_with_retry(
+    l1: &DynProvider<TempoNetwork>,
+    parent: BlockNumHash,
+    expected: BlockNumHash,
+    zone: BlockRef,
+    context: &VerificationContext<'_>,
+    backoff: &mut Backoff,
+) -> Result<crate::l1::L1BlockEvidence, BlockError> {
+    let VerificationContext { config, metrics } = context;
+    loop {
+        match collect_l1_block_at(
+            l1,
+            &config.l1_block_tracker,
+            config.portal_address,
+            parent,
+            expected,
+        )
+        .await
+        {
+            Ok(block) => return Ok(block),
+            Err(L1ReadError::Unavailable(error)) => {
+                record_l1_retry(metrics, backoff, &error, "Tempo block acquisition")?;
+                backoff.wait().await;
+            }
+            Err(error) => return Err(classify_block_l1_error(error, zone)),
+        }
+    }
+}
+
+fn record_l1_retry(
+    metrics: &CheckerMetrics,
+    backoff: &mut Backoff,
+    error: &eyre::Report,
+    operation: &str,
+) -> Result<(), BlockError> {
+    metrics.acquisition_retries_total.increment(1);
+    backoff
+        .record(error, operation)
+        .map_err(BlockError::Disable)?;
+    tracing::warn!(
+        target: "zone::checker",
+        %error,
+        operation,
+        attempt = backoff.attempts,
+        max_attempts = MAX_L1_ATTEMPTS,
+        "checker L1 acquisition failed; retrying"
+    );
+    Ok(())
 }
 
 fn validate_tempo_advance(parent: u64, tip: u64) -> eyre::Result<()> {
@@ -476,7 +619,7 @@ mod tests {
                     "invalid genesis"
                 ))))
             },
-            "operation failed",
+            "operation",
         )
         .await;
 
@@ -494,30 +637,26 @@ mod tests {
     }
 
     #[test]
-    fn local_state_retries_are_bounded() {
-        let block_a = BlockRef::new(1, alloy_primitives::B256::repeat_byte(1));
-        let block_b = BlockRef::new(2, alloy_primitives::B256::repeat_byte(2));
-        let mut retry = None;
-        for _ in 0..20 {
-            record_state_attempt(
-                state_attempts_for_block(&mut retry, block_a),
-                eyre::eyre!("state unavailable"),
-            )
-            .unwrap();
-        }
+    fn acquisition_retries_are_bounded() {
+        let mut attempts = 0;
+        let error = eyre::eyre!("state unavailable");
         for _ in 1..MAX_STATE_ATTEMPTS {
-            record_state_attempt(
-                state_attempts_for_block(&mut retry, block_b),
-                eyre::eyre!("state unavailable"),
+            record_retry_attempt(
+                &mut attempts,
+                MAX_STATE_ATTEMPTS,
+                &error,
+                "local state acquisition",
             )
             .unwrap();
         }
-        let error = record_state_attempt(
-            state_attempts_for_block(&mut retry, block_b),
-            eyre::eyre!("state unavailable"),
+        let error = record_retry_attempt(
+            &mut attempts,
+            MAX_STATE_ATTEMPTS,
+            &error,
+            "local state acquisition",
         )
         .expect_err("the final attempt must disable the checker");
-        assert_eq!(retry, Some((block_b, MAX_STATE_ATTEMPTS)));
-        assert!(error.to_string().contains("remained unavailable"));
+        assert_eq!(attempts, MAX_STATE_ATTEMPTS);
+        assert!(error.to_string().contains("retry budget exhausted"));
     }
 }

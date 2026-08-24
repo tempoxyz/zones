@@ -47,12 +47,6 @@ pub(crate) enum L1PortalEvent {
     },
 }
 
-/// Ordered recognized Portal events for one L1 block.
-#[derive(Debug)]
-pub(super) struct L1Events {
-    pub(super) events: Vec<L1PortalEvent>,
-}
-
 /// Builds ordered event evidence while receipts are visited once.
 #[derive(Default)]
 pub(super) struct EventCollector {
@@ -99,10 +93,8 @@ impl EventCollector {
         Ok(())
     }
 
-    pub(super) fn finish(self) -> L1Events {
-        L1Events {
-            events: self.events,
-        }
+    pub(super) fn finish(self) -> Vec<L1PortalEvent> {
+        self.events
     }
 }
 
@@ -135,8 +127,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             L1PortalEvent::TokenEnabled { token: e.token }
         }
         ZonePortal::BatchSubmitted::SIGNATURE_HASH => {
-            decode_event::<ZonePortal::BatchSubmitted>(log, "BatchSubmitted", block)?;
-            return Ok(None);
+            ignored!(ZonePortal::BatchSubmitted, "BatchSubmitted")
         }
         ZonePortal::WithdrawalProcessed::SIGNATURE_HASH => {
             let e =
@@ -378,7 +369,7 @@ mod tests {
         .encode_log_data())
     }
 
-    fn collect(receipts: &[TempoTransactionReceipt]) -> eyre::Result<L1Events> {
+    fn collect(receipts: &[TempoTransactionReceipt]) -> eyre::Result<Vec<L1PortalEvent>> {
         let mut collector = EventCollector::new(PORTAL);
         for receipt in receipts {
             collector.extract_receipt(receipt, BLOCK)?;
@@ -403,36 +394,30 @@ mod tests {
             ],
         )])
         .unwrap();
-        assert_eq!(events.events.len(), 7);
+        assert_eq!(events.len(), 7);
         assert!(matches!(
-            events.events[0],
+            events[0],
             L1PortalEvent::DepositMade {
                 deposit_number: 7,
                 ..
             }
         ));
+        assert!(matches!(events[1], L1PortalEvent::TokenEnabled { .. }));
         assert!(matches!(
-            events.events[1],
-            L1PortalEvent::TokenEnabled { .. }
-        ));
-        assert!(matches!(
-            events.events[2],
+            events[2],
             L1PortalEvent::WithdrawalProcessed { .. }
         ));
         assert!(matches!(
-            events.events[3],
+            events[3],
             L1PortalEvent::WithdrawalBounceBack { .. }
         ));
+        assert!(matches!(events[4], L1PortalEvent::DepositBounceBack { .. }));
         assert!(matches!(
-            events.events[4],
-            L1PortalEvent::DepositBounceBack { .. }
-        ));
-        assert!(matches!(
-            events.events[5],
+            events[5],
             L1PortalEvent::DepositBounceBackPending { .. }
         ));
         assert!(matches!(
-            events.events[6],
+            events[6],
             L1PortalEvent::RefundClaimed { amount: 42, .. }
         ));
     }
@@ -451,7 +436,7 @@ mod tests {
             receipt(false, B256::ZERO, vec![deposit()]),
         ])
         .unwrap();
-        assert!(events.events.is_empty());
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -507,17 +492,14 @@ mod tests {
         }
         let events = collector.finish();
 
-        assert_eq!(events.events.len(), 3);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], L1PortalEvent::DepositMade { .. }));
         assert!(matches!(
-            events.events[0],
-            L1PortalEvent::DepositMade { .. }
-        ));
-        assert!(matches!(
-            events.events[1],
+            events[1],
             L1PortalEvent::WithdrawalProcessed { .. }
         ));
         assert!(matches!(
-            events.events[2],
+            events[2],
             L1PortalEvent::TokenEnabled { token } if token == Address::repeat_byte(5)
         ));
     }
