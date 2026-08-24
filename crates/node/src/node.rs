@@ -574,12 +574,8 @@ where
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
 
-        self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
+        self.prepare_l1_state(&l1_provider, tempo_block_number)
             .await?;
-        if let Some(keys) = self.l1_config.encryption_keys.clone() {
-            self.resolve_and_seed_encryption_keys(&l1_provider, tempo_block_number, &keys)
-                .await?;
-        }
 
         // Multi-sequencer mode: bootstrap the leadership schedule from the portal
         // snapshot at the local Tempo anchor, and install the transition sink before
@@ -1257,6 +1253,21 @@ where
             sequencer_config,
             prover_config,
         })
+    }
+
+    /// Seed the Zone's L1-derived state from its current snapshot.
+    async fn prepare_l1_state(
+        &mut self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        tempo_block_number: u64,
+    ) -> eyre::Result<()> {
+        self.resolve_and_seed_tokens(l1_provider, tempo_block_number)
+            .await?;
+        if let Some(keys) = self.l1_config.encryption_keys.clone() {
+            self.resolve_and_seed_encryption_keys(l1_provider, tempo_block_number, &keys)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Seed the enabled-token registry from the zone's current L1 snapshot.
