@@ -2527,11 +2527,17 @@ contract ZonePortalTest is BaseTest {
             ""
         );
         uint256 reserve = 20;
-        Withdrawal[] memory withdrawals = new Withdrawal[](reserve);
+        Withdrawal[] memory withdrawals = new Withdrawal[](reserve + 1);
+        for (uint256 i; i < reserve; ++i) {
+            withdrawals[i] = withdrawal;
+        }
+        Withdrawal memory successfulWithdrawal =
+            _withdrawal(address(pathUSD), alice, bob, 1, bytes32("success"), 0, alice, "");
+        withdrawals[reserve] = successfulWithdrawal;
+
         bytes32 withdrawalHash = bytes32(0);
-        for (uint256 i = reserve; i > 0; --i) {
-            withdrawals[i - 1] = withdrawal;
-            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
+        for (uint256 i = withdrawals.length; i > 0; --i) {
+            withdrawalHash = keccak256(abi.encode(withdrawals[i - 1], withdrawalHash));
         }
 
         vm.roll(block.number + 1);
@@ -2563,13 +2569,45 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         bytes32 queueHashAtPublicCapacity = portal.currentDepositQueueHash();
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
         portal.processWithdrawals(withdrawals, bytes32(0));
 
         bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
         assertTrue(queueHashAtCapacity != queueHashAtPublicCapacity);
         assertEq(portal.depositCount(), maximum + 1);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + successfulWithdrawal.amount);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
+
+        bytes32 blockedWithdrawalHash = keccak256(abi.encode(withdrawal, bytes32(0)));
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("blocked-at-cap")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: processedDepositHash,
+                nextProcessedHash: processedDepositHash,
+                prevDepositNumber: 1,
+                nextDepositNumber: 1
+            }),
+            blockedWithdrawalHash,
+            "",
+            ""
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+        );
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.currentDepositQueueHash(), queueHashAtCapacity);
+        assertEq(portal.depositCount(), maximum + 1);
+        assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueSlot(1), blockedWithdrawalHash);
 
         vm.expectRevert(
             abi.encodeWithSelector(

@@ -1055,8 +1055,8 @@ contract ZonePortal is IZonePortal {
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
         uint64 maximum = MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_BOUNCEBACK_RESERVE;
 
-        // A withdrawal callback may return one deposit through the capacity reserved by
-        // processWithdrawals. Further deposits remain subject to the public cap.
+        // A withdrawal callback may return one deposit through the capacity reserved from
+        // public deposits. Further deposits remain subject to the public cap.
         if (_withdrawalReentrancyStatus == CALLBACK_DEPOSIT_AVAILABLE) {
             _withdrawalReentrancyStatus = CALLBACK_DEPOSIT_CONSUMED;
             maximum = MAX_UNPROCESSED_DEPOSITS;
@@ -1099,10 +1099,7 @@ contract ZonePortal is IZonePortal {
         nonReentrantWithdrawal
     {
         uint256 unprocessed = depositCount - lastProcessedDepositNumber;
-        if (
-            unprocessed > MAX_UNPROCESSED_DEPOSITS
-                || withdrawals.length > MAX_UNPROCESSED_DEPOSITS - unprocessed
-        ) {
+        if (unprocessed > MAX_UNPROCESSED_DEPOSITS) {
             revert DepositBlockCapacityExceeded(MAX_UNPROCESSED_DEPOSITS);
         }
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);

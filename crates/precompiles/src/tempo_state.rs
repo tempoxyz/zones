@@ -177,7 +177,6 @@ impl TempoState {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
                     finalizeTempo_0(call) => self.apply_checkpoint(l1, msg_sender, call),
-                    // The cumulative ABI exposes the Z1 selector before execution support lands.
                     finalizeTempo_1(_) => {
                         tempo_precompiles::dispatch::unknown_selector_result(calldata)
                     },
