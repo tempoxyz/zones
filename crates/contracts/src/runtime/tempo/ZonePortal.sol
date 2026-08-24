@@ -68,9 +68,11 @@ contract ZonePortal is IZonePortal {
     /// @dev Keeps name, symbol, and currency in Solidity's one-slot short-string representation.
     uint256 public constant MAX_TOKEN_METADATA_BYTES = 31;
 
-    /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
-    ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
-    uint64 internal constant WITHDRAWAL_BOUNCEBACK_RESERVE = 20;
+    /// @dev Reserves deposit-queue capacity for one maximum-size withdrawal batch.
+    ///      Each withdrawal can append at most one deposit: either a callback-triggered
+    ///      deposit on success or a bounce-back deposit on failure.
+    ///      The 20M batch gas ceiling fits at most 19 withdrawals, plus one slot of margin.
+    uint64 internal constant WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE = 20;
 
     uint256 internal constant WITHDRAWAL_NOT_ENTERED = 0;
     uint256 internal constant WITHDRAWAL_PROCESSING = 1;
@@ -1053,7 +1055,7 @@ contract ZonePortal is IZonePortal {
         // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
-        uint64 maximum = MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_BOUNCEBACK_RESERVE;
+        uint64 maximum = MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE;
 
         // A withdrawal callback may return one deposit through the capacity reserved from
         // public deposits. Further deposits remain subject to the public cap.
