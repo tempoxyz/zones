@@ -96,15 +96,22 @@ height.
 ## Failure behavior
 
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
-or acknowledging the block. A deterministic mismatch records one durable
-finding, freezes the verified tip, and continues acknowledging subsequent
-notifications while recording how far the unchecked range extends. A finding
-remains active until the checker is rebuilt from authenticated genesis.
+or acknowledging the block. Each retry budget is bounded. Tempo retries use
+exponential backoff, while unavailable local Zone state retries once per second.
+Pruned state disables immediately because it cannot recover.
 
-An unrecoverable checker-local error disables the checker and drains ExEx
-notifications so it cannot terminate or stall Zone execution. Observe mode
-never changes block execution or consensus behavior; operators must alert on
-lag or an active divergence.
+A deterministic mismatch records one durable finding, freezes the verified tip,
+and continues acknowledging subsequent notifications while recording how far the
+unchecked range extends. A finding remains active until the checker is rebuilt
+from authenticated genesis.
+
+An exhausted retry budget or an unrecoverable checker-local error disables the
+checker and drains ExEx notifications so it cannot terminate or stall Zone
+execution. Verification then stays disabled for the life of the process; since
+the checker runs as an ExEx inside the node, restarting the node attempts to
+resume from the last durably verified Zone block. Observe mode never changes
+block execution or consensus behavior; operators must alert on lag or an active
+divergence.
 
 The node's existing metrics endpoint exports:
 

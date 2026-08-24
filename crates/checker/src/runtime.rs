@@ -28,7 +28,12 @@ use crate::{
 };
 
 const RETRY_DELAY: Duration = Duration::from_secs(1);
-const MAX_ACQUISITION_ATTEMPTS: u32 = 30;
+/// Maximum delay between Tempo acquisition attempts.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// Retry bound for unavailable local Zone state.
+const MAX_STATE_ATTEMPTS: u32 = 30;
+/// Retry bound for Tempo acquisition.
+const MAX_L1_ATTEMPTS: u32 = 10;
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 /// `NodePrimitives` whose transaction and receipt types the checker can process.
@@ -266,21 +271,21 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, AttemptError>>,
 {
-    let mut attempts = 0;
+    let mut backoff = Backoff::new();
     loop {
         match attempt().await {
             Ok(value) => return Ok(value),
             Err(AttemptError::Retry(error)) => {
-                record_retry_attempt(&mut attempts, &error, operation)?;
+                backoff.record(&error, operation)?;
                 tracing::warn!(
                     target: "zone::checker",
                     %error,
                     operation,
-                    attempt = attempts,
-                    max_attempts = MAX_ACQUISITION_ATTEMPTS,
+                    attempt = backoff.attempts,
+                    max_attempts = MAX_L1_ATTEMPTS,
                     "checker acquisition failed; retrying"
                 );
-                tokio::time::sleep(RETRY_DELAY).await;
+                backoff.wait().await;
             }
             Err(AttemptError::Disable(error)) => return Err(error),
         }
@@ -319,16 +324,43 @@ struct VerificationContext<'a> {
 
 fn record_retry_attempt(
     attempts: &mut u32,
+    max_attempts: u32,
     error: &eyre::Report,
     operation: &str,
 ) -> eyre::Result<()> {
     *attempts = attempts.saturating_add(1);
-    if *attempts >= MAX_ACQUISITION_ATTEMPTS {
+    if *attempts >= max_attempts {
         return Err(eyre::eyre!(
             "{operation} retry budget exhausted after {attempts} failed attempts: {error:#}"
         ));
     }
     Ok(())
+}
+
+/// Bounded backoff for Tempo acquisition.
+struct Backoff {
+    attempts: u32,
+    delay: Duration,
+}
+
+impl Backoff {
+    const fn new() -> Self {
+        Self {
+            attempts: 0,
+            delay: RETRY_DELAY,
+        }
+    }
+
+    /// Record one failed attempt.
+    fn record(&mut self, error: &eyre::Report, operation: &str) -> eyre::Result<()> {
+        record_retry_attempt(&mut self.attempts, MAX_L1_ATTEMPTS, error, operation)
+    }
+
+    /// Wait and increase the next delay.
+    async fn wait(&mut self) {
+        tokio::time::sleep(self.delay).await;
+        self.delay = self.delay.saturating_mul(2).min(MAX_RETRY_DELAY);
+    }
 }
 
 /// Verify one append-only notification's blocks.
@@ -409,9 +441,9 @@ where
     let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
-    let mut l1_attempts = 0;
+    let mut l1_backoff = Backoff::new();
     let tempo_block =
-        collect_l1_block_with_retry(l1, tempo_parent, tempo, zone, context, &mut l1_attempts)
+        collect_l1_block_with_retry(l1, tempo_parent, tempo, zone, context, &mut l1_backoff)
             .await?;
     let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
@@ -443,6 +475,7 @@ where
                 metrics.acquisition_retries_total.increment(1);
                 record_retry_attempt(
                     &mut state_attempts,
+                    MAX_STATE_ATTEMPTS,
                     &error,
                     "local Zone state acquisition (checker requires unpruned state for notified blocks)",
                 )
@@ -452,7 +485,7 @@ where
                     zone_block = zone.number,
                     zone_hash = %zone.hash,
                     attempt = state_attempts,
-                    max_attempts = MAX_ACQUISITION_ATTEMPTS,
+                    max_attempts = MAX_STATE_ATTEMPTS,
                     "checker local state unavailable; retrying"
                 );
                 tokio::time::sleep(RETRY_DELAY).await;
@@ -483,20 +516,11 @@ where
             Err(L1ReadError::Unavailable(error)) => {
                 record_l1_retry(
                     metrics,
-                    &mut l1_attempts,
+                    &mut l1_backoff,
                     &error,
                     "Portal balance acquisition",
                 )?;
-                tokio::time::sleep(RETRY_DELAY).await;
-                collect_l1_block_with_retry(
-                    l1,
-                    tempo_parent,
-                    tempo,
-                    zone,
-                    context,
-                    &mut l1_attempts,
-                )
-                .await?;
+                l1_backoff.wait().await;
             }
             Err(error) => return Err(classify_block_l1_error(error, zone)),
         }
@@ -526,7 +550,7 @@ async fn collect_l1_block_with_retry(
     expected: BlockNumHash,
     zone: BlockRef,
     context: &VerificationContext<'_>,
-    attempts: &mut u32,
+    backoff: &mut Backoff,
 ) -> Result<crate::l1::L1BlockEvidence, BlockError> {
     let VerificationContext { config, metrics } = context;
     loop {
@@ -541,8 +565,8 @@ async fn collect_l1_block_with_retry(
         {
             Ok(block) => return Ok(block),
             Err(L1ReadError::Unavailable(error)) => {
-                record_l1_retry(metrics, attempts, &error, "Tempo block acquisition")?;
-                tokio::time::sleep(RETRY_DELAY).await;
+                record_l1_retry(metrics, backoff, &error, "Tempo block acquisition")?;
+                backoff.wait().await;
             }
             Err(error) => return Err(classify_block_l1_error(error, zone)),
         }
@@ -551,18 +575,20 @@ async fn collect_l1_block_with_retry(
 
 fn record_l1_retry(
     metrics: &CheckerMetrics,
-    attempts: &mut u32,
+    backoff: &mut Backoff,
     error: &eyre::Report,
     operation: &str,
 ) -> Result<(), BlockError> {
     metrics.acquisition_retries_total.increment(1);
-    record_retry_attempt(attempts, error, "L1 acquisition").map_err(BlockError::Disable)?;
+    backoff
+        .record(error, operation)
+        .map_err(BlockError::Disable)?;
     tracing::warn!(
         target: "zone::checker",
         %error,
         operation,
-        attempt = *attempts,
-        max_attempts = MAX_ACQUISITION_ATTEMPTS,
+        attempt = backoff.attempts,
+        max_attempts = MAX_L1_ATTEMPTS,
         "checker L1 acquisition failed; retrying"
     );
     Ok(())
@@ -614,12 +640,23 @@ mod tests {
     fn acquisition_retries_are_bounded() {
         let mut attempts = 0;
         let error = eyre::eyre!("state unavailable");
-        for _ in 1..MAX_ACQUISITION_ATTEMPTS {
-            record_retry_attempt(&mut attempts, &error, "local state acquisition").unwrap();
+        for _ in 1..MAX_STATE_ATTEMPTS {
+            record_retry_attempt(
+                &mut attempts,
+                MAX_STATE_ATTEMPTS,
+                &error,
+                "local state acquisition",
+            )
+            .unwrap();
         }
-        let error = record_retry_attempt(&mut attempts, &error, "local state acquisition")
-            .expect_err("the final attempt must disable the checker");
-        assert_eq!(attempts, MAX_ACQUISITION_ATTEMPTS);
+        let error = record_retry_attempt(
+            &mut attempts,
+            MAX_STATE_ATTEMPTS,
+            &error,
+            "local state acquisition",
+        )
+        .expect_err("the final attempt must disable the checker");
+        assert_eq!(attempts, MAX_STATE_ATTEMPTS);
         assert!(error.to_string().contains("retry budget exhausted"));
     }
 }
