@@ -1389,12 +1389,9 @@ contract ZonePortal is IZonePortal {
         //   - continuity:  once initialized, prevProcessedTokenCount must equal where we last left off
         //   - monotonic:   the processed prefix can only advance
         //   - in-range:    cannot process more tokens than have been enabled
+        uint64 expectedPrev = tokenEnablementCursorInitialized ? lastProcessedEnabledTokenCount : 0;
         if (
-            (!tokenEnablementCursorInitialized
-                    && tokenEnablementTransition.prevProcessedTokenCount != 0)
-                || (tokenEnablementCursorInitialized
-                    && tokenEnablementTransition.prevProcessedTokenCount
-                        != lastProcessedEnabledTokenCount)
+            tokenEnablementTransition.prevProcessedTokenCount != expectedPrev
                 || tokenEnablementTransition.nextProcessedTokenCount
                     < tokenEnablementTransition.prevProcessedTokenCount
                 || tokenEnablementTransition.nextProcessedTokenCount > enabledCount
