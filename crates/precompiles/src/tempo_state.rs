@@ -176,7 +176,9 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
+                    #[schedule(until = T12)]
                     finalizeTempo_0(call) => self.apply_checkpoint(l1, msg_sender, call),
+                    #[schedule(since = T12)]
                     finalizeTempo_1(_) => {
                         tempo_precompiles::dispatch::unknown_selector_result(calldata)
                     },

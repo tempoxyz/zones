@@ -47,9 +47,11 @@ impl ZoneInbox {
                     claimRefund(call) => crate::dispatch::mutate(call, msg_sender, |caller, call| {
                         self.claim_refund(caller, call.token)
                     }),
+                    #[schedule(since = T12)]
                     processedEnabledTokenCount(_) => {
                         tempo_precompiles::dispatch::unknown_selector_result(calldata)
                     },
+                    #[schedule(since = T12)]
                     advanceTempoHeaders(_) => {
                         tempo_precompiles::dispatch::unknown_selector_result(calldata)
                     },
