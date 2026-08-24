@@ -101,26 +101,26 @@ incremental = false
 
 [workspace.dependencies]
 # tempo (from upstream)
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
-tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false, features = [
+tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec" }
+tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false, features = [
   "serde",
 ] }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
-tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false, features = [
+tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec" }
+tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec" }
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false, features = [
   "reth",
   "serde",
   "serde-bincode-compat",
   "reth-codec",
 ] }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
+tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "3d16f4ade388008f4eca4b9d5a6e779ce8b173ec", default-features = false }
 
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
@@ -212,14 +212,14 @@ alloy-sol-types = { version = "1.6.1", default-features = false }
 alloy-transport = "2.3.0"
 
 # commonware
-commonware-actor = "=2026.7.0"
-commonware-codec = "=2026.7.0"
-commonware-consensus = "=2026.7.0"
-commonware-cryptography = "=2026.7.0"
-commonware-math = "=2026.7.0"
-commonware-p2p = "=2026.7.0"
-commonware-runtime = "=2026.7.0"
-commonware-utils = "=2026.7.0"
+commonware-actor = "=2026.7.1"
+commonware-codec = "=2026.7.1"
+commonware-consensus = "=2026.7.1"
+commonware-cryptography = "=2026.7.1"
+commonware-math = "=2026.7.1"
+commonware-p2p = "=2026.7.1"
+commonware-runtime = "=2026.7.1"
+commonware-utils = "=2026.7.1"
 
 # misc
 bincode = "1.3.3"
@@ -270,21 +270,3 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 vergen = { version = "10.0.1", features = ["build", "cargo", "emit_and_set"] }
 vergen-git2 = "10.0.1"
 zeroize = "1.9.0"
-
-# Keep Commonware aligned with the revision used by upstream Tempo. Cargo does
-# not inherit a git dependency's `[patch]` section into this workspace.
-[patch.crates-io]
-commonware-actor = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-broadcast = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-macros = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-stream = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "5950bf7179bb0650a57ed58b9e0478822944b335" }

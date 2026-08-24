@@ -27,7 +27,10 @@ use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 
 use crate::{
     ZoneSequencerProvider,
-    abi::{self, BlockTransition, DepositQueueTransition, IZoneInbox, IZoneOutbox, ZonePortal},
+    abi::{
+        self, BlockTransition, DepositQueueTransition, IZoneOutbox, LegacyBatchSubmitted,
+        LegacyTempoAdvanced, ZonePortal,
+    },
     attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
@@ -334,7 +337,7 @@ impl BatchSubmitter {
         &self,
         batch: &BatchData,
         shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
+    ) -> std::result::Result<LegacyBatchSubmitted, BatchSubmitError> {
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -457,7 +460,7 @@ impl BatchSubmitter {
 
         let mut submission = self
             .portal
-            .submitBatch(
+            .submitBatch_0(
                 batch.tempo_block_number,
                 recent_tempo_block_number,
                 block_transition,
@@ -706,10 +709,10 @@ impl BatchSubmitter {
     fn decode_batch_submitted(
         &self,
         logs: &[alloy_rpc_types_eth::Log],
-    ) -> Result<ZonePortal::BatchSubmitted> {
+    ) -> Result<LegacyBatchSubmitted> {
         logs.iter()
             .filter(|log| log.address() == self.portal_address)
-            .find_map(|log| ZonePortal::BatchSubmitted::decode_log(&log.inner).ok())
+            .find_map(|log| LegacyBatchSubmitted::decode_log(&log.inner).ok())
             .map(|log| log.data)
             .ok_or_else(|| {
                 eyre::eyre!("confirmed submitBatch receipt is missing the BatchSubmitted event")
@@ -1108,7 +1111,7 @@ impl BatchSubmitter {
         &self,
         first_index: u64,
         tail: u64,
-    ) -> Result<BTreeMap<u64, abi::ZonePortal::BatchSubmitted>> {
+    ) -> Result<BTreeMap<u64, LegacyBatchSubmitted>> {
         if first_index >= tail {
             return Ok(BTreeMap::new());
         }
@@ -1126,7 +1129,7 @@ impl BatchSubmitter {
 
             let events = self
                 .portal
-                .BatchSubmitted_filter()
+                .BatchSubmitted_0_filter()
                 .topic2(index_topics.clone())
                 .from_block(lo)
                 .to_block(hi)
@@ -1427,7 +1430,7 @@ fn resolve_ancestry_headers(
 fn resolve_pending_slots(
     head: u64,
     tail: u64,
-    events: &BTreeMap<u64, abi::ZonePortal::BatchSubmitted>,
+    events: &BTreeMap<u64, LegacyBatchSubmitted>,
     slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
     head_slot_hash: B256,
 ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
@@ -1528,11 +1531,11 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     for receipt in receipts {
         for log in receipt.logs() {
             if log.address != inbox_address
-                || log.topics().first() != Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
+                || log.topics().first() != Some(&LegacyTempoAdvanced::SIGNATURE_HASH)
             {
                 continue;
             }
-            let event = IZoneInbox::TempoAdvanced::decode_log(log)
+            let event = LegacyTempoAdvanced::decode_log(log)
                 .map_err(|err| eyre::eyre!("invalid TempoAdvanced log in block {number}: {err}"))?;
             if tempo_block_number.replace(event.tempoBlockNumber).is_some() {
                 return Err(eyre::eyre!(
@@ -2373,8 +2376,8 @@ mod tests {
         assert_eq!(backward_log_query_start(100, 50), 50);
     }
 
-    fn test_batch_event(withdrawal_queue_hash: B256) -> abi::ZonePortal::BatchSubmitted {
-        abi::ZonePortal::BatchSubmitted {
+    fn test_batch_event(withdrawal_queue_hash: B256) -> LegacyBatchSubmitted {
+        LegacyBatchSubmitted {
             withdrawalBatchIndex: 0,
             withdrawalQueueIndex: U256::ZERO,
             nextProcessedDepositQueueHash: B256::ZERO,
@@ -2395,7 +2398,7 @@ mod tests {
             .erased();
         let submitter = BatchSubmitter::new(portal_address, provider);
 
-        let event = abi::ZonePortal::BatchSubmitted {
+        let event = LegacyBatchSubmitted {
             withdrawalBatchIndex: 7,
             withdrawalQueueIndex: U256::from(3),
             nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
@@ -2444,7 +2447,7 @@ mod tests {
         let logs: Vec<_> = [99_u64, 100, 101]
             .into_iter()
             .map(|index| {
-                let event = abi::ZonePortal::BatchSubmitted {
+                let event = LegacyBatchSubmitted {
                     withdrawalBatchIndex: index + 20,
                     withdrawalQueueIndex: U256::from(index),
                     nextProcessedDepositQueueHash: B256::ZERO,
