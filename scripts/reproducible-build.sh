@@ -5,6 +5,8 @@
 # Inputs (env):
 #   VERSION         informational version baked into audit output (default: dev)
 #   OUT_DIR         where the built binary lands (default: ./out)
+#   GIT_SHA         full SHA of the checked-out commit (validated when set)
+#   SOURCE_DATE_EPOCH commit timestamp (validated when set)
 #   DEBIAN_SNAPSHOT pinned Debian apt snapshot override
 #   NO_CACHE        set to 1 to disable Docker/BuildKit layer cache
 #
@@ -18,14 +20,24 @@ VERSION="${VERSION:-dev}"
 OUT_DIR="${OUT_DIR:-./out}"
 DEBIAN_SNAPSHOT="${DEBIAN_SNAPSHOT:-}"
 NO_CACHE="${NO_CACHE:-0}"
+CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+CHECKED_OUT_EPOCH="$(git log -1 --pretty=%ct)"
+COMMIT="${GIT_SHA:-$CHECKED_OUT_COMMIT}"
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$CHECKED_OUT_EPOCH}"
 
 [[ "$NO_CACHE" == "0" || "$NO_CACHE" == "1" ]] || {
   echo "NO_CACHE must be 0 or 1" >&2
   exit 1
 }
 
-SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-COMMIT="$(git rev-parse HEAD)"
+[[ "$COMMIT" =~ ^[0-9a-f]{40}$ && "$COMMIT" == "$CHECKED_OUT_COMMIT" ]] || {
+  echo "GIT_SHA must be the full SHA of the checked-out commit" >&2
+  exit 1
+}
+[[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ && "$SOURCE_DATE_EPOCH" == "$CHECKED_OUT_EPOCH" ]] || {
+  echo "SOURCE_DATE_EPOCH must be the checked-out commit timestamp" >&2
+  exit 1
+}
 
 echo "::group::Reproducible build inputs"
 printf '  commit              = %s\n' "$COMMIT"
