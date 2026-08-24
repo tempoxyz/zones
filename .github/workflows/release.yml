@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: "Dry run (build binaries without creating release)"
+        description: "Verify the canonical Linux x86_64 binary without publishing an image or release"
         default: false
         type: boolean
 
@@ -315,6 +315,9 @@ jobs:
   build-other-release:
     name: Build ${{ matrix.platform.target }} release binary
     needs: resolve-release
+    # Dry runs are a focused reproducible-contract test; full releases retain
+    # the ARM Linux and macOS artifact builds below.
+    if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
