@@ -41,11 +41,14 @@ use tempo_chainspec::{
     hardfork::TempoHardfork,
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
-use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
-    account_keychain::IAccountKeychain::{
-        IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
+use tempo_contracts::{
+    precompiles::{
+        ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
+        account_keychain::IAccountKeychain::{
+            IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
+        },
     },
+    zones::{ZONE_MESSENGER_RUNTIME, ZONE_PORTAL_RUNTIME, ZONE_VERIFIER_RUNTIME},
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -209,22 +212,6 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
     ))
 }
 
-fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
-    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
-    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in crates/contracts")
-    })?;
-    let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let hex_str = artifact["deployedBytecode"]["object"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?;
-    Ok(alloy_primitives::Bytes::from(
-        alloy_primitives::hex::decode(hex_str)?,
-    ))
-}
-
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
     use tempo_zone_contracts::{
         ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
@@ -247,19 +234,19 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
         ZONE_VERIFIER_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("Verifier")?)),
+            .with_code(Some(ZONE_VERIFIER_RUNTIME)),
     );
     genesis.alloc.insert(
         ZONE_PORTAL_IMPL_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("ZonePortal")?)),
+            .with_code(Some(ZONE_PORTAL_RUNTIME)),
     );
     genesis.alloc.insert(
         ZONE_MESSENGER_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
+            .with_code(Some(ZONE_MESSENGER_RUNTIME)),
     );
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
