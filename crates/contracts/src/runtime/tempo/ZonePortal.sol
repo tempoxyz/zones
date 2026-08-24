@@ -1099,7 +1099,10 @@ contract ZonePortal is IZonePortal {
         nonReentrantWithdrawal
     {
         uint256 unprocessed = depositCount - lastProcessedDepositNumber;
-        if (unprocessed > MAX_UNPROCESSED_DEPOSITS) {
+        if (
+            unprocessed > MAX_UNPROCESSED_DEPOSITS
+                || withdrawals.length > MAX_UNPROCESSED_DEPOSITS - unprocessed
+        ) {
             revert DepositBlockCapacityExceeded(MAX_UNPROCESSED_DEPOSITS);
         }
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
