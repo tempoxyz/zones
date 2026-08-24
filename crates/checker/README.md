@@ -195,35 +195,3 @@ src/
 cargo test -p zone-checker
 cargo clippy -p zone-checker --all-targets -- -D warnings
 ```
-
-## Local verification lab
-
-The disposable lab starts a pinned Tempo development chain and a
-checker-enabled Zone, then waits for the checker to verify the blocks containing
-token enablement, deposit, and withdrawal activity:
-
-```bash
-just checker-lab-up
-just checker-lab-trigger token
-just checker-lab-trigger deposit
-just checker-lab-trigger withdrawal
-just checker-lab-trigger all
-just checker-lab-status
-just checker-lab-logs zone
-just checker-lab-restart-zone
-```
-
-Each trigger waits until the checker has verified the Zone block containing the
-corresponding activity and fails if a divergence becomes active. The token
-scenario confirms that the Portal event adds the token to accounting coverage;
-it does not validate token metadata or issuer roles. The `all` scenario runs
-token enablement, deposit, and withdrawal sequentially.
-
-The lab uses a 10-block withdrawal batch interval, prints periodic head
-progress, and fails after three minutes instead of waiting indefinitely.
-Override these defaults with `ZONE_BATCH_INTERVAL_BLOCKS` and
-`WITHDRAWAL_WAIT_TIMEOUT_SECS` when needed.
-
-State and logs are kept under `target/checker-lab`. Use
-`just checker-lab-down` to preserve them or `just checker-lab-reset` to remove
-the complete environment.

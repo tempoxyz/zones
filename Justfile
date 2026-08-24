@@ -5,47 +5,6 @@ zone_rpc := env("ZONE_RPC_URL", "http://localhost:8546")
 zone_http_port := env("ZONE_HTTP_PORT", "8546")
 zone_dev_genesis_tmp := "./target/zone-dev-genesis"
 
-[group('checker')]
-[doc('Build and start the local checker verification lab')]
-checker-lab-up:
-    bash contrib/checker-lab/checker-lab.sh up
-
-[group('checker')]
-[doc('Trigger token, deposit, withdrawal, or all checker lab scenarios')]
-checker-lab-trigger scenario:
-    bash contrib/checker-lab/checker-lab.sh trigger {{scenario}}
-
-[group('checker')]
-[doc('Show local checker lab health and verification progress')]
-checker-lab-status:
-    bash contrib/checker-lab/checker-lab.sh status
-
-[group('checker')]
-[doc('Restart the lab Zone node, rebuilding the current source')]
-checker-lab-restart-zone:
-    bash contrib/checker-lab/checker-lab.sh restart-zone
-
-[group('checker')]
-[doc('Follow checker lab logs for zone (default) or l1')]
-checker-lab-logs name="zone":
-    bash contrib/checker-lab/checker-lab.sh logs {{name}}
-
-[group('checker')]
-[doc('Stop the checker lab while preserving its state')]
-checker-lab-down:
-    bash contrib/checker-lab/checker-lab.sh down
-
-[group('checker')]
-[doc('Stop the checker lab and remove its disposable state')]
-checker-lab-reset:
-    bash contrib/checker-lab/checker-lab.sh reset
-
-[group('checker')]
-[doc('Validate checker lab shell scripts')]
-checker-lab-check:
-    bash -n contrib/checker-lab/*.sh
-    bash contrib/checker-lab/checker-lab.sh help >/dev/null
-
 [group('deps')]
 install-cross:
     cargo install cross --git https://github.com/cross-rs/cross
