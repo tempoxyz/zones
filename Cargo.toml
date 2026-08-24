@@ -20,6 +20,7 @@ members = [
   "crates/checker",
   "crates/p2p",
   "crates/payload",
+  "crates/portal-backing",
   "crates/precompiles",
   "crates/primitives",
   "crates/prover",
@@ -131,6 +132,7 @@ zone-l1 = { path = "crates/l1" }
 zone-node = { path = "crates/node" }
 zone-p2p = { path = "crates/p2p" }
 zone-payload = { path = "crates/payload" }
+zone-portal-backing = { path = "crates/portal-backing" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-prover = { path = "crates/prover" }

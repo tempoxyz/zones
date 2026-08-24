@@ -11785,6 +11785,7 @@ dependencies = [
  "toml",
  "zeroize",
  "zone-p2p",
+ "zone-portal-backing",
  "zone-precompiles",
  "zone-primitives",
  "zone-rpc",
@@ -14002,6 +14003,20 @@ dependencies = [
  "zone-evm",
  "zone-l1",
  "zone-precompiles",
+ "zone-primitives",
+]
+
+[[package]]
+name = "zone-portal-backing"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "eyre",
+ "serde",
+ "tempo-alloy",
+ "tempo-contracts",
+ "tempo-zone-contracts",
+ "tokio",
  "zone-primitives",
 ]
 

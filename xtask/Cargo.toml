@@ -21,6 +21,7 @@ tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-primitives.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-p2p.workspace = true
+zone-portal-backing.workspace = true
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
 tempo-revm.workspace = true
