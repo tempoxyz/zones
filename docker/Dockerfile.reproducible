@@ -47,3 +47,17 @@ RUN cargo build --locked --bin tempo-zone \
 
 FROM scratch AS artifacts
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone /tempo-zone
+
+# Runtime image used only by the reproducible-image verification pilot. The
+# binary is intentionally copied from the reproducible builder above rather
+# than rebuilt in this stage.
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS reproducible-runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /data
+
+FROM reproducible-runtime-base AS tempo-zone-reproducible
+COPY --from=builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone /usr/local/bin/tempo-zone
+ENTRYPOINT ["/usr/local/bin/tempo-zone"]

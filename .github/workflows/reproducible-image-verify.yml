@@ -1,0 +1,289 @@
+name: Verify Reproducible Candidate Image
+
+# This manual-only pilot verifies a non-production reproducible candidate image.
+# It does not attest or gate the existing profiling production image.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Optional branch, tag, or SHA to verify (defaults to this workflow's commit)"
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+env:
+  CANDIDATE_REPOSITORY: ghcr.io/tempoxyz/tempo-zone-repro
+
+jobs:
+  resolve:
+    name: Resolve source commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
+      short_sha: ${{ steps.commit.outputs.short_sha }}
+      source_date_epoch: ${{ steps.commit.outputs.source_date_epoch }}
+      version: ${{ steps.commit.outputs.version }}
+    steps:
+      - name: Check out requested ref
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Record immutable build inputs
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          commit_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+
+          [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Resolved ref is not a full commit SHA: $commit_sha" >&2
+            exit 1
+          }
+          [[ "$source_date_epoch" =~ ^[0-9]+$ ]] || {
+            echo "Invalid SOURCE_DATE_EPOCH: $source_date_epoch" >&2
+            exit 1
+          }
+
+          {
+            echo "commit_sha=$commit_sha"
+            echo "short_sha=$short_sha"
+            echo "source_date_epoch=$source_date_epoch"
+            echo "version=sha-$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  depot-build-and-push:
+    name: Build and push Depot candidate
+    needs: resolve
+    # Forks may exercise the clean rebuild, but never receive access to publish.
+    if: github.repository == 'tempoxyz/zones'
+    runs-on: depot-ubuntu-latest-16
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      candidate_repository: ${{ steps.candidate.outputs.repository }}
+      candidate_tag: ${{ steps.candidate.outputs.tag }}
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.resolve.outputs.source_date_epoch }}
+      GIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Check out resolved commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set candidate image reference
+        id: candidate
+        shell: bash
+        env:
+          CANDIDATE_TAG: run-${{ github.run_id }}-${{ needs.resolve.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          echo "repository=$CANDIDATE_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "tag=$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push reproducible candidate image
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        with:
+          files: docker/docker-bake.hcl
+          targets: tempo-zone-reproducible
+          project: 0c6tg19qsp
+          push: true
+          set: |
+            tempo-zone-reproducible.tags=${{ steps.candidate.outputs.repository }}:${{ steps.candidate.outputs.tag }}
+
+  clean-rebuild:
+    name: Rebuild without Docker cache
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      clean_sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - name: Check out resolved commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Build reproducibly without Docker or BuildKit cache
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          NO_CACHE: "1"
+        run: |
+          set -euo pipefail
+          docker builder prune --all --force
+          scripts/reproducible-build.sh
+
+      - name: Hash clean rebuild
+        id: hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256="$(sha256sum out/tempo-zone | awk '{print $1}')"
+          [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Invalid clean-build SHA-256: $sha256" >&2
+            exit 1
+          }
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+  extract-and-compare:
+    name: Extract and compare candidate binary
+    needs: [resolve, depot-build-and-push, clean-rebuild]
+    if: github.repository == 'tempoxyz/zones'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Log in to Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract candidate binary and compare checksums
+        id: compare
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          CANDIDATE_REPOSITORY: ${{ needs.depot-build-and-push.outputs.candidate_repository }}
+          CANDIDATE_TAG: ${{ needs.depot-build-and-push.outputs.candidate_tag }}
+          CLEAN_SHA256: ${{ needs.clean-rebuild.outputs.clean_sha256 }}
+          BINARY_PATH: /usr/local/bin/tempo-zone
+          MANIFEST: ${{ runner.temp }}/reproducible-image-verification.json
+        run: |
+          set -Eeuo pipefail
+
+          image_digest=""
+          depot_sha256=""
+          comparison_result="failed"
+          failure=""
+          container_id=""
+
+          write_manifest() {
+            jq -n \
+              --arg commit_sha "$COMMIT_SHA" \
+              --arg candidate_repository "$CANDIDATE_REPOSITORY" \
+              --arg candidate_tag "$CANDIDATE_TAG" \
+              --arg image_digest "$image_digest" \
+              --arg binary_path "$BINARY_PATH" \
+              --arg depot_sha256 "$depot_sha256" \
+              --arg clean_build_sha256 "$CLEAN_SHA256" \
+              --arg comparison_result "$comparison_result" \
+              --arg failure "$failure" \
+              '{
+                commit_sha: $commit_sha,
+                candidate_repository: $candidate_repository,
+                candidate_tag: $candidate_tag,
+                image_digest: $image_digest,
+                binary_path: $binary_path,
+                depot_sha256: $depot_sha256,
+                clean_build_sha256: $clean_build_sha256,
+                comparison_result: $comparison_result,
+                failure: $failure
+              }' > "$MANIFEST"
+          }
+
+          cleanup() {
+            status=$?
+            if [[ -n "$container_id" ]]; then
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+            write_manifest
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          tagged_image="$CANDIDATE_REPOSITORY:$CANDIDATE_TAG"
+          for attempt in {1..12}; do
+            image_digest="$(docker buildx imagetools inspect "$tagged_image" \
+              --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+            if [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              break
+            fi
+            echo "Waiting for $tagged_image to become readable (attempt $attempt/12)"
+            sleep 5
+          done
+          if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            failure="could not resolve candidate image digest"
+            echo "Could not resolve a valid digest for $tagged_image" >&2
+            exit 1
+          fi
+
+          immutable_image="$CANDIDATE_REPOSITORY@$image_digest"
+          docker pull "$immutable_image"
+          container_id="$(docker create "$immutable_image")"
+          docker cp "$container_id:$BINARY_PATH" "$RUNNER_TEMP/tempo-zone"
+          depot_sha256="$(sha256sum "$RUNNER_TEMP/tempo-zone" | awk '{print $1}')"
+
+          if [[ "$depot_sha256" == "$CLEAN_SHA256" ]]; then
+            comparison_result="success"
+            echo "Reproducible candidate binary checksum matches clean rebuild"
+          else
+            failure="candidate binary checksum does not match clean rebuild"
+            echo "::error::Reproducible image verification mismatch"
+          fi
+
+          {
+            echo "comparison_result=$comparison_result"
+            echo "image_digest=$image_digest"
+            echo "depot_sha256=$depot_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload verification manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducible-image-verification-${{ needs.resolve.outputs.short_sha }}
+          path: ${{ runner.temp }}/reproducible-image-verification.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Fail on checksum mismatch
+        if: steps.compare.outputs.comparison_result == 'failed'
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          IMAGE_DIGEST: ${{ steps.compare.outputs.image_digest }}
+          DEPOT_SHA256: ${{ steps.compare.outputs.depot_sha256 }}
+          CLEAN_SHA256: ${{ needs.clean-rebuild.outputs.clean_sha256 }}
+          BINARY_PATH: /usr/local/bin/tempo-zone
+        run: |
+          set -euo pipefail
+          echo "Reproducible image verification failed:" >&2
+          echo "  commit SHA: $COMMIT_SHA" >&2
+          echo "  image digest: $IMAGE_DIGEST" >&2
+          echo "  binary path: $BINARY_PATH" >&2
+          echo "  Depot SHA-256: $DEPOT_SHA256" >&2
+          echo "  clean-build SHA-256: $CLEAN_SHA256" >&2
+          exit 1
