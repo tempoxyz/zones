@@ -3460,6 +3460,55 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount);
     }
 
+    function test_callbackWithdrawal_usesReservedCapacityAtPublicCap() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+
+        bytes memory callbackData = _callbackData(GatewayFlow.Deposit);
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(zoneGateway),
+            amount,
+            bytes32(0),
+            2_000_000,
+            alice,
+            callbackData
+        );
+        _enqueueWithdrawal(withdrawal);
+
+        uint64 publicCapacity = portal.MAX_UNPROCESSED_DEPOSITS() - 20;
+        uint64 outstanding = portal.depositCount() - portal.lastProcessedDepositNumber();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), publicCapacity - outstanding);
+        for (uint256 i; i < publicCapacity - outstanding; ++i) {
+            _deposit(portal, address(pathUSD), bob, 1, bytes32(i), bob);
+        }
+        vm.stopPrank();
+
+        assertEq(portal.depositCount() - portal.lastProcessedDepositNumber(), publicCapacity);
+
+        bytes32 queueHashBefore = portal.currentDepositQueueHash();
+        GatewayCallbackData memory callback = abi.decode(callbackData, (GatewayCallbackData));
+        Deposit memory expectedDeposit = Deposit({
+            token: address(pathUSD),
+            sender: address(zoneGateway),
+            amount: amount - portal.calculateDepositFee(),
+            tempoRefundRecipient: alice,
+            keyIndex: callback.keyIndex,
+            encrypted: callback.encrypted
+        });
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(
+            portal.currentDepositQueueHash(),
+            DepositQueueLib.enqueueDeposit(queueHashBefore, expectedDeposit)
+        );
+        assertEq(portal.depositCount() - portal.lastProcessedDepositNumber(), publicCapacity + 1);
+    }
+
     function test_callbackWithdrawal_failureBouncesAndAdvancesQueue() public {
         uint128 amount = 500e6;
         _fundCallbackWithdrawal(amount);

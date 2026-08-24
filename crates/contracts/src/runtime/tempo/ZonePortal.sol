@@ -72,6 +72,11 @@ contract ZonePortal is IZonePortal {
     ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
     uint64 internal constant WITHDRAWAL_BOUNCEBACK_RESERVE = 20;
 
+    uint256 internal constant WITHDRAWAL_NOT_ENTERED = 0;
+    uint256 internal constant WITHDRAWAL_PROCESSING = 1;
+    uint256 internal constant CALLBACK_DEPOSIT_AVAILABLE = 2;
+    uint256 internal constant CALLBACK_DEPOSIT_CONSUMED = 3;
+
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
@@ -326,10 +331,12 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier nonReentrantWithdrawal() {
-        if (_withdrawalReentrancyStatus != 0) revert ReentrantWithdrawal();
-        _withdrawalReentrancyStatus = 1;
+        if (_withdrawalReentrancyStatus != WITHDRAWAL_NOT_ENTERED) {
+            revert ReentrantWithdrawal();
+        }
+        _withdrawalReentrancyStatus = WITHDRAWAL_PROCESSING;
         _;
-        _withdrawalReentrancyStatus = 0;
+        _withdrawalReentrancyStatus = WITHDRAWAL_NOT_ENTERED;
     }
 
     /// @inheritdoc IZonePortal
@@ -1046,9 +1053,16 @@ contract ZonePortal is IZonePortal {
         // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(
-            newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_BOUNCEBACK_RESERVE
-        );
+        uint64 maximum = MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_BOUNCEBACK_RESERVE;
+
+        // A withdrawal callback may return one deposit through the capacity reserved by
+        // processWithdrawals. Further deposits remain subject to the public cap.
+        if (_withdrawalReentrancyStatus == CALLBACK_DEPOSIT_AVAILABLE) {
+            _withdrawalReentrancyStatus = CALLBACK_DEPOSIT_CONSUMED;
+            maximum = MAX_UNPROCESSED_DEPOSITS;
+        }
+
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash, maximum);
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -1176,9 +1190,15 @@ contract ZonePortal is IZonePortal {
 
         bytes32 depositQueueHashBefore = currentDepositQueueHash;
 
+        _withdrawalReentrancyStatus = CALLBACK_DEPOSIT_AVAILABLE;
+
         // We copy whatever the messenger reverts with, so keep its errors small.
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
+
+        // Return to the normal withdrawal-processing state. If relayMessage reverts, this write
+        // and any callback deposit are reverted together.
+        _withdrawalReentrancyStatus = WITHDRAWAL_PROCESSING;
 
         // In closed access, this proves only that some deposit was appended to this portal; it does
         // not bind that deposit to the callback's token, amount, or recipient. Callback data is
