@@ -6,7 +6,7 @@
 //! generators, and failure artifacts.
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, B256, U256},
     providers::{Provider, ProviderBuilder},
     rpc::types::BlockId,
 };
@@ -52,6 +52,8 @@ pub struct PortalBackingReport {
     pub token: Address,
     pub l1_snapshot_block: u64,
     pub zone_snapshot_block: u64,
+    pub l1_snapshot_hash: B256,
+    pub zone_snapshot_hash: B256,
     pub l1_from_block: u64,
     pub zone_from_block: u64,
     pub l1_chain_id: u64,
@@ -124,6 +126,10 @@ where
     );
     let l1_block = BlockId::number(l1_snapshot);
     let zone_block = BlockId::number(zone_snapshot);
+    let (l1_snapshot_hash, zone_snapshot_hash) = tokio::try_join!(
+        header_hash(l1, l1_snapshot, "L1"),
+        header_hash(zone, zone_snapshot, "Zone"),
+    )?;
     let portal = ZonePortal::new(request.portal, l1);
     let factory = ZoneFactory::new(ZONE_FACTORY_ADDRESS, l1);
     let l1_token = TIP20Token::new(request.token, l1);
@@ -236,11 +242,26 @@ where
     let backing_surplus = portal_balance.saturating_sub(required_backing);
     let backing_deficit = required_backing.saturating_sub(portal_balance);
 
+    let (final_l1_hash, final_zone_hash) = tokio::try_join!(
+        header_hash(l1, l1_snapshot, "L1"),
+        header_hash(zone, zone_snapshot, "Zone"),
+    )?;
+    ensure!(
+        final_l1_hash == l1_snapshot_hash,
+        "L1 snapshot block {l1_snapshot} reorged during the audit: started at {l1_snapshot_hash}, ended at {final_l1_hash}"
+    );
+    ensure!(
+        final_zone_hash == zone_snapshot_hash,
+        "Zone snapshot block {zone_snapshot} reorged during the audit: started at {zone_snapshot_hash}, ended at {final_zone_hash}"
+    );
+
     Ok(PortalBackingReport {
         portal: request.portal,
         token: request.token,
         l1_snapshot_block: l1_snapshot,
         zone_snapshot_block: zone_snapshot,
+        l1_snapshot_hash,
+        zone_snapshot_hash,
         l1_from_block: request.l1_from_block,
         zone_from_block: request.zone_from_block,
         l1_chain_id,
@@ -261,6 +282,19 @@ where
         backing_surplus,
         backing_deficit,
     })
+}
+
+async fn header_hash<P: Provider<TempoNetwork>>(
+    provider: &P,
+    number: u64,
+    layer: &str,
+) -> eyre::Result<B256> {
+    provider
+        .get_header_by_number(number.into())
+        .await
+        .wrap_err_with(|| format!("failed reading {layer} snapshot header {number}"))?
+        .map(|header| header.inner.hash)
+        .ok_or_else(|| eyre::eyre!("{layer} snapshot header {number} not found"))
 }
 
 /// Connect to Tempo L1 and the full operator Zone RPC, then run an audit.

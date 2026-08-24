@@ -66,7 +66,9 @@ impl VerifyPortalBacking {
 fn print_report(report: &PortalBackingReport) {
     println!("Portal backing audit");
     println!("  L1 snapshot block:       {}", report.l1_snapshot_block);
+    println!("  L1 snapshot hash:        {}", report.l1_snapshot_hash);
     println!("  Zone snapshot block:     {}", report.zone_snapshot_block);
+    println!("  Zone snapshot hash:      {}", report.zone_snapshot_hash);
     println!(
         "  L1 event scan:           {}..={}",
         report.l1_from_block, report.l1_snapshot_block
