@@ -20,6 +20,7 @@ use tempo_precompiles::{
     storage_credits::NonCreditableSlots,
 };
 use tempo_primitives::TempoBlockEnv;
+use zone_hardfork::ZoneHardfork;
 
 use crate::{
     ZonePrecompileEnv,
@@ -35,7 +36,12 @@ pub(crate) type TestContext =
 
 /// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
 pub(crate) fn test_context() -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::T8)
+    test_context_with_hardfork(TempoHardfork::T8)
+}
+
+/// Create a test EVM context with the specified hardfork.
+pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
+    Context::new(CacheDB::new(EmptyDB::new()), hardfork)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
@@ -58,16 +64,9 @@ pub(crate) fn test_storage_provider(
 
 /// Create the ordinary precompile environment for a local unit test.
 pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
-    test_env_at_zone_hardfork(ctx, zone_hardfork::ZoneHardfork::Z0)
-}
-
-pub(crate) fn test_env_at_zone_hardfork(
-    ctx: &TestContext,
-    hardfork: zone_hardfork::ZoneHardfork,
-) -> ZonePrecompileEnv {
     ZonePrecompileEnv::new(
         &ctx.cfg,
-        hardfork,
+        ZoneHardfork::Z0,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
     )

@@ -76,9 +76,8 @@ impl ZoneInbox {
     where
         P: L1StorageReader,
     {
-        let z1_active = env.zone_hardfork().is_z1();
         crate::execution::create_precompile("ZoneInbox", env, NoCallRules, move |data, caller| {
-            Self::new().call(&l1, data, caller, z1_active)
+            Self::new().call(&l1, data, caller)
         })
     }
 
@@ -88,7 +87,6 @@ impl ZoneInbox {
         portal: Address,
         caller: Address,
         call: IZoneInbox::advanceTempoCall,
-        z1_active: bool,
     ) -> ZoneResult<()> {
         if !caller.is_zero() {
             return Err(ZoneInboxError::only_sequencer().into());
@@ -114,13 +112,13 @@ impl ZoneInbox {
         let has_token_enablements = !call.enabledTokens.is_empty();
         let enabled_token_count = call.enabledTokens.len();
         let mut previous_token_count = self.processed_enabled_token_count.read()?;
-        if z1_active && !portal.is_zero() && previous_token_count == 0 {
+        if StorageCtx.spec().is_t12() && !portal.is_zero() && previous_token_count == 0 {
             let portal_count = l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?;
             let supplied_count = call.enabledTokens.len();
             if supplied_count > portal_count {
                 return Err(ZoneInboxError::invalid_token_enablement_hash().into());
             }
-            // T12/Z1 activation adds the count cursor to zones that already committed the old
+            // T12 activation adds the count cursor to zones that already committed the old
             // append-only token hash. Derive the existing prefix from the final-root array; the
             // hash check below authenticates that prefix and the complete supplied suffix.
             previous_token_count = u64::try_from(portal_count - supplied_count)
@@ -136,7 +134,7 @@ impl ZoneInbox {
         }
 
         if !portal.is_zero() {
-            if !z1_active {
+            if !StorageCtx.spec().is_t12() {
                 if l1.read_portal(|portal| &portal.token_enablement_hash)?
                     != next_token_enablement_hash
                 {
@@ -178,7 +176,7 @@ impl ZoneInbox {
             self.processed_token_enablement_hash
                 .write(next_token_enablement_hash)?;
         }
-        let processed_enabled_token_count = if z1_active {
+        let processed_enabled_token_count = if StorageCtx.spec().is_t12() {
             let next_token_count = previous_token_count
                 .checked_add(
                     u64::try_from(enabled_token_count)
@@ -249,7 +247,7 @@ impl ZoneInbox {
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.processed_deposit_number.write(processed_number)?;
 
-        if z1_active {
+        if StorageCtx.spec().is_t12() {
             self.emit_event(TempoAdvanced {
                 tempoBlockHash: tempo_block_hash,
                 tempoBlockNumber: tempo_block_number,

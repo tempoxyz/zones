@@ -21,8 +21,7 @@ use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
-    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_env_at_zone_hardfork,
-    test_storage_provider,
+    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
 };
 
 const GAS: u64 = 30_000_000;
@@ -427,7 +426,7 @@ fn processed_enabled_token_count_activates_at_z1() -> eyre::Result<()> {
         &IZoneInbox::processedEnabledTokenCountCall::SELECTOR
     );
 
-    let z1_env = test_env_at_zone_hardfork(&harness.ctx, zone_hardfork::ZoneHardfork::Z1);
+    let z1_env = test_env(&harness.ctx);
     let z1_precompile = ZoneInbox::create(harness.l1_state.clone(), &z1_env);
     let post_z1 = call_precompile(
         &mut harness.ctx,

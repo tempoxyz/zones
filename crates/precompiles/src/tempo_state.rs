@@ -16,8 +16,8 @@ use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolError;
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    EncodePrecompileResult, charge_input_cost, dispatch, dispatch::unknown_selector_result,
-    error::TempoPrecompileError, storage::Handler, view,
+    EncodePrecompileResult, charge_input_cost, dispatch, error::TempoPrecompileError,
+    storage::Handler, view,
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
@@ -47,12 +47,11 @@ impl TempoState {
         l1: L1State<P>,
         env: &crate::ZonePrecompileEnv,
     ) -> DynPrecompile {
-        let z1_active = env.zone_hardfork().is_z1();
         crate::execution::create_precompile(
             "TempoState",
             env,
             crate::execution::NoCallRules,
-            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller, z1_active),
+            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
         )
     }
 
@@ -196,7 +195,6 @@ impl TempoState {
         l1: &L1State<P>,
         calldata: &[u8],
         msg_sender: Address,
-        z1_active: bool,
     ) -> PrecompileResult {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
@@ -210,24 +208,16 @@ impl TempoState {
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
                     #[schedule(until = T12)]
                     finalizeTempo_0(call) => {
-                        if z1_active {
-                            unknown_selector_result(calldata)
-                        } else {
-                            self.apply_checkpoints(
-                                l1,
-                                msg_sender,
-                                core::slice::from_ref(&call.header),
-                                false,
-                            )
-                        }
+                        self.apply_checkpoints(
+                            l1,
+                            msg_sender,
+                            core::slice::from_ref(&call.header),
+                            false,
+                        )
                     },
                     #[schedule(since = T12)]
                     finalizeTempo_1(call) => {
-                        if z1_active {
-                            self.apply_checkpoints(l1, msg_sender, &call.headers, true)
-                        } else {
-                            unknown_selector_result(calldata)
-                        }
+                        self.apply_checkpoints(l1, msg_sender, &call.headers, true)
                     },
                 }
             },
@@ -240,14 +230,15 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env_at_zone_hardfork,
-        test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context, test_context_with_hardfork,
+        test_env, test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
+    use tempo_contracts::TempoHardfork;
     use tempo_precompiles::storage::StorageCtx;
     use tempo_zone_contracts::{finalizeTempoCall, legacyFinalizeTempoCall};
 
@@ -259,22 +250,24 @@ mod tests {
 
     impl TempoStateHarness {
         fn new(header: &TempoHeader) -> eyre::Result<Self> {
-            Self::new_at_hardfork(header, zone_hardfork::ZoneHardfork::Z1)
+            Self::new_with_ctx(header, test_context())
         }
 
-        fn new_at_hardfork(
+        fn new_with_tempo_hardfork(
             header: &TempoHeader,
-            hardfork: zone_hardfork::ZoneHardfork,
+            hardfork: TempoHardfork,
         ) -> eyre::Result<Self> {
-            let mut ctx = test_context();
+            Self::new_with_ctx(header, test_context_with_hardfork(hardfork))
+        }
+
+        fn new_with_ctx(header: &TempoHeader, mut ctx: TestContext) -> eyre::Result<Self> {
             let encoded = encode_header(header);
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             }
             let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
-            let precompile =
-                TempoState::create(l1.clone(), &test_env_at_zone_hardfork(&ctx, hardfork));
+            let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
             Ok(Self {
                 ctx,
                 l1,
@@ -445,8 +438,7 @@ mod tests {
     fn legacy_finalize_tempo_works_before_z1() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
-        let mut harness =
-            TempoStateHarness::new_at_hardfork(&genesis, zone_hardfork::ZoneHardfork::Z0)?;
+        let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
 
@@ -466,7 +458,7 @@ mod tests {
         first.inner.timestamp = second.inner.timestamp;
         first.timestamp_millis_part = second.timestamp_millis_part;
 
-        let mut harness = TempoStateHarness::new(&genesis)?;
+        let mut harness = TempoStateHarness::new_with_tempo_hardfork(&genesis, TempoHardfork::T12)?;
         harness.set_block_timestamp(&second);
         let output = harness.finalize_many(
             ZONE_INBOX_ADDRESS,
