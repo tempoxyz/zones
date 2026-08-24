@@ -103,7 +103,7 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    AttestationStore, BatchAnchorConfig, SettlementProverConfig, WithdrawalBatchLimits,
     ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
 };
 
@@ -197,9 +197,10 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
-    /// Validate finalized batch candidates and request Nitro attestations observationally.
+    /// Require SPF validation and a Nitro NSM attestation before settlement.
     pub enable_prover: bool,
-    /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
+    /// Remote Nitro prover TCP address. Required for proof-gated settlement; when absent, the SPF
+    /// runs in-process but settlement fails because no NSM attestation can be produced.
     pub prover_address: Option<String>,
 }
 
@@ -737,7 +738,7 @@ where
             .sequencer_config
             .as_ref()
             .filter(|config| config.enable_prover)
-            .map(|config| ShadowProverConfig {
+            .map(|config| SettlementProverConfig {
                 parent_chain_id: l1_chain_id,
                 zone_id: config.zone_id,
                 chain_spec: evm_chain_spec,
@@ -1256,7 +1257,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
-        prover_config: Option<ShadowProverConfig>,
+        prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1478,7 +1479,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
-        prover_config: Option<ShadowProverConfig>,
+        prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {

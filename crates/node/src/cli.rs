@@ -565,7 +565,7 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Validate finalized batch candidates and request Nitro attestations observationally.
+    /// Require SPF validation and a Nitro NSM attestation before settlement.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
