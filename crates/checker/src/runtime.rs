@@ -382,9 +382,15 @@ where
     let tempo = BlockNumHash::new(anchor.block_number(), anchor.block_hash());
     let tempo_parent = BlockNumHash::from(prior.metadata.imported_tempo);
     validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
-    let tempo_block = collect_l1_block_at(l1, config.portal_address, tempo_parent, tempo)
-        .await
-        .map_err(|error| classify_block_l1_error(error, zone))?;
+    let tempo_block = collect_l1_block_at(
+        l1,
+        &config.l1_block_tracker,
+        config.portal_address,
+        tempo_parent,
+        tempo,
+    )
+    .await
+    .map_err(|error| classify_block_l1_error(error, zone))?;
     let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
     let candidate = CandidateTransition::derive(

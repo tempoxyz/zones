@@ -51,10 +51,13 @@ accounts forward and verifies their aggregate against total supply. It does not
 scan arbitrary Zone storage changes or reread every historical account balance
 on every block.
 
-Tempo consensus and execution are trust boundaries. Tempo evidence is bound to
-exact canonical block hashes and authenticated receipts, and the checker
-independently decodes the relevant Portal events. It does not re-execute Tempo.
-Zone post-state is read through Reth's exact-block storage provider.
+Tempo consensus and execution are trust boundaries. For live blocks, the checker
+reuses Portal logs whose receipts and headers the node's L1 subscriber already
+authenticated. It independently decodes those logs and verifies the exact block
+and parent coordinates. Bootstrap and old recovery ranges fall back to fetching
+and authenticating the same evidence from the configured archival Tempo RPC. It
+does not re-execute Tempo. Zone post-state is read through Reth's exact-block
+storage provider.
 
 ## Startup and recovery
 
@@ -173,15 +176,16 @@ ledger.
 | `observe` | Verify, persist findings, expose metrics, and leave Zone execution unchanged. |
 
 Use `--checker.mode observe` or `CHECKER_MODE=observe`. The checker reuses the
-node's Tempo RPC URL, Portal address, Zone ID, chain specification, and data
-directory. No checker-specific anchor, Portal, or database argument is needed.
+node's authenticated L1 observations, Tempo RPC URL, Portal address, Zone ID,
+chain specification, and data directory. No checker-specific anchor, Portal, or
+database argument is needed.
 
 ## Source organization
 
 ```text
 src/
   bootstrap.rs       genesis identity and authenticated Portal discovery
-  l1/                exact Tempo blocks, receipts, and Portal events
+  l1/                shared/fallback Tempo evidence and Portal event decoding
   l2/                Zone events and exact post-state reads
   accounting/        pure account and liability transitions
   persistence/       row-oriented MDBX state and exact verified coordinates

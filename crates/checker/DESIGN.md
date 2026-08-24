@@ -47,8 +47,9 @@ Protocol activity moves value between these buckets:
 
 For each canonical Zone block, the checker:
 
-1. Authenticates the imported Tempo blocks and decodes recognized events from
-   canonical Zone receipts.
+1. Reuses the node's receipt-authenticated Tempo evidence when retained (or
+   fetches and authenticates old evidence during recovery), then independently
+   decodes Portal events and canonical Zone receipts.
 2. Converts recognized protocol events into ordered accounting effects.
 3. Applies those effects to a copy of the last verified ghost state.
 4. Reads the exact Zone post-state and imported Tempo state.

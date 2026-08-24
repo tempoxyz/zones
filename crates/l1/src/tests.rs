@@ -209,6 +209,42 @@ async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
 }
 
 #[test]
+fn l1_block_tracker_retains_authenticated_portal_logs_after_consumption() {
+    let tracker = L1BlockTracker::default();
+    let anchor = NumHash::new(10, B256::with_last_byte(0x10));
+    let parent_hash = B256::with_last_byte(0x09);
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let log = alloy_primitives::Log::new_unchecked(
+        portal,
+        vec![B256::with_last_byte(1)],
+        Default::default(),
+    );
+    tracker
+        .record_with_portal_evidence(
+            anchor,
+            parent_hash,
+            L1PortalEvents::default(),
+            vec![log.clone()],
+        )
+        .unwrap();
+
+    let observed = tracker.authenticated_portal_logs(anchor).unwrap().unwrap();
+    assert_eq!(observed.parent_hash, parent_hash);
+    assert_eq!(observed.logs, vec![log.clone()]);
+
+    tracker.prune_through(anchor.number);
+    assert_eq!(tracker.observed_hash(anchor.number), None);
+    assert_eq!(
+        tracker
+            .authenticated_portal_logs(anchor)
+            .unwrap()
+            .unwrap()
+            .logs,
+        vec![log]
+    );
+}
+
+#[test]
 fn observed_portal_events_require_complete_advance_tempo_inputs() {
     let events = L1PortalEvents {
         deposits: vec![
@@ -508,7 +544,7 @@ fn verify_receipts_accepts_matching_root_and_logs_bloom() {
     ];
     let receipts_root = calculate_test_receipts_root(&receipts);
 
-    verify_receipts(block, receipts_root, Bloom::ZERO, &receipts)
+    verify_receipts_against_header(block, receipts_root, Bloom::ZERO, &receipts)
         .expect("matching receipts root should validate");
 }
 
@@ -527,8 +563,9 @@ fn verify_receipts_rejects_receipts_root_mismatch() {
         Bloom::ZERO,
     )];
 
-    let err = verify_receipts(block, B256::with_last_byte(0xff), Bloom::ZERO, &receipts)
-        .expect_err("mismatched receipts root should fail");
+    let err =
+        verify_receipts_against_header(block, B256::with_last_byte(0xff), Bloom::ZERO, &receipts)
+            .expect_err("mismatched receipts root should fail");
 
     assert!(
         err.to_string().contains("receipt root mismatch"),
@@ -554,7 +591,7 @@ fn verify_receipts_rejects_changed_receipt_bloom() {
     let mut tampered_receipts = receipts;
     tampered_receipts[0].inner.inner.logs_bloom = Bloom::repeat_byte(0x01);
 
-    let err = verify_receipts(block, receipts_root, Bloom::ZERO, &tampered_receipts)
+    let err = verify_receipts_against_header(block, receipts_root, Bloom::ZERO, &tampered_receipts)
         .expect_err("tampered receipt bloom should fail");
 
     assert!(
@@ -579,7 +616,7 @@ fn verify_receipts_rejects_logs_bloom_mismatch() {
     )];
     let receipts_root = calculate_test_receipts_root(&receipts);
 
-    let err = verify_receipts(block, receipts_root, Bloom::ZERO, &receipts)
+    let err = verify_receipts_against_header(block, receipts_root, Bloom::ZERO, &receipts)
         .expect_err("mismatched header logs bloom should fail");
 
     assert!(
@@ -1641,9 +1678,10 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
+    assert_eq!(portal_logs.len(), 1);
 }
 
 #[test]
@@ -1678,7 +1716,7 @@ fn pause_events_invalidate_cached_portal_storage() {
     ];
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
-    let (_, invalidated) = subscriber.extract_events(1, &[receipt]).unwrap();
+    let (_, invalidated, _) = subscriber.extract_events(1, &[receipt]).unwrap();
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(
