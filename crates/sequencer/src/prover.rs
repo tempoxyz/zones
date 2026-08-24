@@ -1,4 +1,4 @@
-//! Detached, observational SPF validation and Nitro proof generation for settlement batches.
+//! Backpressured SPF validation and Nitro proof generation for settlement batches.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,7 +27,7 @@ use tempo_zone_contracts::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
-    sync::mpsc::{self, error::TrySendError},
+    sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, info};
 use zone_chainspec::ZoneChainSpec;
@@ -45,14 +45,14 @@ use zone_spf::{
 use crate::{BatchAnchor, BatchData, PreparedBatch, ZoneSequencerProvider, metrics::ProverMetrics};
 
 /// Number of candidates allowed to wait behind the active validation.
-const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
+const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
 const RPC_CONCURRENCY: usize = 8;
 
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
-pub struct ShadowProverConfig {
+pub struct SettlementProverConfig {
     /// Parent Tempo chain ID bound into SPF public inputs.
     pub parent_chain_id: u64,
     /// Zone identifier bound into SPF public inputs.
@@ -61,14 +61,15 @@ pub struct ShadowProverConfig {
     pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
-    /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
+    /// Remote Nitro prover TCP address. When absent, execute the SPF in-process and reject
+    /// settlement because no NSM attestation can be produced.
     pub prover_address: Option<String>,
 }
 
-impl fmt::Debug for ShadowProverConfig {
+impl fmt::Debug for SettlementProverConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ShadowProverConfig")
+            .debug_struct("SettlementProverConfig")
             .field("parent_chain_id", &self.parent_chain_id)
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
@@ -79,7 +80,7 @@ impl fmt::Debug for ShadowProverConfig {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ShadowProver {
+pub(crate) struct SettlementProver {
     sender: mpsc::Sender<ProverJob>,
 }
 
@@ -89,6 +90,7 @@ struct ProverJob {
     to: u64,
     prepared: PreparedBatch,
     enqueued_at: Instant,
+    response: oneshot::Sender<Result<ProofBundle>>,
 }
 
 #[derive(Debug)]
@@ -103,7 +105,7 @@ struct ValidationStats {
 }
 
 struct ProverContext<P> {
-    config: ShadowProverConfig,
+    config: SettlementProverConfig,
     portal: Address,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
@@ -157,20 +159,20 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
     }
 }
 
-pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
-    config: ShadowProverConfig,
+pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
+    config: SettlementProverConfig,
     portal: Address,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
-) -> ShadowProver {
+) -> SettlementProver {
     info!(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
         prover_address = ?config.prover_address,
-        queue_capacity = SHADOW_PROVER_QUEUE_CAPACITY,
-        "Shadow prover enabled"
+        queue_capacity = SETTLEMENT_PROVER_QUEUE_CAPACITY,
+        "Settlement prover enabled"
     );
-    let (sender, mut receiver) = mpsc::channel::<ProverJob>(SHADOW_PROVER_QUEUE_CAPACITY);
+    let (sender, mut receiver) = mpsc::channel::<ProverJob>(SETTLEMENT_PROVER_QUEUE_CAPACITY);
     let context = ProverContext {
         config,
         portal,
@@ -189,8 +191,8 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
             metrics
                 .validation_duration_seconds
                 .record(started.elapsed().as_secs_f64());
-            match result {
-                Ok(stats) => {
+            let response = match result {
+                Ok((stats, proof_bundle)) => {
                     metrics.validation_success_total.increment(1);
                     metrics.witness_bytes.record(stats.witness_bytes as f64);
                     metrics.batch_size_blocks.record(stats.blocks as f64);
@@ -221,8 +223,9 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         transactions = stats.transactions,
                         zone_state_nodes = stats.zone_state_nodes,
                         tempo_state_nodes = stats.tempo_state_nodes,
-                        "Shadow prover validated finalized batch candidate"
+                        "Settlement prover produced an attested batch proof"
                     );
+                    Ok(proof_bundle)
                 }
                 Err(err) => {
                     metrics.validation_failure_total.increment(1);
@@ -234,40 +237,51 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         next_block_hash = %job.prepared.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
                         error = ?err,
-                        "Shadow prover failed to validate finalized batch candidate"
+                        "Settlement prover failed to produce an attested batch proof"
                     );
+                    Err(err)
                 }
-            }
+            };
+            let _ = job.response.send(response);
         }
     });
 
-    ShadowProver { sender }
+    SettlementProver { sender }
 }
 
-impl ShadowProver {
-    /// Queue a candidate without waiting for validation or queue capacity.
-    pub(crate) fn try_enqueue(&self, from: u64, to: u64, prepared: PreparedBatch) {
-        if let Err(err) = self.sender.try_send(ProverJob {
-            from,
-            to,
-            prepared: prepared.clone(),
-            enqueued_at: Instant::now(),
-        }) {
-            let batch = &prepared.batch;
-            error!(
-                target: "zone::sequencer::prover",
-                zone_from = from,
-                zone_to = to,
-                prev_block_hash = %batch.prev_block_hash,
-                next_block_hash = %batch.next_block_hash,
-                error = %err,
-                "Shadow prover queue {}; skipping finalized batch candidate",
-                match err {
-                    TrySendError::Full(_) => "full",
-                    TrySendError::Closed(_) => "unavailable",
-                },
-            );
-        }
+impl SettlementProver {
+    /// Produce the proof required to settle one finalized batch.
+    pub(crate) async fn prove(
+        &self,
+        from: u64,
+        to: u64,
+        prepared: PreparedBatch,
+    ) -> Result<ProofBundle> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ProverJob {
+                from,
+                to,
+                prepared,
+                enqueued_at: Instant::now(),
+                response,
+            })
+            .await
+            .map_err(|_| eyre::eyre!("settlement prover worker is unavailable"))?;
+        receiver
+            .await
+            .map_err(|_| eyre::eyre!("settlement prover worker dropped its response"))?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failing(message: &'static str) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<ProverJob>(1);
+        tokio::spawn(async move {
+            while let Some(job) = receiver.recv().await {
+                let _ = job.response.send(Err(eyre::eyre!(message)));
+            }
+        });
+        Self { sender }
     }
 }
 
@@ -275,7 +289,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     context: &ProverContext<P>,
     job: &ProverJob,
     metrics: &ProverMetrics,
-) -> Result<ValidationStats> {
+) -> Result<(ValidationStats, ProofBundle)> {
     let batch = &job.prepared.batch;
     ensure!(
         batch.zone_height == job.to,
@@ -384,8 +398,10 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     };
 
     let started = Instant::now();
-    let output = if let Some(address) = &context.config.prover_address {
-        verify_remotely(address, context.config.zone_id, job, &witness, metrics).await?
+    let (output, proof_bundle) = if let Some(address) = &context.config.prover_address {
+        let (output, proof_bundle) =
+            verify_remotely(address, context.config.zone_id, job, &witness, metrics).await?;
+        (output, Some(proof_bundle))
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
         let attempt = witness.clone();
@@ -393,7 +409,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             .await
             .context("SPF worker panicked")?
             .context("SPF rejected generated witness")?;
-        output
+        (output, None)
     };
     metrics
         .spf_execution_duration_seconds
@@ -405,7 +421,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
-    Ok(ValidationStats {
+    let stats = ValidationStats {
         witness_bytes: witness_size(&witness),
         blocks: witness.zone_blocks.len(),
         deposits: witness
@@ -425,7 +441,10 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             .sum(),
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
-    })
+    };
+    let proof_bundle = proof_bundle
+        .ok_or_eyre("attested settlement requires a remote prover with Nitro NSM support")?;
+    Ok((stats, proof_bundle))
 }
 
 async fn verify_remotely(
@@ -434,7 +453,7 @@ async fn verify_remotely(
     job: &ProverJob,
     witness: &BatchWitness,
     metrics: &ProverMetrics,
-) -> Result<BatchOutput> {
+) -> Result<(BatchOutput, ProofBundle)> {
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
         request_id: format!(
@@ -506,7 +525,7 @@ async fn verify_remotely(
                 request.request_id
             );
             validate_proof_bundle(&proof_bundle)?;
-            Ok(*output)
+            Ok((*output, proof_bundle))
         }
         VerifyResponse::Error {
             version,
