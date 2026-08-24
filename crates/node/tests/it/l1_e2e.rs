@@ -22,7 +22,7 @@ use std::{collections::HashMap, time::Duration};
 use tempo_precompiles::{PATH_USD_ADDRESS, zone_factory::portal};
 use tempo_zone_contracts::{
     IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
-    ZonePortal, ZonePortal::Role as PortalRole,
+    ZonePortal, ZonePortal::Role as PortalRole, legacySubmitBatchCall,
 };
 use zone_node::dev::{ProvisionConfig, provision_zone};
 
@@ -205,7 +205,11 @@ async fn test_three_node_quorum_settles_real_batch_boundary() -> eyre::Result<()
         || {
             let portal = &portal;
             async move {
-                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                let events = portal
+                    .BatchSubmitted_0_filter()
+                    .from_block(0)
+                    .query()
+                    .await?;
                 if events.is_empty() {
                     return Ok(None);
                 }
@@ -263,7 +267,11 @@ async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::
         || {
             let portal = &portal;
             async move {
-                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                let events = portal
+                    .BatchSubmitted_0_filter()
+                    .from_block(0)
+                    .query()
+                    .await?;
                 let Some((_, log)) = events.first() else {
                     return Ok(None);
                 };
@@ -301,7 +309,7 @@ async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::
 async fn fetch_submit_batch_call(
     l1: &L1TestNode,
     tx_hash: B256,
-) -> eyre::Result<ZonePortal::submitBatchCall> {
+) -> eyre::Result<legacySubmitBatchCall> {
     let response: serde_json::Value = reqwest::Client::new()
         .post(l1.http_url().clone())
         .json(&serde_json::json!({
@@ -343,7 +351,7 @@ async fn fetch_submit_batch_call(
         eyre::eyre!("failed to hex-decode submitBatch calldata for {tx_hash}: {err}")
     })?;
 
-    ZonePortal::submitBatchCall::abi_decode(&calldata)
+    legacySubmitBatchCall::abi_decode(&calldata)
         .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))
 }
 
@@ -414,7 +422,11 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
         follower_height < 20,
         "divergent follower unexpectedly imported the leader boundary"
     );
-    let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+    let events = portal
+        .BatchSubmitted_0_filter()
+        .from_block(0)
+        .query()
+        .await?;
     eyre::ensure!(
         events.is_empty(),
         "leader settled despite only its own usable signature"

@@ -21,7 +21,7 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
-use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
+use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError, legacyFinalizeTempoCall};
 use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
 alloy_sol_types::sol! {
@@ -136,7 +136,7 @@ impl TempoState {
         &mut self,
         l1: &L1State<P>,
         sender: Address,
-        call: TempoStateAbi::finalizeTempoCall,
+        call: legacyFinalizeTempoCall,
     ) -> PrecompileResult {
         if self.storage.is_static() {
             return self.revert_error(StaticCallNotAllowed {});
@@ -176,7 +176,12 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
-                    finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
+                    #[schedule(until = T12)]
+                    finalizeTempo_0(call) => self.apply_checkpoint(l1, msg_sender, call),
+                    #[schedule(since = T12)]
+                    finalizeTempo_1(_) => {
+                        tempo_precompiles::dispatch::unknown_selector_result(calldata)
+                    },
                 }
             },
         )
@@ -267,7 +272,7 @@ mod tests {
             header: Bytes,
             is_static: bool,
         ) -> PrecompileResult {
-            let data = TempoStateAbi::finalizeTempoCall { header }.abi_encode();
+            let data = legacyFinalizeTempoCall { header }.abi_encode();
             self.call(caller, data, is_static)
         }
 
