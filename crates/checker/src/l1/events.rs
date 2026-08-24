@@ -84,11 +84,17 @@ impl EventCollector {
             return Ok(());
         }
         for log in receipt.logs() {
-            if log.address() == self.portal
-                && let Some(event) = decode_portal_event(&log.inner, block)?
-            {
-                self.events.push(event);
-            }
+            self.extract_log(&log.inner, block)?;
+        }
+        Ok(())
+    }
+
+    /// Decode one receipt-authenticated log when it was emitted by the configured Portal.
+    pub(super) fn extract_log(&mut self, log: &Log, block: u64) -> eyre::Result<()> {
+        if log.address == self.portal
+            && let Some(event) = decode_portal_event(log, block)?
+        {
+            self.events.push(event);
         }
         Ok(())
     }

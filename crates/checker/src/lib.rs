@@ -108,6 +108,8 @@ pub struct CheckerConfig {
     pub zone_chain_id: u64,
     /// Dedicated MDBX directory below the node data directory.
     pub database_path: PathBuf,
+    /// Receipt-authenticated Tempo observations shared with the Zone node.
+    pub l1_block_tracker: zone_l1::L1BlockTracker,
 }
 
 /// Observe-only checker execution extension.

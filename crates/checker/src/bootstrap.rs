@@ -17,7 +17,7 @@ use crate::{
     AttemptError, CheckerConfig,
     accounting::{State, effects},
     decode_event,
-    l1::{classify_rpc_error, collect_l1_block, portal_balances, validate_l1_receipts},
+    l1::{classify_rpc_error, collect_l1_block, portal_balances},
     l2::read_zone_genesis,
     persistence::{self, Checkpoint},
 };
@@ -206,9 +206,13 @@ async fn authenticate_creation(
         .ok_or_else(|| {
             AttemptError::retry(eyre::eyre!("Portal creation receipts are unavailable"))
         })?;
-    let transaction_hashes = block.transactions().hashes().collect::<Vec<_>>();
-    validate_l1_receipts(coordinate, &transaction_hashes, &receipts)
-        .map_err(AttemptError::disable)?;
+    zone_l1::verify_receipts_against_header(
+        coordinate,
+        block.header().receipts_root(),
+        block.header().logs_bloom(),
+        &receipts,
+    )
+    .map_err(AttemptError::disable)?;
 
     let mut creations = receipts
         .iter()

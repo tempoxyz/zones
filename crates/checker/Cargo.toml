@@ -45,6 +45,7 @@ tempo-revm = { workspace = true, features = ["reth"] }
 tempo-zone-contracts = { workspace = true, features = ["rpc", "std"] }
 zone-precompiles.workspace = true
 zone-primitives.workspace = true
+zone-l1.workspace = true
 
 # misc
 eyre.workspace = true

@@ -160,6 +160,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         }
 
         node = configure_sequencing(&args, zone_id, node).await?;
+        let checker_l1_block_tracker = node.l1_block_tracker();
 
         // Install or skip the checker ExEx based on the configured mode.
         match args.checker_mode {
@@ -178,6 +179,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     zone_id: checker_zone_id,
                     zone_chain_id: checker_zone_chain_id,
                     database_path: checker_database_path,
+                    l1_block_tracker: checker_l1_block_tracker,
                 });
                 builder
                     .node(node)

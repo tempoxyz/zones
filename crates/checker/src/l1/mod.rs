@@ -3,14 +3,15 @@
 mod events;
 
 use alloy_consensus::BlockHeader as _;
-use alloy_eips::{BlockId, BlockNumHash, NumHash};
-use alloy_network::{BlockResponse as _, ReceiptResponse as _, primitives::HeaderResponse as _};
+use alloy_eips::{BlockId, BlockNumHash};
+use alloy_network::{BlockResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
 use tempo_contracts::precompiles::ITIP20;
+use zone_l1::L1BlockTracker;
 
 use crate::AttemptError;
 
@@ -79,11 +80,47 @@ pub(crate) async fn collect_l1_block(
 /// Fetch the exact anchored Tempo block that extends `parent`.
 pub(crate) async fn collect_l1_block_at(
     provider: &DynProvider<TempoNetwork>,
+    tracker: &L1BlockTracker,
     portal: Address,
     parent: BlockNumHash,
     expected: BlockNumHash,
 ) -> Result<L1BlockEvidence, L1ReadError> {
+    if let Some(evidence) = tracker
+        .authenticated_portal_logs(expected)
+        .map_err(finding)?
+    {
+        return collect_tracked_l1_block_evidence(portal, parent, evidence);
+    }
     collect_l1_block_inner(provider, portal, parent, Some(expected)).await
+}
+
+fn collect_tracked_l1_block_evidence(
+    portal: Address,
+    parent: BlockNumHash,
+    evidence: zone_l1::AuthenticatedPortalLogs,
+) -> Result<L1BlockEvidence, L1ReadError> {
+    let expected_number = parent.number.checked_add(1).ok_or_else(|| {
+        disable(eyre::eyre!(
+            "Tempo block number overflow after {}",
+            parent.number
+        ))
+    })?;
+    if evidence.block.number != expected_number || evidence.parent_hash != parent.hash {
+        return Err(finding(eyre::eyre!(
+            "Tempo history is not contiguous at block {}",
+            evidence.block.number
+        )));
+    }
+    let mut collector = EventCollector::new(portal);
+    for log in &evidence.logs {
+        collector
+            .extract_log(log, evidence.block.number)
+            .map_err(finding)?;
+    }
+    Ok(L1BlockEvidence {
+        block: evidence.block,
+        events: collector.finish(),
+    })
 }
 
 async fn collect_l1_block_inner(
@@ -121,13 +158,24 @@ async fn collect_l1_block_inner(
             "Tempo history does not end at the Zone anchor"
         )));
     }
-    let transaction_hashes = block.transactions().as_hashes().ok_or_else(|| {
-        disable(eyre::eyre!(
-            "Tempo block {number} ({}) did not contain transaction hashes",
-            coordinate.hash
-        ))
-    })?;
-    collect_l1_block_evidence(provider, portal, coordinate, transaction_hashes).await
+    let receipts = provider
+        .get_block_receipts(BlockId::hash(coordinate.hash))
+        .await
+        .map_err(classify_rpc_error)?
+        .ok_or_else(|| {
+            unavailable(eyre::eyre!(
+                "no receipts for L1 block {number} ({})",
+                coordinate.hash
+            ))
+        })?;
+    zone_l1::verify_receipts_against_header(
+        coordinate,
+        block.header().receipts_root(),
+        block.header().logs_bloom(),
+        &receipts,
+    )
+    .map_err(disable)?;
+    collect_l1_block_evidence(portal, coordinate, &receipts)
 }
 
 /// Read Portal custody for one token at an exact canonical Tempo block.
@@ -163,24 +211,14 @@ pub(crate) async fn portal_balances(
 }
 
 /// Fetch receipts and collect Portal events for one authenticated L1 block.
-async fn collect_l1_block_evidence(
-    provider: &DynProvider<TempoNetwork>,
+fn collect_l1_block_evidence(
     portal: Address,
     block: BlockNumHash,
-    transaction_hashes: &[B256],
+    receipts: &[TempoTransactionReceipt],
 ) -> Result<L1BlockEvidence, L1ReadError> {
-    let hash = block.hash;
     let number = block.number;
-    let receipts = provider
-        .get_block_receipts(BlockId::hash(hash))
-        .await
-        .map_err(classify_rpc_error)?
-        .ok_or_else(|| unavailable(eyre::eyre!("no receipts for L1 block {number} ({hash})")))?;
-    validate_l1_receipts(NumHash::new(number, hash), transaction_hashes, &receipts)
-        .map_err(disable)?;
-
     let mut event_collector = EventCollector::new(portal);
-    for receipt in &receipts {
+    for receipt in receipts {
         event_collector
             .extract_receipt(receipt, number)
             .map_err(finding)?;
@@ -232,109 +270,59 @@ fn disable(error: impl Into<eyre::Report>) -> L1ReadError {
     L1ReadError::Disable(error.into())
 }
 
-/// Validate transaction and receipt correspondence from the trusted L1 RPC.
-pub(crate) fn validate_l1_receipts(
-    block: NumHash,
-    transaction_hashes: &[B256],
-    receipts: &[TempoTransactionReceipt],
-) -> eyre::Result<()> {
-    let block_number = block.number;
-    let block_hash = block.hash;
-    eyre::ensure!(
-        receipts.len() == transaction_hashes.len(),
-        "L1 block {block_number} ({block_hash}) has {} transactions but {} receipts",
-        transaction_hashes.len(),
-        receipts.len()
-    );
-    for (index, (transaction_hash, receipt)) in transaction_hashes.iter().zip(receipts).enumerate()
-    {
-        eyre::ensure!(
-            receipt.block_hash() == Some(block_hash),
-            "receipt {index} has wrong block hash in L1 block {block_number} ({block_hash})"
-        );
-        eyre::ensure!(
-            receipt.block_number() == Some(block_number),
-            "receipt {index} has wrong block number in L1 block {block_number} ({block_hash})"
-        );
-        eyre::ensure!(
-            receipt.transaction_index() == Some(index as u64),
-            "receipt {index} has wrong transaction index in L1 block {block_number} ({block_hash})"
-        );
-        eyre::ensure!(
-            receipt.transaction_hash() == *transaction_hash,
-            "receipt {index} has wrong transaction hash in L1 block {block_number} ({block_hash})"
-        );
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::ReceiptWithBloom;
-    use alloy_primitives::{B256, Bloom};
-    use alloy_rpc_types_eth::TransactionReceipt;
-    use tempo_alloy::rpc::TempoTransactionReceipt;
-    use tempo_primitives::{TempoReceipt, TempoTxType};
+    use alloy_eips::NumHash;
+    use alloy_primitives::{B256, Log};
+    use alloy_sol_types::SolEvent;
+    use tempo_zone_contracts::ZonePortal;
 
     const BLOCK: u64 = 100;
     const HASH: B256 = B256::repeat_byte(0x10);
 
-    fn receipt_with_logs(
-        success: bool,
-        logs: Vec<alloy_rpc_types_eth::Log>,
-    ) -> TempoTransactionReceipt {
-        let inner_receipt = TempoReceipt {
-            tx_type: TempoTxType::Legacy,
-            success,
-            cumulative_gas_used: 0,
-            logs,
+    #[test]
+    fn tracked_evidence_preserves_accounting_events_and_parent_link() {
+        let parent = BlockNumHash::new(BLOCK - 1, B256::repeat_byte(0x09));
+        let portal = Address::repeat_byte(0x20);
+        let token = Address::repeat_byte(0x21);
+        let log = Log {
+            address: portal,
+            data: ZonePortal::TokenEnabled {
+                token,
+                name: "Test".into(),
+                symbol: "TST".into(),
+                currency: "USD".into(),
+            }
+            .encode_log_data(),
         };
-        TempoTransactionReceipt {
-            inner: TransactionReceipt {
-                inner: ReceiptWithBloom::new(inner_receipt, Bloom::ZERO),
-                transaction_hash: B256::ZERO,
-                transaction_index: Some(0),
-                block_hash: Some(HASH),
-                block_number: Some(BLOCK),
-                gas_used: 0,
-                effective_gas_price: 0,
-                blob_gas_used: None,
-                blob_gas_price: None,
-                from: Address::ZERO,
-                to: Some(Address::ZERO),
-                contract_address: None,
-            },
-            fee_token: None,
-            fee_payer: Address::ZERO,
-        }
+        let tracked = zone_l1::AuthenticatedPortalLogs {
+            block: NumHash::new(BLOCK, HASH),
+            parent_hash: parent.hash,
+            logs: vec![log],
+        };
+
+        let evidence = collect_tracked_l1_block_evidence(portal, parent, tracked).unwrap();
+        assert_eq!(evidence.block(), BlockNumHash::new(BLOCK, HASH));
+        assert!(matches!(
+            evidence.portal_events().next(),
+            Some(L1PortalEvent::TokenEnabled { token: observed }) if *observed == token
+        ));
     }
 
     #[test]
-    fn validate_receipts_rejects_count_mismatch() {
-        let receipts = [receipt_with_logs(true, vec![])];
-        assert!(
-            validate_l1_receipts(
-                NumHash::new(BLOCK, HASH),
-                &[B256::ZERO, B256::repeat_byte(1)],
-                &receipts,
-            )
-            .is_err()
+    fn tracked_evidence_rejects_non_contiguous_parent() {
+        let tracked = zone_l1::AuthenticatedPortalLogs {
+            block: NumHash::new(BLOCK, HASH),
+            parent_hash: B256::repeat_byte(0xff),
+            logs: vec![],
+        };
+        let result = collect_tracked_l1_block_evidence(
+            Address::ZERO,
+            BlockNumHash::new(BLOCK - 1, B256::repeat_byte(0x09)),
+            tracked,
         );
-    }
-
-    #[test]
-    fn validate_receipts_rejects_wrong_transaction_metadata() {
-        let receipts = [receipt_with_logs(true, vec![])];
-        assert!(
-            validate_l1_receipts(
-                NumHash::new(BLOCK, HASH),
-                &[B256::repeat_byte(1)],
-                &receipts,
-            )
-            .is_err()
-        );
+        assert!(matches!(result, Err(L1ReadError::Finding(_))));
     }
 
     #[test]
