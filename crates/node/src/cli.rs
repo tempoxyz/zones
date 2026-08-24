@@ -137,7 +137,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         // Clone L1 connection details for the checker before they are moved into ZoneNode.
         let checker_l1_rpc_url = args.l1_rpc_url.clone();
         let checker_portal_address = args.portal_address;
-        let checker_zone_id = args.zone_id;
+        let checker_zone_id = zone_id;
         let checker_zone_chain_id = builder.config().chain.chain().id();
         let checker_database_path = builder.config().datadir().data_dir().join("checker");
 
