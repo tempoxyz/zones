@@ -105,14 +105,26 @@ where
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     tracing::info!(target: "zone::checker", "checker started");
+    let persisted_identity = config
+        .database_path
+        .exists()
+        .then(|| Store::inspect_identity(&config.database_path))
+        .transpose()?;
     let l1 = connect(&config.l1_rpc_url).await?;
     let bootstrap = retry_transient(
-        || bootstrap::build(ctx.provider(), &l1, &config),
+        || async {
+            match persisted_identity {
+                Some(identity) => {
+                    bootstrap::authenticate(ctx.provider(), &l1, &config, identity).await
+                }
+                None => bootstrap::discover(ctx.provider(), &l1, &config).await,
+            }
+        },
         "checker bootstrap",
     )
     .await?;
     let mut checkpoint = None;
-    let (store, mut snapshot) = if config.database_path.exists() {
+    let (store, mut snapshot) = if persisted_identity.is_some() {
         Store::open(&config.database_path, bootstrap.identity())?
     } else {
         let checkpoint =

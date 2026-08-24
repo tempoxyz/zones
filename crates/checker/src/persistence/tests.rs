@@ -1,9 +1,15 @@
 use alloy_primitives::{Address, B256, U256};
+use reth_db::{
+    Database as _,
+    transaction::{DbTx as _, DbTxMut as _},
+};
 
 use crate::accounting::{AccountKey, BalanceChange, Effect, LiabilityKind, State, TokenState};
 
 use super::{
-    BlockRef, CandidateTransition, Checkpoint, Finding, Identity, PersistenceError, Status, Store,
+    BlockRef, CandidateTransition, Checkpoint, Finding, Identity, PersistenceError, SCHEMA_VERSION,
+    Status, Store,
+    schema::{Meta, MetaKey, MetaValue},
 };
 
 fn block(number: u64, byte: u8) -> BlockRef {
@@ -39,6 +45,7 @@ fn rows_survive_restart_and_clear_on_reset() {
         state,
     };
     let initial = Store::create_atomic(&path, &checkpoint).unwrap();
+    assert_eq!(Store::inspect_identity(&path).unwrap(), identity());
     let (store, reopened) = Store::open(&path, identity()).unwrap();
     assert_eq!(reopened, initial);
     assert_eq!(reopened.state.token(token), Some(TokenState::default()));
@@ -81,6 +88,30 @@ fn rows_survive_restart_and_clear_on_reset() {
     assert_eq!(reset.metadata.verified_zone, genesis);
     assert_eq!(reset.state.account(account), None);
     assert_eq!(reset.state.token(token), Some(TokenState::default()));
+}
+
+#[test]
+fn inspect_identity_validates_schema() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checker");
+    let checkpoint = Checkpoint {
+        identity: identity(),
+        zone: block(0, 10),
+        tempo: block(20, 20),
+        state: Default::default(),
+    };
+    Store::create_atomic(&path, &checkpoint).unwrap();
+    let (store, _) = Store::open(&path, identity()).unwrap();
+    let tx = store.db.tx_mut().unwrap();
+    tx.put::<Meta>(MetaKey::Version, MetaValue::Version(SCHEMA_VERSION + 1))
+        .unwrap();
+    tx.commit().unwrap();
+    drop(store);
+
+    assert!(matches!(
+        Store::inspect_identity(&path),
+        Err(PersistenceError::Schema { .. })
+    ));
 }
 
 #[test]
