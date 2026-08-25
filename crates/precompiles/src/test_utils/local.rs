@@ -34,9 +34,9 @@ pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_
 pub(crate) type TestContext =
     Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 
-/// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
+/// Create an empty test EVM context at the latest Tempo hardfork with Zone changes.
 pub(crate) fn test_context() -> TestContext {
-    test_context_with_hardfork(TempoHardfork::T8)
+    test_context_with_hardfork(TempoHardfork::T12)
 }
 
 /// Create a test EVM context with the specified hardfork.
