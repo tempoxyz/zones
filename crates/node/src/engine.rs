@@ -83,7 +83,7 @@ impl ProductionPermit {
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
-        // NOTE: jtcn 111: Before building a Zone block, checks this node still owns its L1 block.
+        // NOTE: jtcn 117: Before building a Zone block, checks this node still owns its L1 block.
         // This stops the old leader exactly where a handoff begins.
         match self.schedule.leader_for(tempo_anchor) {
             None => Some(EngineExit::Fenced { tempo_anchor }),

@@ -112,6 +112,8 @@ impl L1StateCacheInner {
     /// only when the subscriber has processed receipts through `block_number` and no mutation
     /// barrier exists after the value was populated.
     pub fn get(&mut self, address: Address, slot: B256, block_number: u64) -> Option<B256> {
+        // NOTE: jtcn 80: The cache keeps a value history for each contract slot and L1 block. An
+        // older value is reused only when every block was checked and no change was recorded.
         let (&cached_block, &value) = self
             .slots
             .get(&(address, slot))?
@@ -182,6 +184,8 @@ impl L1StateCacheInner {
         anchor: u64,
         invalidated_addresses: impl IntoIterator<Item = Address>,
     ) {
+        // NOTE: jtcn 79: Each sequential finalized L1 block extends cache coverage and records which
+        // contracts changed. A missing or out of order block clears the cache and starts coverage again.
         if self.coverage.end().checked_add(1) != Some(anchor) {
             warn!(
                 anchor,

@@ -591,8 +591,8 @@ impl WithdrawalProcessor {
                 return Ok(());
             }
 
-            // NOTE: jtcn 50: Splits the remaining withdrawals into L1 transactions that fit the
-            // configured gas limit. One portal slot may take several transactions to drain.
+            // NOTE: jtcn 50: Splits withdrawals under a configured gas budget capped at 20 million
+            // so each call fits below L1's 30 million ceiling. One slot may take several calls.
             let batches =
                 build_withdrawal_batches(remaining, self.config.batch_limits.max_batch_gas);
             let total_gas = batches

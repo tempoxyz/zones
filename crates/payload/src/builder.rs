@@ -261,7 +261,7 @@ where
         // the size budget
         // The block executor owns gas-capacity accounting.
         let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
-        // NOTE: jtcn 75: Runs user transactions only after the L1 update succeeds. They execute
+        // NOTE: jtcn 73: Runs user transactions only after the L1 update succeeds. They execute
         // against the new checkpoint, token config, and deposited balances until the block is full.
         let raw_best_txs = self
             .pool
@@ -283,7 +283,7 @@ where
             return Ok(BuildOutcome::Cancelled);
         }
 
-        // NOTE: jtcn 77: Finalizes withdrawals after every user transaction. It closes any nonempty
+        // NOTE: jtcn 75: Finalizes withdrawals after every user transaction. It closes any nonempty
         // list and periodically closes an empty list so batch settlement keeps moving.
         finalize_withdrawal_batch_if_needed(
             &mut builder,
@@ -301,7 +301,7 @@ where
             block_access_list: _,
         } = builder.finish(&*state_provider, None)?;
 
-        // NOTE: jtcn 79: Checkpoint: `advanceTempo` brought finalized L1 state in, user transactions
+        // NOTE: jtcn 77: Checkpoint: `advanceTempo` brought finalized L1 state in, user transactions
         // ran with Zone precompiles, and the Outbox committed withdrawals for later settlement.
 
         let requests = chain_spec

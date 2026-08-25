@@ -940,7 +940,7 @@ impl LeadershipSink for ScheduleLeadershipSink {
                 transition.epoch,
             )
         })?;
-        // NOTE: jtcn 107: Maps the finalized portal leader address to its manifest P2P identity.
+        // NOTE: jtcn 113: Maps the finalized portal leader address to its manifest P2P identity.
         // The result says who takes over and the first L1 block they own.
         self.schedule.publish(LeadershipState::new(
             transition.epoch,
@@ -1029,7 +1029,7 @@ where
             .increment(1);
         return Ok(());
     }
-    // NOTE: jtcn 113: Forced recovery starts a replacement leader after a Zone block chosen by the
+    // NOTE: jtcn 119: Forced recovery starts a replacement leader after a Zone block chosen by the
     // operator. The next finalized leader update from the portal ends the override.
     schedule.install_forced_recovery(
         recovery_epoch,
@@ -1163,7 +1163,7 @@ where
         } = handle.into_parts();
 
         let sinks = EventSinks::default();
-        // NOTE: jtcn 88: Checkpoint: P2P peers are connected. Outbound messages are checked and
+        // NOTE: jtcn 94: Checkpoint: P2P peers are connected. Outbound messages are checked and
         // inbound messages are authenticated before reaching the active leader or follower.
         task_executor.spawn_critical_task(
             "zone-p2p-event-router",

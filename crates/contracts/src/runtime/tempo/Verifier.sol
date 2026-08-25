@@ -27,7 +27,7 @@ contract Verifier is IVerifier {
         override
         returns (bool)
     {
-        // NOTE: jtcn 125: This reference verifier is a stub that accepts every proof. Portal state
+        // NOTE: jtcn 131: This reference verifier is a stub that accepts every proof. Portal state
         // checks and sequencer signatures still run, but Zone execution is not proven here.
         return true;
     }

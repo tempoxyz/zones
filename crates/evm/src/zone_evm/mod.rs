@@ -69,6 +69,8 @@ impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
 
     /// Clears the L1 overlay bookkeeping left by the current transaction attempt.
     pub(crate) fn clear_l1_overlay_state(&mut self) {
+        // NOTE: jtcn 84: After each transaction, clears the selected L1 anchor and warm read tracking.
+        // This does not clear the shared block versioned L1 cache.
         self.inner
             .ctx_mut()
             .journaled_state
@@ -103,6 +105,8 @@ where
         };
 
         self.clear_l1_overlay_state();
+        // NOTE: jtcn 85: Checkpoint: Every transaction sees TIP 403 policy at the Zone block's L1
+        // checkpoint. Receipt logs stop stale reuse, and mirrored L1 values never enter Zone state.
         result
     }
 }

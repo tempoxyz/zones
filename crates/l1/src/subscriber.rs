@@ -792,6 +792,8 @@ impl L1Subscriber {
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> eyre::Result<L1ProcessedEvents> {
+        // NOTE: jtcn 78: Reads finalized L1 receipt logs and records every contract that may have
+        // changed. TIP 403 policy and token events mark the registry unsafe to reuse at this block.
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();

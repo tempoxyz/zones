@@ -121,6 +121,8 @@ impl ZoneOutbox {
     }
 
     fn enforce_withdrawal_block_cap(&mut self) -> ZoneResult<()> {
+        // NOTE: jtcn 143: Caps how many withdrawal requests one Zone block can create so it cannot
+        // dump unlimited exit work on L1. Zero disables this sequencer configured rate limit.
         let max = self.max_withdrawals_per_block.read()?;
         if max == 0 {
             return Ok(());
@@ -165,8 +167,8 @@ impl ZoneOutbox {
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
-        // NOTE: jtcn 76: Checks the token, recipient, callback, fee, and L1 portal policy. It then
-        // burns the Zone tokens and appends the full withdrawal to the Outbox pending list.
+        // NOTE: jtcn 74: Checks the token, recipient, callback, fee, and L1 portal policy, then burns
+        // and queues the tokens. Callback data is capped at 1 KB and gas at 10 million to bound work.
         if call.zoneFallbackRecipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
         }
@@ -214,6 +216,8 @@ impl ZoneOutbox {
             .checked_add(1)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.last_fallback_nonce.write(fallback_nonce)?;
+        // NOTE: jtcn 150: Saves the chosen Zone fallback recipient behind a nonce. If L1 delivery
+        // fails, only the nonce crosses back and the Inbox uses this mapping to find the recipient.
         self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
         self.enqueue(
             PendingWithdrawal::from_request(caller, current_tx_hash, fallback_nonce, call),
@@ -247,6 +251,8 @@ impl ZoneOutbox {
         caller: Address,
         call: IZoneOutbox::enqueueDepositBounceBackCall,
     ) -> ZoneResult<()> {
+        // NOTE: jtcn 145: Only the Inbox can turn a failed deposit into this zero fee withdrawal.
+        // The normal finalize, submit, and process path carries it back to L1.
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
@@ -290,7 +296,7 @@ impl ZoneOutbox {
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        // NOTE: jtcn 78: Turns the pending withdrawals into one ordered hash, clears the full list,
+        // NOTE: jtcn 76: Turns the pending withdrawals into one ordered hash, clears the full list,
         // and saves the next withdrawal batch index and hash in Zone state.
         if caller != Address::ZERO {
             return Err(ZoneOutboxError::only_sequencer().into());

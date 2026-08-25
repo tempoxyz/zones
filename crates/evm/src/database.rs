@@ -92,6 +92,8 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         &mut self,
         state: &mut AddressMap<Account>,
     ) -> Result<(), ZoneDbError<DB::Error>> {
+        // NOTE: jtcn 83: Rejects any attempt to write TIP 403 state, then removes its read only
+        // values from the EVM result. L1 policy is never committed into the Zone DB.
         if let Some(account) = state.get(&TIP403_REGISTRY_ADDRESS) {
             if account.info != account.original_info() {
                 return Err(ZoneDbError::L1Write {
@@ -138,8 +140,8 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
                 .map_err(ZoneDbError::Inner);
         }
 
-        // NOTE: jtcn 72: Intercepts TIP 403 storage reads and gets the value from the finalized L1
-        // block selected by `advanceTempo`. Local writes cannot replace L1 policy.
+        // NOTE: jtcn 82: The Zone database adapter intercepts TIP 403 storage reads. It uses the L1
+        // block selected by `advanceTempo` instead of reading a local Zone value.
         let anchor = self.anchor()?;
         // REVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged again.
         self.l1

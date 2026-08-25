@@ -161,6 +161,8 @@ impl L1PortalEvents {
                     .push(L1Deposit::Deposit(Deposit::from_event(event)));
             }
             ZonePortalEvents::WithdrawalBounceBack(event) => {
+                // NOTE: jtcn 153: Turns the portal bounceback event into a canonical L1 deposit.
+                // It follows the finalized block path into `advanceTempo` without decryption.
                 info!(
                     l1_block = block_number,
                     token = %event.token,
