@@ -2109,6 +2109,8 @@ At the T9 boundary, Tempo copies the complete runtime bytecode from hardfork-spe
 
 Zone nodes and provers select execution rules from the imported Tempo block and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
 
+A settlement batch MAY contain zone blocks from both sides of a Tempo hard fork. Crossing a hard fork does not itself create a batch boundary. The prover MUST execute every zone block under the Tempo rules selected by that block's imported Tempo anchor, including historical rules for blocks before the fork. Batch submission uses the portal ABI, settlement-attestation format, verifier, and accepted prover image active on Tempo when the batch is submitted; the active prover image MUST therefore support every historical fork represented in the batch.
+
 No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements are consensus changes coordinated with that activation.
 
 If the fork changes zone predeploy behavior, the zone node injects new bytecode at the predeploy addresses before `advanceTempo` executes in the first post-fork zone block.

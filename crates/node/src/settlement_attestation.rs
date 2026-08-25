@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_batch_skips_checkpoint_only_blocks() {
+    fn previous_batch_skips_checkpoint_only_blocks_across_t12() {
         let provider = MockEthProvider::<TempoPrimitives>::new();
 
         let mut first_boundary_header = TempoHeader::default();
@@ -719,13 +719,12 @@ mod tests {
         provider.add_header(first_boundary_hash, first_boundary_header);
 
         let first_deposit_hash = B256::repeat_byte(0x11);
-        let first_tempo_advanced = TempoAdvanced {
+        let first_tempo_advanced = LegacyTempoAdvanced {
             tempoBlockHash: B256::repeat_byte(0x21),
             tempoBlockNumber: 101,
             depositsProcessed: U256::from(3),
             newProcessedDepositQueueHash: first_deposit_hash,
             lastProcessedDepositNumber: 7,
-            lastProcessedEnabledTokenCount: 9,
         };
         let first_batch_finalized = IZoneOutbox::BatchFinalized {
             withdrawalQueueHash: B256::repeat_byte(0x31),
@@ -793,9 +792,11 @@ mod tests {
 
         let commitments = block_commitments(&provider, 4).unwrap().unwrap();
         assert_eq!(commitments.processed_token_count, 15);
+        let previous = previous_batch(&provider, 4).unwrap();
+        assert_eq!(previous, (first_boundary_hash, first_deposit_hash, 7, 0));
         assert_eq!(
-            previous_batch(&provider, 4).unwrap(),
-            (first_boundary_hash, first_deposit_hash, 7, 9)
+            SettlementAbi::T12.token_transition_hash(previous.3, commitments.processed_token_count),
+            alloy_primitives::keccak256((0_u64, 15_u64).abi_encode())
         );
     }
 
