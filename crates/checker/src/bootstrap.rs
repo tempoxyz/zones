@@ -20,7 +20,7 @@ use crate::{
     AttemptError, CheckerConfig,
     accounting::State,
     decode_event,
-    l1::classify_rpc_error,
+    l1::{classify_rpc_error, validate_rpc_header},
     l2::read_zone_genesis,
     persistence::{self, Checkpoint},
 };
@@ -315,7 +315,8 @@ async fn authenticate_creation(
                 creation.number
             ))
         })?;
-    let coordinate = persistence::BlockRef::new(block.header().number(), block.header().hash);
+    let header = validate_rpc_header(block.header())?;
+    let coordinate = persistence::BlockRef::from(header.block);
     if coordinate != creation {
         let error = eyre::eyre!(
             "Portal creation coordinate changed from block {} ({}) to block {} ({})",
@@ -338,8 +339,8 @@ async fn authenticate_creation(
         })?;
     zone_l1::verify_receipts_against_header(
         coordinate.into(),
-        block.header().receipts_root(),
-        block.header().logs_bloom(),
+        header.receipts_root,
+        header.logs_bloom,
         &receipts,
     )
     .map_err(AttemptError::disable)?;
@@ -382,8 +383,9 @@ async fn is_canonical(
 ) -> Result<bool, AttemptError> {
     let block = provider
         .get_block_by_number(coordinate.number.into())
+        .hashes()
         .await
         .map_err(classify_rpc_error)?
         .ok_or_else(|| AttemptError::retry(eyre::eyre!("canonical {name} block is unavailable")))?;
-    Ok(block.header().hash == coordinate.hash)
+    Ok(validate_rpc_header(block.header())?.block == coordinate)
 }

@@ -5,11 +5,14 @@ mod events;
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockId, BlockNumHash};
 use alloy_network::{BlockResponse as _, primitives::HeaderResponse as _};
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, Bloom, Sealable as _, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
-use tempo_alloy::{TempoNetwork, rpc::TempoTransactionReceipt};
+use tempo_alloy::{
+    TempoNetwork,
+    rpc::{TempoHeaderResponse, TempoTransactionReceipt},
+};
 use tempo_contracts::precompiles::ITIP20;
 use zone_l1::L1BlockTracker;
 
@@ -55,6 +58,34 @@ impl From<L1ReadError> for AttemptError {
 pub(crate) struct L1BlockEvidence {
     block: BlockNumHash,
     events: Vec<L1PortalEvent>,
+}
+
+/// Header fields bound to the hash reported by the Tempo RPC.
+pub(crate) struct ValidatedRpcHeader {
+    pub(crate) block: BlockNumHash,
+    pub(crate) parent_hash: B256,
+    pub(crate) receipts_root: B256,
+    pub(crate) logs_bloom: Bloom,
+}
+
+/// Authenticate the RPC-reported hash against the decoded Tempo header.
+pub(crate) fn validate_rpc_header(
+    header: &TempoHeaderResponse,
+) -> Result<ValidatedRpcHeader, AttemptError> {
+    let reported_hash = header.hash();
+    let computed_hash = header.as_ref().hash_slow();
+    if reported_hash != computed_hash {
+        return Err(AttemptError::disable(eyre::eyre!(
+            "Tempo RPC header hash mismatch at block {}: reported {reported_hash}, computed {computed_hash}",
+            header.number()
+        )));
+    }
+    Ok(ValidatedRpcHeader {
+        block: BlockNumHash::new(header.number(), computed_hash),
+        parent_hash: header.parent_hash(),
+        receipts_root: header.receipts_root(),
+        logs_bloom: header.logs_bloom(),
+    })
 }
 
 impl L1BlockEvidence {
@@ -132,18 +163,19 @@ async fn fetch_l1_block_at(
         .await
         .map_err(classify_rpc_error)?
         .ok_or_else(|| unavailable(eyre::eyre!("Tempo block {number} is unavailable")))?;
-    if block.header().number() != number {
+    let header = validate_rpc_header(block.header()).map_err(L1ReadError::from)?;
+    if header.block.number != number {
         return Err(disable(eyre::eyre!(
             "Tempo RPC returned block {} for requested block {number}",
-            block.header().number()
+            header.block.number
         )));
     }
-    if block.header().parent_hash() != parent.hash {
+    if header.parent_hash != parent.hash {
         return Err(finding(eyre::eyre!(
             "Tempo history is not contiguous at block {number}"
         )));
     }
-    let coordinate = BlockNumHash::new(number, block.header().hash());
+    let coordinate = header.block;
     if coordinate != expected {
         return Err(finding(eyre::eyre!(
             "Tempo history does not end at the Zone anchor"
@@ -161,8 +193,8 @@ async fn fetch_l1_block_at(
         })?;
     zone_l1::verify_receipts_against_header(
         coordinate,
-        block.header().receipts_root(),
-        block.header().logs_bloom(),
+        header.receipts_root,
+        header.logs_bloom,
         &receipts,
     )
     .map_err(disable)?;
@@ -264,13 +296,48 @@ fn disable(error: impl Into<eyre::Report>) -> L1ReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header;
     use alloy_eips::NumHash;
     use alloy_primitives::{B256, Log};
+    use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_sol_types::SolEvent;
+    use tempo_alloy::rpc::TempoHeaderResponse;
+    use tempo_primitives::TempoHeader;
     use tempo_zone_contracts::ZonePortal;
 
     const BLOCK: u64 = 100;
     const HASH: B256 = B256::repeat_byte(0x10);
+
+    #[test]
+    fn validates_rpc_hash_against_decoded_header() {
+        let header = TempoHeader {
+            inner: Header {
+                number: BLOCK,
+                parent_hash: B256::repeat_byte(0x09),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut response = TempoHeaderResponse {
+            inner: RpcHeader {
+                hash: header.hash_slow(),
+                inner: header,
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        };
+        let validated = validate_rpc_header(&response).unwrap();
+
+        assert_eq!(validated.block, BlockNumHash::new(BLOCK, response.hash()));
+        assert_eq!(validated.parent_hash, B256::repeat_byte(0x09));
+
+        response.inner.hash = B256::repeat_byte(0xff);
+        assert!(matches!(
+            validate_rpc_header(&response),
+            Err(AttemptError::Disable(_))
+        ));
+    }
 
     #[test]
     fn tracked_evidence_preserves_accounting_events_and_parent_link() {
