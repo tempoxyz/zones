@@ -21,9 +21,7 @@ use crate::{
     bootstrap,
     l1::{L1ReadError, classify_rpc_error, collect_l1_block_at, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
-    persistence::{
-        AppliedStatus, BlockRef, CandidateTransition, Checkpoint, Finding, Snapshot, Status, Store,
-    },
+    persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
     telemetry::{self, CheckerMetrics},
 };
 
@@ -128,13 +126,11 @@ where
         "checker bootstrap",
     )
     .await?;
-    let mut checkpoint = None;
+    let checkpoint = bootstrap.checkpoint();
     let (store, mut snapshot) = if persisted_identity.is_some() {
         Store::open(&config.database_path, bootstrap.identity())?
     } else {
-        let checkpoint =
-            authenticated_checkpoint(&mut checkpoint, &bootstrap, &l1, &config).await?;
-        Store::open_or_create(&config.database_path, checkpoint)?
+        Store::open_or_create(&config.database_path, &checkpoint)?
     };
     let verified = snapshot.metadata.verified_zone;
     if ctx.provider().block_hash(verified.number)? != Some(verified.hash) {
@@ -144,9 +140,7 @@ where
             zone_hash = %verified.hash,
             "checker tip is not in local Zone history; rebuilding"
         );
-        let checkpoint =
-            authenticated_checkpoint(&mut checkpoint, &bootstrap, &l1, &config).await?;
-        snapshot = store.reset(checkpoint)?;
+        snapshot = store.reset(&checkpoint)?;
         metrics.recovery_rebuilds_total.increment(1);
     }
     metrics.update(&snapshot);
@@ -156,9 +150,7 @@ where
 
     while let Some(notification) = ctx.notifications.try_next().await? {
         if !matches!(&notification, ExExNotification::ChainCommitted { .. }) {
-            let checkpoint =
-                authenticated_checkpoint(&mut checkpoint, &bootstrap, &l1, &config).await?;
-            snapshot = store.reset(checkpoint)?;
+            snapshot = store.reset(&checkpoint)?;
             metrics.recovery_rebuilds_total.increment(1);
             metrics.update(&snapshot);
             ctx.catch_up_notifications_with_head(ExExHead::new(bootstrap.zone().into()))?;
@@ -235,26 +227,6 @@ async fn connect(url: &str) -> eyre::Result<DynProvider<TempoNetwork>> {
     )
     .await?;
     Ok(provider)
-}
-
-async fn authenticated_checkpoint<'a>(
-    checkpoint: &'a mut Option<Checkpoint>,
-    bootstrap: &bootstrap::Bootstrap,
-    l1: &DynProvider<TempoNetwork>,
-    config: &CheckerConfig,
-) -> eyre::Result<&'a Checkpoint> {
-    if checkpoint.is_none() {
-        *checkpoint = Some(
-            retry_transient(
-                || bootstrap.checkpoint(l1, config),
-                "checker initial-state replay",
-            )
-            .await?,
-        );
-    }
-    Ok(checkpoint
-        .as_ref()
-        .expect("checkpoint is initialized before it is returned"))
 }
 
 fn rpc_connection_config() -> ConnectionConfig {

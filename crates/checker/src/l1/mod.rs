@@ -68,15 +68,6 @@ impl L1BlockEvidence {
     }
 }
 
-/// Fetch one canonical Tempo block that extends `parent`.
-pub(crate) async fn collect_l1_block(
-    provider: &DynProvider<TempoNetwork>,
-    portal: Address,
-    parent: BlockNumHash,
-) -> Result<L1BlockEvidence, L1ReadError> {
-    collect_l1_block_inner(provider, portal, parent, None).await
-}
-
 /// Fetch the exact anchored Tempo block that extends `parent`.
 pub(crate) async fn collect_l1_block_at(
     provider: &DynProvider<TempoNetwork>,
@@ -91,7 +82,7 @@ pub(crate) async fn collect_l1_block_at(
     {
         return collect_tracked_l1_block_evidence(portal, parent, evidence);
     }
-    collect_l1_block_inner(provider, portal, parent, Some(expected)).await
+    fetch_l1_block_at(provider, portal, parent, expected).await
 }
 
 fn collect_tracked_l1_block_evidence(
@@ -123,11 +114,11 @@ fn collect_tracked_l1_block_evidence(
     })
 }
 
-async fn collect_l1_block_inner(
+async fn fetch_l1_block_at(
     provider: &DynProvider<TempoNetwork>,
     portal: Address,
     parent: BlockNumHash,
-    expected: Option<BlockNumHash>,
+    expected: BlockNumHash,
 ) -> Result<L1BlockEvidence, L1ReadError> {
     let number = parent.number.checked_add(1).ok_or_else(|| {
         disable(eyre::eyre!(
@@ -153,7 +144,7 @@ async fn collect_l1_block_inner(
         )));
     }
     let coordinate = BlockNumHash::new(number, block.header().hash());
-    if expected.is_some_and(|expected| coordinate != expected) {
+    if coordinate != expected {
         return Err(finding(eyre::eyre!(
             "Tempo history does not end at the Zone anchor"
         )));

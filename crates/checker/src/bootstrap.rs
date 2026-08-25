@@ -18,9 +18,9 @@ use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
 
 use crate::{
     AttemptError, CheckerConfig,
-    accounting::{State, effects},
+    accounting::State,
     decode_event,
-    l1::{classify_rpc_error, collect_l1_block, portal_balances},
+    l1::classify_rpc_error,
     l2::read_zone_genesis,
     persistence::{self, Checkpoint},
 };
@@ -34,7 +34,6 @@ pub(crate) struct Bootstrap {
     identity: persistence::Identity,
     zone: persistence::BlockRef,
     tempo: persistence::BlockRef,
-    initial_token: Address,
 }
 
 impl Bootstrap {
@@ -46,21 +45,14 @@ impl Bootstrap {
         self.zone
     }
 
-    /// Replay the authenticated pre-genesis history only when a database must be created or reset.
-    pub(crate) async fn checkpoint(
-        &self,
-        provider: &DynProvider<TempoNetwork>,
-        config: &CheckerConfig,
-    ) -> Result<Checkpoint, AttemptError> {
-        let creation = BlockNumHash::from(self.identity.creation);
-        let tempo = BlockNumHash::from(self.tempo);
-        let state = initial_state(provider, config, creation, tempo, self.initial_token).await?;
-        Ok(Checkpoint {
+    /// Build the empty checkpoint preceding Portal creation.
+    pub(crate) fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
             identity: self.identity,
             zone: self.zone,
             tempo: self.tempo,
-            state,
-        })
+            state: State::default(),
+        }
     }
 }
 
@@ -187,6 +179,13 @@ async fn finish_bootstrap(
     source: CreationSource,
 ) -> Result<Bootstrap, AttemptError> {
     authenticate_creation(l1, creation, config, context.initial_token, source).await?;
+    if context.tempo.number >= creation.number {
+        return Err(AttemptError::disable(eyre::eyre!(
+            "Zone genesis Tempo anchor {} must precede Portal creation block {}",
+            context.tempo.number,
+            creation.number,
+        )));
+    }
     if !is_canonical(l1, context.tempo, "Zone genesis anchor").await? {
         return Err(AttemptError::disable(eyre::eyre!(
             "Zone genesis Tempo anchor is not canonical"
@@ -197,7 +196,6 @@ async fn finish_bootstrap(
         identity: context.identity(config, creation),
         zone: context.zone,
         tempo: persistence::BlockRef::from(context.tempo),
-        initial_token: context.initial_token,
     })
 }
 
@@ -388,52 +386,4 @@ async fn is_canonical(
         .map_err(classify_rpc_error)?
         .ok_or_else(|| AttemptError::retry(eyre::eyre!("canonical {name} block is unavailable")))?;
     Ok(block.header().hash == coordinate.hash)
-}
-
-async fn initial_state(
-    provider: &DynProvider<TempoNetwork>,
-    config: &CheckerConfig,
-    creation: BlockNumHash,
-    anchor: BlockNumHash,
-    initial_token: Address,
-) -> Result<State, AttemptError> {
-    let mut state = State::default();
-    if anchor.number < creation.number {
-        return Ok(state);
-    }
-    let block = provider
-        .get_block_by_hash(creation.hash)
-        .await
-        .map_err(classify_rpc_error)?
-        .ok_or_else(|| AttemptError::retry(eyre::eyre!("Portal creation block is unavailable")))?;
-    let parent = BlockNumHash::new(
-        creation.number.checked_sub(1).ok_or_else(|| {
-            AttemptError::disable(eyre::eyre!("Portal cannot be created in Tempo genesis"))
-        })?,
-        block.header().parent_hash(),
-    );
-    let mut previous = parent;
-    while previous.number < anchor.number {
-        let block = collect_l1_block(provider, config.portal_address, previous).await?;
-        state
-            .apply(&effects::from_tempo(&block))
-            .map_err(AttemptError::disable)?;
-        previous = block.block();
-    }
-    if previous != anchor {
-        return Err(AttemptError::disable(eyre::eyre!(
-            "Tempo history does not end at the Zone genesis anchor"
-        )));
-    }
-    if state.token(initial_token).is_none() {
-        return Err(AttemptError::disable(eyre::eyre!(
-            "Portal creation did not enable the Zone genesis token"
-        )));
-    }
-    let tokens = state.tokens().map(|(token, _)| token).collect::<Vec<_>>();
-    let balances = portal_balances(provider, config.portal_address, tokens, anchor.hash).await?;
-    state
-        .verify_portal_balances(balances)
-        .map_err(AttemptError::disable)?;
-    Ok(state)
 }

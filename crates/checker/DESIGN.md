@@ -98,6 +98,8 @@ also validates relationships between independent protocol evidence, including:
 
 - Canonical Portal creation and token-enablement events are the only source of
   tracked-token membership; other accounting effects require existing members.
+- Zone genesis must anchor before Portal creation, establishing an empty
+  accounting baseline before normal replay reaches the creation block.
 - Processed deposit outcomes and their exact TIP-20 mints.
 - User withdrawal principal and fees and their exact receipt-local TIP-20
   debits and burns.
