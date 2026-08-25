@@ -18,7 +18,7 @@ use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    IZoneInbox, IZoneOutbox, LegacyTempoAdvanced, TEMPO_STATE_ADDRESS, TempoState, Withdrawal,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoAdvanced, TempoState, Withdrawal,
     ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 use zone_l1::ChainTempoStateExt;
@@ -748,7 +748,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     let tempo_advanced_filter = Filter::new()
         .address(ZONE_INBOX_ADDRESS)
         .from_block(0)
-        .event_signature(LegacyTempoAdvanced::SIGNATURE_HASH);
+        .event_signature(TempoAdvanced::SIGNATURE_HASH);
     let tempo_advanced_events = provider.get_logs(&tempo_advanced_filter).await?;
 
     assert!(
@@ -759,7 +759,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     // Find the event for our deposit block (should have depositsProcessed == 1)
     let deposit_event = tempo_advanced_events
         .iter()
-        .filter_map(|log| LegacyTempoAdvanced::decode_log(&log.inner).ok())
+        .filter_map(|log| TempoAdvanced::decode_log(&log.inner).ok())
         .find(|event| event.depositsProcessed == U256::from(1));
     assert!(
         deposit_event.is_some(),

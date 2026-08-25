@@ -21,7 +21,8 @@ use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
-    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
+    compressed_x_and_parity, encrypt_plaintext, test_context, test_context_with_hardfork, test_env,
+    test_storage_provider,
 };
 
 const GAS: u64 = 30_000_000;
@@ -47,12 +48,15 @@ struct Harness {
 
 impl Harness {
     fn new() -> eyre::Result<Self> {
-        Self::with_l1(MockL1Reader::default())
+        Self::new_with_hardfork(TempoHardfork::T12)
     }
 
-    fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
-        let mut ctx = test_context();
-        ctx.cfg.spec = TempoHardfork::T9;
+    fn new_with_hardfork(hardfork: TempoHardfork) -> eyre::Result<Self> {
+        let ctx = test_context_with_hardfork(hardfork);
+        Self::with_l1(MockL1Reader::default(), ctx)
+    }
+
+    fn with_l1(l1: MockL1Reader, mut ctx: TestContext) -> eyre::Result<Self> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
         let child_header = TempoHeader {
@@ -415,7 +419,7 @@ fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<(
 
 #[test]
 fn processed_enabled_token_count_activates_at_t12() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
+    let mut harness = Harness::new_with_hardfork(TempoHardfork::T11)?;
     let calldata = IZoneInbox::processedEnabledTokenCountCall {}.abi_encode();
 
     let pre_t12 = harness.call(ALICE, &calldata)?;
@@ -426,6 +430,7 @@ fn processed_enabled_token_count_activates_at_t12() -> eyre::Result<()> {
         &IZoneInbox::processedEnabledTokenCountCall::SELECTOR
     );
 
+    let mut harness = Harness::new()?;
     let t12_env = test_env(&harness.ctx);
     let t12_precompile = ZoneInbox::create(harness.l1_state.clone(), &t12_env);
     let post_t12 = call_precompile(
@@ -503,7 +508,7 @@ fn advance_rejects_a_preselected_anchor_before_child_selection() -> eyre::Result
 
 #[test]
 fn child_anchor_storage_failure_is_fatal_and_rolls_back_checkpoint() -> eyre::Result<()> {
-    let mut harness = Harness::with_l1(MockL1Reader::failing_storage())?;
+    let mut harness = Harness::with_l1(MockL1Reader::failing_storage(), test_context())?;
     let result = harness.call_atomic(
         Address::ZERO,
         harness.advance_call(Vec::new(), Vec::new()).abi_encode(),

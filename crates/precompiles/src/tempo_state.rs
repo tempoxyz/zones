@@ -230,13 +230,15 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context, test_context_with_hardfork,
+        test_env, test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::storage::StorageCtx;
     use tempo_zone_contracts::{finalizeTempoCall, legacyFinalizeTempoCall};
 
@@ -248,7 +250,14 @@ mod tests {
 
     impl TempoStateHarness {
         fn new(header: &TempoHeader) -> eyre::Result<Self> {
-            let mut ctx = test_context();
+            Self::new_with_context(header, test_context())
+        }
+
+        fn new_with_hardfork(header: &TempoHeader, hardfork: TempoHardfork) -> eyre::Result<Self> {
+            Self::new_with_context(header, test_context_with_hardfork(hardfork))
+        }
+
+        fn new_with_context(header: &TempoHeader, mut ctx: TestContext) -> eyre::Result<Self> {
             let encoded = encode_header(header);
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -317,22 +326,25 @@ mod tests {
             self.call(caller, data, is_static)
         }
 
-        fn finalize_legacy_raw(
+        fn finalize_many(&mut self, caller: Address, headers: Vec<Bytes>) -> PrecompileResult {
+            let data = finalizeTempoCall { headers }.abi_encode();
+            self.call(caller, data, false)
+        }
+
+        fn finalize_legacy(
             &mut self,
             caller: Address,
-            header: Bytes,
+            header: &TempoHeader,
             is_static: bool,
         ) -> PrecompileResult {
             self.call(
                 caller,
-                legacyFinalizeTempoCall { header }.abi_encode(),
+                legacyFinalizeTempoCall {
+                    header: encode_header(header),
+                }
+                .abi_encode(),
                 is_static,
             )
-        }
-
-        fn finalize_many(&mut self, caller: Address, headers: Vec<Bytes>) -> PrecompileResult {
-            let data = finalizeTempoCall { headers }.abi_encode();
-            self.call(caller, data, false)
         }
 
         fn finalize(
@@ -426,12 +438,11 @@ mod tests {
     fn legacy_finalize_tempo_works_before_t12() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
-        let mut harness = TempoStateHarness::new(&genesis)?;
+        let mut harness = TempoStateHarness::new_with_hardfork(&genesis, TempoHardfork::T11)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
 
-        let output =
-            harness.finalize_legacy_raw(ZONE_INBOX_ADDRESS, encode_header(&child), false)?;
+        let output = harness.finalize_legacy(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
         harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
     }
