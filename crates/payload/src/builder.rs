@@ -44,7 +44,7 @@ use tempo_transaction_pool::{
     StateAwareBestTransactions, TempoTransactionPool, transaction::TempoPooledTransaction,
 };
 use tracing::{error, info, warn};
-use zone_chainspec::{ZoneChainSpec, ZoneHardforks as _};
+use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
@@ -180,6 +180,10 @@ where
         validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
         let final_imported = imported_headers.last().expect("validated nonempty import");
         let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
+        let follows_checkpoint_prefix = match tempo_import {
+            TempoImport::Full(prepared) => prepared.follows_checkpoint_prefix,
+            TempoImport::CheckpointOnly(_) => false,
+        };
         let total_deposits = match tempo_import {
             TempoImport::Full(prepared) => prepared.queued_deposits.len(),
             TempoImport::CheckpointOnly(_) => 0,
@@ -305,11 +309,8 @@ where
             finalize_withdrawal_batch_if_needed(
                 &mut builder,
                 block_number,
-                if chain_spec.zone_hardfork_at(attributes.timestamp()).is_z1() {
-                    1
-                } else {
-                    self.withdrawal_batch_interval_blocks
-                },
+                self.withdrawal_batch_interval_blocks,
+                follows_checkpoint_prefix,
                 self.withdrawal_reveal_encryptor.as_deref(),
                 chain_id,
             )?;
@@ -584,6 +585,7 @@ fn finalize_withdrawal_batch_if_needed<B>(
     builder: &mut B,
     block_number: u64,
     interval_blocks: u64,
+    follows_checkpoint_prefix: bool,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
     chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
@@ -592,7 +594,12 @@ where
 {
     let pending_withdrawals =
         read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
-    if pending_withdrawals.is_empty() && !block_number.is_multiple_of(interval_blocks) {
+    if !should_finalize_withdrawal_batch(
+        !pending_withdrawals.is_empty(),
+        block_number,
+        interval_blocks,
+        follows_checkpoint_prefix,
+    ) {
         return Ok(());
     }
 
@@ -638,6 +645,17 @@ where
             );
             err
         })
+}
+
+fn should_finalize_withdrawal_batch(
+    has_pending_withdrawals: bool,
+    block_number: u64,
+    interval_blocks: u64,
+    follows_checkpoint_prefix: bool,
+) -> bool {
+    has_pending_withdrawals
+        || block_number.is_multiple_of(interval_blocks)
+        || follows_checkpoint_prefix
 }
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
@@ -827,13 +845,22 @@ mod tests {
     use zone_l1::PreparedL1Block;
 
     #[test]
-    fn withdrawal_batch_cadence_is_deterministic_from_block_number() {
+    fn withdrawal_batch_boundary_conditions() {
         let blocks = super::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
         assert_eq!(blocks, 120);
-        assert_ne!(119 % blocks, 0);
-        assert_eq!(120 % blocks, 0);
-        assert_eq!(240 % blocks, 0);
+        assert!(!super::should_finalize_withdrawal_batch(
+            false, 119, blocks, false
+        ));
+        assert!(super::should_finalize_withdrawal_batch(
+            false, 120, blocks, false
+        ));
+        assert!(super::should_finalize_withdrawal_batch(
+            true, 121, blocks, false
+        ));
+        assert!(super::should_finalize_withdrawal_batch(
+            false, 150, blocks, true
+        ));
     }
 
     #[test]
@@ -1034,6 +1061,7 @@ mod tests {
                 },
             }],
             enabled_tokens: vec![],
+            follows_checkpoint_prefix: false,
         };
 
         let recovered_tx = super::build_advance_tempo_tx(&prepared, 1337);
