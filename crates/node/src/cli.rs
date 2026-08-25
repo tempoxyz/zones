@@ -111,6 +111,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         }
 
         let zone_id = builder.config().chain.zone_id();
+        validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
         let manifest_mode = args.sequencer_manifest.is_some();
         validate_p2p_transaction_size_limit(
@@ -482,6 +483,10 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
+    /// Deprecated: validates the Zone ID encoded in the genesis chain ID.
+    #[arg(long = "zone.id", env = "ZONE_ID")]
+    pub zone_id: Option<u32>,
+
     /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
         long = "redacted-rpc.port",
@@ -575,6 +580,16 @@ fn parse_portal_address(value: &str) -> Result<Address, String> {
     Ok(address)
 }
 
+fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
+    if let Some(configured) = configured {
+        eyre::ensure!(
+            configured == derived,
+            "deprecated --zone.id value {configured} does not match zone ID {derived} encoded in the genesis chain ID"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Write as _, process::Command, thread, time::Duration};
@@ -583,7 +598,7 @@ mod tests {
 
     use super::{
         Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
-        parse_portal_address, validate_p2p_transaction_size_limit,
+        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -655,6 +670,25 @@ mod tests {
     fn portal_address_must_be_nonzero() {
         assert!(parse_portal_address("0x0000000000000000000000000000000000000000").is_err());
         assert!(parse_portal_address("0x1111111111111111111111111111111111111111").is_ok());
+    }
+
+    #[test]
+    fn deprecated_zone_id_is_accepted_and_validated() {
+        assert!(validate_deprecated_zone_id(None, 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
+
+        let parsed = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "7",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zone.zone_id, Some(7));
     }
 
     #[test]
