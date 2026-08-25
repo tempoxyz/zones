@@ -313,7 +313,7 @@ fn notification_tip<N: NodePrimitives>(notification: &ExExNotification<N>) -> Op
 enum BlockError {
     /// Authenticated divergence to persist as a finding.
     Finding { zone: BlockRef, error: eyre::Report },
-    /// Failure that cannot be resolved within the acquisition bound.
+    /// Checker-local failure that must stop verification.
     Disable(eyre::Report),
 }
 
@@ -403,13 +403,15 @@ fn already_applied(
     number: u64,
     hash: alloy_primitives::B256,
 ) -> Result<bool, BlockError> {
+    let verified = snapshot.metadata.verified_zone;
     match snapshot.metadata.classify(number, hash) {
         AppliedStatus::New => Ok(false),
         AppliedStatus::Applied => Ok(true),
-        AppliedStatus::Conflicts => Err(BlockError::Finding {
-            zone: BlockRef::new(number, hash),
-            error: eyre::eyre!("notification conflicts with the persisted verified tip"),
-        }),
+        AppliedStatus::Conflicts => Err(BlockError::Disable(eyre::eyre!(
+            "notification block {number} ({hash}) conflicts with verified Zone block {} ({})",
+            verified.number,
+            verified.hash
+        ))),
     }
 }
 
@@ -634,6 +636,40 @@ mod tests {
             assert!(validate_tempo_advance(10, tip).is_err());
         }
         assert!(validate_tempo_advance(u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn conflicting_verified_coordinate_disables() {
+        let verified = BlockRef::new(10, alloy_primitives::B256::repeat_byte(1));
+        let snapshot = Snapshot {
+            metadata: crate::persistence::Metadata {
+                identity: crate::persistence::Identity {
+                    l1_chain_id: 1,
+                    zone_chain_id: 2,
+                    zone_id: 3,
+                    portal: alloy_primitives::Address::repeat_byte(4),
+                    creation: BlockRef::new(5, alloy_primitives::B256::repeat_byte(5)),
+                },
+                verified_zone: verified,
+                imported_tempo: BlockRef::new(20, alloy_primitives::B256::repeat_byte(2)),
+                observed_zone: verified,
+                status: Status::Verifying,
+            },
+            state: Default::default(),
+        };
+
+        assert!(matches!(
+            already_applied(&snapshot, verified.number, verified.hash),
+            Ok(true)
+        ));
+        assert!(matches!(
+            already_applied(
+                &snapshot,
+                verified.number,
+                alloy_primitives::B256::repeat_byte(9)
+            ),
+            Err(BlockError::Disable(_))
+        ));
     }
 
     #[test]
