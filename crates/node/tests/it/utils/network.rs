@@ -411,6 +411,15 @@ where
             return writer.shutdown().await;
         }
 
+        // `paused` may change while `read` is pending. Recheck it before forwarding the bytes so
+        // enabling a pause cannot leak the chunk that wakes the read.
+        while conditions.borrow().paused {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                changed = conditions.changed() => if changed.is_err() { return Ok(()) },
+            }
+        }
+
         let condition = *conditions.borrow();
         let throttle = condition.bytes_per_second.map_or(Duration::ZERO, |rate| {
             Duration::from_secs_f64(read as f64 / rate.get() as f64)
@@ -420,6 +429,15 @@ where
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(delay) => {},
+            }
+        }
+
+        // The pause can also be enabled while the latency or bandwidth delay is pending.
+        // Recheck immediately before forwarding so that delayed chunks cannot leak through.
+        while conditions.borrow().paused {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                changed = conditions.changed() => if changed.is_err() { return Ok(()) },
             }
         }
         tokio::select! {
@@ -495,13 +513,20 @@ mod tests {
     async fn directional_pause_latency_and_bandwidth_preserve_the_stream() -> eyre::Result<()> {
         let (upstream, shutdown) = start_echo_server().await?;
         let proxy = TcpChaosProxy::start(upstream).await?;
+        let mut client = TcpStream::connect(proxy.listen_addr()).await?;
+        client.write_all(b"ready!").await?;
+        let mut warmup = [0_u8; 6];
+        client.read_exact(&mut warmup).await?;
+        assert_eq!(&warmup, b"ready!");
+
+        // Pause an established stream after its forwarding loop has returned to `read`. This
+        // covers the race where the paused state changes while that read is pending.
         proxy.pause_client_to_upstream(true);
         proxy.pause_upstream_to_client(false);
         proxy.set_upstream_to_client_latency(Duration::from_millis(100));
         proxy.set_client_to_upstream_bandwidth(NonZeroU64::new(8 * 1024));
         proxy.set_upstream_to_client_bandwidth(None);
 
-        let mut client = TcpStream::connect(proxy.listen_addr()).await?;
         let payload = vec![0x5a; 4 * 1024];
         client.write_all(&payload).await?;
         let mut echoed = vec![0_u8; payload.len()];
@@ -513,6 +538,15 @@ mod tests {
         );
 
         let started = tokio::time::Instant::now();
+        proxy.pause_client_to_upstream(false);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        proxy.pause_client_to_upstream(true);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(800), client.read_exact(&mut echoed))
+                .await
+                .is_err(),
+            "pause enabled during the bandwidth delay leaked the pending payload"
+        );
         proxy.pause_client_to_upstream(false);
         client.read_exact(&mut echoed).await?;
         assert_eq!(echoed, payload);

@@ -206,8 +206,8 @@ async fn test_follower_keeps_up_with_high_p2p_latency() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Delayed L1 RPC responses cannot make a follower accept blocks before observing their anchors;
-/// the follower eventually observes those anchors and converges with the healthy nodes.
+/// A follower does not import leader blocks while their L1 anchors are withheld. Once responses
+/// resume with substantial latency, it observes the anchors and converges with the healthy nodes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_follower_keeps_up_with_high_l1_latency() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -215,14 +215,38 @@ async fn test_follower_keeps_up_with_high_l1_latency() -> eyre::Result<()> {
     let (cluster, _network, [_leader_l1, follower_l1, _other_follower_l1]) =
         start_cluster().await?;
     synchronized_head(&cluster).await?;
+    let follower_anchor = cluster.nodes[1].tempo_block_number().await?;
+    let highest_observed_anchor = cluster.nodes[1]
+        .l1_block_tracker()
+        .latest()
+        .map_or(follower_anchor, |anchor| anchor.number);
+    let target_anchor = highest_observed_anchor + RECOVERY_GAP;
+
     follower_l1.set_client_to_upstream_latency(L1_LATENCY);
     follower_l1.set_upstream_to_client_latency(L1_LATENCY);
+    follower_l1.pause_upstream_to_client(true);
 
-    let target = cluster.nodes[0].provider().get_block_number().await? + RECOVERY_GAP;
     cluster.nodes[0]
-        .wait_for_block_number(target, NETWORK_TIMEOUT)
+        .wait_for_tempo_block_number(target_anchor, NETWORK_TIMEOUT)
         .await?;
-    cluster.wait_all_at(target, NETWORK_TIMEOUT).await?;
-    cluster.assert_same_block(target).await?;
+    let target_head = cluster.nodes[0].provider().get_block_number().await?;
+    eyre::ensure!(
+        cluster.nodes[1].tempo_block_number().await? < target_anchor,
+        "follower imported anchor {target_anchor} while its L1 responses were paused"
+    );
+    eyre::ensure!(
+        cluster.nodes[1]
+            .l1_block_tracker()
+            .latest()
+            .is_none_or(|anchor| anchor.number < target_anchor),
+        "follower observed anchor {target_anchor} while its L1 responses were paused"
+    );
+
+    follower_l1.pause_upstream_to_client(false);
+    cluster.nodes[1]
+        .wait_for_tempo_block_number(target_anchor, NETWORK_TIMEOUT)
+        .await?;
+    cluster.wait_all_at(target_head, NETWORK_TIMEOUT).await?;
+    cluster.assert_same_block(target_head).await?;
     Ok(())
 }

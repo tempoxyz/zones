@@ -182,7 +182,7 @@ async fn test_three_sequencers_reconnect_and_catch_up_after_l1_network_outage() 
         .wait_for_connections_after(0, 3, NETWORK_TIMEOUT)
         .await?;
     let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
-    let batches_before_outage = poll_until(
+    poll_until(
         NETWORK_TIMEOUT,
         POLL_INTERVAL,
         "an initial settled batch before the network outage",
@@ -232,7 +232,6 @@ async fn test_three_sequencers_reconnect_and_catch_up_after_l1_network_outage() 
             "node {index} reached outage target {outage_target} without an L1 connection"
         );
     }
-    let batches_at_resume = batch_count(&portal).await?.max(batches_before_outage);
 
     // Restoring the listeners must result in new TCP connections, not reuse of the sockets that
     // were alive before the fault. Catch-up then proves those connections carry valid RPC traffic.
@@ -267,8 +266,8 @@ async fn test_three_sequencers_reconnect_and_catch_up_after_l1_network_outage() 
         || {
             let portal = &portal;
             async move {
-                let count = batch_count(portal).await?;
-                Ok((count > batches_at_resume).then_some(count))
+                let settled_height = portal.zoneHeight().call().await?;
+                Ok((settled_height >= U256::from(recovered_height)).then_some(settled_height))
             }
         },
     )
@@ -372,8 +371,6 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
             index + 1
         );
     }
-    let batches_at_resume = batch_count(&portal).await?;
-
     for proxy in [&follower_one_proxy, &follower_two_proxy] {
         proxy.resume();
     }
@@ -408,8 +405,8 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
         || {
             let portal = &portal;
             async move {
-                let count = batch_count(portal).await?;
-                Ok((count > batches_at_resume).then_some(count))
+                let settled_height = portal.zoneHeight().call().await?;
+                Ok((settled_height >= U256::from(recovered_height)).then_some(settled_height))
             }
         },
     )
@@ -466,8 +463,6 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
             "node {index} advanced zone state without a connected leader"
         );
     }
-    let batches_before_leader_resume = batch_count(&portal).await?;
-
     leader_proxy.resume();
     leader_proxy
         .wait_for_connections_after(leader_accepted_before_outage, 1, NETWORK_TIMEOUT)
@@ -496,8 +491,9 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
         || {
             let portal = &portal;
             async move {
-                let count = batch_count(portal).await?;
-                Ok((count > batches_before_leader_resume).then_some(count))
+                let settled_height = portal.zoneHeight().call().await?;
+                Ok((settled_height >= U256::from(phase_two_recovered_height))
+                    .then_some(settled_height))
             }
         },
     )
@@ -511,7 +507,6 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
         .wait_all_at(phase_three_baseline, NETWORK_TIMEOUT)
         .await?;
     cluster.assert_same_block(phase_three_baseline).await?;
-    let batches_before_single_follower_outage = batch_count(&portal).await?;
     let isolated_accepted_before_outage = follower_one_proxy.accepted_connections();
     follower_one_proxy.disconnect();
     follower_one_proxy
@@ -549,8 +544,8 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
         || {
             let portal = &portal;
             async move {
-                let count = batch_count(portal).await?;
-                Ok((count > batches_before_single_follower_outage).then_some(count))
+                let settled_height = portal.zoneHeight().call().await?;
+                Ok((settled_height > U256::from(phase_three_baseline)).then_some(settled_height))
             }
         },
     )
