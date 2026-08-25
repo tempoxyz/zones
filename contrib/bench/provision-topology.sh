@@ -567,7 +567,7 @@ provision_up() {
     local count="${ZONES_BENCH_COUNT:-100}"
     local max_concurrent="${ZONES_BENCH_MAX_CONCURRENT:-12}"
     local withdrawal_amount="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
-    local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
+    local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-5000000}"
     local withdrawal_max_batch_gas="${ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS:-20000000}"
     local withdrawal_max_in_flight_batches="${ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES:-12}"
     local zone_batch_interval_blocks="${ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS:-120}"
@@ -704,7 +704,8 @@ provision_up() {
     local planned_singleton_withdrawal_gas=0
     case "$neobank_preset" in
         encrypted-deposit) ;;
-        *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + callback_gas_limit)) ;;
+        # The untimed Earn anchor always uses the 10M protocol maximum.
+        *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10000000)) ;;
     esac
     (( planned_singleton_withdrawal_gas == 0 ||
        planned_singleton_withdrawal_gas <= l1_general_gas_limit )) \

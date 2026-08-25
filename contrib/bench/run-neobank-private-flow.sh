@@ -83,9 +83,7 @@ ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-2000000}"
 ZONES_BENCH_ACTIVITY_AMOUNT="${ZONES_BENCH_ACTIVITY_AMOUNT:-1}"
 ZONES_BENCH_WITHDRAWAL_AMOUNT="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
 ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT="${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT:-10000000}"
-# The canonical Zone boundary e2e uses the full callback allowance: a gateway
-# callback can include a swap, vault action, and encrypted return deposit.
-ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
+ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-5000000}"
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/neobank-e2e}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-e2e.json}"
 ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUTPUT/scenario.rendered.yml}"
@@ -119,6 +117,7 @@ ZONES_BENCH_RECIPIENT_ACCOUNT_END="${ZONES_BENCH_RECIPIENT_ACCOUNT_END:-$ZONES_B
 if [[ -z "${ZONES_BENCH_RECIPIENT_GENERATOR:-}" ]]; then
     ZONES_BENCH_RECIPIENT_GENERATOR='{ pool: { pool: users, select: random } }'
 fi
+ZONES_BENCH_POSITION_RECIPIENT='{ var: account.address }'
 case "$ZONES_BENCH_RECIPIENT_MODE" in
     existing) ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT='{ var: recipient.address }' ;;
     random) ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT=random ;;
@@ -312,7 +311,7 @@ export ZONES_BENCH_DEPOSIT_GAS_LIMIT ZONES_BENCH_ACTIVITY_GAS_LIMIT
 export ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT ZONES_BENCH_APPROVAL_GAS_LIMIT
 export ZONES_BENCH_ADMISSION_SEED_AMOUNT
 export ZONES_BENCH_RECIPIENT_ACCOUNT_START ZONES_BENCH_RECIPIENT_ACCOUNT_END
-export ZONES_BENCH_RECIPIENT_GENERATOR
+export ZONES_BENCH_RECIPIENT_GENERATOR ZONES_BENCH_POSITION_RECIPIENT
 export ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN
 export ZONES_BENCH_EARN_ROUTER ZONES_BENCH_EARN_VAULT
 export ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER ZONES_BENCH_BRIDGE_WALLET
@@ -565,6 +564,31 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
         "approval_round=base_and_earn"
 fi
 
+# Seed Earn before any setup or measured Earn callback: make one untimed deposit
+# with the full callback allowance and leave its returned EarnToken in an unrelated
+# Zone account. This keeps the EarnVault and engine nonempty, so the benchmark runs
+# steady-state deposit and redemption paths instead of empty-pool transitions.
+earn_anchor_amount="$ZONES_BENCH_WITHDRAWAL_AMOUNT"
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
+    readonly earn_anchor_callback_gas_limit=10000000
+    anchor_recipient_hash="$(cast keccak "zones-benchmark-earn-anchor:$ZONES_BENCH_SEED")"
+    earn_anchor_recipient="0x${anchor_recipient_hash: -40}"
+    ZONES_BENCH_CALLBACK_GAS_LIMIT="$earn_anchor_callback_gas_limit" \
+    ZONES_BENCH_SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT="$ZONES_BENCH_DEPOSIT_AMOUNT" \
+    ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT="$earn_anchor_amount" \
+    ZONES_BENCH_POSITION_RECIPIENT="\"$earn_anchor_recipient\"" run_setup_scenario \
+        earn_anchor "$neobank_specs/swapped-redemption-position-scenario.yml" 1 \
+        "$ZONES_BENCH_OUTPUT/earn-anchor-report.json" \
+        "callback_gas_limit=$earn_anchor_callback_gas_limit amount=$earn_anchor_amount"
+
+    anchor_share_supply_after="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
+    anchor_earn_supply_after="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
+    [[ "$anchor_share_supply_after" == "$earn_anchor_amount" ]] ||
+        die "Earn anchor share supply $anchor_share_supply_after does not equal $earn_anchor_amount"
+    [[ "$anchor_earn_supply_after" == "$earn_anchor_amount" ]] ||
+        die "Earn anchor token supply $anchor_earn_supply_after does not equal $earn_anchor_amount"
+fi
+
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
     initial_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     initial_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
@@ -632,8 +656,9 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
       "$ZONES_BENCH_NEOBANK_PRESET" == "swapped-redemption" ]]; then
     initial_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     initial_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
-    [[ "$initial_share_supply" == 0 && "$initial_earn_supply" == 0 ]] ||
-        die "$ZONES_BENCH_NEOBANK_PRESET position setup requires zero initial EarnToken supply"
+    [[ "$initial_share_supply" == "$earn_anchor_amount" &&
+       "$initial_earn_supply" == "$earn_anchor_amount" ]] ||
+        die "$ZONES_BENCH_NEOBANK_PRESET position setup requires only the startup Earn anchor position"
 
     stage_start redemption_position_setup
     position_concurrency="$ZONES_BENCH_MAX_CONCURRENT"
@@ -655,10 +680,11 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
     stage_start redemption_position_check
     positioned_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     positioned_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
-    [[ "$positioned_share_supply" == "$swapped_redemption_total_position" ]] ||
-        die "$ZONES_BENCH_NEOBANK_PRESET share supply $positioned_share_supply does not equal $swapped_redemption_total_position"
-    [[ "$positioned_earn_supply" == "$swapped_redemption_total_position" ]] ||
-        die "$ZONES_BENCH_NEOBANK_PRESET EarnToken supply $positioned_earn_supply does not equal $swapped_redemption_total_position"
+    expected_redemption_position="$(bigint_eval "$swapped_redemption_total_position + $earn_anchor_amount")"
+    [[ "$positioned_share_supply" == "$expected_redemption_position" ]] ||
+        die "$ZONES_BENCH_NEOBANK_PRESET share supply $positioned_share_supply does not equal $expected_redemption_position"
+    [[ "$positioned_earn_supply" == "$expected_redemption_position" ]] ||
+        die "$ZONES_BENCH_NEOBANK_PRESET EarnToken supply $positioned_earn_supply does not equal $expected_redemption_position"
     verify_reward_zone_balances \
         seeded "$swapped_redemption_total_position" \
         "$swapped_redemption_position_per_account"
@@ -740,10 +766,11 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
     stage_start redemption_postcondition
     final_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     final_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
-    [[ "$final_share_supply" == "$swapped_redemption_expected_remaining" ]] ||
-        die "terminal $ZONES_BENCH_NEOBANK_PRESET share supply $final_share_supply does not equal $swapped_redemption_expected_remaining"
-    [[ "$final_earn_supply" == "$swapped_redemption_expected_remaining" ]] ||
-        die "terminal $ZONES_BENCH_NEOBANK_PRESET EarnToken supply $final_earn_supply does not equal $swapped_redemption_expected_remaining"
+    expected_redemption_remaining="$(bigint_eval "$swapped_redemption_expected_remaining + $earn_anchor_amount")"
+    [[ "$final_share_supply" == "$expected_redemption_remaining" ]] ||
+        die "terminal $ZONES_BENCH_NEOBANK_PRESET share supply $final_share_supply does not equal $expected_redemption_remaining"
+    [[ "$final_earn_supply" == "$expected_redemption_remaining" ]] ||
+        die "terminal $ZONES_BENCH_NEOBANK_PRESET EarnToken supply $final_earn_supply does not equal $expected_redemption_remaining"
     verify_reward_zone_balances \
         distributed_remaining "$swapped_redemption_expected_remaining" \
         "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \

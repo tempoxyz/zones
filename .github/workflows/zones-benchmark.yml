@@ -85,7 +85,7 @@ on:
         description: L1 callback gas requested by composable withdrawals (maximum 10000000).
         type: string
         required: true
-        default: "10000000"
+        default: "5000000"
       swap-liquidity:
         description: Untimed liquidity seeded into the selected swap mechanism.
         type: string
@@ -222,7 +222,7 @@ jobs:
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_SWAP_MECHANISM: direct-swap
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
-          INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '10000000' }}
+          INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '5000000' }}
           INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
           INPUT_L1_GAS_LIMIT: ${{ inputs.l1-gas-limit || '30000000' }}
           INPUT_L1_GENERAL_GAS_LIMIT: ${{ inputs.l1-general-gas-limit || '30000000' }}
@@ -339,7 +339,9 @@ jobs:
           planned_singleton_withdrawal_gas=0
           case "$neobank_preset" in
             encrypted-deposit) ;;
-            *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT)) ;;
+            # Startup creates and retains an Earn anchor position with the full
+            # callback allowance before measured steady-state withdrawals.
+            *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10000000)) ;;
           esac
           (( planned_singleton_withdrawal_gas == 0 ||
              planned_singleton_withdrawal_gas <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
