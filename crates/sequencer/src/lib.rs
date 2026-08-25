@@ -146,8 +146,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
-    // NOTE: jtcn 19: Checkpoint: The leader started `ZoneEngine` for block production and
-    // `spawn_zone_sequencer` for settlement. This function shares one signed L1 provider between
+    // NOTE: jtcn 19: Checkpoint: The leader started `ZoneEngine` for block production and `spawn_zone_sequencer` for settlement. This function shares one signed L1 provider between
     // `ZoneMonitor` and `WithdrawalProcessor`. Next we switch to the separate L1 input task.
 
     // Build a single shared L1 provider with the sequencer wallet.

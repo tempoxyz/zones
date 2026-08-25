@@ -184,8 +184,9 @@ impl L1StateCacheInner {
         anchor: u64,
         invalidated_addresses: impl IntoIterator<Item = Address>,
     ) {
-        // NOTE: jtcn 79: Each sequential finalized L1 block extends cache coverage and records which
-        // contracts changed. A missing or out of order block clears the cache and starts coverage again.
+        // NOTE: jtcn 79: Each finalized L1 block records which contracts changed. This only marks
+        // their old cached values stale and does not fetch replacements. A missing or out of order
+        // block clears the cache and starts coverage again.
         if self.coverage.end().checked_add(1) != Some(anchor) {
             warn!(
                 anchor,
