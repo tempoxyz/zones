@@ -41,6 +41,12 @@ pub(crate) struct ProverMetrics {
     /// Time spent establishing a TCP connection to the remote prover.
     pub(crate) spf_remote_connect_duration_seconds: Histogram,
 
+    /// Number of TCP connections successfully established with the remote prover.
+    pub(crate) spf_remote_connect_success_total: Counter,
+
+    /// Number of TCP connections that failed to establish with the remote prover.
+    pub(crate) spf_remote_connect_failure_total: Counter,
+
     /// Time spent serializing and sending a request to the remote prover.
     pub(crate) spf_remote_request_send_duration_seconds: Histogram,
 
@@ -49,6 +55,12 @@ pub(crate) struct ProverMetrics {
 
     /// Time from the first response byte until the response is fully read and decoded.
     pub(crate) spf_remote_response_receive_duration_seconds: Histogram,
+
+    /// Number of successful responses received from the remote prover.
+    pub(crate) spf_remote_response_success_total: Counter,
+
+    /// Number of error responses received from the remote prover.
+    pub(crate) spf_remote_response_failure_total: Counter,
 
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,

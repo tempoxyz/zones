@@ -455,7 +455,16 @@ async fn verify_remotely(
     metrics
         .spf_remote_connect_duration_seconds
         .record(started.elapsed().as_secs_f64());
-    let stream = stream.wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+    let stream = match stream {
+        Ok(stream) => {
+            metrics.spf_remote_connect_success_total.increment(1);
+            stream
+        }
+        Err(err) => {
+            metrics.spf_remote_connect_failure_total.increment(1);
+            return Err(err).wrap_err_with(|| format!("connect to remote prover at {address}"));
+        }
+    };
 
     let first_read_at = Arc::new(OnceLock::new());
     let stream = FirstReadTimed {
@@ -511,6 +520,7 @@ async fn verify_remotely(
                 "remote prover response request ID {request_id:?} does not match {:?}",
                 request.request_id
             );
+            metrics.spf_remote_response_success_total.increment(1);
             Ok(output)
         }
         VerifyResponse::Error {
@@ -530,6 +540,7 @@ async fn verify_remotely(
                     request.request_id
                 );
             }
+            metrics.spf_remote_response_failure_total.increment(1);
             bail!("remote prover rejected request ({code:?}): {message}")
         }
     }
