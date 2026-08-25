@@ -341,9 +341,6 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     fi
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     FROM_BLOCK=$(cast block-number --rpc-url "$HTTP_RPC")
-    WAIT_TIMEOUT="${WITHDRAWAL_WAIT_TIMEOUT_SECS:-180}"
-    START_TIME=$SECONDS
-    POLLS=0
     echo "Waiting for withdrawal to be processed on L1 (from block $FROM_BLOCK)..."
     while true; do
         LOGS=$(cast logs --address "$PORTAL" --from-block "$FROM_BLOCK" --rpc-url "$HTTP_RPC" \
@@ -356,22 +353,6 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
             echo "Withdrawal processed on L1! (block $L1_BLOCK_DEC)"
             echo "Explorer: https://explore.moderato.tempo.xyz/tx/$L1_TX"
             break
-        fi
-        if (( SECONDS - START_TIME >= WAIT_TIMEOUT )); then
-            echo "Timed out after ${WAIT_TIMEOUT}s waiting for withdrawal processing." >&2
-            exit 1
-        fi
-        ((POLLS += 1))
-        if (( POLLS % 40 == 0 )); then
-            L1_HEAD=$(cast block-number --rpc-url "$HTTP_RPC") || {
-                echo "Tempo RPC became unavailable while waiting for withdrawal processing." >&2
-                exit 1
-            }
-            ZONE_HEAD=$(cast block-number --rpc-url "{{rpc}}") || {
-                echo "Zone RPC became unavailable while waiting for withdrawal processing." >&2
-                exit 1
-            }
-            echo "Still waiting... Zone head: $ZONE_HEAD, Tempo head: $L1_HEAD"
         fi
         sleep 0.25
     done
