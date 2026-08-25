@@ -121,7 +121,7 @@ impl ZoneOutbox {
     }
 
     fn enforce_withdrawal_block_cap(&mut self) -> ZoneResult<()> {
-        // NOTE: jtcn 143: Caps how many withdrawal requests one Zone block can create so it cannot
+        // NOTE: jtcn 152: Caps how many withdrawal requests one Zone block can create so it cannot
         // dump unlimited exit work on L1. Zero disables this sequencer configured rate limit.
         let max = self.max_withdrawals_per_block.read()?;
         if max == 0 {
@@ -216,7 +216,7 @@ impl ZoneOutbox {
             .checked_add(1)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.last_fallback_nonce.write(fallback_nonce)?;
-        // NOTE: jtcn 150: Saves the chosen Zone fallback recipient behind a nonce. If L1 delivery
+        // NOTE: jtcn 159: Saves the chosen Zone fallback recipient behind a nonce. If L1 delivery
         // fails, only the nonce crosses back and the Inbox uses this mapping to find the recipient.
         self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
         self.enqueue(
@@ -251,7 +251,7 @@ impl ZoneOutbox {
         caller: Address,
         call: IZoneOutbox::enqueueDepositBounceBackCall,
     ) -> ZoneResult<()> {
-        // NOTE: jtcn 145: Only the Inbox can turn a failed deposit into this zero fee withdrawal.
+        // NOTE: jtcn 154: Only the Inbox can turn a failed deposit into this zero fee withdrawal.
         // The normal finalize, submit, and process path carries it back to L1.
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZoneOutboxError::only_zone_inbox().into());

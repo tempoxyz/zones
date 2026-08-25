@@ -52,7 +52,7 @@ contract ZonePortal is IZonePortal {
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
-    // NOTE: jtcn 141: Caps deposits at 230 and token enables at eight so `advanceTempo` can process
+    // NOTE: jtcn 150: Caps deposits at 230 and token enables at eight so `advanceTempo` can process
     // one L1 block within its gas budget. Regular deposits stop at 210, leaving 20 for bouncebacks.
     // Token metadata stays under 31 bytes for the same reason.
     /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
@@ -77,7 +77,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
-    // NOTE: jtcn 142: Caps a callback at 10 million gas so one withdrawal fits safely in an L1
+    // NOTE: jtcn 151: Caps a callback at 10 million gas so one withdrawal fits safely in an L1
     // transaction. New requests above it fail and old queued requests bounce instead of getting stuck.
     /// @notice Maximum gas a withdrawal callback may request
     /// @dev Over-cap legacy withdrawals are dequeued and bounced back in `processWithdrawals`.
@@ -296,6 +296,8 @@ contract ZonePortal is IZonePortal {
         _;
     }
 
+    // NOTE: jtcn 142: Admin owns configuration. Sequencers submit batches and process withdrawals.
+    // Either one can rotate encryption keys and change the leader. Guardians can only pause.
     modifier onlySequencer() {
         if (!isSequencer(msg.sender)) revert NotSequencer();
         _;
@@ -485,6 +487,8 @@ contract ZonePortal is IZonePortal {
     ///      Passing address(0) cancels a pending transfer.
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
     function transferAdmin(address newAdmin) external onlyAdmin {
+        // NOTE: jtcn 143: Admin transfer takes two calls so a wrong address cannot take control by
+        // accident. The admin can be rotated or a pending transfer canceled, but never renounced.
         pendingAdmin = newAdmin;
         emit AdminTransferStarted(admin, newAdmin);
     }
@@ -503,6 +507,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Enable or disable account allowlist enforcement without discarding membership.
     function setAccessMode(bool enforced) external onlyAdmin {
+        // NOTE: jtcn 144: Access mode requires Accounts for depositors, refund addresses, and plain
+        // withdrawal recipients. Gateway mode makes callbacks use CallbackGateways that can redeposit.
         _requireCapabilityActive(Capability.AccessPolicy);
         _isAccessEnforced = enforced;
         emit EnforcementModesUpdated(enforced, _isGatewayEnforced);
@@ -528,6 +534,8 @@ contract ZonePortal is IZonePortal {
     /// @notice Add or remove an account from closed-loop portal flows.
     /// @dev Returns without emitting when already configured. Abdication freezes all changes.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        // NOTE: jtcn 145: Only admin changes Account, CallbackGateway, and PauseGuardian membership.
+        // Roles cannot overlap, so an address must lose its old role before taking another one.
         _requireCapabilityActive(Capability.AccessPolicy);
         if (allowed) require(account != messenger);
         Role previous = role[account];
@@ -620,6 +628,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Pause deposits and withdrawal processing for 30 days.
     function pause() external whenNotPaused {
+        // NOTE: jtcn 146: Admin, a Sequencer, or a PauseGuardian can stop deposits and withdrawal
+        // processing for 30 days. The pause expires automatically and only admin can end it early.
         _requireCapabilityActive(Capability.PausePortal);
         if (
             msg.sender != admin && !isSequencer(msg.sender)
@@ -640,6 +650,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Schedule permanent abdication of a Portal configuration surface.
     function abdicate(Capability capability) external onlyAdmin whenNotPaused {
+        // NOTE: jtcn 147: After 30 days, this permanently disables future pauses or freezes the
+        // current access policy. Admin can still resume a pause that was already active.
         if (abdicationEffectiveAt[capability] != 0) revert AbdicationAlreadyScheduled(capability);
         uint64 effectiveAt = uint64(block.timestamp) + ABDICATION_DELAY;
         abdicationEffectiveAt[capability] = effectiveAt;
@@ -656,6 +668,8 @@ contract ZonePortal is IZonePortal {
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
     function enableToken(address _token) external onlyAdmin {
+        // NOTE: jtcn 148: Enabling a token is permanent so its holders always keep a withdrawal
+        // path. Admin can pause new deposits for that token without disabling withdrawals.
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
             revert TokenNotEnabled();
@@ -677,6 +691,10 @@ contract ZonePortal is IZonePortal {
         _tokenConfigs[_token].depositsActive = true;
         emit DepositsResumed(_token);
     }
+
+    // NOTE: jtcn 149: Checkpoint: Portal permissions now define who configures the Zone, settles
+    // state, participates in closed flows, handles callbacks, and can pause. Token controls cannot
+    // permanently disable exits.
 
     /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
@@ -1139,7 +1157,7 @@ contract ZonePortal is IZonePortal {
 
         address _token = withdrawal.token;
 
-        // NOTE: jtcn 146: A zero fallback nonce marks a failed deposit that already traveled through
+        // NOTE: jtcn 155: A zero fallback nonce marks a failed deposit that already traveled through
         // the Outbox and withdrawal queue. The portal sends it down the L1 deposit refund path.
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
@@ -1154,7 +1172,7 @@ contract ZonePortal is IZonePortal {
             return;
         }
 
-        // NOTE: jtcn 151: A withdrawal bounces when its recipient becomes blocked, its transfer
+        // NOTE: jtcn 160: A withdrawal bounces when its recipient becomes blocked, its transfer
         // fails, or its callback reverts. It is dequeued first so one bad exit cannot block the queue.
         // In closed access a callback that does not return funds to the portal also fails.
         bool success;
@@ -1225,7 +1243,7 @@ contract ZonePortal is IZonePortal {
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
-        // NOTE: jtcn 147: Charges the reserved bounceback fee when possible, then sends the rest to
+        // NOTE: jtcn 156: Charges the reserved bounceback fee when possible, then sends the rest to
         // the deposit's chosen L1 refund address. A blocked transfer is parked instead of lost.
         address _token = withdrawal.token;
         uint128 bouncebackFee = calculateBouncebackFee();
@@ -1252,7 +1270,7 @@ contract ZonePortal is IZonePortal {
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
-        // NOTE: jtcn 148: A parked deposit refund belongs only to its named L1 refund address. That
+        // NOTE: jtcn 157: A parked deposit refund belongs only to its named L1 refund address. That
         // address can claim once portal access and TIP 403 allow the transfer.
         _requireAllowed(msg.sender);
         amount = refunds[token][msg.sender];
@@ -1303,7 +1321,7 @@ contract ZonePortal is IZonePortal {
         }
     }
 
-    // NOTE: jtcn 149: Checkpoint: A failed L1 deposit used the Zone Outbox and normal withdrawal
+    // NOTE: jtcn 158: Checkpoint: A failed L1 deposit used the Zone Outbox and normal withdrawal
     // settlement to return its escrowed funds to the chosen L1 refund address.
 
     /// @notice Enqueue a bounce-back deposit for failed callback
@@ -1311,7 +1329,7 @@ contract ZonePortal is IZonePortal {
     /// @param amount The amount to bounce back
     /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
     function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
-        // NOTE: jtcn 152: Appends the failed withdrawal to the L1 deposit queue using its fallback
+        // NOTE: jtcn 161: Appends the failed withdrawal to the L1 deposit queue using its fallback
         // nonce as the recipient. The L1 subscriber carries it into the next `advanceTempo` call.
         WithdrawalBounceBackDeposit memory depositData = WithdrawalBounceBackDeposit({
             token: _token, to: address(uint160(fallbackNonce)), amount: amount
