@@ -230,15 +230,13 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_context_with_hardfork,
-        test_env, test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
-    use tempo_contracts::TempoHardfork;
     use tempo_precompiles::storage::StorageCtx;
     use tempo_zone_contracts::{finalizeTempoCall, legacyFinalizeTempoCall};
 
@@ -250,17 +248,7 @@ mod tests {
 
     impl TempoStateHarness {
         fn new(header: &TempoHeader) -> eyre::Result<Self> {
-            Self::new_with_ctx(header, test_context())
-        }
-
-        fn new_with_tempo_hardfork(
-            header: &TempoHeader,
-            hardfork: TempoHardfork,
-        ) -> eyre::Result<Self> {
-            Self::new_with_ctx(header, test_context_with_hardfork(hardfork))
-        }
-
-        fn new_with_ctx(header: &TempoHeader, mut ctx: TestContext) -> eyre::Result<Self> {
+            let mut ctx = test_context();
             let encoded = encode_header(header);
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -458,7 +446,7 @@ mod tests {
         first.inner.timestamp = second.inner.timestamp;
         first.timestamp_millis_part = second.timestamp_millis_part;
 
-        let mut harness = TempoStateHarness::new_with_tempo_hardfork(&genesis, TempoHardfork::T12)?;
+        let mut harness = TempoStateHarness::new(&genesis)?;
         harness.set_block_timestamp(&second);
         let output = harness.finalize_many(
             ZONE_INBOX_ADDRESS,
