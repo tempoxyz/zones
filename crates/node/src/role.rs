@@ -637,7 +637,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
     let mut current: Option<RunningGeneration> = None;
 
     loop {
-        // NOTE: jtcn 131: Reads who owns the next L1 block and runs this node as leader, follower,
+        // NOTE: jtcn 176: Reads who owns the next L1 block and runs this node as leader, follower,
         // or fenced. The role only changes when the finalized schedule changes.
 
         // An rpc-only member is not registered with `ZonePortal`, so it can never be named
@@ -699,7 +699,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
             .as_ref()
             .is_some_and(|generation| generation.role.same_variant(desired))
         {
-            // NOTE: jtcn 132: Stops every task from the old role before starting the new one. This
+            // NOTE: jtcn 177: Stops every task from the old role before starting the new one. This
             // keeps both leaders from producing the same Zone block during a handoff.
             if !stop_current_generation(&mut current, &sinks).await {
                 return;
@@ -876,7 +876,7 @@ where
 
     match desired {
         DesiredRole::Fenced => {
-            // NOTE: jtcn 134: Fenced means the node cannot prove who should lead next. It stops
+            // NOTE: jtcn 179: Fenced means the node cannot prove who should lead next. It stops
             // building and importing blocks until the finalized schedule becomes usable again.
             sinks.clear();
             warn!(
@@ -886,7 +886,7 @@ where
             );
         }
         DesiredRole::Follower { epoch } => {
-            // NOTE: jtcn 114: Creates the follower channels. Live P2P events go to `sync_rx`,
+            // NOTE: jtcn 159: Creates the follower channels. Live P2P events go to `sync_rx`,
             // missing blocks go to `backfill_rx`, and peer transactions go to `transactions_rx`.
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
@@ -935,7 +935,7 @@ where
             tasks.spawn(async move {
                 tokio::select! {
                     () = forward_token.cancelled() => TaskEnd::Ended("transaction-forwarding (cancelled)"),
-                    // NOTE: jtcn 122: Sends local transactions to the current leader and the next
+                    // NOTE: jtcn 167: Sends local transactions to the current leader and the next
                     // possible leader so a handoff does not lose them.
                     () = forward_new_transactions(pool, listener, commands) => {
                         TaskEnd::Ended("transaction-forwarding")
@@ -957,7 +957,7 @@ where
                 }
             });
             info!(target: "zone::role", generation = id, epoch, "Follower generation started");
-            // NOTE: jtcn 128: Checkpoint: P2P carries saved blocks, missing block recovery,
+            // NOTE: jtcn 173: Checkpoint: P2P carries saved blocks, missing block recovery,
             // forwarded transactions, and settlement signatures between Zone nodes.
         }
         DesiredRole::Leader { epoch, .. } => {
@@ -1027,7 +1027,7 @@ where
             let provider = context.provider.clone();
             let commands = context.commands.clone();
             tasks.spawn(async move {
-                // NOTE: jtcn 111: Starts the block broadcaster. It only publishes Zone blocks that
+                // NOTE: jtcn 156: Starts the block broadcaster. It only publishes Zone blocks that
                 // have already been written to disk.
                 broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
                 TaskEnd::Ended("block-broadcast")
@@ -1106,7 +1106,7 @@ where
         }
     }
 
-    // NOTE: jtcn 136: Checkpoint: A finalized portal event changed the schedule. The old role
+    // NOTE: jtcn 181: Checkpoint: A finalized portal event changed the schedule. The old role
     // stopped at the boundary and the new leader, follower, or fenced role started from there.
     Ok(RunningGeneration {
         id,

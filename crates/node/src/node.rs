@@ -940,7 +940,7 @@ impl LeadershipSink for ScheduleLeadershipSink {
                 transition.epoch,
             )
         })?;
-        // NOTE: jtcn 129: Maps the finalized portal leader address to its manifest P2P identity.
+        // NOTE: jtcn 174: Maps the finalized portal leader address to its manifest P2P identity.
         // The result says who takes over and the first L1 block they own.
         self.schedule.publish(LeadershipState::new(
             transition.epoch,
@@ -1029,7 +1029,7 @@ where
             .increment(1);
         return Ok(());
     }
-    // NOTE: jtcn 135: Forced recovery starts a replacement leader after a Zone block chosen by the
+    // NOTE: jtcn 180: Forced recovery starts a replacement leader after a Zone block chosen by the
     // operator. The next finalized leader update from the portal ends the override.
     schedule.install_forced_recovery(
         recovery_epoch,
@@ -1163,7 +1163,7 @@ where
         } = handle.into_parts();
 
         let sinks = EventSinks::default();
-        // NOTE: jtcn 110: Checkpoint: P2P peers are connected. Outbound messages are checked and
+        // NOTE: jtcn 155: Checkpoint: P2P peers are connected. Outbound messages are checked and
         // inbound messages are authenticated before reaching the active leader or follower.
         task_executor.spawn_critical_task(
             "zone-p2p-event-router",
@@ -1396,7 +1396,7 @@ where
         chain_id: u64,
         max_response_size: usize,
     ) -> eyre::Result<()> {
-        // NOTE: jtcn 86: Builds an authenticated RPC from the same Reth handlers that read the Zone
+        // NOTE: jtcn 131: Builds an authenticated RPC from the same Reth handlers that read the Zone
         // DB. Its separate L1 provider only fetches Portal metadata and the active encryption key.
         let eth_handlers = handle.eth_handlers().clone();
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()

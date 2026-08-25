@@ -702,7 +702,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
         id: &FilterId,
         auth: &AuthContext,
     ) -> Result<(), JsonRpcError> {
-        // NOTE: jtcn 98: Binds each filter ID to the account that created it. Other callers get the
+        // NOTE: jtcn 143: Binds each filter ID to the account that created it. Other callers get the
         // same not found result as a missing filter so its existence is not leaked.
         let owner_matches = {
             let owners = self.filter_owners.lock().await;
@@ -860,7 +860,7 @@ where
         block: Option<BlockId>,
         auth: AuthContext,
     ) -> BoxFut<'_> {
-        // NOTE: jtcn 91: Balance and nonce queries return real data only for the caller. Other
+        // NOTE: jtcn 136: Balance and nonce queries return real data only for the caller. Other
         // addresses return zero, while transactions and receipts owned by another sender return null.
         Box::pin(async move {
             // Silent dummy: non-caller addresses get "0x0" to avoid leaking account existence.
@@ -1231,7 +1231,7 @@ where
     }
 
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
-        // NOTE: jtcn 100: Zone methods expose the caller and expiry, Portal metadata, and the active
+        // NOTE: jtcn 145: Zone methods expose the caller and expiry, Portal metadata, and the active
         // public deposit encryption key. They require auth but never expose operator controls.
         Box::pin(async move {
             to_raw(&AuthorizationTokenInfoResponse {
@@ -1270,7 +1270,7 @@ where
         })
     }
 
-    // NOTE: jtcn 101: Checkpoint: The redacted RPC identifies one account, permits a small method
+    // NOTE: jtcn 146: Checkpoint: The redacted RPC identifies one account, permits a small method
     // set, and scopes or scrubs every private result before returning it over HTTP or WebSocket.
 }
 
@@ -1424,7 +1424,7 @@ fn redact_header(header: &mut TempoHeaderResponse) {
 
 /// Clear gas related fields that leak the size (and therefore tx counts)
 fn redact_fee_history(history: &mut FeeHistory) {
-    // NOTE: jtcn 93: Checkpoint: The redacted RPC authenticated one caller, allowed only listed
+    // NOTE: jtcn 138: Checkpoint: The redacted RPC authenticated one caller, allowed only listed
     // methods, and scoped account, transaction, receipt, and block reads to that caller.
     // `redact_block` strips execution details, while this function replaces fee signals with fixed
     // public values. Next we apply the same boundary to simulations, submissions, and subscriptions.
@@ -1467,7 +1467,7 @@ fn apply_public_fee_policy(request: &mut TempoTransactionRequest) {
 
 /// Strip privacy-sensitive fields from a block returned by the redacted RPC.
 fn redact_block(block: &mut RpcBlock) {
-    // NOTE: jtcn 92: Removes transactions and zeros roots, gas, bloom, size, and other fields that
+    // NOTE: jtcn 137: Removes transactions and zeros roots, gas, bloom, size, and other fields that
     // reveal private activity. Requests for full transactions are rejected before this point.
     redact_header(&mut block.header);
     block.transactions = BlockTransactions::Hashes(Vec::new());

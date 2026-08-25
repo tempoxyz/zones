@@ -75,7 +75,7 @@ library WithdrawalQueueLib {
     )
         internal
     {
-        // NOTE: jtcn 152: Proves this withdrawal is next in the head slot, then replaces the slot
+        // NOTE: jtcn 101: Proves this withdrawal is next in the head slot, then replaces the slot
         // with the remaining hash. An empty hash advances the queue head to the next slot.
         uint256 head = queue.head;
 

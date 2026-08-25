@@ -253,7 +253,7 @@ impl ZoneInbox {
         current_hash: B256,
         deposit: Deposit,
     ) -> ZoneResult<()> {
-        // NOTE: jtcn 169: A deposit bounces when its proof or ciphertext is bad, or its Zone
+        // NOTE: jtcn 118: A deposit bounces when its proof or ciphertext is bad, or its Zone
         // recipient cannot receive the token. The Inbox sends its net amount into the Outbox.
         outbox.enqueue_deposit_bounce_back(
             ZONE_INBOX_ADDRESS,
@@ -272,7 +272,7 @@ impl ZoneInbox {
         outbox: &mut ZoneOutbox,
         deposit: WithdrawalBounceBackDeposit,
     ) -> ZoneResult<()> {
-        // NOTE: jtcn 179: Resolves and deletes the saved fallback nonce, then mints the amount to
+        // NOTE: jtcn 128: Resolves and deletes the saved fallback nonce, then mints the amount to
         // that Zone recipient. Deleting the mapping makes the bounceback usable only once.
         let fallback_nonce = u64::from_be_bytes(
             deposit.to.as_slice()[12..]
@@ -333,7 +333,7 @@ impl ZoneInbox {
     }
 
     fn claim_refund(&mut self, caller: Address, token: Address) -> ZoneResult<u128> {
-        // NOTE: jtcn 180: If policy blocks the bounceback mint, the Inbox parks it under the token
+        // NOTE: jtcn 129: If policy blocks the bounceback mint, the Inbox parks it under the token
         // and fallback recipient. Only that recipient can claim once they are allowed to receive.
         let amount = self.withdrawal_bounce_backs[token][caller].read()?;
         if !self.try_mint(token, caller, amount)? {
@@ -365,7 +365,7 @@ impl ZoneInbox {
         Ok(self.withdrawal_bounce_backs[token][owner].read()?)
     }
 
-    // NOTE: jtcn 181: Checkpoint: A failed Zone withdrawal used the portal deposit queue and
+    // NOTE: jtcn 130: Checkpoint: A failed Zone withdrawal used the portal deposit queue and
     // `advanceTempo` to recreate its burned tokens for the chosen Zone fallback recipient.
 
     /// Returns the hash-chain head after the last processed L1 deposit.

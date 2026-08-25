@@ -325,7 +325,7 @@ async fn join_runtime_thread(thread: std::thread::JoinHandle<()>) -> eyre::Resul
 
 /// Starts Commonware block transport on a dedicated OS thread.
 pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2pHandle> {
-    // NOTE: jtcn 102: Runs P2P on its own thread. Node commands send messages to peers and P2P
+    // NOTE: jtcn 147: Runs P2P on its own thread. Node commands send messages to peers and P2P
     // events bring received messages back. Separate backfill channels recover missing blocks.
     let shutdown = CancellationToken::new();
     let thread_shutdown = shutdown.clone();
@@ -339,7 +339,7 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
     let thread = std::thread::Builder::new()
         .name("zone-p2p".to_owned())
         .spawn(move || {
-            // NOTE: jtcn 103: Starts Commonware with the node side of those channels. The node and
+            // NOTE: jtcn 148: Starts Commonware with the node side of those channels. The node and
             // network can now pass messages without sharing the same runtime thread.
             let result = run(
                 config,
@@ -389,7 +389,7 @@ fn run(
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
         let local_ed25519_public_key = config.ed25519_public_key();
         let leadership = config.leadership();
-        // NOTE: jtcn 104: Starts this Zone's Commonware network from the P2P manifest. The result is
+        // NOTE: jtcn 149: Starts this Zone's Commonware network from the P2P manifest. The result is
         // the authenticated peer network used by every protocol below.
         let (mut commonware, mut oracle, peers) = network::instantiate(
             &context,
@@ -401,7 +401,7 @@ fn run(
             network_id,
         )?;
         oracle.track(0, peers);
-        // NOTE: jtcn 106: Creates separate network channels for blocks, missing block requests,
+        // NOTE: jtcn 151: Creates separate network channels for blocks, missing block requests,
         // missing block replies, transactions, settlement proposals, and signatures.
         let (block_sender, block_receiver) =
             commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
@@ -457,7 +457,7 @@ fn run(
             })
             .await;
 
-        // NOTE: jtcn 107: The manifest says who belongs to this Zone. The finalized L1 schedule says
+        // NOTE: jtcn 152: The manifest says who belongs to this Zone. The finalized L1 schedule says
         // which member may send each message right now.
         let membership = RoutingMembership::from_manifest(&config.manifest);
 
@@ -534,12 +534,12 @@ async fn run_commands(
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
-    // NOTE: jtcn 108: Node tasks put outbound messages on this command channel. Each branch checks
+    // NOTE: jtcn 153: Node tasks put outbound messages on this command channel. Each branch checks
     // the local role, chooses allowed manifest peers, and sends on the matching protocol.
     while let Some(command) = commands.recv().await {
         match command {
             P2pCommand::BroadcastBlock(block) => {
-                // NOTE: jtcn 113: Confirms this node is allowed to produce the block, then sends the
+                // NOTE: jtcn 158: Confirms this node is allowed to produce the block, then sends the
                 // saved block to every other manifest peer on the block channel.
 
                 // Mirror of the inbound transport check: the sender must lead somewhere in
@@ -710,7 +710,7 @@ where
         mut transactions,
     } = receivers;
 
-    // NOTE: jtcn 109: Commonware gives this loop the message and authenticated peer that sent it.
+    // NOTE: jtcn 154: Commonware gives this loop the message and authenticated peer that sent it.
     // The loop checks that peer's current role before passing anything to the node.
     loop {
         let event = tokio::select! {

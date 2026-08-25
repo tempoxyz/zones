@@ -290,7 +290,7 @@ impl LeadershipSchedule {
     /// a non-monotonic activation is an error that must fence ingestion in the caller.
     /// Returns whether a new transition was appended.
     pub fn publish(&self, record: LeadershipState) -> eyre::Result<bool> {
-        // NOTE: jtcn 130: Saves the finalized leader change and wakes the role controller. A
+        // NOTE: jtcn 175: Saves the finalized leader change and wakes the role controller. A
         // conflicting change is rejected instead of choosing a leader locally.
         let mut state = self.inner.write().expect("poisoned");
         // The first observed record is the earliest known authority and governs from anchor

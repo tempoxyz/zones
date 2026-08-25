@@ -55,7 +55,7 @@ pub async fn start_redacted_rpc(
     config: RedactedRpcConfig,
     api: Arc<dyn ZoneRpcApi>,
 ) -> eyre::Result<std::net::SocketAddr> {
-    // NOTE: jtcn 87: Listens on a separate port for HTTP and WebSocket requests. Both paths
+    // NOTE: jtcn 132: Listens on a separate port for HTTP and WebSocket requests. Both paths
     // authenticate before dispatch and use the same response size limit.
     let listen_addr = config.listen_addr;
     let state = Arc::new(RpcState {
@@ -318,7 +318,7 @@ pub(crate) async fn authenticate_token(
     config: &RedactedRpcConfig,
     api: &dyn ZoneRpcApi,
 ) -> Result<AuthContext, AuthenticateError> {
-    // NOTE: jtcn 89: Recovers the signing account as the caller. A keychain signature must still
+    // NOTE: jtcn 134: Recovers the signing account as the caller. A keychain signature must still
     // be active. This proves identity, not a Portal role or operator access.
     let token = auth::parse_auth_header(token_value)?;
     let max_auth_token_validity = config

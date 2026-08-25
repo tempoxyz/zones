@@ -145,7 +145,7 @@ impl LogOrderingRedactor {
 /// Filters logs to only those the caller is allowed to see, renumbering the
 /// `log_index` via [`LogOrderingRedactor`].
 pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
-    // NOTE: jtcn 97: Keeps only approved token and policy logs where the caller is a stakeholder.
+    // NOTE: jtcn 142: Keeps only approved token and policy logs where the caller is a stakeholder.
     // It rewrites ordering fields so gaps do not reveal hidden transactions or logs.
     let mut redactor = LogOrderingRedactor::default();
     logs.into_iter()
@@ -224,7 +224,7 @@ pub fn scope_filter(filter: &mut Filter) {
 /// authenticated caller to appear in an eligible indexed topic before backend
 /// log retrieval.
 pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<(), JsonRpcError> {
-    // NOTE: jtcn 96: Before reading the DB, limits filters to enabled Zone tokens and the policy
+    // NOTE: jtcn 141: Before reading the DB, limits filters to enabled Zone tokens and the policy
     // guard. The caller must appear in an allowed event field, which also reduces timing leaks.
     scope_filter(filter);
     if filter.topics[0].len() == 1 && filter.topics[0].contains(&B256::ZERO) {

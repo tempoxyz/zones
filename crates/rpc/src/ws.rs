@@ -500,7 +500,7 @@ pub(crate) async fn handle_ws_upgrade(
     Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // NOTE: jtcn 99: Authenticates once during upgrade, then sends every message through the same
+    // NOTE: jtcn 144: Authenticates once during upgrade, then sends every message through the same
     // rules as HTTP. Sessions close on token expiry and recheck keychain authorization while open.
     // Only redacted block header and log subscriptions are allowed.
     // Prefer header auth; fall back to query param for browser clients.

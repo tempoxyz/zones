@@ -253,7 +253,7 @@ pub async fn dispatch(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    // NOTE: jtcn 90: Only methods listed here can reach Reth. Debug, admin, sequencer,
+    // NOTE: jtcn 135: Only methods listed here can reach Reth. Debug, admin, sequencer,
     // and unknown methods are rejected before touching the node API.
     let id = req.id.clone();
 

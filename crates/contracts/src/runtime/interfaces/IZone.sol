@@ -8,7 +8,7 @@ address constant ZONE_PORTAL_IMPL_ADDRESS = 0x5AD1000000000000000000000000000000
 address constant ZONE_VERIFIER_ADDRESS = 0x5a56000000000000000000000000000000000000;
 address constant ZONE_MESSENGER_ADDRESS = 0x5A4d000000000000000000000000000000000000;
 
-// NOTE: jtcn 157: Each account has one role. Sequencers settle, Accounts use closed flows,
+// NOTE: jtcn 106: Each account has one role. Sequencers settle, Accounts use closed flows,
 // CallbackGateways handle callbacks, and PauseGuardians can trigger a pause. Admin is separate.
 /// @notice Mutually exclusive authorization role assigned to a Tempo account.
 enum Role {
