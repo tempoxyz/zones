@@ -91,14 +91,12 @@ just send-deposit 1000000 <recipient-address>   # to a specific address
 ### Withdrawing from Zone to Tempo
 
 ```bash
-
 # withdraw from the zone
 just max-approve-outbox
 just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific address
 ```
 
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
-
 
 ### Querying the Redacted RPC
 
@@ -107,19 +105,17 @@ Zone balances are private by default. Every RPC request must include a signed au
 `just zone-auth-token` reads `generated/<name>/zone.json` and signs a short-lived auth token:
 
 ```bash
-
 # generate an auth token
 export PRIVATE_KEY=<zone-wallet-private-key>
 export TOKEN=$(just zone-auth-token my-zone)
 
-# query your TIP-20 balance 
+# query your TIP-20 balance
 just check-balance-redacted my-zone <token-address>
 ```
 
-
 See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, redacted RPC, router demos, TIP-403 policy flows, and command references.
 
-<br> 
+<br>
 
 ## License
 
