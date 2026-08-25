@@ -126,7 +126,7 @@ impl ZoneInbox {
 
             match queued {
                 DecodedQueuedDeposit::WithdrawalBounceBack(deposit) => {
-                    self.process_withdrawal_bounce_back(&mut outbox, deposit)
+                    self.process_withdrawal_bounce_back(l1, &mut outbox, deposit)
                 }
                 DecodedQueuedDeposit::Deposit(deposit) => {
                     let Some(decryption) = decryptions.next() else {
@@ -134,6 +134,7 @@ impl ZoneInbox {
                     };
                     let key = read_encryption_key(l1, deposit.keyIndex)?;
                     self.process_deposit(
+                        l1,
                         &mut outbox,
                         portal,
                         current_hash,
@@ -209,8 +210,9 @@ impl ZoneInbox {
         Ok(())
     }
 
-    fn process_deposit(
+    fn process_deposit<P: L1StorageReader>(
         &mut self,
+        l1: &L1State<P>,
         outbox: &mut ZoneOutbox,
         portal: Address,
         current_hash: B256,
@@ -223,7 +225,7 @@ impl ZoneInbox {
             return self.fail_deposit(outbox, current_hash, deposit);
         };
 
-        if self.try_mint(deposit.token, to, deposit.amount)? {
+        if self.try_mint(l1, deposit.token, to, deposit.amount)? {
             self.emit_event(deposit.processed_event(current_hash, to, memo))?;
         } else {
             self.fail_deposit(outbox, current_hash, deposit)?;
@@ -249,8 +251,9 @@ impl ZoneInbox {
         Ok(())
     }
 
-    fn process_withdrawal_bounce_back(
+    fn process_withdrawal_bounce_back<P: L1StorageReader>(
         &mut self,
+        l1: &L1State<P>,
         outbox: &mut ZoneOutbox,
         deposit: WithdrawalBounceBackDeposit,
     ) -> ZoneResult<()> {
@@ -260,7 +263,7 @@ impl ZoneInbox {
                 .expect("address suffix is eight bytes"),
         );
         let recipient = outbox.consume_fallback_recipient(ZONE_INBOX_ADDRESS, fallback_nonce)?;
-        if self.try_mint(deposit.token, recipient, deposit.amount)? {
+        if self.try_mint(l1, deposit.token, recipient, deposit.amount)? {
             self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {
             let slot = self.withdrawal_bounce_backs[deposit.token][recipient].slot();
@@ -272,7 +275,13 @@ impl ZoneInbox {
 
     /// Mint with Solidity `try/catch` semantics: ordinary reverts are caught while fatal and
     /// out-of-gas failures abort the outer Inbox call.
-    fn try_mint(&mut self, token: Address, to: Address, amount: u128) -> ZoneResult<bool> {
+    fn try_mint<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        token: Address,
+        to: Address,
+        amount: u128,
+    ) -> ZoneResult<bool> {
         let ensure_logic_err = |err: TempoPrecompileError| {
             if err.is_system_error() {
                 Err(err)
@@ -292,15 +301,17 @@ impl ZoneInbox {
         }
 
         let checkpoint = self.storage.checkpoint();
-        let success = TIP20Token::from_address(token)
-            .and_then(|mut token| {
-                token.mint(
-                    ZONE_INBOX_ADDRESS,
-                    ITIP20::mintCall {
-                        to,
-                        amount: U256::from(amount),
-                    },
-                )
+        let success = l1
+            .with_local_tip20_pause(|| {
+                TIP20Token::from_address(token).and_then(|mut token| {
+                    token.mint(
+                        ZONE_INBOX_ADDRESS,
+                        ITIP20::mintCall {
+                            to,
+                            amount: U256::from(amount),
+                        },
+                    )
+                })
             })
             .map(|_| true)
             .or_else(ensure_logic_err)?;
@@ -312,9 +323,14 @@ impl ZoneInbox {
         Ok(success)
     }
 
-    fn claim_refund(&mut self, caller: Address, token: Address) -> ZoneResult<u128> {
+    fn claim_refund<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        token: Address,
+    ) -> ZoneResult<u128> {
         let amount = self.withdrawal_bounce_backs[token][caller].read()?;
-        if !self.try_mint(token, caller, amount)? {
+        if !self.try_mint(l1, token, caller, amount)? {
             return Err(TempoPrecompileError::from(TIP20Error::policy_forbids()).into());
         }
 

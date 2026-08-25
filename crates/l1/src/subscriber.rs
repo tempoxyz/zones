@@ -1,7 +1,10 @@
 use super::*;
 use eyre::WrapErr as _;
 use std::collections::HashSet;
-use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
+use tempo_contracts::precompiles::{
+    ITIP20::{PauseStateUpdate, TransferPolicyUpdate},
+    TIP403_REGISTRY_ADDRESS,
+};
 use tempo_primitives::is_tip20_prefix;
 
 use std::collections::BTreeMap;
@@ -335,9 +338,16 @@ type L1ProcessedEvents = (
 );
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
-    (address == TIP403_REGISTRY_ADDRESS
-        || (is_tip20_prefix(address) && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH)))
-    .then_some(TIP403_REGISTRY_ADDRESS)
+    let tip20 = is_tip20_prefix(address);
+    if address == TIP403_REGISTRY_ADDRESS
+        || (tip20 && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH))
+    {
+        Some(TIP403_REGISTRY_ADDRESS)
+    } else if tip20 && topic0 == Some(&PauseStateUpdate::SIGNATURE_HASH) {
+        Some(address)
+    } else {
+        None
+    }
 }
 
 fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Address> {
@@ -1064,6 +1074,16 @@ mod tests {
         assert_eq!(
             cache_invalidation_address(token, Some(&TransferPolicyUpdate::SIGNATURE_HASH)),
             Some(TIP403_REGISTRY_ADDRESS)
+        );
+    }
+
+    #[test]
+    fn token_pause_updates_invalidate_the_token() {
+        let token = address!("20C0000000000000000000000000000000000999");
+
+        assert_eq!(
+            cache_invalidation_address(token, Some(&PauseStateUpdate::SIGNATURE_HASH)),
+            Some(token)
         );
     }
 
