@@ -454,8 +454,8 @@ impl L1Subscriber {
         &self,
         provider: &'a DynProvider<TempoNetwork>,
     ) -> eyre::Result<Pin<Box<dyn Stream<Item = eyre::Result<()>> + Send + 'a>>> {
-        // NOTE: jtcn 31: Uses WebSocket heads when available, otherwise polls an L1 block filter.
-        // Either one only wakes the subscriber, which then reads the finalized L1 head.
+        // NOTE: jtcn 21: A WebSocket head or block filter wakes the subscriber. The notification
+        // is only a hint, so the subscriber still reads the finalized L1 head itself.
         match provider.subscribe_blocks().await {
             Ok(subscription) => {
                 info!("Using WebSocket newHeads notifications");
@@ -560,8 +560,8 @@ impl L1Subscriber {
         );
 
         let start = std::time::Instant::now();
-        // NOTE: jtcn 33: Verifies receipts, pulls portal events, and clears cached TIP 403 values
-        // when their L1 policy changed.
+        // NOTE: jtcn 23: Verifies the receipts against the L1 header, extracts portal events, and
+        // clears any cached contract values changed by those events.
         self.backfill(l1_provider, next_block, finalized).await?;
         self.subscriber_metrics
             .backfill_duration_seconds
@@ -587,7 +587,8 @@ impl L1Subscriber {
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued as another trigger.
-        // NOTE: jtcn 32: Syncs every missing finalized L1 block in order.
+        // NOTE: jtcn 22: Resumes from the L1 checkpoint saved in the Zone DB and fetches every
+        // missing finalized block in order. The in memory cursors only track work in progress.
         next_block = self.sync_finalized_once(l1_provider, next_block).await?;
 
         while let Some(trigger) = triggers.next().await {
@@ -717,8 +718,8 @@ impl L1Subscriber {
                     })?;
                 }
             }
-            // NOTE: jtcn 34: Adds the verified L1 block to the Zone queue and wakes
-            // `ZoneEngine::run_until`.
+            // NOTE: jtcn 24: Adds the verified L1 header and portal events to the engine queue and
+            // wakes `ZoneEngine`. The saved checkpoint does not move until the Zone block lands.
             let appended = self
                 .deposit_queue
                 .try_enqueue_sealed(sealed, events.clone())
@@ -771,8 +772,8 @@ impl L1Subscriber {
     /// [`Self::spawn`] retries transient errors and treats deterministic finalized-block
     /// ingestion failures as fatal.
     pub async fn run(&self) -> eyre::Result<()> {
-        // NOTE: jtcn 30: Reads finalized L1 blocks in order so every node sees the same deposits
-        // and config before handling the matching Zone block.
+        // NOTE: jtcn 20: Reads finalized L1 blocks in order. Their headers and verified receipts
+        // are the source of truth for deposits, Zone config, and leadership changes.
         let provider = self.connect().await?;
         let triggers = self.head_triggers(&provider).await?;
         info!(

@@ -335,6 +335,8 @@ impl BatchSubmitter {
         batch: &BatchData,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
+        // NOTE: jtcn 41: Builds the signed Zone update and chooses an L1 block hash the portal can
+        // still read. It sends `ZonePortal.submitBatch` and waits for `BatchSubmitted` in the receipt.
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,

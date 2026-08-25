@@ -138,8 +138,8 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
                 .map_err(ZoneDbError::Inner);
         }
 
-        // NOTE: jtcn 42: Sends TIP 403 storage reads to the L1 state provider using the recorded
-        // L1 block number.
+        // NOTE: jtcn 72: Intercepts TIP 403 storage reads and gets the value from the finalized L1
+        // block selected by `advanceTempo`. Local writes cannot replace L1 policy.
         let anchor = self.anchor()?;
         // REVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged again.
         self.l1

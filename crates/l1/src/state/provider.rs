@@ -173,8 +173,8 @@ impl L1StateProvider {
     /// Panics if called from within an async context on the same tokio runtime (see struct-level
     /// docs).
     pub fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
-        // NOTE: jtcn 43: Uses the cached value when it has this exact L1 block. Otherwise it reads
-        // that block by RPC and caches the result.
+        // NOTE: jtcn 73: Uses a cached contract value only when it came from this exact L1 block.
+        // Otherwise it reads that historical block by RPC and caches the result.
         {
             let mut cache = self.cache.lock();
             if let Some(value) = cache.get(address, slot, block_number) {

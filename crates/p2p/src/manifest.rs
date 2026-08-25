@@ -290,8 +290,8 @@ impl LeadershipSchedule {
     /// a non-monotonic activation is an error that must fence ingestion in the caller.
     /// Returns whether a new transition was appended.
     pub fn publish(&self, record: LeadershipState) -> eyre::Result<bool> {
-        // NOTE: jtcn 101: Saves the finalized leader change and wakes the role controller. A
-        // conflicting epoch or activation block is rejected instead of picking a leader locally.
+        // NOTE: jtcn 108: Saves the finalized leader change and wakes the role controller. A
+        // conflicting change is rejected instead of choosing a leader locally.
         let mut state = self.inner.write().expect("poisoned");
         // The first observed record is the earliest known authority and governs from anchor
         // zero: a fresh zone's genesis anchors precede the portal creation block, and no

@@ -126,8 +126,8 @@ where
         let zone_hardfork = self
             .chain_spec
             .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
-        // NOTE: jtcn 41: Wraps Zone state so TIP 403 reads use the finalized L1 block recorded in
-        // this Zone block.
+        // NOTE: jtcn 56: Wraps the normal Zone database with an L1 view, then installs the Zone
+        // precompiles. Both use the same finalized L1 block for this execution.
         let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);

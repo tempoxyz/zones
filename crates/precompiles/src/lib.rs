@@ -133,6 +133,8 @@ pub fn extend_zone_precompiles<P>(
 {
     let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
 
+    // NOTE: jtcn 57: `TempoState` stores the finalized L1 checkpoint. `ZoneInbox` brings deposits
+    // and token changes into the Zone, while `ZoneOutbox` records withdrawals going back to L1.
     precompiles.set_precompile_lookup(move |address: &Address| {
         #[cfg(feature = "std")]
         if *address == ZONE_OUTBOX_ADDRESS {
@@ -140,6 +142,8 @@ pub fn extend_zone_precompiles<P>(
         }
 
         if is_tip20_prefix(*address) {
+            // NOTE: jtcn 58: TIP 20 precompiles hold Zone token balances. Zone rules keep minting
+            // and burning inside the Inbox and Outbox and hide private account reads.
             Some(create_tip20_precompile(*address, &env))
         } else if *address == TEMPO_STATE_ADDRESS {
             Some(TempoState::create(l1.clone(), &env))
@@ -148,12 +152,16 @@ pub fn extend_zone_precompiles<P>(
         } else if *address == ZONE_FEE_MANAGER_ADDRESS {
             Some(zone_precompile!(env, ZoneFeeManager))
         } else if *address == TIP403_REGISTRY_ADDRESS {
+            // NOTE: jtcn 59: TIP 403 supplies token transfer policy from finalized L1 state. Zone
+            // contracts use it internally, while ordinary callers cannot query it directly.
             Some(zone_precompile!(
                 env,
                 TIP403Registry,
                 tip403_proxy::Tip403Rules
             ))
         } else if *address == NONCE_PRECOMPILE_ADDRESS {
+            // NOTE: jtcn 60: `NonceManager` handles keyed transaction nonces. `AccountKeychain`
+            // manages account keys and limits, while `StorageCredits` tracks storage budgets.
             Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
         } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
             Some(zone_precompile!(
@@ -162,6 +170,8 @@ pub fn extend_zone_precompiles<P>(
                 account_keychain::AccountKeychainRules
             ))
         } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
+            // NOTE: jtcn 61: `ReceivePolicyGuard` holds claims for transfers blocked by a recipient
+            // policy. Only the sender, recipient, or recovery account can inspect a claim.
             Some(zone_precompile!(
                 env,
                 ReceivePolicyGuard,
@@ -174,6 +184,9 @@ pub fn extend_zone_precompiles<P>(
                 storage_credits::StorageCreditsRules
             ))
         } else {
+            // NOTE: jtcn 62: Zones do not expose the L1 token factory, L1 fee manager, channel
+            // reserve, or Stablecoin DEX precompiles. Their work stays on Tempo L1.
+
             // unsupported L1 precompiles:
             // TIP20Factory, TipFeeManager, TIP20ChannelReserve, StablecoinDEX
             None

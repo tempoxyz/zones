@@ -134,8 +134,8 @@ fn peer_sets(
                 node.address().to_commonware(),
             )
         })
-        // NOTE: jtcn 18: Every node connects to the quorum nodes. RPC nodes make the connection
-        // themselves, so quorum nodes never connect back into RPC nodes.
+        // NOTE: jtcn 83: Every node connects to the quorum members. RPC only nodes open their own
+        // connections, so quorum members do not need to dial them back.
         .partition(|(rpc_only, public_key, _)| !rpc_only || public_key == local_ed25519_public_key);
     let primary = Map::try_from(
         primary

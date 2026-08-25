@@ -141,6 +141,8 @@ pub struct WithdrawalProcessorConfig {
 /// Limits applied while packing and submitting `processWithdrawals` transactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WithdrawalBatchLimits {
+    // NOTE: jtcn 51: Withdrawal speed is limited by gas per transaction, ordered nonces, the number
+    // of L1 transactions allowed in flight, confirmation time, and the portal's strict order.
     /// Maximum planned gas for one transaction. A single oversized withdrawal is still emitted
     /// so that it cannot permanently block the queue.
     pub max_batch_gas: u64,
@@ -178,6 +180,8 @@ impl Default for WithdrawalBatchLimits {
 ///
 /// Withdrawals are grouped by batch index, where each batch is a `Vec<Withdrawal>` in FIFO order
 /// (oldest first). The batch index corresponds to the portal's withdrawal queue slot index.
+// NOTE: jtcn 46: Keeps full withdrawal data in an in memory map keyed by portal queue slot. The
+// portal stores only hashes, so this cache can always be rebuilt from L1 and saved Zone receipts.
 pub struct WithdrawalStore {
     batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
@@ -387,8 +391,8 @@ impl WithdrawalProcessor {
     pub async fn run(&self, shutdown: &sync::CancellationToken) {
         info!("Withdrawal processor started");
 
-        // NOTE: jtcn 88: A submitted batch wakes this worker immediately. The poll interval only
-        // retries if the wake up was missed or earlier work failed.
+        // NOTE: jtcn 45: An accepted batch wakes the withdrawal worker immediately. The poll
+        // interval only retries when a wake up was missed or earlier work failed.
         loop {
             tokio::select! {
                 biased;
@@ -404,11 +408,14 @@ impl WithdrawalProcessor {
                 }
             }
 
-            // NOTE: jtcn 89: Matches each portal queue hash with the full withdrawals saved when
-            // the Zone batch was accepted.
+            // NOTE: jtcn 48: Reads the portal queue head and tail, then starts with the oldest slot.
+            // Both slots and the withdrawals inside each slot are processed in order.
             if let Err(e) = self.process_queue(shutdown).await {
                 error!(error = %e, "Withdrawal processing cycle failed");
             }
+
+            // NOTE: jtcn 54: Checkpoint: Finalized L1 produced a saved Zone block, `submitBatch`
+            // committed it to the portal, and `processWithdrawals` delivered its exits on L1.
 
             if shutdown.is_cancelled() {
                 debug!("Withdrawal processor stopped after draining submitted transactions");
@@ -550,8 +557,8 @@ impl WithdrawalProcessor {
                 return Ok(());
             }
 
-            // NOTE: jtcn 90: Compares the queue hash with the saved withdrawals so a retry skips
-            // ones the portal already processed.
+            // NOTE: jtcn 49: Compares the portal's current slot hash with the cached withdrawal
+            // list. Already processed items are trimmed and a mismatch rebuilds the cache.
             let Some(offset) = find_processed_offset(&withdrawals, slot_hash) else {
                 error!(
                     slot = head_val,
@@ -584,8 +591,8 @@ impl WithdrawalProcessor {
                 return Ok(());
             }
 
-            // NOTE: jtcn 91: Splits the remaining withdrawals into L1 transactions that fit the
-            // configured gas limit.
+            // NOTE: jtcn 50: Splits the remaining withdrawals into L1 transactions that fit the
+            // configured gas limit. One portal slot may take several transactions to drain.
             let batches =
                 build_withdrawal_batches(remaining, self.config.batch_limits.max_batch_gas);
             let total_gas = batches
@@ -602,8 +609,6 @@ impl WithdrawalProcessor {
             if shutdown.is_cancelled() {
                 return Ok(());
             }
-            // NOTE: jtcn 92: Submits those transactions with ordered nonces and limits how many
-            // can be in flight at once.
             let outcome = self
                 .submit_and_confirm_batches(
                     SubmitBatches {
@@ -621,8 +626,8 @@ impl WithdrawalProcessor {
 
             match outcome {
                 SubmitOutcome::Confirmed => {
-                    // NOTE: jtcn 96: After every L1 transaction for this slot confirms, removes its
-                    // saved data and continues until the portal queue is empty.
+                    // NOTE: jtcn 53: After every L1 transaction for this slot confirms, removes its
+                    // cached data and reads the portal head again before continuing.
                     self.store.lock().remove_batch(head_val);
                     info!(
                         slot = head_val,
@@ -709,6 +714,8 @@ impl WithdrawalProcessor {
                     "📤 Broadcasting withdrawal batch to L1"
                 );
 
+                // NOTE: jtcn 52: Calls `processWithdrawals` with the next withdrawals and the hash
+                // that should remain. Ordered nonces let several L1 transactions stay in flight.
                 let call = self
                     .portal
                     .processWithdrawals(batch_withdrawals, remaining_queue)

@@ -92,6 +92,8 @@ where
         beneficiary: Address,
         _skip_liquidity_check: bool,
     ) -> Result<Address> {
+        // NOTE: jtcn 63: The Zone fee manager picks the transaction's fee token and holds the
+        // maximum fee before execution. It pays the block beneficiary and refunds what was unused.
         ctx.enter(|| {
             ZoneFeeManager::new().collect_fee_pre_tx(fee_payer, fee_token, max_amount, beneficiary)
         })

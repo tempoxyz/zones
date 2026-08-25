@@ -26,6 +26,9 @@ pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
     fn admit(&self, _data: &[u8], caller: Address) -> CallCheck {
+        // NOTE: jtcn 74: Rejects direct TIP 403 calls from Zone users. TIP 20, the Inbox, the
+        // Outbox, and fee handling still read the same policy internally.
+
         // Operator simulations use `address(0)`. Public RPC simulations cannot select this caller.
         if caller.is_zero() {
             return CallCheck::Continue;

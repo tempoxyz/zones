@@ -331,8 +331,8 @@ contract ZonePortal is IZonePortal {
         external
         onlyAdmin
     {
-        // NOTE: jtcn 98: Replaces the sequencers allowed to lead and sign batches, and sets how
-        // many signatures a batch needs.
+        // NOTE: jtcn 132: Replaces the sequencers allowed to lead and sign batches. It also sets
+        // how many matching signatures the portal requires.
         _replaceSequencerSet(newSequencers, newThreshold, true);
     }
 
@@ -413,8 +413,8 @@ contract ZonePortal is IZonePortal {
 
     /// @inheritdoc IZonePortal
     function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencerOrAdmin {
-        // NOTE: jtcn 99: Changes the active leader once for this L1 block. The expected epoch stops
-        // an old request from changing it back later.
+        // NOTE: jtcn 133: Changes the active leader for future Zone blocks. The expected epoch and
+        // one change per L1 block rules stop stale requests from changing it back.
         if (!isSequencer(newLeader)) revert InvalidLeader();
         // Idempotent fanout: every node relays the same target, only the first call transitions.
         if (newLeader == leader) return;
@@ -442,6 +442,8 @@ contract ZonePortal is IZonePortal {
         uint64 activationTempoBlock = uint64(block.number);
         leaderActivationTempoBlock = activationTempoBlock;
         emit LeaderUpdated(previous, newLeader, leaderEpoch, activationTempoBlock);
+        // NOTE: jtcn 134: Checkpoint: `ZonePortal` is L1 truth for deposits, accepted Zone state,
+        // pending withdrawals, the sequencer set, and the active leader.
     }
 
     /// @notice Set zone gas rate. Only callable by admin.
@@ -769,8 +771,9 @@ contract ZonePortal is IZonePortal {
         external
         onlySequencerOrAdmin
     {
-        // NOTE: jtcn 26: Verifies the operator owns this decryption key, then adds it to key
-        // history. The previous key stays valid for the grace period.
+        // NOTE: jtcn 115: Verifies the operator controls the new encryption key and appends it to
+        // history. The previous key remains valid for 86,400 L1 blocks so old deposits still work.
+
         // Validate yParity
         if (!Secp256k1Lib.isCompressedYParity(yParity)) revert InvalidEphemeralPubkey();
 
@@ -1003,8 +1006,8 @@ contract ZonePortal is IZonePortal {
         internal
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        // NOTE: jtcn 27: Checks the depositor, token, refund address, TIP 403 policy, encrypted
-        // payload, and selected decryption key before taking funds.
+        // NOTE: jtcn 116: Checks the depositor, token, refund address, TIP 403 policy, encrypted
+        // payload, and selected encryption key before taking any funds.
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
         // Enforced gateways may deposit callback returns without also being allowed accounts.
         _requireAllowedDepositor(msg.sender);
@@ -1046,8 +1049,8 @@ contract ZonePortal is IZonePortal {
             revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
         }
 
-        // NOTE: jtcn 28: Pulls the tokens into the portal, pays the deposit fee, and keeps the rest
-        // for the Zone recipient.
+        // NOTE: jtcn 117: Pulls the tokens into the portal, pays the deposit fee, and holds the
+        // remaining amount until the Zone mints it to the hidden recipient.
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
         // Build the queued deposit.
@@ -1060,8 +1063,9 @@ contract ZonePortal is IZonePortal {
             encrypted: encrypted
         });
 
-        // NOTE: jtcn 29: Adds the encrypted deposit to the hash queue. The L1 subscriber reads
-        // this event and sends the deposit into the next Zone block.
+        // NOTE: jtcn 118: Appends the encrypted deposit to the portal hash queue and emits its full
+        // data. The L1 subscriber carries that event into a later Zone block.
+
         // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
@@ -1103,8 +1107,8 @@ contract ZonePortal is IZonePortal {
         whenNotPaused
         nonReentrantWithdrawal
     {
-        // NOTE: jtcn 93: Rebuilds the withdrawal hash chain so each item can be checked and
-        // removed from the portal queue in order.
+        // NOTE: jtcn 128: A pending withdrawal queue means `head` is behind `tail`. Each slot holds
+        // one ordered hash chain, while the caller supplies the full withdrawals behind that hash.
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
         bytes32 nextQueue = remainingQueue;
 
@@ -1117,13 +1121,14 @@ contract ZonePortal is IZonePortal {
             _processWithdrawal(withdrawals[i], remainingQueues[i]);
         }
 
-        // NOTE: jtcn 97: The withdrawal chapter is complete. The portal checked and sent each item
-        // in order, and any failed send became a Zone deposit instead of blocking the queue.
+        // NOTE: jtcn 131: Checkpoint: Portal head and slot hashes record durable withdrawal
+        // progress. The worker's full withdrawal data and retry position are only local caches.
     }
 
     function _processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) internal {
-        // NOTE: jtcn 94: Removes the withdrawal from the queue, then sends it. A failed transfer or
-        // callback is turned into a deposit back to the Zone instead of blocking the queue.
+        // NOTE: jtcn 129: Removes the next withdrawal, then transfers tokens or runs its callback.
+        // A failed delivery becomes a deposit back to the Zone instead of blocking the queue.
+
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
@@ -1322,13 +1327,15 @@ contract ZonePortal is IZonePortal {
         external
         onlySequencer
     {
-        // NOTE: jtcn 75: A batch must start from the last Zone block this portal accepted.
+        // NOTE: jtcn 119: The portal starts with the last accepted Zone hash, height, L1 checkpoint,
+        // deposit position, withdrawal batch index, and withdrawal queue. The new batch must extend it.
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
         }
 
-        // NOTE: jtcn 76: Gets the L1 block hash this batch is tied to. Recent batches use their L1
-        // block directly, while older batches include a newer block for the ancestry proof.
+        // NOTE: jtcn 120: Gets the L1 block hash this batch claims to use. Recent batches use that
+        // block directly, while older batches prove ancestry from a newer available block.
+
         // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
         uint64 anchorBlockNumber;
         bytes32 anchorBlockHash;
@@ -1356,7 +1363,7 @@ contract ZonePortal is IZonePortal {
 
         if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
-        // NOTE: jtcn 77: Checks enough current sequencers signed this exact batch and L1 anchor.
+        // NOTE: jtcn 121: Checks enough current sequencers signed this exact batch and L1 anchor.
         // The certificate binds every value that affects settlement, rather than only the
         // zone block hash. A leader therefore cannot reuse signatures for this block with a
         // different withdrawal root, deposit transition, Tempo anchor, or verifier config.
@@ -1372,8 +1379,9 @@ contract ZonePortal is IZonePortal {
                 signatures
             )) revert InvalidQuorumCertificate();
 
-        // NOTE: jtcn 79: Checks deposit processing continues from the last accepted deposit and
-        // never moves backward or past the end of the queue.
+        // NOTE: jtcn 123: Checks deposit processing starts where the last accepted batch stopped.
+        // It cannot move backward or claim deposits that are not in the portal queue.
+
         // These are strictly not necessary, but we'll assert them here since they are cheap while
         // the prover doesn't (yet) enforce them.
         //   - continuity:  prevDepositNumber must equal where we last left off
@@ -1388,8 +1396,9 @@ contract ZonePortal is IZonePortal {
             revert InvalidDepositTransition();
         }
 
-        // NOTE: jtcn 80: Passes the block, deposit, and withdrawal changes to the configured proof
-        // verifier before accepting the batch.
+        // NOTE: jtcn 124: Passes the block, deposit, and withdrawal changes to the configured proof
+        // verifier. The portal accepts nothing until the verifier returns true.
+
         // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
             .verify(
@@ -1406,8 +1415,9 @@ contract ZonePortal is IZonePortal {
             );
         if (!valid) revert InvalidProof();
 
-        // NOTE: jtcn 82: Saves the new Zone block hash, L1 checkpoint, deposit position, batch
-        // number, and Zone height after every check passes.
+        // NOTE: jtcn 126: After every check passes, saves the new Zone hash, height, L1 checkpoint,
+        // processed deposit number, and withdrawal batch index in portal storage.
+
         // Update state
         withdrawalBatchIndex++;
         blockHash = blockTransition.nextBlockHash;
@@ -1415,8 +1425,8 @@ contract ZonePortal is IZonePortal {
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
         zoneHeight = nextZoneHeight;
 
-        // NOTE: jtcn 83: Adds this batch's withdrawal hash to the portal queue. Empty withdrawal
-        // batches do not take a queue slot.
+        // NOTE: jtcn 127: Adds a nonempty withdrawal hash at the portal queue tail. Empty batches
+        // still advance accepted Zone state without creating a queue slot.
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
         // Emit event after state updates
@@ -1445,8 +1455,8 @@ contract ZonePortal is IZonePortal {
         view
         returns (bool)
     {
-        // NOTE: jtcn 78: Requires the signing threshold, rejects unknown or duplicate signers,
-        // and checks every signature covers the same batch data.
+        // NOTE: jtcn 122: Requires the configured signature threshold, rejects unknown or duplicate
+        // signers, and checks every signature covers the same batch data.
         uint256 threshold = sequencerThreshold;
         if (
             nextZoneHeight <= zoneHeight || signatures.length < threshold

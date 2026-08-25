@@ -165,6 +165,8 @@ impl ZoneOutbox {
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
+        // NOTE: jtcn 76: Checks the token, recipient, callback, fee, and L1 portal policy. It then
+        // burns the Zone tokens and appends the full withdrawal to the Outbox pending list.
         if call.zoneFallbackRecipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
         }
@@ -288,6 +290,8 @@ impl ZoneOutbox {
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
+        // NOTE: jtcn 78: Turns the pending withdrawals into one ordered hash, clears the full list,
+        // and saves the next withdrawal batch index and hash in Zone state.
         if caller != Address::ZERO {
             return Err(ZoneOutboxError::only_sequencer().into());
         }

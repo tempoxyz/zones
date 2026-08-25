@@ -83,6 +83,8 @@ impl ZoneInbox {
         caller: Address,
         call: IZoneInbox::advanceTempoCall,
     ) -> ZoneResult<()> {
+        // NOTE: jtcn 66: The Inbox starts from the L1 checkpoint, deposit position, and token
+        // commitment saved in the previous Zone block. Only the system transaction can advance them.
         if !caller.is_zero() {
             return Err(ZoneInboxError::only_sequencer().into());
         }
@@ -92,6 +94,9 @@ impl ZoneInbox {
         let deposits = decode_deposits(call.deposits)?;
 
         let mut tempo_state = TempoState::new();
+
+        // NOTE: jtcn 67: `TempoState` requires the supplied header to be the next finalized L1
+        // block. It pins every L1 backed read in this transaction to that exact block.
 
         // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
         tempo_state.finalize_checkpoint(l1, call.header)?;
@@ -103,6 +108,8 @@ impl ZoneInbox {
             next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
         }
 
+        // NOTE: jtcn 68: Checks token enablement and the deposit queue against `ZonePortal` at the
+        // same L1 block. A newer portal value cannot leak into this Zone block.
         if !portal.is_zero()
             && l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
         {
@@ -165,6 +172,9 @@ impl ZoneInbox {
             }
         }
 
+        // NOTE: jtcn 71: Writes the new L1 checkpoint, deposit position, enabled tokens, minted
+        // balances, and bounce backs into this Zone block's EVM state.
+
         // Step 4: Update state
         self.processed_deposit_queue_hash.write(current_hash)?;
         let previous_number = self.processed_deposit_number.read()?;
@@ -218,11 +228,15 @@ impl ZoneInbox {
         decryption: DecryptionData,
         key: (B256, u8),
     ) -> ZoneResult<()> {
+        // NOTE: jtcn 69: Verifies the sequencer supplied the right plaintext for this encrypted
+        // deposit. The proof ties the plaintext to the deposit's L1 encryption key.
         let Some((to, memo)) = recover_encrypted_payload(portal, &deposit, &decryption, key)?
         else {
             return self.fail_deposit(outbox, current_hash, deposit);
         };
 
+        // NOTE: jtcn 70: Mints a valid deposit to its hidden Zone recipient. A bad decryption or
+        // blocked recipient becomes an Outbox bounce back instead of stopping the L1 queue.
         if self.try_mint(deposit.token, to, deposit.amount)? {
             self.emit_event(deposit.processed_event(current_hash, to, memo))?;
         } else {

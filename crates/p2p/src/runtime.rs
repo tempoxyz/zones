@@ -325,10 +325,8 @@ async fn join_runtime_thread(thread: std::thread::JoinHandle<()>) -> eyre::Resul
 
 /// Starts Commonware block transport on a dedicated OS thread.
 pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2pHandle> {
-    // NOTE: jtcn 15: Runs P2P on its own thread. Commands send blocks, transactions, and settlement
-    // messages from the node to peers, while events bring received messages back to the node.
-    // Backfill commands ask for missing blocks or send blocks to a peer. Backfill requests tell the
-    // node what a peer needs, and backfill responses return missing blocks to the follower.
+    // NOTE: jtcn 80: Runs P2P on its own thread. Node commands send messages to peers and P2P
+    // events bring received messages back. Separate backfill channels recover missing blocks.
     let shutdown = CancellationToken::new();
     let thread_shutdown = shutdown.clone();
     let (stopped_tx, stopped) = oneshot::channel();
@@ -341,7 +339,8 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
     let thread = std::thread::Builder::new()
         .name("zone-p2p".to_owned())
         .spawn(move || {
-            // NOTE: jtcn 16: Starts the Commonware runtime for this Zone using the channels above.
+            // NOTE: jtcn 81: Starts Commonware with the node side of those channels. The node and
+            // network can now pass messages without sharing the same runtime thread.
             let result = run(
                 config,
                 network_id,
@@ -390,8 +389,8 @@ fn run(
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
         let local_ed25519_public_key = config.ed25519_public_key();
         let leadership = config.leadership();
-        // NOTE: jtcn 17: Starts this Zone's Commonware network. This loads the manifest peers and
-        // returns the network used to create each P2P channel below.
+        // NOTE: jtcn 82: Starts this Zone's Commonware network from the P2P manifest. The result is
+        // the authenticated peer network used by every protocol below.
         let (mut commonware, mut oracle, peers) = network::instantiate(
             &context,
             &config.manifest,
@@ -402,8 +401,8 @@ fn run(
             network_id,
         )?;
         oracle.track(0, peers);
-        // NOTE: jtcn 19: Creates separate P2P channels for blocks, backfill, transactions, and
-        // settlement messages.
+        // NOTE: jtcn 84: Creates separate network channels for blocks, missing block requests,
+        // missing block replies, transactions, settlement proposals, and signatures.
         let (block_sender, block_receiver) =
             commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
         let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
@@ -458,8 +457,8 @@ fn run(
             })
             .await;
 
-        // NOTE: jtcn 20: The manifest says who is a member. The current L1 schedule says who can
-        // send each type of P2P message.
+        // NOTE: jtcn 85: The manifest says who belongs to this Zone. The finalized L1 schedule says
+        // which member may send each message right now.
         let membership = RoutingMembership::from_manifest(&config.manifest);
 
         let command_loop = run_commands(
@@ -535,13 +534,14 @@ async fn run_commands(
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
-    // NOTE: jtcn 21: Node tasks put outbound messages on `P2pHandle.commands`. Each branch checks
-    // this node's role, picks the manifest peers, and uses its Commonware channel from above.
+    // NOTE: jtcn 86: Node tasks put outbound messages on this command channel. Each branch checks
+    // the local role, chooses allowed manifest peers, and sends on the matching protocol.
     while let Some(command) = commands.recv().await {
         match command {
             P2pCommand::BroadcastBlock(block) => {
-                // NOTE: jtcn 52: Confirms this node can broadcast blocks, then sends the saved
-                // block to every other manifest peer on the block channel.
+                // NOTE: jtcn 91: Confirms this node is allowed to produce the block, then sends the
+                // saved block to every other manifest peer on the block channel.
+
                 // Mirror of the inbound transport check: the sender must lead somewhere in
                 // the retained schedule; every importer applies the exact
                 // `producer == leader_for(anchor)` fence. Recipients are all other manifest
@@ -710,8 +710,8 @@ where
         mut transactions,
     } = receivers;
 
-    // NOTE: jtcn 22: Commonware gives this loop each message and the authenticated manifest peer
-    // that sent it. This checks the peer can send that message now, then passes it to the node.
+    // NOTE: jtcn 87: Commonware gives this loop the message and authenticated peer that sent it.
+    // The loop checks that peer's current role before passing anything to the node.
     loop {
         let event = tokio::select! {
             // Got a block

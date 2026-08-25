@@ -42,6 +42,8 @@ enum ZoneBlockPhase {
 
 impl ZoneBlockPhase {
     fn validate_transaction(self, tx: &TempoTxEnvelope) -> Result<Self, BlockExecutionError> {
+        // NOTE: jtcn 64: Enforces the Zone block order during both building and validation.
+        // `advanceTempo` must be first, user transactions come next, and Outbox finalization is last.
         if tx.subblock_proposer().is_some() {
             return Err(BlockValidationError::msg(
                 "subblock transactions are not supported in zone blocks",

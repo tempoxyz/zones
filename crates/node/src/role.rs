@@ -637,8 +637,9 @@ pub(crate) async fn run_role_controller<P, Pool>(
     let mut current: Option<RunningGeneration> = None;
 
     loop {
-        // NOTE: jtcn 102: Reads who should lead the next L1 block and runs this node as leader,
-        // follower, or fenced.
+        // NOTE: jtcn 109: Reads who owns the next L1 block and runs this node as leader, follower,
+        // or fenced. The role only changes when the finalized schedule changes.
+
         // An rpc-only member is not registered with `ZonePortal`, so it can never be named
         // leader by a finalized transition. Fencing it explicitly means a corrupt or wrongly
         // provisioned record cannot start a producer whose blocks nobody could settle.
@@ -698,7 +699,8 @@ pub(crate) async fn run_role_controller<P, Pool>(
             .as_ref()
             .is_some_and(|generation| generation.role.same_variant(desired))
         {
-            // NOTE: jtcn 103: Stops the old role at the handoff block before starting the new role.
+            // NOTE: jtcn 110: Stops every task from the old role before starting the new one. This
+            // keeps both leaders from producing the same Zone block during a handoff.
             if !stop_current_generation(&mut current, &sinks).await {
                 return;
             }
@@ -874,8 +876,8 @@ where
 
     match desired {
         DesiredRole::Fenced => {
-            // NOTE: jtcn 105: Fenced means no valid leader is known, so this node does not build or
-            // import blocks.
+            // NOTE: jtcn 112: Fenced means the node cannot prove who should lead next. It stops
+            // building and importing blocks until the finalized schedule becomes usable again.
             sinks.clear();
             warn!(
                 target: "zone::role",
@@ -884,8 +886,8 @@ where
             );
         }
         DesiredRole::Follower { epoch } => {
-            // NOTE: jtcn 53: Starts the follower tasks that receive leader blocks, backfill gaps,
-            // and forward transactions. Followers never build Zone blocks.
+            // NOTE: jtcn 92: Creates the follower channels. Live P2P events go to `sync_rx`,
+            // missing blocks go to `backfill_rx`, and peer transactions go to `transactions_rx`.
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (backfill_tx, backfill_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
@@ -933,8 +935,8 @@ where
             tasks.spawn(async move {
                 tokio::select! {
                     () = forward_token.cancelled() => TaskEnd::Ended("transaction-forwarding (cancelled)"),
-                    // NOTE: jtcn 60: Sends local transactions to the current and possible next
-                    // leaders so they are not lost during a handoff.
+                    // NOTE: jtcn 100: Sends local transactions to the current leader and the next
+                    // possible leader so a handoff does not lose them.
                     () = forward_new_transactions(pool, listener, commands) => {
                         TaskEnd::Ended("transaction-forwarding")
                     }
@@ -955,12 +957,12 @@ where
                 }
             });
             info!(target: "zone::role", generation = id, epoch, "Follower generation started");
-            // NOTE: jtcn 61: The follower block path is complete. Blocks arrive through P2P, gaps
-            // are backfilled, every block is checked before import, and transactions are forwarded.
+            // NOTE: jtcn 106: Checkpoint: P2P carries saved blocks, missing block recovery,
+            // forwarded transactions, and settlement signatures between Zone nodes.
         }
         DesiredRole::Leader { epoch, .. } => {
-            // NOTE: jtcn 24: Follow the normal leader path first. This starts block production,
-            // broadcast, settlement, and withdrawals. Leadership changes and failover come later.
+            // NOTE: jtcn 16: A leader starts two sides of the core loop. `ZoneEngine` turns L1
+            // blocks into Zone blocks, while the L1 workers settle them and deliver withdrawals.
             let sequencer = context
                 .sequencer
                 .as_ref()
@@ -1002,8 +1004,8 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
-            // NOTE: jtcn 25: Builds the leader's Zone engine and starts its task. It consumes
-            // finalized L1 blocks and produces one Zone block for each one.
+            // NOTE: jtcn 17: Starts `ZoneEngine`. It consumes finalized L1 blocks and produces one
+            // saved Zone block for each one.
             let engine = build_engine(context, sequencer, last_header);
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
@@ -1025,7 +1027,8 @@ where
             let provider = context.provider.clone();
             let commands = context.commands.clone();
             tasks.spawn(async move {
-                // NOTE: jtcn 50: Broadcasts only Zone blocks already written to disk.
+                // NOTE: jtcn 89: Starts the block broadcaster. It only publishes Zone blocks that
+                // have already been written to disk.
                 broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
                 TaskEnd::Ended("block-broadcast")
             });
@@ -1086,8 +1089,8 @@ where
             let prover_config = sequencer.prover_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
-                // NOTE: jtcn 62: Starts the batch monitor and withdrawal processor with the same
-                // L1 signer, nonce tracker, and withdrawal data.
+                // NOTE: jtcn 18: Starts the L1 side of the leader. Despite the name, this does not
+                // build blocks. It submits saved Zone blocks and delivers withdrawals on L1.
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,
@@ -1103,9 +1106,8 @@ where
         }
     }
 
-    // NOTE: jtcn 107: The leadership chapter is complete. A finalized portal event updates the
-    // schedule, the old work stops at the boundary, and the new leader, follower, or fenced work
-    // starts.
+    // NOTE: jtcn 114: Checkpoint: A finalized portal event changed the schedule. The old role
+    // stopped at the boundary and the new leader, follower, or fenced role started from there.
     Ok(RunningGeneration {
         id,
         role: desired,

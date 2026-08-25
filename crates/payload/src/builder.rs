@@ -177,6 +177,9 @@ where
 
         let total_deposits = prepared.queued_deposits.len();
 
+        // NOTE: jtcn 30: Every Zone block has the same shape. It applies one L1 update first, runs
+        // user transactions next, and finalizes this block's withdrawal list last.
+
         info!(
             target: "zone::payload",
             zone_block = parent_header.number() + 1,
@@ -217,7 +220,8 @@ where
             consensus_context: None,
             subblock_fee_recipients: Default::default(),
         };
-        // NOTE: jtcn 40: Creates the Zone EVM that will run the L1 update and user transactions.
+        // NOTE: jtcn 55: Creates the Zone EVM for this block. From here we walk through its L1 view,
+        // precompiles, deposits, user transactions, and withdrawals.
         let mut builder = self
             .evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
@@ -235,9 +239,9 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
-        // NOTE: jtcn 44: Runs advanceTempo first to update the L1 checkpoint and process deposits
-        // using TIP 403 policy from finalized L1. Those temporary L1 reads are not saved in Zone state.
-        // Runs advanceTempo first to update the L1 checkpoint, enable tokens, and process deposits.
+        // NOTE: jtcn 65: Builds the first system transaction from the finalized L1 header,
+        // deposits, decryptions, and token updates. It calls `ZoneInbox.advanceTempo`.
+
         // Execute advanceTempo system transaction — exactly one per zone block.
         builder
             .execute_transaction(build_advance_tempo_tx(prepared, chain_id))
@@ -257,7 +261,8 @@ where
         // the size budget
         // The block executor owns gas-capacity accounting.
         let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
-        // NOTE: jtcn 45: Runs valid user transactions after advanceTempo until the block is full.
+        // NOTE: jtcn 75: Runs user transactions only after the L1 update succeeds. They execute
+        // against the new checkpoint, token config, and deposited balances until the block is full.
         let raw_best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
@@ -278,8 +283,8 @@ where
             return Ok(BuildOutcome::Cancelled);
         }
 
-        // NOTE: jtcn 46: Finalizes waiting withdrawals after user transactions. With no waiting
-        // withdrawals, the interval decides when to make an empty batch boundary.
+        // NOTE: jtcn 77: Finalizes withdrawals after every user transaction. It closes any nonempty
+        // list and periodically closes an empty list so batch settlement keeps moving.
         finalize_withdrawal_batch_if_needed(
             &mut builder,
             block_number,
@@ -295,6 +300,9 @@ where
             block,
             block_access_list: _,
         } = builder.finish(&*state_provider, None)?;
+
+        // NOTE: jtcn 79: Checkpoint: `advanceTempo` brought finalized L1 state in, user transactions
+        // ran with Zone precompiles, and the Outbox committed withdrawals for later settlement.
 
         let requests = chain_spec
             .is_prague_active_at_timestamp(attributes.timestamp())

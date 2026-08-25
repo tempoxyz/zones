@@ -146,6 +146,9 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
+    // NOTE: jtcn 19: Creates one L1 writer shared by the batch monitor and withdrawal processor.
+    // Sharing it keeps their L1 transaction nonces from colliding.
+
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
@@ -199,8 +202,8 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         withdrawal_notify,
         withdrawal_repair_notify,
     );
-    // NOTE: jtcn 63: Starts the monitor from the last Zone block accepted by the L1 portal so a
-    // restart does not repeat or skip batches.
+    // NOTE: jtcn 34: Starts the batch monitor from the last Zone block accepted by the L1 portal.
+    // A restart continues from L1 instead of guessing from local memory.
     let monitor_handle = monitor::spawn_zone_monitor(
         monitor_config,
         zone_provider,

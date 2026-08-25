@@ -863,7 +863,7 @@ where
                 status: role_status,
             };
 
-            // NOTE: jtcn 12: this is the function responsible for leader failover etc etc
+            // NOTE: jtcn 13: this is the function responsible for leader failover etc etc
             // mentioned above.
             task_executor
                 .spawn_critical_task("zone-role-controller", run_role_controller(context, sinks));
@@ -883,7 +883,7 @@ where
         } else if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
 
-            // NOTE: jtcn 13: Start the background workers that submit Zone batches to L1, process
+            // NOTE: jtcn 14: Start the background workers that submit Zone batches to L1, process
             // withdrawals on L1, and shut down cleanly.
             Self::launch_sequencer_tasks(
                 config,
@@ -900,9 +900,8 @@ where
             .await?;
         }
 
-        // NOTE: jtcn 14: Node startup is done. It built the Reth node, checked the Zone against L1,
-        // loaded tokens, keys, and leadership, then started L1 sync, P2P, both RPC servers, and
-        // leader or follower work. Next is how P2P moves data between nodes.
+        // NOTE: jtcn 15: Checkpoint: The node is connected to its Zone on L1. L1 sync, P2P, RPC,
+        // and role work are running. Next we follow the leader's core loop.
         Ok(handle)
     }
 }
@@ -941,8 +940,8 @@ impl LeadershipSink for ScheduleLeadershipSink {
                 transition.epoch,
             )
         })?;
-        // NOTE: jtcn 100: Maps the finalized portal leader address to its manifest P2P identity,
-        // then publishes the epoch and the L1 block where that leader takes over.
+        // NOTE: jtcn 107: Maps the finalized portal leader address to its manifest P2P identity.
+        // The result says who takes over and the first L1 block they own.
         self.schedule.publish(LeadershipState::new(
             transition.epoch,
             leader.clone(),
@@ -1030,8 +1029,8 @@ where
             .increment(1);
         return Ok(());
     }
-    // NOTE: jtcn 106: Forced recovery starts a replacement leader after a canonical Zone block
-    // selected by the operator. The next finalized portal leader update ends the override.
+    // NOTE: jtcn 113: Forced recovery starts a replacement leader after a Zone block chosen by the
+    // operator. The next finalized leader update from the portal ends the override.
     schedule.install_forced_recovery(
         recovery_epoch,
         recovery.leader().clone(),
@@ -1164,9 +1163,8 @@ where
         } = handle.into_parts();
 
         let sinks = EventSinks::default();
-        // NOTE: jtcn 23: P2P is fully wired. Peers are connected, outbound messages are checked,
-        // and inbound senders are authenticated. This router hands accepted messages to the current
-        // role. Next is the normal leader block path.
+        // NOTE: jtcn 88: Checkpoint: P2P peers are connected. Outbound messages are checked and
+        // inbound messages are authenticated before reaching the active leader or follower.
         task_executor.spawn_critical_task(
             "zone-p2p-event-router",
             route_events_to_generations(events, sinks.clone()),

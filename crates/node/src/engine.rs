@@ -83,8 +83,8 @@ impl ProductionPermit {
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
-        // NOTE: jtcn 104: Before each Zone block, checks the schedule still assigns its L1 block
-        // to this node. A handoff stops the old leader at the exact boundary.
+        // NOTE: jtcn 111: Before building a Zone block, checks this node still owns its L1 block.
+        // This stops the old leader exactly where a handoff begins.
         match self.schedule.leader_for(tempo_anchor) {
             None => Some(EngineExit::Fenced { tempo_anchor }),
             Some(record) if record.leader == self.local_ed25519_public_key => None,
@@ -233,8 +233,8 @@ impl ZoneEngine {
     /// 2. Advances the zone chain for each available L1 block (no delay between blocks)
     /// 3. Sends periodic FCU heartbeats
     pub async fn run_until(mut self, stop: CancellationToken) -> EngineExit {
-        // NOTE: jtcn 35: A new L1 block wakes the engine immediately. The one second timer is only
-        // a fallback.
+        // NOTE: jtcn 25: A queued L1 block wakes the engine immediately. The timer only retries if
+        // a wake up was missed.
         let mut fcu_interval = tokio::time::interval(Duration::from_secs(1));
         fcu_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -300,8 +300,8 @@ impl ZoneEngine {
     ///
     /// Returns `Some` when the loop must stop: cancellation, demotion, or fenced leadership.
     async fn advance_all_available(&mut self, stop: &CancellationToken) -> Option<EngineExit> {
-        // NOTE: jtcn 36: Processes every finalized L1 block already in the queue without waiting
-        // between blocks.
+        // NOTE: jtcn 26: Drains every finalized L1 block already waiting in the queue. It does not
+        // sleep between blocks when the Zone is catching up.
         match drain_all_available(self, stop).await {
             Ok(Some(EngineExit::Cancelled)) | Ok(None) => None,
             Ok(Some(exit @ EngineExit::Demoted { .. })) => {
@@ -336,7 +336,8 @@ impl ZoneEngine {
     /// via `newPayload`. Only confirms (removes) the L1 block from the
     /// deposit queue after `newPayload` succeeds.
     async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
-        // NOTE: jtcn 37: Builds exactly one Zone block for this finalized L1 block.
+        // NOTE: jtcn 27: Starts exactly one Zone block for this finalized L1 block. The Zone and L1
+        // advance together one block at a time.
         let l1_num_hash = l1_block.header.num_hash();
 
         // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
@@ -354,7 +355,8 @@ impl ZoneEngine {
         let timestamp_secs = timestamp_millis / 1000;
         let timestamp_millis_part = timestamp_millis % 1000;
 
-        // NOTE: jtcn 38: Decrypts deposits and prepares the finalized L1 data for the payload.
+        // NOTE: jtcn 28: Decrypts this L1 block's deposits and packages its header, portal events,
+        // and token changes for Zone execution.
         let l1_block = self.prepare_l1_block(l1_block).await?;
 
         let attributes = ZonePayloadAttributes {
@@ -377,8 +379,9 @@ impl ZoneEngine {
             l1_block,
         };
 
-        // NOTE: jtcn 39: Gives Reth the finalized L1 data for the next Zone block. This triggers
-        // `ZonePayloadBuilder::try_build`, which executes and assembles the block.
+        // NOTE: jtcn 29: Gives Reth the finalized L1 input for the next Zone block. Reth calls
+        // `ZonePayloadBuilder::try_build` to execute and assemble it.
+
         // Send FCU with payload attributes through the engine API to trigger
         // payload building. The forkchoice state points at the current head;
         // the attributes carry the L1 block data for the new zone block.
@@ -403,15 +406,17 @@ impl ZoneEngine {
 
         let header = payload.block().sealed_header().clone();
         let block_number = header.number();
-        // NOTE: jtcn 47: Sends the built block to Reth for validation before accepting it.
+        // NOTE: jtcn 31: Sends the completed candidate back through Reth validation. A bad block
+        // cannot advance the Zone or consume its queued L1 input.
         let res = self.to_engine.new_payload(payload.into()).await?;
 
         if !res.is_valid() {
             eyre::bail!("Invalid payload for block {block_number}");
         }
 
-        // NOTE: jtcn 48: After validation, removes this L1 item from the queue and makes the new
-        // Zone block the chain head.
+        // NOTE: jtcn 32: After validation, Reth writes the block and its EVM state to the Zone DB.
+        // Only then does the node consume the matching L1 item and make the block canonical.
+
         // newPayload succeeded — remove the exact finalized L1 block that
         // produced it. A mismatch indicates an internal consumer-ordering bug.
         self.deposit_queue.confirm(l1_num_hash)?;
@@ -429,8 +434,8 @@ impl ZoneEngine {
             error!(target: "zone::engine", "Error sending post-newPayload FCU: {:?}", e);
         }
 
-        // NOTE: jtcn 49: Leader block production is complete. One finalized L1 block became one
-        // canonical Zone block through advanceTempo, TIP 403, user transactions, and withdrawals.
+        // NOTE: jtcn 33: Checkpoint: One finalized L1 block produced one validated Zone block. The
+        // block, receipts, and EVM state are now saved and ready for settlement.
         Ok(())
     }
 }
