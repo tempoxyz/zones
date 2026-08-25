@@ -1089,7 +1089,8 @@ where
             let prover_config = sequencer.prover_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
-                // NOTE: jtcn 18:  Starts logic to process submitBatch and processWithdrawal transactions
+                // NOTE: jtcn 18: Starts the leader's settlement tasks. They submit saved Zone blocks
+                // and process their withdrawal queues on L1.
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,

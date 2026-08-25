@@ -172,8 +172,10 @@ impl ZoneInbox {
             }
         }
 
-        // NOTE: jtcn 71: Writes the new L1 checkpoint, deposit position, enabled tokens, minted
-        // balances, and bounce backs into this Zone block's EVM state.
+        // NOTE: jtcn 71: Checkpoint: `advance_tempo` finalized the next L1 header, checked Portal
+        // commitments, enabled tokens, and processed every deposit in order. It now saves the new
+        // checkpoint and deposit position with any minted balances or queued bouncebacks. These
+        // writes become part of this Zone block's EVM state.
 
         // Step 4: Update state
         self.processed_deposit_queue_hash.write(current_hash)?;

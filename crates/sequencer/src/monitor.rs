@@ -729,8 +729,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// Returns the portal-confirmed canonical Zone block number. Callers must verify that this
     /// anchor covers any batch boundary they were attempting to submit.
     async fn resync_from_portal(&mut self) -> Result<u64> {
-        // NOTE: jtcn 44: After a failed or uncertain submission, reads the portal again. The last
-        // Zone block accepted on L1 is the source of truth for where submission resumes.
+        // NOTE: jtcn 44: Checkpoint: `ZoneMonitor` scans saved blocks and builds each finalized
+        // batch. `submit_batch_with_retry` asks `BatchSubmitter` to call `ZonePortal.submitBatch`.
+        // A receipt advances the local cursor and wakes withdrawal processing, while an uncertain
+        // result resyncs from Portal state.
         self.metrics.resync_from_portal_total.increment(1);
         let old_hash = self.prev_zone_block_hash;
         let old_last_submitted = self.last_submitted_zone_block;

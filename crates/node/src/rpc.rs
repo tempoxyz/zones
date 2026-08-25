@@ -1424,8 +1424,10 @@ fn redact_header(header: &mut TempoHeaderResponse) {
 
 /// Clear gas related fields that leak the size (and therefore tx counts)
 fn redact_fee_history(history: &mut FeeHistory) {
-    // NOTE: jtcn 93: Replaces fee history signals about private block load with fixed public values.
-    // Transaction filling supplies deterministic missing fee values for the same reason.
+    // NOTE: jtcn 93: Checkpoint: The redacted RPC authenticated one caller, allowed only listed
+    // methods, and scoped account, transaction, receipt, and block reads to that caller.
+    // `redact_block` strips execution details, while this function replaces fee signals with fixed
+    // public values. Next we apply the same boundary to simulations, submissions, and subscriptions.
     history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
     history.gas_used_ratio.fill(0.0);
     history.base_fee_per_blob_gas.fill(0);

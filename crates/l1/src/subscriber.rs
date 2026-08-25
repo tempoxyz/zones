@@ -391,6 +391,8 @@ impl L1Subscriber {
             "l1-block-subscriber",
             Box::pin(async move {
                 loop {
+                    // NOTE: jtcn 20: Node startup runs this separate L1 subscriber in the background.
+                    // It follows finalized L1 and feeds the engine. Settlement tasks do not call it.
                     if let Err(e) = subscriber.run().await {
                         if let Some(fenced) = fenced_ingestion_error(&e) {
                             error!(
@@ -461,6 +463,7 @@ impl L1Subscriber {
                 info!("Using WebSocket newHeads notifications");
                 Ok(Box::pin(subscription.into_stream().map(|_| Ok(()))))
             }
+            // TODO: should fail here?
             Err(err)
                 if err
                     .as_transport_err()
@@ -718,8 +721,10 @@ impl L1Subscriber {
                     })?;
                 }
             }
-            // NOTE: jtcn 24: Adds the verified L1 header and portal events to the engine queue and
-            // wakes `ZoneEngine`. The saved checkpoint does not move until the Zone block lands.
+            // NOTE: jtcn 24: Checkpoint: `L1Subscriber::run` follows finality, `follow_finalized`
+            // fills gaps, and `backfill` verifies headers and receipts. The verified header and
+            // portal events enter `DepositQueue` and wake `ZoneEngine`. The saved checkpoint moves
+            // only after the Zone block lands.
             let appended = self
                 .deposit_queue
                 .try_enqueue_sealed(sealed, events.clone())
@@ -772,8 +777,6 @@ impl L1Subscriber {
     /// [`Self::spawn`] retries transient errors and treats deterministic finalized-block
     /// ingestion failures as fatal.
     pub async fn run(&self) -> eyre::Result<()> {
-        // NOTE: jtcn 20: Reads finalized L1 blocks in order. Their headers and verified receipts
-        // are the source of truth for deposits, Zone config, and leadership changes.
         let provider = self.connect().await?;
         let triggers = self.head_triggers(&provider).await?;
         info!(

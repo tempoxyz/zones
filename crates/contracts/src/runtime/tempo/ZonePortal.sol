@@ -1086,8 +1086,10 @@ contract ZonePortal is IZonePortal {
             encrypted: encrypted
         });
 
-        // NOTE: jtcn 140: Appends the encrypted deposit to the portal hash queue and emits its full
-        // data. The L1 subscriber carries that event into a later Zone block.
+        // NOTE: jtcn 140: Checkpoint: `_deposit` checked roles, token state, TIP 403 policy,
+        // ciphertext, and the encryption key before pulling funds into the Portal. It paid the fee
+        // and now appends the net deposit to the hash queue. `L1Subscriber` carries the emitted data
+        // into a later Zone block.
 
         // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
@@ -1462,8 +1464,10 @@ contract ZonePortal is IZonePortal {
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
         zoneHeight = nextZoneHeight;
 
-        // NOTE: jtcn 149: Adds a nonempty withdrawal hash at the portal queue tail. Empty batches
-        // still advance accepted Zone state without creating a queue slot.
+        // NOTE: jtcn 149: Checkpoint: `submitBatch` checked continuity, the L1 anchor, sequencer
+        // signatures, deposit progress, and the configured verifier. It saved the accepted Zone
+        // hash, height, checkpoint, and deposit position. Only a nonempty withdrawal hash enters
+        // the Portal FIFO, while an empty batch still advances accepted Zone state.
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
         // Emit event after state updates

@@ -184,8 +184,9 @@ pub fn extend_zone_precompiles<P>(
                 storage_credits::StorageCreditsRules
             ))
         } else {
-            // NOTE: jtcn 62: Zones do not expose the L1 token factory, L1 fee manager, channel
-            // reserve, or Stablecoin DEX precompiles. Their work stays on Tempo L1.
+            // NOTE: jtcn 62: Checkpoint: `extend_zone_precompiles` installed the Zone Inbox,
+            // Outbox, token, policy, nonce, keychain, receive policy, fee, and storage services.
+            // It also removes L1 only factories and channels because those services stay on L1.
 
             // unsupported L1 precompiles:
             // TIP20Factory, TipFeeManager, TIP20ChannelReserve, StablecoinDEX

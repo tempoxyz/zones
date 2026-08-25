@@ -146,8 +146,9 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
-    // NOTE: jtcn 19: Creates one L1 writer shared by the batch monitor and withdrawal processor.
-    // Sharing it keeps their L1 transaction nonces from colliding.
+    // NOTE: jtcn 19: Checkpoint: The leader started `ZoneEngine` for block production and
+    // `spawn_zone_sequencer` for settlement. This function shares one signed L1 provider between
+    // `ZoneMonitor` and `WithdrawalProcessor`. Next we switch to the separate L1 input task.
 
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal

@@ -1242,8 +1242,10 @@ where
         );
     }
 
-    // NOTE: jtcn 121: After every check passes, makes the block canonical and marks its L1 input as
-    // processed. The next live or backfilled block can now extend it.
+    // NOTE: jtcn 121: Checkpoint: The follower received a live or backfilled block, waited for its
+    // finalized L1 anchor, and `import_peer_block` reexecuted it through the local engine. After
+    // `new_payload` and fork choice both accept it, the block is canonical and its L1 input is
+    // released so the next block can extend it.
 
     // Mirror the leader engine only after the block is canonical locally. The block cannot be
     // un-imported at this point, so the observation must be released unconditionally — leaving it
