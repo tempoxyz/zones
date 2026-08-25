@@ -6,12 +6,17 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::SolConstructor,
+    sol_types::{SolCall, SolConstructor},
 };
 use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
 use std::{fs, path::PathBuf};
-use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
+use tempo_alloy::{
+    TempoNetwork,
+    primitives::transaction::Call,
+    provider::TempoProviderBuilderExt as _,
+    rpc::{TempoCallBuilderExt as _, TempoTransactionRequest},
+};
 use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
 use tempo_precompiles::TIP20_FACTORY_ADDRESS;
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role as PortalRole};
@@ -118,6 +123,8 @@ alloy::sol! {
 }
 
 const DEFAULT_DEPLOYMENT_GAS_LIMIT: u64 = 30_000_000;
+// Tempo's transaction pool rejects AA transactions containing more than 32 calls.
+const MAX_PORTAL_ROLE_CALLS_PER_TX: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -244,6 +251,7 @@ impl DeployNeobankFixtures {
             .await
             .wrap_err("failed connecting fixture deployer to Tempo L1")?;
         let admin_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .with_expiring_nonces()
             .wallet(EthereumWallet::from(portal_admin))
             .connect(&self.l1_rpc_url)
             .await
@@ -607,6 +615,7 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
         "Configuring {} closed-loop ZonePortal roles...",
         assignments.len()
     );
+    let mut missing_role_calls = Vec::new();
     for (index, (account, expected_role)) in assignments.iter().enumerate() {
         if !portal
             .hasRole(*account, *expected_role)
@@ -614,39 +623,92 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
             .await
             .wrap_err_with(|| format!("failed querying ZonePortal role at index {index}"))?
         {
-            let pending = match expected_role {
-                PortalRole::Account => {
-                    portal
-                        .setAllowedAccount(*account, true)
-                        .fee_token(fee_token)
-                        .send()
-                        .await
+            let input = match expected_role {
+                PortalRole::Account => ZonePortal::setAllowedAccountCall {
+                    account: *account,
+                    allowed: true,
                 }
-                PortalRole::CallbackGateway => {
-                    portal
-                        .setGateway(*account, true)
-                        .fee_token(fee_token)
-                        .send()
-                        .await
+                .abi_encode(),
+                PortalRole::CallbackGateway => ZonePortal::setGatewayCall {
+                    account: *account,
+                    allowed: true,
                 }
+                .abi_encode(),
                 unsupported => eyre::bail!(
                     "unsupported benchmark ZonePortal role {unsupported:?} at index {index}"
                 ),
-            }
-            .wrap_err_with(|| format!("failed assigning ZonePortal role at index {index}"))?;
-            let receipt = pending.get_receipt().await.wrap_err_with(|| {
-                format!("failed waiting for ZonePortal role receipt at index {index}")
-            })?;
-            check(&receipt, "assign ZonePortal benchmark role")?;
+            };
+            missing_role_calls.push(Call {
+                to: portal_address.into(),
+                value: Uint::<256, 4>::ZERO,
+                input: input.into(),
+            });
         }
         if (index + 1) % 10 == 0 || index + 1 == assignments.len() {
             println!(
-                "ZonePortal role setup progress: {}/{}",
+                "ZonePortal role discovery progress: {}/{}",
                 index + 1,
                 assignments.len()
             );
         }
     }
+
+    let batch_count = missing_role_calls
+        .len()
+        .div_ceil(MAX_PORTAL_ROLE_CALLS_PER_TX);
+    println!(
+        "Assigning {} missing ZonePortal roles in {} Tempo AA batches...",
+        missing_role_calls.len(),
+        batch_count
+    );
+    let receipt_results = futures::future::join_all(
+        missing_role_calls
+            .chunks(MAX_PORTAL_ROLE_CALLS_PER_TX)
+            .enumerate()
+            .map(|(batch_index, calls)| {
+                let request = TempoTransactionRequest {
+                    calls: calls.to_vec(),
+                    fee_token: Some(fee_token),
+                    ..Default::default()
+                };
+                async move {
+                    provider
+                        .send_transaction(request)
+                        .await
+                        .wrap_err_with(|| {
+                            format!(
+                                "failed submitting ZonePortal role batch {}/{batch_count}",
+                                batch_index + 1
+                            )
+                        })?
+                        .get_receipt()
+                        .await
+                        .wrap_err_with(|| {
+                            format!(
+                                "failed waiting for ZonePortal role batch {}/{batch_count}",
+                                batch_index + 1
+                            )
+                        })
+                }
+            }),
+    )
+    .await;
+    for (batch_index, receipt) in receipt_results.into_iter().enumerate() {
+        let receipt = receipt?;
+        check(
+            &receipt,
+            &format!(
+                "assign ZonePortal benchmark role batch {}/{batch_count}",
+                batch_index + 1
+            ),
+        )?;
+        println!(
+            "ZonePortal role batch progress: {}/{}",
+            batch_index + 1,
+            batch_count
+        );
+    }
+
     for (index, (account, expected_role)) in assignments.iter().enumerate() {
         ensure!(
             portal
