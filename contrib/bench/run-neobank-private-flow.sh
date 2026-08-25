@@ -113,6 +113,7 @@ ZONES_BENCH_ACTIVITY_GAS_LIMIT="${ZONES_BENCH_ACTIVITY_GAS_LIMIT:-500000}"
 ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT="${ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT:-10000000}"
 ZONES_BENCH_APPROVAL_GAS_LIMIT="${ZONES_BENCH_APPROVAL_GAS_LIMIT:-2000000}"
 ZONES_BENCH_ADMISSION_SEED_AMOUNT="${ZONES_BENCH_ADMISSION_SEED_AMOUNT:-1}"
+ZONES_BENCH_ADMISSION_SEED_TPS="${ZONES_BENCH_ADMISSION_SEED_TPS:-200}"
 ZONES_BENCH_RECIPIENT_ACCOUNT_START="${ZONES_BENCH_RECIPIENT_ACCOUNT_START:-$ZONES_BENCH_ACCOUNT_START}"
 ZONES_BENCH_RECIPIENT_ACCOUNT_END="${ZONES_BENCH_RECIPIENT_ACCOUNT_END:-$ZONES_BENCH_ACCOUNT_END}"
 if [[ -z "${ZONES_BENCH_RECIPIENT_GENERATOR:-}" ]]; then
@@ -182,6 +183,7 @@ for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BE
     ZONES_BENCH_RECIPIENT_ACCOUNT_END
 do uint "$name"; done
 positive_rate ZONES_BENCH_TPS
+positive_rate ZONES_BENCH_ADMISSION_SEED_TPS
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
 (( 10#$ZONES_BENCH_MAX_CONCURRENT > 0 )) || die "max concurrency must be positive"
 (( 10#$ZONES_BENCH_SAMPLE_INSTANCES > 0 )) ||
@@ -475,12 +477,13 @@ trap cleanup EXIT INT TERM
 
 run_setup_scenario() {
     local stage="$1" scenario="$2" count="$3" report="$4" context="${5:-}"
+    local starts_per_second="${6:-0}"
     local concurrency="$ZONES_BENCH_MAX_CONCURRENT"
     if (( 10#$concurrency > 10#$count )); then concurrency="$count"; fi
 
     echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$stage${context:+ $context}"
     "$txgen_bin" scenario run \
-        --scenario "$scenario" --count "$count" --starts-per-second 0 \
+        --scenario "$scenario" --count "$count" --starts-per-second "$starts_per_second" \
         --max-in-flight "$concurrency" --max-rpc-in-flight "$concurrency" \
         --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
         --seed "$ZONES_BENCH_SEED" --report "$report"
@@ -490,15 +493,19 @@ run_setup_scenario() {
 
 # Zone transaction-pool admission requires every sender to hold a nonzero
 # balance of an enabled token. Run one exact encrypted onramp per benchmark
-# account before the untimed outbox approvals. This setup scenario uses account
-# leases, so count=accounts touches every account exactly once while respecting
-# the configured max-in-flight cap.
+# account before the untimed outbox approvals. Pace the deposits so a large
+# account pool is not packed into one L1 block and rejected by ZonePortal's
+# per-block deposit cap. This setup scenario uses account leases, so
+# count=accounts touches every account exactly once while respecting the
+# configured max-in-flight cap.
 seed_zone_admission_balances() {
     local seed_report="$ZONES_BENCH_OUTPUT/admission-seed-report.json"
     local total=$((10#$ZONES_BENCH_ACCOUNTS))
 
     run_setup_scenario \
-        zone_admission_seed "$admission_seed_scenario" "$total" "$seed_report"
+        zone_admission_seed "$admission_seed_scenario" "$total" "$seed_report" \
+        "starts_per_second=$ZONES_BENCH_ADMISSION_SEED_TPS" \
+        "$ZONES_BENCH_ADMISSION_SEED_TPS"
     echo "Zone admission seed verified: $total/$total exact encrypted deposits processed"
 }
 
