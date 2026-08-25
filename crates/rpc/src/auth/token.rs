@@ -136,6 +136,8 @@ impl AuthorizationToken {
         max_auth_token_validity: Duration,
         now: u64,
     ) -> Result<(), AuthError> {
+        // NOTE: jtcn 88: The signed token binds its version, Zone, chain, issue time, and expiry.
+        // It must match this server and its validity window. A zero Zone ID works for any Zone.
         if self.version != 0 {
             return Err(AuthError::UnsupportedVersion(self.version));
         }

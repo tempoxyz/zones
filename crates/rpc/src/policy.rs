@@ -17,6 +17,8 @@ pub fn enforce_authorized(
     request: &mut TempoTransactionRequest,
     auth: &AuthContext,
 ) -> Result<(), JsonRpcError> {
+    // NOTE: jtcn 94: Simulations and transaction filling force `from` to the authenticated caller.
+    // Only protocol deployers may create contracts. The request handlers reject state overrides.
     enforce_from(request, auth)?;
     enforce_contract_creation(request, auth.caller)
 }
@@ -74,6 +76,8 @@ fn enforce_contract_creation_with_allowlist(
 /// Decode a raw transaction and verify the recovered sender matches the
 /// authenticated caller. Returns `-32003 Transaction rejected` on mismatch.
 pub fn verify_raw_tx_sender(data: &[u8], auth: &AuthContext) -> Result<(), JsonRpcError> {
+    // NOTE: jtcn 95: Decodes each signed transaction and recovers its sender before it reaches the
+    // pool. A transaction from any account other than the authenticated caller is rejected.
     let tx = TempoTxEnvelope::decode_2718_exact(data)
         .map_err(|_| JsonRpcError::invalid_params("failed to decode transaction"))?;
 

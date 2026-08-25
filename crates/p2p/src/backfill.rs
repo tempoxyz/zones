@@ -315,7 +315,7 @@ where
     }
 
     async fn request_blocks(&mut self, start: u64) -> eyre::Result<()> {
-        // NOTE: jtcn 102: Tries the current leader first, then other eligible peers. It asks each one
+        // NOTE: jtcn 118: Tries the current leader first, then other eligible peers. It asks each one
         // for saved blocks starting at the first missing height.
         let policy = RoutingPolicy::new(&self.local, &self.membership, &self.leadership);
         let (candidates, leader) = (

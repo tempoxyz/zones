@@ -342,7 +342,7 @@ where
                 "persisted zone block hash does not match notification at height {number}: expected={expected}, actual={hash}"
             );
         }
-        // NOTE: jtcn 96: Reads each newly saved Zone block from the DB and sends it to the P2P
+        // NOTE: jtcn 112: Reads each newly saved Zone block from the DB and sends it to the P2P
         // runtime. Unsaved candidate blocks never enter the network.
         commands
             .send(P2pCommand::BroadcastBlock(block.encoded))
@@ -639,7 +639,7 @@ where
         signed.attestation == expected,
         "settlement signature does not match leader state"
     );
-    // NOTE: jtcn 111: Verifies each follower signature and saves it under the exact batch hash.
+    // NOTE: jtcn 127: Verifies each follower signature and saves it under the exact batch hash.
     // The L1 submitter waits until this store reaches the portal threshold.
     let signatures =
         store.insert_follower_settlement(attestation.domain, leader, signer, signed)?;
@@ -757,7 +757,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                 return;
             }
             response = backfill_responses.recv() => {
-                // NOTE: jtcn 103: Missing blocks returned by a peer enter through the follower's
+                // NOTE: jtcn 119: Missing blocks returned by a peer enter through the follower's
                 // backfill channel. They join live blocks in the same ordered `pending` map.
                 let Some(response) = response else {
                     debug!(target: "zone::p2p", "Backfill response channel closed");
@@ -832,7 +832,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                                 height <= persisted_head,
                                 "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
                             );
-                            // NOTE: jtcn 109: The follower rebuilds the proposed batch from its own
+                            // NOTE: jtcn 125: The follower rebuilds the proposed batch from its own
                             // saved Zone state. It signs only when every value matches.
                             let expected = build_settlement_attestation(
                                 &provider,
@@ -856,7 +856,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                             // Return the signed settlement attestation to the peer that
                             // proposed it. During a scheduled handoff that is the outgoing
                             // leader, not the most recently observed one.
-                            // NOTE: jtcn 110: Sends the follower's signature back to the leader over
+                            // NOTE: jtcn 126: Sends the follower's signature back to the leader over
                             // the settlement signature protocol.
                             commands.send(P2pCommand::SendSettlementSignature {
                                 leader: leader.clone(),
@@ -872,7 +872,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                         }
                     }
                     P2pEvent::BlockReceived { .. } => {
-                        // NOTE: jtcn 99: A live block enters here after Commonware receives it and
+                        // NOTE: jtcn 115: A live block enters here after Commonware receives it and
                         // the P2P event router puts it on the follower's sync channel.
                         let (block, live_sender) = match event {
                             P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
@@ -925,7 +925,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                     }
                 };
 
-                // NOTE: jtcn 101: Sends the first missing height to the backfill coordinator. The
+                // NOTE: jtcn 117: Sends the first missing height to the backfill coordinator. The
                 // follower keeps handling other messages while the coordinator makes the request.
 
                 // retry the backfill
@@ -1023,7 +1023,7 @@ where
         tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
     }
     if number > best.saturating_add(1) {
-        // NOTE: jtcn 100: If a block skips a height, it stays in `pending`. This marks backfill as
+        // NOTE: jtcn 116: If a block skips a height, it stays in `pending`. This marks backfill as
         // needed so the follower loop asks a peer for the missing saved blocks.
         info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
     }
@@ -1088,7 +1088,7 @@ where
         let Some(block) = pending.remove(&next) else {
             return Ok(PeerBlockImportOutcome::Imported);
         };
-        // NOTE: jtcn 104: Before import, checks the height, parent, scheduled leader, L1 checkpoint,
+        // NOTE: jtcn 120: Before import, checks the height, parent, scheduled leader, L1 checkpoint,
         // portal events, and transaction results against this follower's own state.
         import_peer_block(
             provider,
@@ -1242,7 +1242,7 @@ where
         );
     }
 
-    // NOTE: jtcn 105: After every check passes, makes the block canonical and marks its L1 input as
+    // NOTE: jtcn 121: After every check passes, makes the block canonical and marks its L1 input as
     // processed. The next live or backfilled block can now extend it.
 
     // Mirror the leader engine only after the block is canonical locally. The block cannot be
