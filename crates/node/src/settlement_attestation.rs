@@ -147,10 +147,10 @@ where
     for receipt in receipts {
         for log in receipt.logs() {
             if log.address == ZONE_INBOX_ADDRESS {
-                match log.topics().first() {
-                    Some(topic) if topic == &TempoAdvanced::SIGNATURE_HASH => {
+                match log.topics().first().copied() {
+                    Some(TempoAdvanced::SIGNATURE_HASH) => {
                         let event = TempoAdvanced::decode_log(log).wrap_err_with(|| {
-                            format!("invalid post-Z1 TempoAdvanced log in block {number}")
+                            format!("invalid post-T12 TempoAdvanced log in block {number}")
                         })?;
                         settlement_abi = Some(SettlementAbi::T12);
                         anchor_hash = Some(event.tempoBlockHash);
@@ -159,7 +159,7 @@ where
                         processed_deposit_number = Some(event.lastProcessedDepositNumber);
                         processed_token_count = Some(event.lastProcessedEnabledTokenCount);
                     }
-                    Some(topic) if topic == &LegacyTempoAdvanced::SIGNATURE_HASH => {
+                    Some(LegacyTempoAdvanced::SIGNATURE_HASH) => {
                         let event = LegacyTempoAdvanced::decode_log(log).wrap_err_with(|| {
                             format!("invalid legacy TempoAdvanced log in block {number}")
                         })?;

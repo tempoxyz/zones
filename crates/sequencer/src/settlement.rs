@@ -1640,10 +1640,10 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
             let Some(topic) = log.topics().first() else {
                 continue;
             };
-            let (block_number, deposit_hash, deposit_number, token_count) =
-                if topic == &TempoAdvanced::SIGNATURE_HASH {
+            let (block_number, deposit_hash, deposit_number, token_count) = match *topic {
+                TempoAdvanced::SIGNATURE_HASH => {
                     let event = TempoAdvanced::decode_log(log).map_err(|err| {
-                        eyre::eyre!("invalid post-Z1 TempoAdvanced log in block {number}: {err}")
+                        eyre::eyre!("invalid post-T12 TempoAdvanced log in block {number}: {err}")
                     })?;
                     settlement_abi = Some(SettlementAbi::T12);
                     (
@@ -1652,7 +1652,8 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                         event.lastProcessedDepositNumber,
                         event.lastProcessedEnabledTokenCount,
                     )
-                } else if topic == &LegacyTempoAdvanced::SIGNATURE_HASH {
+                }
+                LegacyTempoAdvanced::SIGNATURE_HASH => {
                     let event = LegacyTempoAdvanced::decode_log(log).map_err(|err| {
                         eyre::eyre!("invalid legacy TempoAdvanced log in block {number}: {err}")
                     })?;
@@ -1663,9 +1664,11 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                         event.lastProcessedDepositNumber,
                         0,
                     )
-                } else {
+                }
+                _ => {
                     continue;
-                };
+                }
+            };
             if tempo_block_number.replace(block_number).is_some() {
                 return Err(eyre::eyre!(
                     "zone block {number} contains more than one TempoAdvanced event"

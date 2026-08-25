@@ -41,14 +41,12 @@ use tempo_chainspec::{
     hardfork::TempoHardfork,
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
-use tempo_contracts::{
-    precompiles::{
-        ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
-        account_keychain::IAccountKeychain::{
-            IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
-        },
+use tempo_contracts::precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
+    account_keychain::IAccountKeychain::{
+        IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
-    zones::{ZONE_MESSENGER_RUNTIME, ZONE_PORTAL_RUNTIME, ZONE_VERIFIER_RUNTIME},
+    t12_zone_factory_state,
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -63,7 +61,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -215,41 +213,21 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 }
 
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    use tempo_zone_contracts::{
-        ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
-    };
-
-    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot 0 packs
-    // `uint32 nextZoneId`, `address owner`, and the implementation lock flag.
-    let packed_factory_config: U256 = U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32);
-    let mut factory_storage = BTreeMap::new();
-    factory_storage.insert(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()));
-
-    genesis.alloc.insert(
-        ZONE_FACTORY_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(vec![0xef].into()))
-            .with_storage(Some(factory_storage)),
-    );
-    genesis.alloc.insert(
-        ZONE_VERIFIER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(ZONE_VERIFIER_RUNTIME)),
-    );
-    genesis.alloc.insert(
-        ZONE_PORTAL_IMPL_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(ZONE_PORTAL_RUNTIME)),
-    );
-    genesis.alloc.insert(
-        ZONE_MESSENGER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(ZONE_MESSENGER_RUNTIME)),
-    );
+    for account in t12_zone_factory_state(owner) {
+        let storage = account.storage.map(|(slot, value)| {
+            BTreeMap::from([(
+                B256::from(slot.to_be_bytes()),
+                B256::from(value.to_be_bytes()),
+            )])
+        });
+        genesis.alloc.insert(
+            account.address,
+            GenesisAccount::default()
+                .with_nonce(Some(1))
+                .with_code(Some(account.code))
+                .with_storage(storage),
+        );
+    }
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
     let token_policy_slot = keccak256(
@@ -1674,7 +1652,7 @@ impl L1TestNode {
         use tempo_zone_contracts::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
         let events = portal
-            .BatchSubmitted_0_filter()
+            .BatchSubmitted_1_filter()
             .from_block(0)
             .query()
             .await?;

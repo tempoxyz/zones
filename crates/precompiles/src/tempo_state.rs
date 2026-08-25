@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_finalize_tempo_works_before_z1() -> eyre::Result<()> {
+    fn legacy_finalize_tempo_works_before_t12() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;

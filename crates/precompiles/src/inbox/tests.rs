@@ -414,23 +414,23 @@ fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<(
 }
 
 #[test]
-fn processed_enabled_token_count_activates_at_z1() -> eyre::Result<()> {
+fn processed_enabled_token_count_activates_at_t12() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let calldata = IZoneInbox::processedEnabledTokenCountCall {}.abi_encode();
 
-    let pre_z1 = harness.call(ALICE, &calldata)?;
-    assert!(pre_z1.is_revert());
-    let error = UnknownFunctionSelector::abi_decode(&pre_z1.bytes)?;
+    let pre_t12 = harness.call(ALICE, &calldata)?;
+    assert!(pre_t12.is_revert());
+    let error = UnknownFunctionSelector::abi_decode(&pre_t12.bytes)?;
     assert_eq!(
         error.selector.as_slice(),
         &IZoneInbox::processedEnabledTokenCountCall::SELECTOR
     );
 
-    let z1_env = test_env(&harness.ctx);
-    let z1_precompile = ZoneInbox::create(harness.l1_state.clone(), &z1_env);
-    let post_z1 = call_precompile(
+    let t12_env = test_env(&harness.ctx);
+    let t12_precompile = ZoneInbox::create(harness.l1_state.clone(), &t12_env);
+    let post_t12 = call_precompile(
         &mut harness.ctx,
-        &z1_precompile,
+        &t12_precompile,
         ALICE,
         &calldata,
         GAS,
@@ -438,9 +438,9 @@ fn processed_enabled_token_count_activates_at_z1() -> eyre::Result<()> {
         ZONE_INBOX_ADDRESS,
         ZONE_INBOX_ADDRESS,
     )?;
-    assert!(post_z1.is_success());
+    assert!(post_t12.is_success());
     assert_eq!(
-        IZoneInbox::processedEnabledTokenCountCall::abi_decode_returns(&post_z1.bytes)?,
+        IZoneInbox::processedEnabledTokenCountCall::abi_decode_returns(&post_t12.bytes)?,
         0
     );
     Ok(())
