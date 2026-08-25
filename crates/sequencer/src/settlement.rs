@@ -418,7 +418,7 @@ impl BatchSubmitter {
         let signatures = if let Some(certificate) = &certificate {
             certificate.signatures.clone()
         } else {
-            // Single-sequencer mode, where the 1-of-1 sequencer self-signs the attestation.
+            // Legacy mode, where the 1-of-1 sequencer will self-sign the attestation
             let anchor_block_number = anchor_mode.anchor_block_number(batch.tempo_block_number);
             let anchor_block_hash = self
                 .l1_provider

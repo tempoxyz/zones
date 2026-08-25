@@ -31,8 +31,8 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
     DecryptionData, Deposit, DepositType, EnabledToken, IZoneInbox, IZoneOutbox,
-    LegacyTempoAdvanced, QueuedDeposit, TempoAdvanced, TempoStateError,
-    WithdrawalBounceBackDeposit, ZoneInboxError, ZoneInboxEvent,
+    LegacyTempoAdvanced, QueuedDeposit, TempoAdvanced, WithdrawalBounceBackDeposit, ZoneInboxError,
+    ZoneInboxEvent,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -99,14 +99,7 @@ impl ZoneInbox {
         let mut tempo_state = TempoState::new();
 
         // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
-        let bootstrap = tempo_state.tempo_block_hash()?.is_zero();
-        tempo_state.finalize_checkpoints(l1, &[call.header], false, true)?;
-        if bootstrap && !portal.is_zero() {
-            let admin = l1.read_portal(|portal| &portal.admin)?;
-            if admin.is_zero() || l1.read_portal_vec_len(|portal| &portal.sequencers)? == 0 {
-                return Err(TempoStateError::invalid_parent_hash().into());
-            }
-        }
+        tempo_state.finalize_checkpoints(l1, &[call.header])?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
 
         let has_token_enablements = !call.enabledTokens.is_empty();
@@ -281,10 +274,7 @@ impl ZoneInbox {
             return Err(ZoneInboxError::only_sequencer().into());
         }
         let mut tempo_state = TempoState::new();
-        if tempo_state.tempo_block_hash()?.is_zero() {
-            return Err(TempoStateError::invalid_parent_hash().into());
-        }
-        tempo_state.finalize_checkpoints(l1, &call.headers, true, false)
+        tempo_state.finalize_checkpoints(l1, &call.headers)
     }
 
     fn enable_tokens(&mut self, tokens: Vec<EnabledToken>) -> ZoneResult<()> {

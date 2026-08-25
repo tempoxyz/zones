@@ -12,14 +12,14 @@ use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
 use alloy_network::ReceiptResponse;
 use alloy_provider::{DynProvider, Provider};
-use alloy_rpc_types_eth::{Filter, TransactionRequest};
-use alloy_sol_types::{SolCall, SolEvent};
+use alloy_rpc_types_eth::TransactionRequest;
+use alloy_sol_types::SolCall;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoAdvanced, TempoState, Withdrawal,
-    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
 };
 use zone_l1::ChainTempoStateExt;
 use zone_primitives::constants::zone_chain_id;
@@ -742,28 +742,23 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     )
     .await?;
 
-    // The local fixture runs Z0, which emits the legacy TempoAdvanced signature.
-    let provider = zone.provider();
-    let zone_inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, &provider);
-    let tempo_advanced_filter = Filter::new()
-        .address(ZONE_INBOX_ADDRESS)
-        .from_block(0)
-        .event_signature(TempoAdvanced::SIGNATURE_HASH);
-    let tempo_advanced_events = provider.get_logs(&tempo_advanced_filter).await?;
+    // Query TempoAdvanced events from ZoneInbox
+    let zone_inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, zone.provider());
+    let tempo_advanced_filter = zone_inbox.TempoAdvanced_1_filter().from_block(0);
+    let tempo_advanced_events = tempo_advanced_filter.query().await?;
 
     assert!(
         !tempo_advanced_events.is_empty(),
-        "should have at least one legacy TempoAdvanced event"
+        "should have at least one TempoAdvanced event"
     );
 
     // Find the event for our deposit block (should have depositsProcessed == 1)
     let deposit_event = tempo_advanced_events
         .iter()
-        .filter_map(|log| TempoAdvanced::decode_log(&log.inner).ok())
-        .find(|event| event.depositsProcessed == U256::from(1));
+        .find(|(e, _)| e.depositsProcessed == U256::from(1));
     assert!(
         deposit_event.is_some(),
-        "should have a legacy TempoAdvanced event with depositsProcessed == 1"
+        "should have a TempoAdvanced event with depositsProcessed == 1"
     );
 
     // Query encrypted deposit events

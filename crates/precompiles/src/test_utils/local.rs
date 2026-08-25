@@ -20,7 +20,6 @@ use tempo_precompiles::{
     storage_credits::NonCreditableSlots,
 };
 use tempo_primitives::TempoBlockEnv;
-use zone_hardfork::ZoneHardfork;
 
 use crate::{
     ZonePrecompileEnv,
@@ -34,7 +33,7 @@ pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_
 pub(crate) type TestContext =
     Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 
-/// Create an empty test EVM context at the latest Tempo hardfork with Zone changes.
+/// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
     test_context_with_hardfork(TempoHardfork::T12)
 }
@@ -66,7 +65,7 @@ pub(crate) fn test_storage_provider(
 pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
     ZonePrecompileEnv::new(
         &ctx.cfg,
-        ZoneHardfork::Z0,
+        zone_hardfork::ZoneHardfork::Z0,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
     )

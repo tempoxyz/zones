@@ -87,9 +87,10 @@ impl TempoState {
 
     /// Validate and apply a finalized Tempo checkpoint transition.
     ///
-    /// IMPORTANT: this operation only enforces local continuity and Zone-time alignment: the
-    /// decoded block number must increment by one and its parent hash must match the previously
-    /// stored Tempo hash. The final Tempo timestamp is a lower bound for the Zone block timestamp.
+    /// IMPORTANT: this operation only enforces local continuity and Zone-time alignment. The
+    /// first header must directly extend the stored Tempo checkpoint, and every subsequent header
+    /// must directly extend the preceding header. The final Tempo timestamp is a lower bound for
+    /// the Zone block timestamp.
     ///
     /// Canonicality is a separate proof obligation: the batch proof must bind the imported header
     /// hash and state root to the canonical settlement anchor and authenticate every Tempo storage
@@ -100,21 +101,15 @@ impl TempoState {
         &mut self,
         l1: &L1State<P>,
         headers: &[Bytes],
-        allow_multiple: bool,
-        allow_bootstrap: bool,
     ) -> ZoneResult<()> {
-        if headers.is_empty()
-            || headers.len() > MAX_TEMPO_HEADERS_PER_ZONE_BLOCK
-            || (!allow_multiple && headers.len() != 1)
-        {
+        if headers.is_empty() || headers.len() > MAX_TEMPO_HEADERS_PER_ZONE_BLOCK {
             return Err(TempoStateError::invalid_rlp_data().into());
         }
 
         let initial_block_number = self.tempo_block_number.read()?;
         let mut previous_block_number = initial_block_number;
         let mut previous_block_hash = self.tempo_block_hash.read()?;
-        let bootstrap = previous_block_hash.is_zero();
-        if bootstrap && (!allow_bootstrap || headers.len() != 1) {
+        if previous_block_hash.is_zero() {
             return Err(TempoStateError::invalid_parent_hash().into());
         }
         let mut final_state_root = B256::ZERO;
@@ -128,10 +123,10 @@ impl TempoState {
             if !header_cursor.is_empty() {
                 return Err(TempoStateError::invalid_rlp_data().into());
             }
-            if !bootstrap && header.parent_hash() != previous_block_hash {
+            if header.parent_hash() != previous_block_hash {
                 return Err(TempoStateError::invalid_parent_hash().into());
             }
-            if !bootstrap && previous_block_number.checked_add(1) != Some(header.number()) {
+            if previous_block_number.checked_add(1) != Some(header.number()) {
                 return Err(TempoStateError::invalid_block_number().into());
             }
             previous_block_hash = keccak256(header_rlp);
@@ -166,7 +161,6 @@ impl TempoState {
         l1: &L1State<P>,
         sender: Address,
         headers: &[Bytes],
-        allow_multiple: bool,
     ) -> PrecompileResult {
         if self.storage.is_static() {
             return self.revert_error(StaticCallNotAllowed {});
@@ -175,7 +169,7 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::OnlyZoneInbox {});
         }
 
-        self.finalize_checkpoints(l1, headers, allow_multiple, false)
+        self.finalize_checkpoints(l1, headers)
             .encode_precompile_result(0, 0, |()| Bytes::new())
     }
 
@@ -208,16 +202,11 @@ impl TempoState {
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
                     #[schedule(until = T12)]
                     finalizeTempo_0(call) => {
-                        self.apply_checkpoints(
-                            l1,
-                            msg_sender,
-                            core::slice::from_ref(&call.header),
-                            false,
-                        )
+                        self.apply_checkpoints(l1, msg_sender, core::slice::from_ref(&call.header))
                     },
                     #[schedule(since = T12)]
                     finalizeTempo_1(call) => {
-                        self.apply_checkpoints(l1, msg_sender, &call.headers, true)
+                        self.apply_checkpoints(l1, msg_sender, &call.headers)
                     },
                 }
             },

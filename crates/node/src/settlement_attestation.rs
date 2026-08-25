@@ -199,9 +199,9 @@ where
     }))
 }
 
-/// Get the previous batch's (i.e. the last block in the previous batch) block hash,
-/// deposit hash, processed deposit number, and processed enabled-token count. These values are
-/// used to identify the previous batch while submitting the current batch.
+/// Get the previous batch's (i.e the last block in the previous batch) block_hash,
+/// deposit_hash, processed_deposit_number, and processed_token_count. These values
+/// are used to identify the previous batch while submitting the current batch.
 fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64, u64)>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
