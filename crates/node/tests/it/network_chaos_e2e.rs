@@ -51,11 +51,9 @@ async fn wait_for_settled_height(
     height: u64,
     description: &str,
 ) -> eyre::Result<U256> {
-    poll_until(NETWORK_TIMEOUT, POLL_INTERVAL, description, || {
-        async move {
-            let settled_height = portal.zoneHeight().call().await?;
-            Ok((settled_height >= U256::from(height)).then_some(settled_height))
-        }
+    poll_until(NETWORK_TIMEOUT, POLL_INTERVAL, description, || async move {
+        let settled_height = portal.zoneHeight().call().await?;
+        Ok((settled_height >= U256::from(height)).then_some(settled_height))
     })
     .await
 }
