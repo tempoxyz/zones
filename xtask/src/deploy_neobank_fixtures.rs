@@ -895,21 +895,24 @@ async fn deploy<P: Provider<TempoNetwork>>(
     bytecode: Vec<u8>,
     label: &str,
 ) -> eyre::Result<Address> {
-    let gas_limit = std::env::var("ZONES_BENCH_L1_GENERAL_GAS_LIMIT")
+    let general_gas_limit = std::env::var("ZONES_BENCH_L1_GENERAL_GAS_LIMIT")
         .unwrap_or_else(|_| DEFAULT_DEPLOYMENT_GAS_LIMIT.to_string())
         .parse::<u64>()
         .wrap_err("ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be an unsigned integer")?;
     ensure!(
-        gas_limit > 0 && gas_limit <= DEFAULT_DEPLOYMENT_GAS_LIMIT,
-        "ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be between 1 and {DEFAULT_DEPLOYMENT_GAS_LIMIT}"
+        general_gas_limit > 0,
+        "ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be greater than zero"
     );
+    // The configured value is the aggregate general-transaction budget for an L1 block. Keep
+    // this individual deployment transaction within Tempo's protocol transaction gas cap.
+    let gas_limit = general_gas_limit.min(DEFAULT_DEPLOYMENT_GAS_LIMIT);
     let receipt = provider
         .send_transaction(
             TransactionRequest::default()
                 .with_kind(alloy::primitives::TxKind::Create)
                 // Fixture constructors can make contract calls that Tempo's generic
-                // estimator underestimates. Use the configured general-transaction
-                // cap so the setup transaction is admissible on the provisioned L1.
+                // estimator underestimates. Use as much of the configured general-transaction
+                // budget as Tempo's per-transaction cap allows.
                 .with_gas_limit(gas_limit)
                 .input(Bytes::from(bytecode).into())
                 .into(),

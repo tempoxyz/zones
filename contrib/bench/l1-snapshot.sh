@@ -207,6 +207,8 @@ l1_snapshot_load_config() {
         || l1_snapshot_die "benchmark accounts exceed the cached funded-account capacity"
     (( L1_SNAPSHOT_CHAIN_ID > 0 && L1_SNAPSHOT_GAS_LIMIT > 0 && L1_SNAPSHOT_GENERAL_GAS_LIMIT > 0 )) \
         || l1_snapshot_die "chain ID and gas limits must be greater than zero"
+    (( L1_SNAPSHOT_GENERAL_GAS_LIMIT <= L1_SNAPSHOT_GAS_LIMIT )) \
+        || l1_snapshot_die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT cannot exceed ZONES_BENCH_L1_GAS_LIMIT"
     (( L1_SNAPSHOT_FORCE == 0 || L1_SNAPSHOT_FORCE == 1 )) \
         || l1_snapshot_die "ZONES_BENCH_FORCE_BLOAT must be 0 or 1"
 

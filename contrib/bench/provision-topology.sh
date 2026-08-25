@@ -554,6 +554,7 @@ provision_up() {
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
     local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
+    local zone_gas_limit="${ZONES_BENCH_ZONE_GAS_LIMIT:-30000000}"
     local l1_max_fee_per_gas="${ZONES_BENCH_L1_MAX_FEE_PER_GAS:-12000000000}"
     local zone_max_fee_per_gas="${ZONES_BENCH_ZONE_MAX_FEE_PER_GAS:-10000000000}"
     local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-1024}"
@@ -587,6 +588,7 @@ provision_up() {
     ZONES_BENCH_L1_CHAIN_ID="$l1_chain_id"
     ZONES_BENCH_L1_GAS_LIMIT="$l1_gas_limit"
     ZONES_BENCH_L1_GENERAL_GAS_LIMIT="$l1_general_gas_limit"
+    ZONES_BENCH_ZONE_GAS_LIMIT="$zone_gas_limit"
     ZONES_BENCH_L1_MAX_FEE_PER_GAS="$l1_max_fee_per_gas"
     ZONES_BENCH_ZONE_MAX_FEE_PER_GAS="$zone_max_fee_per_gas"
     ZONES_BENCH_BLOAT_MIB="$bloat_mib"
@@ -609,7 +611,7 @@ provision_up() {
     for name in \
         ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY \
         ZONES_BENCH_L1_CHAIN_ID \
-        ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
+        ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT ZONES_BENCH_ZONE_GAS_LIMIT \
         ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS \
         ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE \
         ZONES_BENCH_RPC_TIMEOUT_SECS ZONES_BENCH_ZONE_TIMEOUT_SECS \
@@ -627,6 +629,7 @@ provision_up() {
     l1_chain_id=$((10#$l1_chain_id))
     l1_gas_limit=$((10#$l1_gas_limit))
     l1_general_gas_limit=$((10#$l1_general_gas_limit))
+    zone_gas_limit=$((10#$zone_gas_limit))
     l1_max_fee_per_gas=$((10#$l1_max_fee_per_gas))
     zone_max_fee_per_gas=$((10#$zone_max_fee_per_gas))
     bloat_mib=$((10#$bloat_mib))
@@ -651,8 +654,7 @@ provision_up() {
     (( l1_gas_limit > 0 )) || die "ZONES_BENCH_L1_GAS_LIMIT must be greater than zero"
     (( l1_general_gas_limit > 0 )) \
         || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be greater than zero"
-    (( l1_gas_limit <= 30000000 )) \
-        || die "ZONES_BENCH_L1_GAS_LIMIT cannot exceed 30000000"
+    (( zone_gas_limit > 0 )) || die "ZONES_BENCH_ZONE_GAS_LIMIT must be greater than zero"
     (( l1_general_gas_limit <= l1_gas_limit )) \
         || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT cannot exceed ZONES_BENCH_L1_GAS_LIMIT"
     (( l1_max_fee_per_gas > 0 )) \
@@ -724,6 +726,7 @@ provision_up() {
 
     export ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY
     export ZONES_BENCH_L1_CHAIN_ID ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT
+    export ZONES_BENCH_ZONE_GAS_LIMIT
     export ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
     export ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE
     export ZONES_BENCH_SWAP_MECHANISM ZONES_BENCH_RECIPIENT_MODE ZONES_BENCH_SWAP_LIQUIDITY
@@ -892,6 +895,7 @@ provision_up() {
         --initial-token "$zone_token"
         --admin "$admin_address"
         --sequencer "$sequencer_address"
+        --gas-limit "$zone_gas_limit"
         --access-mode
     )
     # Access starts closed with an empty allowlist; untimed fixture setup applies the map.
@@ -973,10 +977,13 @@ provision_up() {
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_zone_enabled_token "$zone_rpc" "$(jq -er '.earnToken' "$fixture_metadata")" "$zone_timeout"
     neobank_allowed_accounts+=("$(jq -er '.bridgeWallet' "$fixture_metadata")")
-    local queried_zone_chain_id
+    local queried_zone_chain_id queried_zone_gas_limit
     queried_zone_chain_id="$(hex_to_dec "$(rpc "$zone_rpc" eth_chainId)")"
     [[ "$queried_zone_chain_id" == "$zone_chain_id" ]] \
         || die "Zone RPC chain ID $queried_zone_chain_id does not match zone.json chain ID $zone_chain_id"
+    queried_zone_gas_limit="$(hex_to_dec "$(rpc "$zone_rpc" eth_getBlockByNumber '["latest",false]' | jq -er '.gasLimit')")"
+    [[ "$queried_zone_gas_limit" == "$zone_gas_limit" ]] \
+        || die "Zone RPC gas limit $queried_zone_gas_limit does not match configured gas limit $zone_gas_limit"
 
     local target_id="local-consensus-${genesis_a#0x}-zone-$zone_id"
     local -a env_pairs=(
@@ -1011,6 +1018,7 @@ provision_up() {
         ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS 0 \
         ZONES_BENCH_L1_GAS_LIMIT "$l1_gas_limit" \
         ZONES_BENCH_L1_GENERAL_GAS_LIMIT "$l1_general_gas_limit" \
+        ZONES_BENCH_ZONE_GAS_LIMIT "$zone_gas_limit" \
         ZONES_BENCH_SWAP_MECHANISM "$swap_mechanism" \
         ZONES_BENCH_RECIPIENT_MODE "$recipient_mode" \
         ZONES_BENCH_SWAP_LIQUIDITY "$swap_liquidity" \
