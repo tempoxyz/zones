@@ -397,11 +397,8 @@ where
 {
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
-        while conditions.borrow().paused {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                changed = conditions.changed() => if changed.is_err() { return Ok(()) },
-            }
+        if !wait_until_resumed(&mut conditions, &cancel).await {
+            return Ok(());
         }
         let read = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
@@ -413,11 +410,8 @@ where
 
         // `paused` may change while `read` is pending. Recheck it before forwarding the bytes so
         // enabling a pause cannot leak the chunk that wakes the read.
-        while conditions.borrow().paused {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                changed = conditions.changed() => if changed.is_err() { return Ok(()) },
-            }
+        if !wait_until_resumed(&mut conditions, &cancel).await {
+            return Ok(());
         }
 
         let condition = *conditions.borrow();
@@ -434,11 +428,8 @@ where
 
         // The pause can also be enabled while the latency or bandwidth delay is pending.
         // Recheck immediately before forwarding so that delayed chunks cannot leak through.
-        while conditions.borrow().paused {
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                changed = conditions.changed() => if changed.is_err() { return Ok(()) },
-            }
+        if !wait_until_resumed(&mut conditions, &cancel).await {
+            return Ok(());
         }
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
@@ -446,6 +437,21 @@ where
         }
         bytes.fetch_add(read as u64, Ordering::Relaxed);
     }
+}
+
+/// Wait until forwarding is enabled again. Returns false if the connection or condition stream
+/// has been cancelled, in which case the caller should stop forwarding.
+async fn wait_until_resumed(
+    conditions: &mut watch::Receiver<DirectionCondition>,
+    cancel: &CancellationToken,
+) -> bool {
+    while conditions.borrow().paused {
+        tokio::select! {
+            _ = cancel.cancelled() => return false,
+            changed = conditions.changed() => if changed.is_err() { return false },
+        }
+    }
+    true
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 use crate::utils::{
-    RealP2pCluster, ZoneAccount, poll_until, start_real_p2p_cluster_with_l1_proxy,
+    RealP2pCluster, TcpChaosProxy, ZoneAccount, poll_until, start_real_p2p_cluster_with_l1_proxy,
     start_real_p2p_cluster_with_per_node_l1_proxies,
 };
 
@@ -44,6 +44,21 @@ async fn batch_count(
         .query()
         .await?
         .len())
+}
+
+async fn wait_for_settled_height(
+    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
+    height: u64,
+    description: &str,
+) -> eyre::Result<U256> {
+    poll_until(NETWORK_TIMEOUT, POLL_INTERVAL, description, || {
+        let portal = portal;
+        async move {
+            let settled_height = portal.zoneHeight().call().await?;
+            Ok((settled_height >= U256::from(height)).then_some(settled_height))
+        }
+    })
+    .await
 }
 
 async fn submit_outage_asset_flow(
@@ -161,6 +176,222 @@ async fn assert_outage_asset_flow(
         );
     }
     Ok(())
+}
+
+async fn recover_both_followers(
+    cluster: &RealP2pCluster,
+    account: &mut ZoneAccount,
+    follower_one_proxy: &TcpChaosProxy,
+    follower_two_proxy: &TcpChaosProxy,
+    baseline_height: u64,
+) -> eyre::Result<()> {
+    let accepted_before_outage = [
+        follower_one_proxy.accepted_connections(),
+        follower_two_proxy.accepted_connections(),
+    ];
+    for proxy in [follower_one_proxy, follower_two_proxy] {
+        proxy.disconnect();
+    }
+    for proxy in [follower_one_proxy, follower_two_proxy] {
+        proxy.wait_for_no_connections(NETWORK_TIMEOUT).await?;
+    }
+
+    let outage_start = cluster.l1.provider().get_block_number().await?;
+    let assets =
+        submit_outage_asset_flow(cluster, account, "both-follower outage", outage_start).await?;
+    let target = (outage_start + OUTAGE_BLOCK_GAP).max(assets.deposit_block + 1);
+    cluster.nodes[0]
+        .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
+        .await?;
+    for (index, follower) in cluster.nodes[1..].iter().enumerate() {
+        eyre::ensure!(
+            follower.tempo_block_number().await? < target,
+            "follower {} reached outage target {target} without an L1 connection",
+            index + 1
+        );
+    }
+    for proxy in [follower_one_proxy, follower_two_proxy] {
+        proxy.resume();
+    }
+    for (proxy, accepted) in [follower_one_proxy, follower_two_proxy]
+        .into_iter()
+        .zip(accepted_before_outage)
+    {
+        proxy
+            .wait_for_connections_after(accepted, 1, NETWORK_TIMEOUT)
+            .await?;
+    }
+    for follower in &cluster.nodes[1..] {
+        follower
+            .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
+            .await?;
+    }
+
+    let recovered_height = cluster.nodes[0].provider().get_block_number().await?;
+    eyre::ensure!(
+        recovered_height > baseline_height,
+        "leader did not continue producing during the follower outage"
+    );
+    cluster
+        .wait_all_at(recovered_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(recovered_height).await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    wait_for_settled_height(
+        &portal,
+        recovered_height,
+        "quorum settlement to resume after both followers catch up",
+    )
+    .await?;
+    assert_outage_asset_flow(cluster, account, assets).await
+}
+
+async fn recover_leader(
+    cluster: &RealP2pCluster,
+    account: &mut ZoneAccount,
+    leader_proxy: &TcpChaosProxy,
+    follower_one_proxy: &TcpChaosProxy,
+    follower_two_proxy: &TcpChaosProxy,
+) -> eyre::Result<()> {
+    let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
+    cluster
+        .wait_all_at(baseline_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(baseline_height).await?;
+    leader_proxy
+        .wait_for_connections_after(0, 1, NETWORK_TIMEOUT)
+        .await?;
+    let accepted_before_outage = leader_proxy.accepted_connections();
+    leader_proxy.disconnect();
+    leader_proxy
+        .wait_for_no_connections(NETWORK_TIMEOUT)
+        .await?;
+
+    let outage_start = cluster.l1.provider().get_block_number().await?;
+    let assets = submit_outage_asset_flow(cluster, account, "leader outage", outage_start).await?;
+    let target = (outage_start + OUTAGE_BLOCK_GAP).max(assets.deposit_block + 1);
+    for (index, follower) in cluster.nodes[1..].iter().enumerate() {
+        poll_until(
+            NETWORK_TIMEOUT,
+            POLL_INTERVAL,
+            &format!(
+                "follower {} to observe L1 during the leader outage",
+                index + 1
+            ),
+            || async {
+                Ok(follower
+                    .l1_block_tracker()
+                    .latest()
+                    .filter(|block| block.number >= target)
+                    .map(|block| block.number))
+            },
+        )
+        .await?;
+    }
+    eyre::ensure!(
+        follower_one_proxy.active_connections() > 0 && follower_two_proxy.active_connections() > 0,
+        "a follower L1 proxy lost connectivity during the leader-only outage"
+    );
+    for (index, node) in cluster.nodes.iter().enumerate() {
+        eyre::ensure!(
+            node.tempo_block_number().await? < target,
+            "node {index} advanced zone state without a connected leader"
+        );
+    }
+    leader_proxy.resume();
+    leader_proxy
+        .wait_for_connections_after(accepted_before_outage, 1, NETWORK_TIMEOUT)
+        .await?;
+    for node in &cluster.nodes {
+        node.wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
+            .await?;
+    }
+
+    let recovered_height = cluster.nodes[0].provider().get_block_number().await?;
+    eyre::ensure!(
+        recovered_height > baseline_height,
+        "leader did not produce the anchors missed during its L1 outage"
+    );
+    cluster
+        .wait_all_at(recovered_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(recovered_height).await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    wait_for_settled_height(
+        &portal,
+        recovered_height,
+        "quorum settlement to resume after the leader catches up",
+    )
+    .await?;
+    assert_outage_asset_flow(cluster, account, assets).await
+}
+
+async fn recover_single_follower(
+    cluster: &RealP2pCluster,
+    account: &mut ZoneAccount,
+    leader_proxy: &TcpChaosProxy,
+    follower_one_proxy: &TcpChaosProxy,
+    follower_two_proxy: &TcpChaosProxy,
+) -> eyre::Result<()> {
+    let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
+    cluster
+        .wait_all_at(baseline_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(baseline_height).await?;
+    let accepted_before_outage = follower_one_proxy.accepted_connections();
+    follower_one_proxy.disconnect();
+    follower_one_proxy
+        .wait_for_no_connections(NETWORK_TIMEOUT)
+        .await?;
+
+    let outage_start = cluster.l1.provider().get_block_number().await?;
+    let assets =
+        submit_outage_asset_flow(cluster, account, "single-follower outage", outage_start).await?;
+    let target = (outage_start + OUTAGE_BLOCK_GAP).max(assets.deposit_block + 1);
+    cluster.nodes[0]
+        .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
+        .await?;
+    cluster.nodes[2]
+        .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
+        .await?;
+    eyre::ensure!(
+        cluster.nodes[1].tempo_block_number().await? < target,
+        "isolated follower reached outage target without an L1 connection"
+    );
+    eyre::ensure!(
+        leader_proxy.active_connections() > 0 && follower_two_proxy.active_connections() > 0,
+        "healthy quorum member lost L1 connectivity during the single-follower outage"
+    );
+
+    // Capture a leader-produced height after the target before checking the portal. A prior batch
+    // may have already settled past the phase baseline, which would not prove 2-of-3 settlement.
+    let leader_height_during_outage = cluster.nodes[0].provider().get_block_number().await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    wait_for_settled_height(
+        &portal,
+        leader_height_during_outage,
+        "2-of-3 settlement to reach the leader height during the single-follower outage",
+    )
+    .await?;
+
+    follower_one_proxy.resume();
+    follower_one_proxy
+        .wait_for_connections_after(accepted_before_outage, 1, NETWORK_TIMEOUT)
+        .await?;
+    cluster.nodes[1]
+        .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
+        .await?;
+
+    let recovered_height = cluster.nodes[0].provider().get_block_number().await?;
+    eyre::ensure!(
+        recovered_height > baseline_height,
+        "healthy quorum did not advance during the single-follower outage"
+    );
+    cluster
+        .wait_all_at(recovered_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(recovered_height).await?;
+    assert_outage_asset_flow(cluster, account, assets).await
 }
 
 /// All three sequencers lose their established L1 connections, remain running while L1 advances,
@@ -344,233 +575,35 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
         .await?;
     cluster.assert_same_block(baseline_height).await?;
 
-    let follower_accepted_before_outage = [
-        follower_one_proxy.accepted_connections(),
-        follower_two_proxy.accepted_connections(),
-    ];
-    for proxy in [&follower_one_proxy, &follower_two_proxy] {
-        proxy.disconnect();
-    }
-    for proxy in [&follower_one_proxy, &follower_two_proxy] {
-        proxy.wait_for_no_connections(NETWORK_TIMEOUT).await?;
-    }
-
-    let outage_start = cluster.l1.provider().get_block_number().await?;
-    let follower_outage_assets =
-        submit_outage_asset_flow(&cluster, &mut account, "both-follower outage", outage_start)
-            .await?;
-    let outage_target =
-        (outage_start + OUTAGE_BLOCK_GAP).max(follower_outage_assets.deposit_block + 1);
-    cluster.nodes[0]
-        .wait_for_tempo_block_number(outage_target, NETWORK_TIMEOUT)
-        .await?;
-    for (index, follower) in cluster.nodes[1..].iter().enumerate() {
-        eyre::ensure!(
-            follower.tempo_block_number().await? < outage_target,
-            "follower {} reached outage target {outage_target} without an L1 connection",
-            index + 1
-        );
-    }
-    for proxy in [&follower_one_proxy, &follower_two_proxy] {
-        proxy.resume();
-    }
-    for (proxy, accepted) in [&follower_one_proxy, &follower_two_proxy]
-        .into_iter()
-        .zip(follower_accepted_before_outage)
-    {
-        proxy
-            .wait_for_connections_after(accepted, 1, NETWORK_TIMEOUT)
-            .await?;
-    }
-    for follower in &cluster.nodes[1..] {
-        follower
-            .wait_for_tempo_block_number(outage_target, NETWORK_TIMEOUT)
-            .await?;
-    }
-
-    let recovered_height = cluster.nodes[0].provider().get_block_number().await?;
-    eyre::ensure!(
-        recovered_height > baseline_height,
-        "leader did not continue producing during the follower outage"
-    );
-    cluster
-        .wait_all_at(recovered_height, NETWORK_TIMEOUT)
-        .await?;
-    cluster.assert_same_block(recovered_height).await?;
-
-    poll_until(
-        NETWORK_TIMEOUT,
-        POLL_INTERVAL,
-        "quorum settlement to resume after both followers catch up",
-        || {
-            let portal = &portal;
-            async move {
-                let settled_height = portal.zoneHeight().call().await?;
-                Ok((settled_height >= U256::from(recovered_height)).then_some(settled_height))
-            }
-        },
-    )
-    .await?;
-    assert_outage_asset_flow(&cluster, &account, follower_outage_assets).await?;
-
-    // Phase 2 reverses the fault. Followers keep their L1 sockets and independently observe the
-    // advancing finalized chain, but cannot advance zone state without leader-produced blocks.
-    let phase_two_baseline = cluster.nodes[0].provider().get_block_number().await?;
-    cluster
-        .wait_all_at(phase_two_baseline, NETWORK_TIMEOUT)
-        .await?;
-    cluster.assert_same_block(phase_two_baseline).await?;
-    leader_proxy
-        .wait_for_connections_after(0, 1, NETWORK_TIMEOUT)
-        .await?;
-    let leader_accepted_before_outage = leader_proxy.accepted_connections();
-    leader_proxy.disconnect();
-    leader_proxy
-        .wait_for_no_connections(NETWORK_TIMEOUT)
-        .await?;
-
-    let leader_outage_start = cluster.l1.provider().get_block_number().await?;
-    let leader_outage_assets =
-        submit_outage_asset_flow(&cluster, &mut account, "leader outage", leader_outage_start)
-            .await?;
-    let leader_outage_target =
-        (leader_outage_start + OUTAGE_BLOCK_GAP).max(leader_outage_assets.deposit_block + 1);
-    for (index, follower) in cluster.nodes[1..].iter().enumerate() {
-        poll_until(
-            NETWORK_TIMEOUT,
-            POLL_INTERVAL,
-            &format!(
-                "follower {} to observe L1 during the leader outage",
-                index + 1
-            ),
-            || async {
-                Ok(follower
-                    .l1_block_tracker()
-                    .latest()
-                    .filter(|block| block.number >= leader_outage_target)
-                    .map(|block| block.number))
-            },
-        )
-        .await?;
-    }
-    eyre::ensure!(
-        follower_one_proxy.active_connections() > 0 && follower_two_proxy.active_connections() > 0,
-        "a follower L1 proxy lost connectivity during the leader-only outage"
-    );
-    for (index, node) in cluster.nodes.iter().enumerate() {
-        eyre::ensure!(
-            node.tempo_block_number().await? < leader_outage_target,
-            "node {index} advanced zone state without a connected leader"
-        );
-    }
-    leader_proxy.resume();
-    leader_proxy
-        .wait_for_connections_after(leader_accepted_before_outage, 1, NETWORK_TIMEOUT)
-        .await?;
-    for node in &cluster.nodes {
-        node.wait_for_tempo_block_number(leader_outage_target, NETWORK_TIMEOUT)
-            .await?;
-    }
-
-    let phase_two_recovered_height = cluster.nodes[0].provider().get_block_number().await?;
-    eyre::ensure!(
-        phase_two_recovered_height > phase_two_baseline,
-        "leader did not produce the anchors missed during its L1 outage"
-    );
-    cluster
-        .wait_all_at(phase_two_recovered_height, NETWORK_TIMEOUT)
-        .await?;
-    cluster
-        .assert_same_block(phase_two_recovered_height)
-        .await?;
-
-    poll_until(
-        NETWORK_TIMEOUT,
-        POLL_INTERVAL,
-        "quorum settlement to resume after the leader catches up",
-        || {
-            let portal = &portal;
-            async move {
-                let settled_height = portal.zoneHeight().call().await?;
-                Ok((settled_height >= U256::from(phase_two_recovered_height))
-                    .then_some(settled_height))
-            }
-        },
-    )
-    .await?;
-    assert_outage_asset_flow(&cluster, &account, leader_outage_assets).await?;
-
-    // Phase 3 isolates one follower. The leader and other follower must keep producing and
-    // settling as a 2-of-3 quorum; the isolated follower then reconnects and rejoins the chain.
-    let phase_three_baseline = cluster.nodes[0].provider().get_block_number().await?;
-    cluster
-        .wait_all_at(phase_three_baseline, NETWORK_TIMEOUT)
-        .await?;
-    cluster.assert_same_block(phase_three_baseline).await?;
-    let isolated_accepted_before_outage = follower_one_proxy.accepted_connections();
-    follower_one_proxy.disconnect();
-    follower_one_proxy
-        .wait_for_no_connections(NETWORK_TIMEOUT)
-        .await?;
-
-    let single_follower_outage_start = cluster.l1.provider().get_block_number().await?;
-    let single_follower_outage_assets = submit_outage_asset_flow(
+    recover_both_followers(
         &cluster,
         &mut account,
-        "single-follower outage",
-        single_follower_outage_start,
-    )
-    .await?;
-    let single_follower_outage_target = (single_follower_outage_start + OUTAGE_BLOCK_GAP)
-        .max(single_follower_outage_assets.deposit_block + 1);
-    cluster.nodes[0]
-        .wait_for_tempo_block_number(single_follower_outage_target, NETWORK_TIMEOUT)
-        .await?;
-    cluster.nodes[2]
-        .wait_for_tempo_block_number(single_follower_outage_target, NETWORK_TIMEOUT)
-        .await?;
-    eyre::ensure!(
-        cluster.nodes[1].tempo_block_number().await? < single_follower_outage_target,
-        "isolated follower reached outage target without an L1 connection"
-    );
-    eyre::ensure!(
-        leader_proxy.active_connections() > 0 && follower_two_proxy.active_connections() > 0,
-        "healthy quorum member lost L1 connectivity during the single-follower outage"
-    );
-    poll_until(
-        NETWORK_TIMEOUT,
-        POLL_INTERVAL,
-        "2-of-3 settlement to continue with one follower disconnected from L1",
-        || {
-            let portal = &portal;
-            async move {
-                let settled_height = portal.zoneHeight().call().await?;
-                Ok((settled_height > U256::from(phase_three_baseline)).then_some(settled_height))
-            }
-        },
+        &follower_one_proxy,
+        &follower_two_proxy,
+        baseline_height,
     )
     .await?;
 
-    follower_one_proxy.resume();
-    follower_one_proxy
-        .wait_for_connections_after(isolated_accepted_before_outage, 1, NETWORK_TIMEOUT)
-        .await?;
-    cluster.nodes[1]
-        .wait_for_tempo_block_number(single_follower_outage_target, NETWORK_TIMEOUT)
-        .await?;
+    // Phase 2 reverses the fault: followers observe L1, but zone state cannot move without the
+    // disconnected leader.
+    recover_leader(
+        &cluster,
+        &mut account,
+        &leader_proxy,
+        &follower_one_proxy,
+        &follower_two_proxy,
+    )
+    .await?;
 
-    let phase_three_recovered_height = cluster.nodes[0].provider().get_block_number().await?;
-    eyre::ensure!(
-        phase_three_recovered_height > phase_three_baseline,
-        "healthy quorum did not advance during the single-follower outage"
-    );
-    cluster
-        .wait_all_at(phase_three_recovered_height, NETWORK_TIMEOUT)
-        .await?;
-    cluster
-        .assert_same_block(phase_three_recovered_height)
-        .await?;
-    assert_outage_asset_flow(&cluster, &account, single_follower_outage_assets).await?;
+    // Phase 3 leaves a healthy 2-of-3 quorum while one follower catches up after reconnection.
+    recover_single_follower(
+        &cluster,
+        &mut account,
+        &leader_proxy,
+        &follower_one_proxy,
+        &follower_two_proxy,
+    )
+    .await?;
 
     Ok(())
 }
