@@ -136,12 +136,12 @@ where
         .ok_or_eyre(format!(
             "receipts for canonical block {number} are not persisted"
         ))?;
+    let mut settlement_abi = None;
     let mut anchor_hash = None;
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
     let mut processed_token_count = None;
-    let mut settlement_abi = None;
     let mut withdrawal = None;
 
     for receipt in receipts {
