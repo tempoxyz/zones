@@ -77,11 +77,13 @@ use zone_primitives::constants::{ZONE_INBOX_ADDRESS, zone_chain_id as derive_zon
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
+mod network;
 
 pub(crate) use auth_tokens::{
     build_signed_token_blob, now_secs, sign_keychain_signature, sign_p256_signature,
     sign_webauthn_signature,
 };
+pub(crate) use network::{P2pChaosNetwork, TcpChaosProxy};
 
 /// Atomic counter for unique zone IDs across concurrent tests.
 static NEXT_ZONE_ID: AtomicU64 = AtomicU64::new(71_000);
@@ -1846,12 +1848,13 @@ impl L1TestNode {
     /// Wait for a withdrawal to be fully processed on L1 (pathUSD).
     ///
     /// Polls the account's L1 token balance until it increases by at least
-    /// `amount`, then asserts both `BatchSubmitted` and `WithdrawalProcessed`
-    /// events exist on the portal.
+    /// `amount` from the caller-provided pre-withdrawal balance, then asserts
+    /// both `BatchSubmitted` and `WithdrawalProcessed` events exist on the portal.
     pub(crate) async fn wait_for_withdrawal_on_l1(
         &self,
         portal_address: Address,
         account: Address,
+        balance_before: U256,
         amount: u128,
         timeout: Duration,
     ) -> eyre::Result<()> {
@@ -1860,6 +1863,7 @@ impl L1TestNode {
             portal_address,
             PATH_USD_ADDRESS,
             account,
+            balance_before,
             amount,
             timeout,
         )
@@ -1867,15 +1871,17 @@ impl L1TestNode {
     }
 
     /// Wait for a withdrawal of a specific token to be fully processed on L1.
+    ///
+    /// `balance_before` must be captured before submitting the withdrawal request.
     pub(crate) async fn wait_for_withdrawal_on_l1_token(
         &self,
         portal_address: Address,
         token: Address,
         account: Address,
+        balance_before: U256,
         amount: u128,
         timeout: Duration,
     ) -> eyre::Result<()> {
-        let balance_before = self.balance_of(token, account).await?;
         let expected = balance_before + U256::from(amount);
         self.wait_for_balance(token, account, expected, timeout)
             .await?;
@@ -3159,6 +3165,16 @@ impl ZoneAccount {
         self.deposit_to(self.address, amount, timeout, zone).await
     }
 
+    /// Submit a pathUSD deposit on L1 without waiting for the zone to process it.
+    ///
+    /// Returns the L1 block containing the deposit. This is useful for tests that deliberately
+    /// prevent a zone node from observing L1 and need to restore connectivity before awaiting the
+    /// corresponding mint.
+    pub(crate) async fn submit_deposit(&mut self, amount: u128) -> eyre::Result<u64> {
+        self.submit_deposit_with_memo(amount, self.address, B256::ZERO)
+            .await
+    }
+
     /// Simulate an encrypted deposit without submitting a transaction.
     pub(crate) async fn simulate_deposit(
         &self,
@@ -3294,37 +3310,13 @@ impl ZoneAccount {
         timeout: Duration,
         zone: &ZoneTestNode,
     ) -> eyre::Result<(u64, U256)> {
-        use tempo_contracts::precompiles::ITIP20;
-        use tempo_precompiles::PATH_USD_ADDRESS;
-        use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
-
-        let portal_address = self.portal_address;
-
-        // Approve portal if needed
-        if !self.l1_portal_approved {
-            ITIP20::new(PATH_USD_ADDRESS, &self.l1_provider)
-                .approve(portal_address, U256::MAX)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            self.l1_portal_approved = true;
-        }
-
-        let portal = ZonePortal::new(portal_address, &self.l1_provider);
-        let (key_index, encrypted) = self.prepare_deposit(recipient, memo).await?;
+        use tempo_zone_contracts::ZONE_TOKEN_ADDRESS;
 
         // Snapshot balance before deposit
         let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, recipient).await?;
-
-        // Call deposit on portal
-        let receipt = portal
-            .deposit(PATH_USD_ADDRESS, amount, key_index, encrypted, self.address)
-            .send()
-            .await?
-            .get_receipt()
+        let block_number = self
+            .submit_deposit_with_memo(amount, recipient, memo)
             .await?;
-        eyre::ensure!(receipt.status(), "L1 deposit tx failed");
 
         // Wait for the zone to process the encrypted deposit and mint to recipient
         let balance = zone
@@ -3336,11 +3328,42 @@ impl ZoneAccount {
             )
             .await?;
 
-        let block_number = receipt
-            .block_number
-            .ok_or_else(|| eyre::eyre!("deposit receipt missing block number"))?;
-
         Ok((block_number, balance))
+    }
+
+    async fn submit_deposit_with_memo(
+        &mut self,
+        amount: u128,
+        recipient: Address,
+        memo: B256,
+    ) -> eyre::Result<u64> {
+        use tempo_contracts::precompiles::ITIP20;
+        use tempo_precompiles::PATH_USD_ADDRESS;
+        use tempo_zone_contracts::ZonePortal;
+
+        let portal_address = self.portal_address;
+        if !self.l1_portal_approved {
+            let receipt = ITIP20::new(PATH_USD_ADDRESS, &self.l1_provider)
+                .approve(portal_address, U256::MAX)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(receipt.status(), "L1 portal approval failed");
+            self.l1_portal_approved = true;
+        }
+
+        let (key_index, encrypted) = self.prepare_deposit(recipient, memo).await?;
+        let receipt = ZonePortal::new(portal_address, &self.l1_provider)
+            .deposit(PATH_USD_ADDRESS, amount, key_index, encrypted, self.address)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L1 deposit tx failed");
+        receipt
+            .block_number
+            .ok_or_else(|| eyre::eyre!("deposit receipt missing block number"))
     }
 
     async fn prepare_deposit(
@@ -3387,6 +3410,35 @@ impl ZoneAccount {
     /// Skips approval if already approved in this session.
     pub(crate) async fn withdraw(&mut self, amount: u128) -> eyre::Result<()> {
         self.withdraw_with(WithdrawalArgs::new(amount)).await
+    }
+
+    /// Submit a simple withdrawal to the L2 transaction pool without waiting for inclusion.
+    ///
+    /// The outbox must already be approved with [`Self::approve_outbox`]. Keeping approval
+    /// separate makes it possible to submit this transaction while block production is paused.
+    pub(crate) async fn submit_withdrawal(&self, amount: u128) -> eyre::Result<B256> {
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS};
+
+        eyre::ensure!(
+            self.l2_outbox_approved_tokens.contains(&ZONE_TOKEN_ADDRESS),
+            "zone outbox must be approved before submitting a non-blocking withdrawal"
+        );
+        let args = WithdrawalArgs::new(amount);
+        let pending = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
+            .requestWithdrawal(
+                ZONE_TOKEN_ADDRESS,
+                self.address,
+                args.amount,
+                args.memo,
+                args.gas_limit,
+                self.address,
+                args.data,
+                args.reveal_to,
+            )
+            .gas(WITHDRAWAL_TX_GAS)
+            .send()
+            .await?;
+        Ok(*pending.tx_hash())
     }
 
     /// Approve the ZoneOutbox, then request a withdrawal on L2 with custom args.
@@ -3794,6 +3846,107 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
     withdrawal_batch_interval_blocks: u64,
     active_nodes: usize,
 ) -> eyre::Result<RealP2pCluster> {
+    Ok(start_real_p2p_cluster_inner(
+        withdrawal_batch_interval_blocks,
+        active_nodes,
+        L1ProxyMode::Direct,
+        None,
+        false,
+    )
+    .await?
+    .cluster)
+}
+
+/// Start the full three-member real-L1 cluster with one shared, controllable L1 proxy. Existing
+/// cluster constructors intentionally retain their direct-connect behavior.
+pub(crate) async fn start_real_p2p_cluster_with_l1_proxy(
+    withdrawal_batch_interval_blocks: u64,
+    l1_block_time: Duration,
+) -> eyre::Result<(RealP2pCluster, TcpChaosProxy)> {
+    let mut parts = start_real_p2p_cluster_inner(
+        withdrawal_batch_interval_blocks,
+        3,
+        L1ProxyMode::All,
+        Some(l1_block_time),
+        false,
+    )
+    .await?;
+    Ok((
+        parts.cluster,
+        parts
+            .l1_proxies
+            .pop()
+            .expect("proxied cluster constructor must return its L1 proxy"),
+    ))
+}
+
+/// Start the full three-member cluster with one independently controllable L1 proxy per node.
+pub(crate) async fn start_real_p2p_cluster_with_per_node_l1_proxies(
+    withdrawal_batch_interval_blocks: u64,
+    l1_block_time: Duration,
+) -> eyre::Result<(RealP2pCluster, [TcpChaosProxy; 3])> {
+    let parts = start_real_p2p_cluster_inner(
+        withdrawal_batch_interval_blocks,
+        3,
+        L1ProxyMode::PerNode,
+        Some(l1_block_time),
+        false,
+    )
+    .await?;
+    let proxies: [TcpChaosProxy; 3] = parts
+        .l1_proxies
+        .try_into()
+        .map_err(|_| eyre::eyre!("per-node proxy constructor must return three L1 proxies"))?;
+    Ok((parts.cluster, proxies))
+}
+
+/// Start a full three-member cluster with independently controllable P2P links and one
+/// controllable L1 proxy per node.
+pub(crate) async fn start_real_p2p_network_chaos_cluster(
+    withdrawal_batch_interval_blocks: u64,
+    l1_block_time: Duration,
+) -> eyre::Result<(RealP2pCluster, P2pChaosNetwork, [TcpChaosProxy; 3])> {
+    let parts = start_real_p2p_cluster_inner(
+        withdrawal_batch_interval_blocks,
+        3,
+        L1ProxyMode::PerNode,
+        Some(l1_block_time),
+        true,
+    )
+    .await?;
+    let proxies = parts
+        .l1_proxies
+        .try_into()
+        .map_err(|_| eyre::eyre!("network-chaos cluster must return three L1 proxies"))?;
+    Ok((
+        parts.cluster,
+        parts
+            .p2p_network
+            .expect("network-chaos cluster must return its P2P proxy mesh"),
+        proxies,
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum L1ProxyMode {
+    Direct,
+    All,
+    PerNode,
+}
+
+struct RealP2pClusterParts {
+    cluster: RealP2pCluster,
+    l1_proxies: Vec<TcpChaosProxy>,
+    p2p_network: Option<P2pChaosNetwork>,
+}
+
+async fn start_real_p2p_cluster_inner(
+    withdrawal_batch_interval_blocks: u64,
+    active_nodes: usize,
+    proxy_mode: L1ProxyMode,
+    l1_block_time: Option<Duration>,
+    proxy_p2p: bool,
+) -> eyre::Result<RealP2pClusterParts> {
     eyre::ensure!(
         (2..=3).contains(&active_nodes),
         "real P2P test cluster requires two or three active nodes, got {active_nodes}"
@@ -3804,12 +3957,44 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
         Ok(listener.local_addr()?)
     }
 
-    let l1 = L1TestNode::start().await?;
+    let l1 = match l1_block_time {
+        Some(block_time) => {
+            L1TestNode::start_with(|config| config.dev.block_time = Some(block_time)).await?
+        }
+        None => L1TestNode::start().await?,
+    };
+    let direct_url = l1.ws_url().to_string();
+    let (l1_proxies, l1_rpc_urls) = match proxy_mode {
+        L1ProxyMode::Direct => (Vec::new(), vec![direct_url; active_nodes]),
+        L1ProxyMode::All => {
+            let upstream = TcpChaosProxy::upstream_addr(l1.ws_url())?;
+            let proxy = TcpChaosProxy::start(upstream).await?;
+            let proxy_url = proxy.proxy_url(l1.ws_url())?.to_string();
+            (vec![proxy], vec![proxy_url; active_nodes])
+        }
+        L1ProxyMode::PerNode => {
+            let upstream = TcpChaosProxy::upstream_addr(l1.ws_url())?;
+            let mut proxies = Vec::with_capacity(active_nodes);
+            let mut urls = Vec::with_capacity(active_nodes);
+            for _ in 0..active_nodes {
+                let proxy = TcpChaosProxy::start(upstream).await?;
+                urls.push(proxy.proxy_url(l1.ws_url())?.to_string());
+                proxies.push(proxy);
+            }
+            (proxies, urls)
+        }
+    };
     let addresses = [
         available_address()?,
         available_address()?,
         available_address()?,
     ];
+    let (p2p_network, manifest_addresses) = if proxy_p2p {
+        let (network, manifest_addresses) = P2pChaosNetwork::start(addresses).await?;
+        (Some(network), manifest_addresses)
+    } else {
+        (None, [addresses; 3])
+    };
     let identities = [
         Ed25519PrivateKey::from_seed(301),
         Ed25519PrivateKey::from_seed(302),
@@ -3858,27 +4043,24 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
         next_unique_chain_id()
     ));
     std::fs::create_dir_all(&config_dir)?;
-    let manifest_path = config_dir.join("manifest.toml");
-    let mut manifest = format!(
-        "zone_id = {zone_id}\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
-        const_hex::encode_prefixed(public_keys[0].as_ref())
-    );
-    for (index, ((public_key, signer), address)) in public_keys
-        .iter()
-        .zip(&attestation_signers)
-        .zip(addresses)
-        .enumerate()
-    {
-        manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
-            const_hex::encode_prefixed(public_key.as_ref()),
-            signer.address(),
-        ));
-    }
-    std::fs::write(&manifest_path, manifest)?;
-
     let mut configs = Vec::with_capacity(3);
     for (index, role) in [(0, Role::Leader), (1, Role::Follower), (2, Role::Follower)] {
+        let manifest_path = config_dir.join(format!("manifest-{index}.toml"));
+        let mut manifest = format!(
+            "zone_id = {zone_id}\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(public_keys[0].as_ref())
+        );
+        for (peer_index, (public_key, signer)) in
+            public_keys.iter().zip(&attestation_signers).enumerate()
+        {
+            let address = manifest_addresses[index][peer_index];
+            manifest.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{peer_index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(public_key.as_ref()),
+                signer.address(),
+            ));
+        }
+        std::fs::write(&manifest_path, manifest)?;
         let key_path = config_dir.join(format!("node-{index}.key"));
         std::fs::write(
             &key_path,
@@ -3907,7 +4089,7 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
         };
         nodes.push(
             ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
-                l1.ws_url().to_string(),
+                l1_rpc_urls[index].clone(),
                 portal_address,
                 chain_id,
                 Some(genesis.clone()),
@@ -3921,11 +4103,15 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
         );
     }
 
-    Ok(RealP2pCluster {
-        l1,
-        portal_address,
-        nodes,
-        attestation_signers: attestation_signers.to_vec(),
+    Ok(RealP2pClusterParts {
+        cluster: RealP2pCluster {
+            l1,
+            portal_address,
+            nodes,
+            attestation_signers: attestation_signers.to_vec(),
+        },
+        l1_proxies,
+        p2p_network,
     })
 }
 

@@ -108,12 +108,14 @@ async fn test_multiasset_deposit_and_withdraw() -> eyre::Result<()> {
 
     // Withdraw AlphaUSD
     let alpha_withdrawal: u128 = 500_000; // 0.5 AlphaUSD
+    let alpha_balance_before = l1.balance_of(l1_alpha, account.address()).await?;
     account.withdraw_token(l2_alpha, alpha_withdrawal).await?;
 
     l1.wait_for_withdrawal_on_l1_token(
         portal_address,
         l1_alpha,
         account.address(),
+        alpha_balance_before,
         alpha_withdrawal,
         withdrawal_timeout,
     )
@@ -121,12 +123,14 @@ async fn test_multiasset_deposit_and_withdraw() -> eyre::Result<()> {
 
     // Withdraw BetaUSD
     let beta_withdrawal: u128 = 1_000_000; // 1 BetaUSD
+    let beta_balance_before = l1.balance_of(l1_beta, account.address()).await?;
     account.withdraw_token(l2_beta, beta_withdrawal).await?;
 
     l1.wait_for_withdrawal_on_l1_token(
         portal_address,
         l1_beta,
         account.address(),
+        beta_balance_before,
         beta_withdrawal,
         withdrawal_timeout,
     )

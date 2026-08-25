@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"
@@ -17,6 +17,7 @@ members = [
   "crates/hardfork",
   "crates/l1",
   "crates/node",
+  "crates/checker",
   "crates/p2p",
   "crates/payload",
   "crates/precompiles",
@@ -136,6 +137,7 @@ zone-prover = { path = "crates/prover" }
 zone-rpc = { path = "crates/rpc" }
 zone-sequencer = { path = "crates/sequencer" }
 zone-spf = { path = "crates/spf" }
+zone-checker = { path = "crates/checker" }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
@@ -144,11 +146,16 @@ reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512
 reth-cli = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
+reth-codecs = { version = "0.6.0", default-features = false }
+reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-engine-local = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
+reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
@@ -215,6 +222,8 @@ commonware-runtime = "=2026.7.0"
 commonware-utils = "=2026.7.0"
 
 # misc
+bincode = "1.3.3"
+bytes = { version = "1.11.1", default-features = false }
 aes-gcm = "0.10.3"
 base64 = "0.22.1"
 clap = { version = "4.5.45", features = ["derive"] }
@@ -240,6 +249,7 @@ serde = { version = "1.0.219", default-features = false, features = [
   "derive",
   "alloc",
 ] }
+tempfile = "3.20"
 serde_json = "1.0.142"
 serde_yaml = "0.9.34"
 schnellru = "0.2.4"

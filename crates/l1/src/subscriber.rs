@@ -13,6 +13,7 @@ pub const MAX_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
 #[derive(Debug, Default)]
 struct L1BlockTrackerState {
     observed: BTreeMap<u64, L1BlockObservation>,
+    recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
 }
@@ -21,7 +22,23 @@ struct L1BlockTrackerState {
 struct L1BlockObservation {
     hash: B256,
     portal_events: L1PortalEvents,
+    portal_evidence: Option<AuthenticatedPortalLogs>,
 }
+
+/// Receipt-root-authenticated Portal logs for one finalized Tempo block.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedPortalLogs {
+    /// Exact finalized Tempo block containing the logs.
+    pub block: NumHash,
+    /// Parent hash from the authenticated Tempo header.
+    pub parent_hash: B256,
+    /// Portal logs in canonical receipt and log order.
+    pub logs: Vec<alloy_primitives::Log>,
+}
+
+/// Number of consumed Tempo blocks whose authenticated Portal logs remain available to
+/// asynchronous observers such as the checker ExEx.
+const RECENT_PORTAL_EVIDENCE_BLOCKS: u64 = 256;
 
 /// L1 blocks whose headers and receipts have been independently validated and
 /// whose derived state has been applied to the local caches.
@@ -158,9 +175,41 @@ impl L1BlockTracker {
         }
     }
 
+    /// Return retained receipt-authenticated Portal logs for an exact Tempo block.
+    ///
+    /// This is intentionally non-blocking. Callers replaying older history can fall back to an
+    /// archival provider when the bounded recent cache no longer contains the block.
+    pub fn authenticated_portal_logs(
+        &self,
+        block: NumHash,
+    ) -> eyre::Result<Option<AuthenticatedPortalLogs>> {
+        let state = self.state.read();
+        if let Some(observation) = state.observed.get(&block.number) {
+            eyre::ensure!(
+                observation.hash == block.hash,
+                "observed different L1 hash at block {}: expected {}, got {}",
+                block.number,
+                block.hash,
+                observation.hash
+            );
+            return Ok(observation.portal_evidence.clone());
+        }
+        if let Some(evidence) = state.recent_portal_evidence.get(&block.number) {
+            eyre::ensure!(
+                evidence.block.hash == block.hash,
+                "retained different L1 hash at block {}: expected {}, got {}",
+                block.number,
+                block.hash,
+                evidence.block.hash
+            );
+            return Ok(Some(evidence.clone()));
+        }
+        Ok(None)
+    }
+
     /// Record an independently validated and applied L1 anchor.
     pub fn record(&self, block: NumHash) -> eyre::Result<()> {
-        self.record_with_portal_events(block, L1PortalEvents::default())
+        self.record_observation(block, L1PortalEvents::default(), None)
     }
 
     /// Record an L1 anchor together with portal events decoded from its verified receipts.
@@ -168,6 +217,31 @@ impl L1BlockTracker {
         &self,
         block: NumHash,
         portal_events: L1PortalEvents,
+    ) -> eyre::Result<()> {
+        self.record_observation(block, portal_events, None)
+    }
+
+    /// Record an L1 anchor together with decoded events and authenticated raw Portal logs.
+    pub fn record_with_portal_evidence(
+        &self,
+        block: NumHash,
+        parent_hash: B256,
+        portal_events: L1PortalEvents,
+        logs: Vec<alloy_primitives::Log>,
+    ) -> eyre::Result<()> {
+        let evidence = AuthenticatedPortalLogs {
+            block,
+            parent_hash,
+            logs,
+        };
+        self.record_observation(block, portal_events, Some(evidence))
+    }
+
+    fn record_observation(
+        &self,
+        block: NumHash,
+        portal_events: L1PortalEvents,
+        portal_evidence: Option<AuthenticatedPortalLogs>,
     ) -> eyre::Result<()> {
         let mut state = self.state.write();
         if let Some(observation) = state.observed.get(&block.number) {
@@ -214,6 +288,7 @@ impl L1BlockTracker {
             L1BlockObservation {
                 hash: block.hash,
                 portal_events,
+                portal_evidence,
             },
         );
         state.latest = Some(block);
@@ -228,7 +303,22 @@ impl L1BlockTracker {
     /// only after successfully consuming the matching finalized L1 work.
     pub fn prune_through(&self, number: u64) {
         let mut state = self.state.write();
+        let consumed = state
+            .observed
+            .range(..=number)
+            .filter_map(|(_, observation)| {
+                observation
+                    .portal_evidence
+                    .clone()
+                    .map(|evidence| (evidence.block.number, evidence))
+            })
+            .collect::<Vec<_>>();
+        state.recent_portal_evidence.extend(consumed);
         state.observed.retain(|height, _| *height > number);
+        let retain_after = number.saturating_sub(RECENT_PORTAL_EVIDENCE_BLOCKS);
+        state
+            .recent_portal_evidence
+            .retain(|height, _| *height > retain_after);
         state.pruned_through = Some(state.pruned_through.map_or(number, |old| old.max(number)));
         drop(state);
         self.changed.send_replace(());
@@ -238,7 +328,11 @@ impl L1BlockTracker {
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>);
+type L1ProcessedEvents = (
+    L1PortalEvents,
+    HashSet<Address>,
+    Option<Vec<alloy_primitives::Log>>,
+);
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
     (address == TIP403_REGISTRY_ADDRESS
@@ -287,6 +381,8 @@ pub struct L1SubscriberConfig {
     pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub encryption_keys: Option<crate::EncryptionKeyRing>,
+    /// Whether to retain authenticated Portal logs for external observers.
+    pub retain_portal_evidence: bool,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
@@ -669,16 +765,18 @@ impl L1Subscriber {
             // Decoding fails closed: a decode failure of a recognized portal log aborts this
             // block before anything is enqueued or any cache advances. Ingestion halts here (fenced)
             // instead of continuing under a partial event view.
-            let (events, invalidated) =
-                self.extract_events(block_number, &receipts)
-                    .map_err(|err| {
-                        self.subscriber_metrics.decode_fence_failures.increment(1);
-                        FencedIngestionError::new(block_number, "portal event decoding", err)
-                    })?;
+            let processed_events = self
+                .extract_events(block_number, &receipts)
+                .map_err(|err| {
+                    self.subscriber_metrics.decode_fence_failures.increment(1);
+                    FencedIngestionError::new(block_number, "portal event decoding", err)
+                })?;
+            let (events, invalidated, portal_logs) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
+            let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.config.leadership_sink {
@@ -718,9 +816,18 @@ impl L1Subscriber {
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
-            self.config
-                .block_tracker
-                .record_with_portal_events(anchor, events.clone())?;
+            if let Some((parent_hash, logs)) = portal_evidence {
+                self.config.block_tracker.record_with_portal_evidence(
+                    anchor,
+                    parent_hash,
+                    events.clone(),
+                    logs,
+                )?;
+            } else {
+                self.config
+                    .block_tracker
+                    .record_with_portal_events(anchor, events.clone())?;
+            }
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
             self.apply_enabled_token_events(&events);
@@ -785,12 +892,17 @@ impl L1Subscriber {
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
+        let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
 
         for receipt in receipts {
+            let retain_receipt_logs = portal_logs.is_some() && receipt.status();
             for log in receipt.logs() {
                 let address = log.address();
 
                 if address == portal_address {
+                    if retain_receipt_logs && let Some(logs) = &mut portal_logs {
+                        logs.push(log.inner.clone());
+                    }
                     invalidated.insert(address);
                     if let Some(address) =
                         portal_event_cache_invalidation_address(log.topics().first())
@@ -813,7 +925,7 @@ impl L1Subscriber {
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated))
+        Ok((portal_events, invalidated, portal_logs))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -895,7 +1007,7 @@ async fn fetch_and_verify_receipts_for_header(
         .get_block_receipts(BlockId::hash(block_hash))
         .await?
         .ok_or_else(|| eyre::eyre!("no receipts for block {block_number} ({block_hash})"))?;
-    verify_receipts(
+    verify_receipts_against_header(
         block,
         expected_receipts_root,
         expected_logs_bloom,
@@ -904,7 +1016,8 @@ async fn fetch_and_verify_receipts_for_header(
     Ok(receipts)
 }
 
-pub(crate) fn verify_receipts(
+/// Verify that RPC receipts reproduce an authenticated Tempo header's receipt root and log bloom.
+pub fn verify_receipts_against_header(
     block: NumHash,
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,

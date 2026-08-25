@@ -990,7 +990,7 @@ interface ITempoState {
     function tempoBlockNumber() external view returns (uint64);
 
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity and exact timestamp alignment with the Zone block.
+    /// @dev Validates chain continuity and requires the Zone block timestamp to be at or after the Tempo timestamp.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;

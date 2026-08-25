@@ -1,7 +1,7 @@
 # This workflow is intended for forks or private copies of tempoxyz/zones.
-# It keeps their main branch aligned with the upstream repository every hour.
+# It keeps their main and release branches aligned with upstream every hour.
 
-name: Sync main branch with upstream
+name: Sync main and release branches with upstream
 
 on:
   schedule:
@@ -14,28 +14,31 @@ jobs:
   sync:
     if: ${{ github.repository != 'tempoxyz/zones' }}
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+      - name: Fetch GitHub token via STS
+        id: github-sts
+        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # main
         with:
-          client-id: ${{ vars.SYNC_APP_ID }}
-          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-workflows: write
+          policy: sync-from-upstream
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.github-sts.outputs.token }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Sync main with upstream
+      - name: Sync main and release branches with upstream
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_TOKEN: ${{ steps.github-sts.outputs.token }}
         run: |
           git remote add upstream https://github.com/tempoxyz/zones.git
-          git fetch upstream main
+          git fetch upstream \
+            '+refs/heads/main:refs/remotes/upstream/main' \
+            '+refs/heads/release/*:refs/remotes/upstream/release/*'
           git checkout main
           git reset --hard upstream/main
-          git push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main --force
+          git push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            '+refs/heads/main:refs/heads/main' \
+            '+refs/remotes/upstream/release/*:refs/heads/release/*'

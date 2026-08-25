@@ -23,7 +23,7 @@ use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, U256};
-use alloy_provider::Provider as _;
+use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
@@ -51,11 +51,16 @@ use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
     BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
 };
+use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     Pool, PoolTransaction, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroU32,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
@@ -73,6 +78,7 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -82,8 +88,8 @@ use zone_l1::{
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
-    BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pConfig, P2pNetworkId,
-    ZoneManifest, spawn_p2p,
+    BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pCommand, P2pConfig,
+    P2pNetworkId, P2pPeerId, ZoneManifest, spawn_p2p,
 };
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
@@ -258,6 +264,7 @@ impl ZoneNode {
             retry_connection_interval,
             leadership_sink: None,
             encryption_keys: None,
+            retain_portal_evidence: false,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -287,6 +294,12 @@ impl ZoneNode {
     /// Set the redacted RPC configuration.
     pub fn with_redacted_rpc(mut self, config: ZoneRedactedRpcConfig) -> Self {
         self.redacted_rpc_config = config;
+        self
+    }
+
+    /// Retain authenticated Portal logs for an external observer.
+    pub fn with_portal_evidence_retention(mut self) -> Self {
+        self.l1_config.retain_portal_evidence = true;
         self
     }
 
@@ -473,6 +486,19 @@ where
     }
 }
 
+/// P2P services that continue running after the network is initialized.
+struct P2PRuntime {
+    sinks: EventSinks,
+    commands: Sender<P2pCommand>,
+    backfill_commands: Sender<BackfillCommand>,
+    attestation: AttestationContext,
+    schedule: LeadershipSchedule,
+    local_ed25519_public_key: P2pPeerId,
+    role_status: SharedRoleStatus,
+    peer_tips: PeerTipRegistry,
+    backfill_requests_rx: Receiver<BackfillRequest>,
+}
+
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
@@ -622,111 +648,34 @@ where
         let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
-        let mut p2p_runtime = None;
-        if let Some(config) = self.p2p_config.take() {
-            let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
-            let attestation_domain = AttestationDomain {
-                l1_chain_id,
-                portal_address: self.portal_address,
-                zone_id: genesis_zone_id,
-            };
-            let anchor_config = self
-                .sequencer_config
-                .as_ref()
-                .map(|config| config.batch_anchor_config)
-                .unwrap_or_default();
-            // The manifest decides who this node collects settlement signatures from; the portal
-            // decides whose signatures count and how many are needed. Reconcile them before any
-            // role task starts, so a disagreement fails at startup instead of stalling
-            // settlement at the next batch boundary.
-            let pinned_sequencer_set_version =
-                crate::settlement_attestation::validate_registered_sequencer_set(
-                    config.manifest(),
-                    self.portal_address,
+        let p2p_runtime = if let Some(config) = self.p2p_config.take() {
+            Some(
+                Self::start_p2p(
+                    config,
                     &l1_provider,
-                )
-                .await?;
-            // Every node holds an attestation store so it can be promoted anytime.
-            let attestation = AttestationContext::new(
-                attestation_domain,
-                pinned_sequencer_set_version,
-                config.block_attestation_signer(),
-                config.block_attestation_addresses(),
-                AttestationStore::default(),
-                l1_provider.clone(),
-                anchor_config,
-            );
-            let schedule = config.leadership();
-            let local_ed25519_public_key = config.ed25519_public_key();
-            let manifest = config.manifest().clone();
-            let local_secp256k1_address = config.secp256k1_address();
-            let individual_signer = config.block_attestation_signer();
-            // Created before the network starts so requests arriving ahead of the serving
-            // task (spawned once the provider exists) buffer instead of dropping.
-            let (backfill_requests_tx, backfill_requests_rx) =
-                tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
-            let (sinks, commands, backfill_commands) =
-                Self::launch_p2p_network(config, network_id, &task_executor, backfill_requests_tx)?;
-
-            // Operator RPC handles: every quorum member holds a wallet-backed L1 provider
-            // signing with its individual key so any of them can relay setLeader. An rpc-only
-            // standby holds no individual key, so it cannot relay and gets no provider.
-            let role_status: SharedRoleStatus = Default::default();
-            let peer_tips = PeerTipRegistry::default();
-            let relayer = match individual_signer {
-                Some(signer) => {
-                    use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
-                    let provider =
-                        alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                            .with_nonce_key_filler()
-                            .wallet(alloy_network::EthereumWallet::from(signer))
-                            .connect_with_config(
-                                &self.l1_config.l1_rpc_url,
-                                rpc_connection_config(self.l1_config.retry_connection_interval),
-                            )
-                            .await?
-                            .erased();
-                    if !provider.client().is_local()
-                        && let Some(avg_block_time) =
-                            Chain::from_id(l1_chain_id).average_blocktime_hint()
-                    {
-                        provider
-                            .client()
-                            .set_poll_interval(avg_block_time.mul_f32(0.6));
-                    }
-                    Some(provider)
-                }
-                None => None,
-            };
-            sequencer_rpc_slot
-                .set(SequencerRpcContext::new(
-                    schedule.clone(),
-                    role_status.clone(),
-                    peer_tips.clone(),
-                    manifest,
-                    pinned_sequencer_set_version,
-                    local_secp256k1_address,
-                    local_ed25519_public_key.clone(),
-                    relayer,
+                    l1_chain_id,
+                    genesis_zone_id,
+                    self.portal_address,
+                    self.sequencer_config
+                        .as_ref()
+                        .map(|config| config.batch_anchor_config)
+                        .unwrap_or_default(),
+                    self.l1_config.l1_rpc_url.clone(),
+                    self.l1_config.retry_connection_interval,
                     self.l1_config.encryption_keys.clone().unwrap_or_default(),
-                ))
-                .expect("the sequencer RPC context is installed exactly once");
-            p2p_runtime = Some((
-                sinks,
-                commands,
-                backfill_commands,
-                attestation,
-                schedule,
-                local_ed25519_public_key,
-                role_status,
-                peer_tips,
-                backfill_requests_rx,
-            ));
-        } else if let Some(ref config) = self.sequencer_config {
-            // Legacy single-sequencer mode keeps the static engine.
-            let sequencer_addr = config.sequencer_signer.address();
-            self.spawn_zone_engine(&ctx, sequencer_addr)?;
-        }
+                    &task_executor,
+                    &sequencer_rpc_slot,
+                )
+                .await?,
+            )
+        } else {
+            if let Some(ref config) = self.sequencer_config {
+                // Legacy single-sequencer mode keeps the static engine.
+                let sequencer_addr = config.sequencer_signer.address();
+                self.spawn_zone_engine(&ctx, sequencer_addr)?;
+            }
+            None
+        };
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
         let max_response_size = ctx
@@ -797,7 +746,7 @@ where
         )
         .await?;
 
-        if let Some((
+        if let Some(P2PRuntime {
             sinks,
             commands,
             backfill_commands,
@@ -807,7 +756,7 @@ where
             role_status,
             peer_tips,
             backfill_requests_rx,
-        )) = p2p_runtime
+        }) = p2p_runtime
         {
             // Backfill serving is role-neutral: every role serves the same canonical
             // provider, so the server outlives role generations and a leadership handoff
@@ -1116,6 +1065,104 @@ where
             >,
         >,
 {
+    async fn start_p2p(
+        config: P2pConfig,
+        l1_provider: &DynProvider<TempoNetwork>,
+        l1_chain_id: u64,
+        genesis_zone_id: u32,
+        portal_address: Address,
+        anchor_config: BatchAnchorConfig,
+        l1_rpc_url: String,
+        retry_connection_interval: Duration,
+        encryption_keys: EncryptionKeyRing,
+        task_executor: &TaskExecutor,
+        sequencer_rpc_slot: &Arc<OnceLock<SequencerRpcContext>>,
+    ) -> eyre::Result<P2PRuntime> {
+        let network_id = P2pNetworkId::new(l1_chain_id, portal_address);
+        let attestation_domain = AttestationDomain {
+            l1_chain_id,
+            portal_address,
+            zone_id: genesis_zone_id,
+        };
+        let pinned_sequencer_set_version =
+            crate::settlement_attestation::validate_registered_sequencer_set(
+                config.manifest(),
+                portal_address,
+                l1_provider,
+            )
+            .await?;
+        let attestation = AttestationContext::new(
+            attestation_domain,
+            pinned_sequencer_set_version,
+            config.block_attestation_signer(),
+            config.block_attestation_addresses(),
+            AttestationStore::default(),
+            l1_provider.clone(),
+            anchor_config,
+        );
+        let schedule = config.leadership();
+        let local_ed25519_public_key = config.ed25519_public_key();
+        let manifest = config.manifest().clone();
+        let local_secp256k1_address = config.secp256k1_address();
+        let individual_signer = config.block_attestation_signer();
+        let (backfill_requests_tx, backfill_requests_rx) =
+            tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
+        let (sinks, commands, backfill_commands) =
+            Self::launch_p2p_network(config, network_id, task_executor, backfill_requests_tx)?;
+
+        let role_status: SharedRoleStatus = Default::default();
+        let peer_tips = PeerTipRegistry::default();
+        let relayer = match individual_signer {
+            Some(signer) => {
+                use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
+                let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                    .with_nonce_key_filler()
+                    .wallet(alloy_network::EthereumWallet::from(signer))
+                    .connect_with_config(
+                        &l1_rpc_url,
+                        rpc_connection_config(retry_connection_interval),
+                    )
+                    .await?
+                    .erased();
+                if !provider.client().is_local()
+                    && let Some(avg_block_time) =
+                        Chain::from_id(l1_chain_id).average_blocktime_hint()
+                {
+                    provider
+                        .client()
+                        .set_poll_interval(avg_block_time.mul_f32(0.6));
+                }
+                Some(provider)
+            }
+            None => None,
+        };
+        sequencer_rpc_slot
+            .set(SequencerRpcContext::new(
+                schedule.clone(),
+                role_status.clone(),
+                peer_tips.clone(),
+                manifest,
+                pinned_sequencer_set_version,
+                local_secp256k1_address,
+                local_ed25519_public_key.clone(),
+                relayer,
+                encryption_keys,
+            ))
+            .expect("the sequencer RPC context is installed exactly once");
+
+        Ok(P2PRuntime {
+            sinks,
+            commands,
+            backfill_commands,
+            attestation,
+            schedule,
+            local_ed25519_public_key,
+            role_status,
+            peer_tips,
+            backfill_requests_rx,
+        })
+    }
+
     /// Start the Commonware network and the long-lived P2P event demultiplexer.
     ///
     /// Role-specific consumers are attached later by the role controller through the returned
