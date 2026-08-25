@@ -47,6 +47,9 @@ pub(crate) struct ProverMetrics {
     /// Number of TCP connections that failed to establish with the remote prover.
     pub(crate) spf_remote_connect_failure_total: Counter,
 
+    /// Number of remote prover requests that failed because of connectivity.
+    pub(crate) spf_remote_connectivity_failure_total: Counter,
+
     /// Time spent serializing and sending a request to the remote prover.
     pub(crate) spf_remote_request_send_duration_seconds: Histogram,
 
@@ -66,6 +69,8 @@ pub(crate) struct ProverMetrics {
     pub(crate) output_validation_duration_seconds: Histogram,
 
     /// Number of finalized batch candidates that failed prover validation.
+    ///
+    /// Remote prover connectivity failures are excluded.
     pub(crate) validation_failure_total: Counter,
 
     /// Number of finalized batch candidates that passed prover validation.
