@@ -52,6 +52,7 @@ use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
@@ -342,6 +343,7 @@ impl BatchSubmitter {
         batch: &BatchData,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
+        let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -381,7 +383,13 @@ impl BatchSubmitter {
                     )
                     .await?;
                 let anchor_mode = match self
-                    .validate_certificate(batch, batch.zone_height, metadata, &certificate)
+                    .validate_certificate(
+                        batch,
+                        settlement_abi,
+                        batch.zone_height,
+                        metadata,
+                        &certificate,
+                    )
                     .await
                 {
                     Ok(anchor_mode) => anchor_mode,
@@ -434,6 +442,7 @@ impl BatchSubmitter {
                 metadata,
                 SettlementAttestationInput {
                     batch,
+                    settlement_abi,
                     anchor_block_number,
                     anchor_block_hash,
                     block_transition: &block_transition,
@@ -466,7 +475,7 @@ impl BatchSubmitter {
             "Submitting batch to ZonePortal on L1"
         );
 
-        let receipt = match batch.settlement_abi {
+        let receipt = match settlement_abi {
             SettlementAbi::Legacy => {
                 let mut submission = self
                     .portal
@@ -585,6 +594,7 @@ impl BatchSubmitter {
     ) -> Result<Bytes> {
         let SettlementAttestationInput {
             batch,
+            settlement_abi,
             anchor_block_number,
             anchor_block_hash,
             block_transition,
@@ -607,16 +617,10 @@ impl BatchSubmitter {
             anchorBlockHash: anchor_block_hash,
             blockTransitionHash: keccak256(block_transition.abi_encode()),
             depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
-            tokenEnablementTransitionHash: match batch.settlement_abi {
-                SettlementAbi::Legacy => B256::ZERO,
-                SettlementAbi::T12 => keccak256(
-                    TokenEnablementTransition {
-                        prevProcessedTokenCount: batch.prev_processed_token_count,
-                        nextProcessedTokenCount: batch.next_processed_token_count,
-                    }
-                    .abi_encode(),
-                ),
-            },
+            tokenEnablementTransitionHash: settlement_abi.token_transition_hash(
+                batch.prev_processed_token_count,
+                batch.next_processed_token_count,
+            ),
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfigHash: keccak256(verifier_config),
         };
@@ -761,6 +765,7 @@ impl BatchSubmitter {
     async fn validate_certificate(
         &self,
         batch: &BatchData,
+        settlement_abi: SettlementAbi,
         zone_height: u64,
         metadata: PortalSubmissionMetadata,
         certificate: &SettlementCertificate,
@@ -785,16 +790,10 @@ impl BatchSubmitter {
             )
                 .abi_encode(),
         );
-        let expected_token_transition_hash = match batch.settlement_abi {
-            SettlementAbi::Legacy => B256::ZERO,
-            SettlementAbi::T12 => alloy_primitives::keccak256(
-                (
-                    batch.prev_processed_token_count,
-                    batch.next_processed_token_count,
-                )
-                    .abi_encode(),
-            ),
-        };
+        let expected_token_transition_hash = settlement_abi.token_transition_hash(
+            batch.prev_processed_token_count,
+            batch.next_processed_token_count,
+        );
 
         // Run a bunch of checks to verify that whats in the attestation certificate is exactly what
         // we expect. `submitBatch` will revert if any of these are wrong, so we should catch it early.
@@ -1255,13 +1254,30 @@ pub enum SettlementAbi {
     T12,
 }
 
+impl SettlementAbi {
+    /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
+    pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
+        let t12_active = provider
+            .is_hardfork_active(TempoHardfork::T12)
+            .await
+            .wrap_err("failed reading the live Tempo L1 hardfork")?;
+        Ok(if t12_active { Self::T12 } else { Self::Legacy })
+    }
+
+    /// Hash the token transition exactly as the selected settlement statement expects.
+    pub fn token_transition_hash(self, previous: u64, next: u64) -> B256 {
+        match self {
+            Self::Legacy => B256::ZERO,
+            Self::T12 => keccak256((previous, next).abi_encode()),
+        }
+    }
+}
+
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
 /// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
 #[derive(Debug, Clone)]
 pub struct BatchData {
-    /// Portal ABI and attestation format active for this batch.
-    pub settlement_abi: SettlementAbi,
     /// Zone L2 height committed by this batch.
     pub zone_height: u64,
     /// Tempo L1 block number for EIP-2935 verification.
@@ -1311,8 +1327,6 @@ pub(crate) struct FinalizedBatchLog {
 
 /// Zone L2 state read at a specific block, used to populate [`BatchData`].
 pub(crate) struct ZoneBlockSnapshot {
-    /// Portal ABI selected by this block's `TempoAdvanced` event version.
-    pub settlement_abi: SettlementAbi,
     /// Latest Tempo L1 block number as seen by the zone.
     pub tempo_block_number: u64,
     /// Cumulative hash of all deposits processed by the zone up to this block.
@@ -1327,6 +1341,7 @@ pub(crate) struct ZoneBlockSnapshot {
 
 struct SettlementAttestationInput<'a> {
     batch: &'a BatchData,
+    settlement_abi: SettlementAbi,
     anchor_block_number: u64,
     anchor_block_hash: B256,
     block_transition: &'a BlockTransition,
@@ -1630,7 +1645,6 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
     let mut processed_token_count = None;
-    let mut settlement_abi = None;
 
     for receipt in receipts {
         for log in receipt.logs() {
@@ -1645,7 +1659,6 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                     let event = TempoAdvanced::decode_log(log).map_err(|err| {
                         eyre::eyre!("invalid post-T12 TempoAdvanced log in block {number}: {err}")
                     })?;
-                    settlement_abi = Some(SettlementAbi::T12);
                     (
                         event.tempoBlockNumber,
                         event.newProcessedDepositQueueHash,
@@ -1657,7 +1670,6 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
                     let event = LegacyTempoAdvanced::decode_log(log).map_err(|err| {
                         eyre::eyre!("invalid legacy TempoAdvanced log in block {number}: {err}")
                     })?;
-                    settlement_abi = Some(SettlementAbi::Legacy);
                     (
                         event.tempoBlockNumber,
                         event.newProcessedDepositQueueHash,
@@ -1681,8 +1693,6 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     }
 
     Ok(ZoneBlockSnapshot {
-        settlement_abi: settlement_abi
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its settlement ABI"))?,
         tempo_block_number: tempo_block_number
             .ok_or_else(|| eyre::eyre!("zone block {number} is missing TempoAdvanced"))?,
         processed_deposit_hash: processed_deposit_hash
@@ -1908,6 +1918,36 @@ mod tests {
             .unwrap();
         assert_eq!(legacySubmitBatchCall::SELECTOR, legacy);
         assert_ne!(legacySubmitBatchCall::SELECTOR, submitBatchCall::SELECTOR);
+    }
+
+    #[tokio::test]
+    async fn settlement_abi_follows_live_l1_hardfork() {
+        let legacy = Asserter::new();
+        legacy.push_success(&serde_json::json!({ "active": "T11" }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(legacy)).await.unwrap(),
+            SettlementAbi::Legacy
+        );
+
+        let t12 = Asserter::new();
+        t12.push_success(&serde_json::json!({ "active": "T12" }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(t12)).await.unwrap(),
+            SettlementAbi::T12
+        );
+    }
+
+    #[test]
+    fn t12_uses_token_transition_for_legacy_boundary() {
+        assert_eq!(
+            SettlementAbi::Legacy.token_transition_hash(0, 0),
+            B256::ZERO
+        );
+        assert_eq!(
+            SettlementAbi::T12.token_transition_hash(0, 0),
+            keccak256((0_u64, 0_u64).abi_encode())
+        );
+        assert_ne!(SettlementAbi::T12.token_transition_hash(0, 0), B256::ZERO);
     }
 
     #[tokio::test]
@@ -2406,7 +2446,6 @@ mod tests {
             .erased();
         let mut submitter = BatchSubmitter::new(Address::ZERO, provider);
         let batch = BatchData {
-            settlement_abi: SettlementAbi::T12,
             zone_height: 1,
             tempo_block_number: 1,
             prev_block_hash: B256::ZERO,

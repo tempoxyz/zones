@@ -117,7 +117,6 @@ pub(crate) async fn validate_registered_sequencer_set(
 
 #[derive(Debug, Clone, Copy)]
 struct BlockCommitments {
-    settlement_abi: SettlementAbi,
     tempo_block_hash: B256,
     tempo_block_number: u64,
     processed_deposit_hash: B256,
@@ -136,7 +135,6 @@ where
         .ok_or_eyre(format!(
             "receipts for canonical block {number} are not persisted"
         ))?;
-    let mut settlement_abi = None;
     let mut anchor_hash = None;
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
@@ -152,7 +150,6 @@ where
                         let event = TempoAdvanced::decode_log(log).wrap_err_with(|| {
                             format!("invalid post-T12 TempoAdvanced log in block {number}")
                         })?;
-                        settlement_abi = Some(SettlementAbi::T12);
                         anchor_hash = Some(event.tempoBlockHash);
                         tempo_block_number = Some(event.tempoBlockNumber);
                         processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
@@ -163,7 +160,6 @@ where
                         let event = LegacyTempoAdvanced::decode_log(log).wrap_err_with(|| {
                             format!("invalid legacy TempoAdvanced log in block {number}")
                         })?;
-                        settlement_abi = Some(SettlementAbi::Legacy);
                         anchor_hash = Some(event.tempoBlockHash);
                         tempo_block_number = Some(event.tempoBlockNumber);
                         processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
@@ -189,8 +185,6 @@ where
     };
 
     Ok(Some(BlockCommitments {
-        settlement_abi: settlement_abi
-            .ok_or_eyre(format!("block {number} is missing its settlement ABI"))?,
         tempo_block_hash: anchor_hash
             .ok_or_eyre(format!("block {number} is missing TempoAdvanced"))?,
         tempo_block_number: tempo_block_number
@@ -253,6 +247,7 @@ where
         .hash();
     let (previous_tip, previous_deposit_hash, previous_deposit_number, previous_token_count) =
         previous_batch(provider, number)?;
+    let settlement_abi = SettlementAbi::from_l1(&context.l1_provider).await?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
     let set_version_call = portal.sequencerSetVersion();
@@ -322,12 +317,8 @@ where
             )
                 .abi_encode(),
         ),
-        tokenEnablementTransitionHash: match commitments.settlement_abi {
-            SettlementAbi::Legacy => B256::ZERO,
-            SettlementAbi::T12 => alloy_primitives::keccak256(
-                (previous_token_count, commitments.processed_token_count).abi_encode(),
-            ),
-        },
+        tokenEnablementTransitionHash: settlement_abi
+            .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
         verifierConfigHash: alloy_primitives::keccak256(Bytes::new()),
     }))
@@ -682,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tempo_advanced_selects_legacy_settlement() {
+    fn legacy_tempo_advanced_preserves_zero_token_cursor() {
         let provider = MockEthProvider::<TempoPrimitives>::new();
         let tempo_advanced = LegacyTempoAdvanced {
             tempoBlockHash: B256::repeat_byte(0x21),
@@ -715,7 +706,6 @@ mod tests {
         );
 
         let commitments = block_commitments(&provider, 1).unwrap().unwrap();
-        assert_eq!(commitments.settlement_abi, SettlementAbi::Legacy);
         assert_eq!(commitments.processed_token_count, 0);
     }
 
@@ -802,7 +792,7 @@ mod tests {
         );
 
         let commitments = block_commitments(&provider, 4).unwrap().unwrap();
-        assert_eq!(commitments.settlement_abi, SettlementAbi::T12);
+        assert_eq!(commitments.processed_token_count, 15);
         assert_eq!(
             previous_batch(&provider, 4).unwrap(),
             (first_boundary_hash, first_deposit_hash, 7, 9)

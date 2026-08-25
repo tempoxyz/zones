@@ -483,7 +483,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
 
         let batch_data = BatchData {
-            settlement_abi: end_state.settlement_abi,
             zone_height: to,
             tempo_block_number: end_state.tempo_block_number,
             prev_block_hash: self.prev_zone_block_hash,
@@ -814,7 +813,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     ) -> Result<ZoneBlockSnapshot> {
         if zone_block_number == 0 {
             return Ok(ZoneBlockSnapshot {
-                settlement_abi: crate::SettlementAbi::Legacy,
                 tempo_block_number: 0,
                 processed_deposit_hash: B256::ZERO,
                 processed_deposit_number: 0,
@@ -1052,7 +1050,6 @@ mod tests {
             .set_attestation_store(Some(AttestationStore::default()));
 
         let batch_data = BatchData {
-            settlement_abi: crate::SettlementAbi::T12,
             zone_height: 71,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0xbb),
@@ -1067,8 +1064,9 @@ mod tests {
             withdrawal_batch_index: 1,
         };
 
-        // Preflight portal hash, followed by submission metadata with a 2-of-N threshold.
+        // Preflight portal hash, live hardfork, then submission metadata with a 2-of-N threshold.
         l1.push_success(&abi_encode_b256(batch_data.prev_block_hash));
+        l1.push_success(&serde_json::json!({ "active": "T12" }));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(0),
             abi_encode_u64(1),
@@ -1342,7 +1340,6 @@ mod tests {
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {
-            settlement_abi: crate::SettlementAbi::T12,
             zone_height: 20,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0x99),
@@ -1392,7 +1389,6 @@ mod tests {
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {
-            settlement_abi: crate::SettlementAbi::T12,
             zone_height: pending_boundary,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0x99),
@@ -1438,7 +1434,6 @@ mod tests {
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {
-            settlement_abi: crate::SettlementAbi::T12,
             zone_height: 20,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0x99),
