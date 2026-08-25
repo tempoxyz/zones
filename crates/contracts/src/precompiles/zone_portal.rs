@@ -11,14 +11,10 @@ use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 
-/// Maximum number of deposits accepted by a portal in one Tempo block.
+/// Maximum deposits that may remain outstanding in portal.
 pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
-#[deprecated(note = "use MAX_UNPROCESSED_DEPOSITS")]
-pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = MAX_UNPROCESSED_DEPOSITS;
-/// Maximum number of token enablements imported from one Tempo block.
+/// Maximum token enablements that may remain outstanding in portal.
 pub const MAX_UNPROCESSED_TOKEN_ENABLEMENTS: usize = 8;
-#[deprecated(note = "use MAX_UNPROCESSED_TOKEN_ENABLEMENTS")]
-pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = MAX_UNPROCESSED_TOKEN_ENABLEMENTS;
 /// Maximum UTF-8 byte length of each enabled token metadata string.
 pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
