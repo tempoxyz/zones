@@ -171,6 +171,7 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
             retry_connection_interval: Duration::from_secs(1),
             leadership_sink: None,
             encryption_keys: None,
+            retain_portal_evidence: false,
         },
         local_state,
         deposit_queue: DepositQueue::default(),
@@ -1653,7 +1654,8 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 
 #[test]
 fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    subscriber.config.retain_portal_evidence = true;
     let portal = subscriber.config.portal_address;
 
     // A recognized topic0 with garbage payload must fence the whole block, never be skipped.
@@ -1681,7 +1683,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
-    assert_eq!(portal_logs.len(), 1);
+    assert_eq!(portal_logs.unwrap().len(), 1);
 }
 
 #[test]

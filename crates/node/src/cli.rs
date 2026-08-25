@@ -134,13 +134,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-        // Clone L1 connection details for the checker before they are moved into ZoneNode.
-        let checker_l1_rpc_url = args.l1_rpc_url.clone();
-        let checker_portal_address = args.portal_address;
-        let checker_zone_id = zone_id;
-        let checker_zone_chain_id = builder.config().chain.chain().id();
-        let checker_database_path = builder.config().datadir().data_dir().join("checker");
-
         let mut node = ZoneNode::new(
             args.l1_rpc_url.clone(),
             args.portal_address,
@@ -160,7 +153,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         }
 
         node = configure_sequencing(&args, zone_id, node).await?;
-        let checker_l1_block_tracker = node.l1_block_tracker();
 
         // Install or skip the checker ExEx based on the configured mode.
         match args.checker_mode {
@@ -173,13 +165,14 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             }
             CheckerMode::Observe => {
                 info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
+                let node = node.with_portal_evidence_retention();
                 let checker = CheckerExEx::new(CheckerConfig {
-                    l1_rpc_url: checker_l1_rpc_url,
-                    portal_address: checker_portal_address,
-                    zone_id: checker_zone_id,
-                    zone_chain_id: checker_zone_chain_id,
-                    database_path: checker_database_path,
-                    l1_block_tracker: checker_l1_block_tracker,
+                    l1_rpc_url: args.l1_rpc_url.clone(),
+                    portal_address: args.portal_address,
+                    zone_id,
+                    zone_chain_id: builder.config().chain.chain().id(),
+                    database_path: builder.config().datadir().data_dir().join("checker"),
+                    l1_block_tracker: node.l1_block_tracker(),
                 });
                 builder
                     .node(node)

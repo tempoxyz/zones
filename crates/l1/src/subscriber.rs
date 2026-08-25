@@ -328,7 +328,11 @@ impl L1BlockTracker {
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>, Vec<alloy_primitives::Log>);
+type L1ProcessedEvents = (
+    L1PortalEvents,
+    HashSet<Address>,
+    Option<Vec<alloy_primitives::Log>>,
+);
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
     (address == TIP403_REGISTRY_ADDRESS
@@ -377,6 +381,8 @@ pub struct L1SubscriberConfig {
     pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub encryption_keys: Option<crate::EncryptionKeyRing>,
+    /// Whether to retain authenticated Portal logs for external observers.
+    pub retain_portal_evidence: bool,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
@@ -770,7 +776,7 @@ impl L1Subscriber {
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
-            let parent_hash = sealed.parent_hash();
+            let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.config.leadership_sink {
@@ -810,12 +816,18 @@ impl L1Subscriber {
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
-            self.config.block_tracker.record_with_portal_evidence(
-                anchor,
-                parent_hash,
-                events.clone(),
-                portal_logs,
-            )?;
+            if let Some((parent_hash, logs)) = portal_evidence {
+                self.config.block_tracker.record_with_portal_evidence(
+                    anchor,
+                    parent_hash,
+                    events.clone(),
+                    logs,
+                )?;
+            } else {
+                self.config
+                    .block_tracker
+                    .record_with_portal_events(anchor, events.clone())?;
+            }
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
             self.apply_enabled_token_events(&events);
@@ -880,16 +892,16 @@ impl L1Subscriber {
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
-        let mut portal_logs = Vec::new();
+        let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
 
         for receipt in receipts {
-            let successful = receipt.status();
+            let retain_receipt_logs = portal_logs.is_some() && receipt.status();
             for log in receipt.logs() {
                 let address = log.address();
 
                 if address == portal_address {
-                    if successful {
-                        portal_logs.push(log.inner.clone());
+                    if retain_receipt_logs && let Some(logs) = &mut portal_logs {
+                        logs.push(log.inner.clone());
                     }
                     invalidated.insert(address);
                     if let Some(address) =
