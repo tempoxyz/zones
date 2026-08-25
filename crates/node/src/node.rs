@@ -258,6 +258,7 @@ impl ZoneNode {
             retry_connection_interval,
             leadership_sink: None,
             encryption_keys: None,
+            retain_portal_evidence: false,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -287,6 +288,12 @@ impl ZoneNode {
     /// Set the redacted RPC configuration.
     pub fn with_redacted_rpc(mut self, config: ZoneRedactedRpcConfig) -> Self {
         self.redacted_rpc_config = config;
+        self
+    }
+
+    /// Retain authenticated Portal logs for an external observer.
+    pub fn with_portal_evidence_retention(mut self) -> Self {
+        self.l1_config.retain_portal_evidence = true;
         self
     }
 

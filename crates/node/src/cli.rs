@@ -5,6 +5,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
+use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
 use tempo_evm::consensus::TempoConsensus;
@@ -18,6 +19,7 @@ use crate::{
     ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
+use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
     MAX_WITHDRAWAL_BATCH_GAS, WithdrawalBatchLimits,
@@ -152,8 +154,35 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
         node = configure_sequencing(&args, zone_id, node).await?;
 
-        let handle = builder.node(node).launch_with_debug_capabilities().await?;
-        handle.wait_for_node_exit().await
+        // Install or skip the checker ExEx based on the configured mode.
+        match args.checker_mode {
+            CheckerMode::Off => {
+                let handle = builder
+                    .node(node)
+                    .launch_with_debug_capabilities()
+                    .await?;
+                handle.wait_for_node_exit().await
+            }
+            CheckerMode::Observe => {
+                info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
+                let node = node.with_portal_evidence_retention();
+                let checker = CheckerExEx::new(CheckerConfig {
+                    l1_rpc_url: args.l1_rpc_url.clone(),
+                    portal_address: args.portal_address,
+                    zone_id,
+                    zone_chain_id: builder.config().chain.chain().id(),
+                    database_path: builder.config().datadir().data_dir().join("checker"),
+                    l1_block_tracker: node.l1_block_tracker(),
+                });
+                builder
+                    .node(node)
+                    .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
+                    .launch_with_debug_capabilities()
+                    .await?
+                    .wait_for_node_exit()
+                    .await
+            }
+        }
     })
 }
 
@@ -478,6 +507,15 @@ pub struct ZoneArgs {
     )]
     pub enable_sequencer: bool,
 
+    /// Checker ExEx mode: `off` (default) or `observe`.
+    #[arg(
+        long = "checker.mode",
+        env = "CHECKER_MODE",
+        default_value = "off",
+        value_parser = zone_checker::CheckerMode::parse,
+    )]
+    pub checker_mode: zone_checker::CheckerMode,
+
     /// Validate finalized batch candidates with the SPF without changing settlement.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
@@ -560,6 +598,50 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn checker_mode_defaults_to_off() {
+        let args = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ])
+        .unwrap()
+        .zone;
+        assert_eq!(args.checker_mode, zone_checker::CheckerMode::Off);
+    }
+
+    #[test]
+    fn checker_mode_observe_parses() {
+        let args = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--checker.mode",
+            "observe",
+        ])
+        .unwrap()
+        .zone;
+        assert_eq!(args.checker_mode, zone_checker::CheckerMode::Observe);
+    }
+
+    #[test]
+    fn checker_mode_enforce_is_rejected() {
+        let result = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--checker.mode",
+            "enforce",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
