@@ -738,6 +738,10 @@ async fn portal_parent_number(
     zone: &DynProvider<TempoNetwork>,
     discovery: &Discovery,
 ) -> Result<u64> {
+    if discovery.portal_block_hash.is_zero() {
+        return Ok(0);
+    }
+
     match zone.get_block_by_hash(discovery.portal_block_hash).await? {
         Some(block) => Ok(block.header.number()),
         None => {
@@ -758,17 +762,22 @@ async fn discover_batch(
     from_override: Option<u64>,
     to_override: Option<u64>,
 ) -> Result<(TempoHeader, u64, Vec<ExtractedBlock>)> {
-    let portal_parent_number = portal_parent_number(zone, discovery).await?;
-    let default_from = portal_parent_number
-        .checked_add(1)
-        .ok_or_else(|| eyre!("Zone block number overflow"))?;
-    let from = from_override.unwrap_or(default_from);
+    let from = match from_override {
+        Some(from) => from,
+        None => portal_parent_number(zone, discovery)
+            .await?
+            .checked_add(1)
+            .ok_or_else(|| eyre!("Zone block number overflow"))?,
+    };
     if from == 0 {
         bail!("a batch cannot start at Zone genesis block 0");
     }
     let parent_number = from - 1;
     let parent_header = zone_header(zone, parent_number).await?;
-    if from_override.is_none() && parent_header.hash_slow() != discovery.portal_block_hash {
+    if from_override.is_none()
+        && !discovery.portal_block_hash.is_zero()
+        && parent_header.hash_slow() != discovery.portal_block_hash
+    {
         bail!("resolved parent header does not match the portal block hash");
     }
 

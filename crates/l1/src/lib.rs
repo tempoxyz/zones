@@ -18,7 +18,7 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockNumberOrTag, NumHash};
-use alloy_network::primitives::HeaderResponse as _;
+use alloy_network::{ReceiptResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, Bloom, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
@@ -96,10 +96,11 @@ pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
 pub use subscriber::{
-    L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS,
+    AuthenticatedPortalLogs, L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink,
+    MAX_L1_LOOKAHEAD_BLOCKS, verify_receipts_against_header,
 };
 
 #[cfg(test)]
 pub(crate) use queue::PendingDeposits;
 #[cfg(test)]
-pub(crate) use subscriber::{LocalTempoCheckpointReader, verify_receipts};
+pub(crate) use subscriber::LocalTempoCheckpointReader;
