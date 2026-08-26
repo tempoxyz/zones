@@ -202,7 +202,7 @@ async fn batch_count(
     portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
 ) -> eyre::Result<usize> {
     Ok(portal
-        .BatchSubmitted_filter()
+        .BatchSubmitted_0_filter()
         .from_block(0)
         .query()
         .await?
@@ -232,7 +232,11 @@ async fn assert_batch_history_is_canonical(
     cluster: &RealP2pCluster,
     portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
 ) -> eyre::Result<u64> {
-    let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+    let events = portal
+        .BatchSubmitted_0_filter()
+        .from_block(0)
+        .query()
+        .await?;
     eyre::ensure!(!events.is_empty(), "no batches were submitted");
 
     let mut indices = HashSet::with_capacity(events.len());
@@ -770,7 +774,11 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
         || {
             let portal = &portal;
             async move {
-                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                let events = portal
+                    .BatchSubmitted_0_filter()
+                    .from_block(0)
+                    .query()
+                    .await?;
                 Ok(events
                     .iter()
                     .any(|(event, _)| event.nextBlockHash == boundary_hash)
