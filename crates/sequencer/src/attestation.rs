@@ -12,8 +12,16 @@ use alloy_sol_types::{Eip712Domain, SolStruct as _, SolValue as _, eip712_domain
 use eyre::WrapErr as _;
 use tokio::sync::{Notify, watch};
 
+use crate::settlement::BatchAnchor;
+
 type SettlementSignatures =
     BTreeMap<u64, BTreeMap<B256, BTreeMap<Address, SignedSettlementAttestation>>>;
+
+#[derive(Debug, Default)]
+struct AttestationState {
+    settlements: SettlementSignatures,
+    prepared_anchors: BTreeMap<u64, BatchAnchor>,
+}
 
 sol! {
     /// Exact settlement statement verified by ZonePortal.
@@ -119,7 +127,7 @@ pub struct SettlementCertificate {
 /// Settlement certificates shared by P2P and batch submission.
 #[derive(Debug, Clone)]
 pub struct AttestationStore {
-    settlements: Arc<RwLock<SettlementSignatures>>,
+    state: Arc<RwLock<AttestationState>>,
     settlement_changed: Arc<Notify>,
     submitted_height: watch::Sender<u64>,
 }
@@ -128,7 +136,7 @@ impl Default for AttestationStore {
     fn default() -> Self {
         let (submitted_height, _) = watch::channel(0);
         Self {
-            settlements: Arc::default(),
+            state: Arc::default(),
             settlement_changed: Arc::default(),
             submitted_height,
         }
@@ -151,12 +159,14 @@ impl AttestationStore {
         let digest = domain.settlement_digest(&signed.attestation);
 
         let (inserted, signature_count) = {
-            let mut all = self
-                .settlements
-                .write()
-                .expect("attestation store lock poisoned");
+            let mut state = self.state.write().expect("attestation store lock poisoned");
 
-            let signatures = all.entry(height).or_default().entry(digest).or_default();
+            let signatures = state
+                .settlements
+                .entry(height)
+                .or_default()
+                .entry(digest)
+                .or_default();
             let inserted = signatures.insert(signer, signed).is_none();
             (inserted, signatures.len())
         };
@@ -176,11 +186,9 @@ impl AttestationStore {
         leader: Address,
         follower: Address,
     ) -> eyre::Result<()> {
-        let all = self
+        let state = self.state.read().expect("attestation store lock poisoned");
+        let signatures = state
             .settlements
-            .read()
-            .expect("attestation store lock poisoned");
-        let signatures = all
             .get(&height)
             .and_then(|by_digest| by_digest.get(&digest))
             .filter(|signatures| signatures.contains_key(&leader))
@@ -208,11 +216,9 @@ impl AttestationStore {
         let digest = domain.settlement_digest(&signed.attestation);
 
         let signature_count = {
-            let mut all = self
+            let mut state = self.state.write().expect("attestation store lock poisoned");
+            let signatures = state
                 .settlements
-                .write()
-                .expect("attestation store lock poisoned");
-            let signatures = all
                 .get_mut(&height)
                 .and_then(|by_digest| by_digest.get_mut(&digest))
                 .filter(|signatures| signatures.contains_key(&leader))
@@ -254,11 +260,9 @@ impl AttestationStore {
 
     /// Get the settlement certificate at the zone block height
     fn settlement_at(&self, height: u64, quorum: usize) -> Option<SettlementCertificate> {
-        let all = self
+        let state = self.state.read().expect("attestation store lock poisoned");
+        let (digest, signatures) = state
             .settlements
-            .read()
-            .expect("attestation store lock poisoned");
-        let (digest, signatures) = all
             .get(&height)?
             .iter()
             .find(|(_, signatures)| signatures.len() >= quorum)?;
@@ -278,24 +282,47 @@ impl AttestationStore {
 
     /// Remove one unusable certificate without discarding other anchor candidates.
     pub fn remove_settlement(&self, height: u64, digest: B256) {
-        let mut settlements = self
-            .settlements
-            .write()
-            .expect("attestation store lock poisoned");
-        if let Some(by_digest) = settlements.get_mut(&height) {
+        let mut state = self.state.write().expect("attestation store lock poisoned");
+        if let Some(by_digest) = state.settlements.get_mut(&height) {
             by_digest.remove(&digest);
             if by_digest.is_empty() {
-                settlements.remove(&height);
+                state.settlements.remove(&height);
             }
         }
     }
 
+    /// Publish the monitor-owned anchor for a height, invalidating signatures for any previous
+    /// anchor at that height.
+    pub fn replace_prepared_anchor(&self, height: u64, anchor: BatchAnchor) {
+        let mut state = self.state.write().expect("attestation store lock poisoned");
+        if state.prepared_anchors.get(&height) != Some(&anchor) {
+            state.settlements.remove(&height);
+            state.prepared_anchors.insert(height, anchor);
+            self.settlement_changed.notify_one();
+        }
+    }
+
+    /// Return the monitor-owned anchor for a Zone height.
+    pub fn prepared_anchor(&self, height: u64) -> Option<BatchAnchor> {
+        self.state
+            .read()
+            .expect("attestation store lock poisoned")
+            .prepared_anchors
+            .get(&height)
+            .cloned()
+    }
+
     /// Remove all attestations covered by a confirmed batch submission.
     pub fn remove_submitted(&self, height: u64) {
-        self.settlements
-            .write()
-            .expect("attestation store lock poisoned")
-            .retain(|settlement_height, _| *settlement_height > height);
+        {
+            let mut state = self.state.write().expect("attestation store lock poisoned");
+            state
+                .settlements
+                .retain(|settlement_height, _| *settlement_height > height);
+            state
+                .prepared_anchors
+                .retain(|anchor_height, _| *anchor_height > height);
+        }
         self.submitted_height.send_if_modified(|submitted| {
             if height > *submitted {
                 *submitted = height;
@@ -479,5 +506,45 @@ mod tests {
 
         store.remove_submitted(10);
         assert!(store.settlement_at(10, 1).is_none());
+    }
+
+    #[test]
+    fn replacing_prepared_anchor_discards_the_old_certificate() {
+        let store = AttestationStore::default();
+        let signer = PrivateKeySigner::random();
+        let attestation = SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: 3,
+            zoneHeight: U256::from(10),
+            withdrawalBatchIndex: U256::from(1),
+            verifier: Address::repeat_byte(2),
+            tempoBlockNumber: 100,
+            anchorBlockNumber: 100,
+            anchorBlockHash: B256::repeat_byte(3),
+            blockTransitionHash: B256::repeat_byte(4),
+            depositQueueTransitionHash: B256::repeat_byte(5),
+            withdrawalQueueHash: B256::repeat_byte(6),
+            verifierConfigHash: B256::repeat_byte(7),
+        };
+        let first = crate::BatchAnchor::Direct {
+            block_hash: B256::repeat_byte(3),
+        };
+        store.replace_prepared_anchor(10, first);
+        store.insert_settlement(
+            domain(),
+            signer.address(),
+            SignedSettlementAttestation::sign(attestation, domain(), &signer).unwrap(),
+        );
+        assert!(store.settlement_at(10, 1).is_some());
+
+        let replacement = crate::BatchAnchor::Ancestry {
+            block_number: 108,
+            block_hash: B256::repeat_byte(10),
+            ancestry_headers: vec![Bytes::from_static(&[1])],
+        };
+        store.replace_prepared_anchor(10, replacement.clone());
+
+        assert!(store.settlement_at(10, 1).is_none());
+        assert_eq!(store.prepared_anchor(10), Some(replacement));
     }
 }

@@ -43,8 +43,8 @@ use crate::{
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
-        WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
-        read_zone_block_snapshot,
+        PreparedBatch, WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch,
+        fetch_finalized_batch_boundaries, read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -318,6 +318,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             Err(BatchSubmitError::PortalAdvanced) => {
                 unreachable!("portal advancement is reconciled by submit_batch_with_retry")
             }
+            Err(BatchSubmitError::PreparedAnchorInvalid(error)) => {
+                error!(
+                    from = scan_from,
+                    to = latest_zone_block,
+                    %error,
+                    "Prepared anchor invalidation escaped the rebuild loop; retrying on the next monitor tick"
+                );
+            }
             Err(BatchSubmitError::Other(error)) => {
                 error!(
                     from = scan_from,
@@ -491,14 +499,44 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             withdrawal_batch_index: finalized_batch.finalized_index,
         };
 
-        self.prove_and_submit_batch(from, &batch_data, to, finalized_batch.withdrawals, shutdown)
-            .await
+        loop {
+            let prepared = self
+                .batch_submitter
+                .prepare_batch(batch_data.clone())
+                .await?;
+            if let Some(store) = &self.config.attestation_store {
+                store.replace_prepared_anchor(to, prepared.anchor.clone());
+            }
+
+            match self
+                .prove_and_submit_batch(
+                    from,
+                    &prepared,
+                    to,
+                    finalized_batch.withdrawals.clone(),
+                    shutdown,
+                )
+                .await
+            {
+                Err(BatchSubmitError::PreparedAnchorInvalid(error)) => {
+                    warn!(
+                        zone_from = from,
+                        zone_to = to,
+                        anchor_block_number = prepared.anchor.block_number(batch_data.tempo_block_number),
+                        anchor_block_hash = %prepared.anchor.block_hash(),
+                        error = %error,
+                        "Prepared batch anchor expired or changed; rebuilding the settlement attempt"
+                    );
+                }
+                result => return result,
+            }
+        }
     }
 
     async fn prove_and_submit_batch(
         &mut self,
         from: u64,
-        batch_data: &BatchData,
+        prepared: &PreparedBatch,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
@@ -506,14 +544,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let proof_bundle = if let Some(prover) = &self.settlement_prover {
             Some(
                 prover
-                    .prove(from, last_zone_block, batch_data.clone())
+                    .prove(from, last_zone_block, prepared.clone())
                     .await?,
             )
         } else {
             None
         };
         self.submit_batch_with_retry(
-            batch_data,
+            prepared,
             proof_bundle.as_ref(),
             last_zone_block,
             withdrawals,
@@ -539,12 +577,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// on-chain state.
     async fn submit_batch_with_retry(
         &mut self,
-        batch_data: &BatchData,
+        prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
+        let batch_data = &prepared.batch;
         let mut delay = INITIAL_RETRY_DELAY;
 
         for attempt in 1..=MAX_RETRIES {
@@ -595,7 +634,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(batch_data, proof_bundle, shutdown)
+                .submit_batch(prepared, proof_bundle, shutdown)
                 .await
             {
                 Ok(event) => {
@@ -685,6 +724,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                     return Ok(());
                 }
+                Err(error @ BatchSubmitError::PreparedAnchorInvalid(_)) => return Err(error),
                 Err(BatchSubmitError::Other(e)) => {
                     self.metrics
                         .batch_submit_latency_seconds
@@ -1055,6 +1095,15 @@ mod tests {
         }
     }
 
+    fn prepared(batch: BatchData) -> PreparedBatch {
+        PreparedBatch {
+            anchor: crate::BatchAnchor::Direct {
+                block_hash: B256::ZERO,
+            },
+            batch,
+        }
+    }
+
     #[tokio::test]
     async fn attestation_failure_prevents_submit_batch() {
         let l1 = Asserter::new();
@@ -1078,7 +1127,7 @@ mod tests {
         let error = monitor
             .prove_and_submit_batch(
                 11,
-                &batch_data,
+                &prepared(batch_data),
                 20,
                 Vec::new(),
                 &sync::CancellationToken::new(),
@@ -1128,9 +1177,10 @@ mod tests {
 
         let shutdown = sync::CancellationToken::new();
         let submission_shutdown = shutdown.clone();
+        let prepared = prepared(batch_data.clone());
         let submission = tokio::spawn(async move {
             monitor
-                .submit_batch_with_retry(&batch_data, None, 71, Vec::new(), &submission_shutdown)
+                .submit_batch_with_retry(&prepared, None, 71, Vec::new(), &submission_shutdown)
                 .await
         });
 
@@ -1401,7 +1451,7 @@ mod tests {
 
         monitor
             .submit_batch_with_retry(
-                &batch_data,
+                &prepared(batch_data.clone()),
                 None,
                 20,
                 Vec::new(),
@@ -1454,7 +1504,7 @@ mod tests {
 
         let error = monitor
             .submit_batch_with_retry(
-                &batch_data,
+                &prepared(batch_data),
                 None,
                 pending_boundary,
                 Vec::new(),
@@ -1498,7 +1548,7 @@ mod tests {
 
         let error = monitor
             .submit_batch_with_retry(
-                &batch_data,
+                &prepared(batch_data),
                 None,
                 20,
                 Vec::new(),

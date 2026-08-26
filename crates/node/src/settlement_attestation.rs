@@ -188,7 +188,7 @@ pub(crate) async fn build_settlement_attestation<P>(
     provider: &P,
     number: u64,
     context: &AttestationContext,
-    proposed_anchor: Option<(u64, B256)>,
+    anchor: (u64, B256),
 ) -> eyre::Result<Option<SettlementAttestation>>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
@@ -229,25 +229,7 @@ where
         "zone withdrawal batch index {withdrawal_batch_index} does not follow portal index {portal_batch_index}"
     );
 
-    let (anchor_block_number, anchor_block_hash) = if let Some(anchor) = proposed_anchor {
-        anchor
-    } else {
-        let l1_tip = context.l1_provider.get_block_number().await?;
-        let gap = l1_tip.saturating_sub(commitments.tempo_block_number);
-        if gap < context.anchor_config.effective_window() {
-            (commitments.tempo_block_number, commitments.tempo_block_hash)
-        } else {
-            let anchor_number = l1_tip.saturating_sub(context.anchor_config.safety_margin());
-            let header = context
-                .l1_provider
-                .get_header_by_number(anchor_number.into())
-                .await?
-                .ok_or_eyre(format!("missing L1 anchor header {anchor_number}"))?
-                .inner
-                .inner;
-            (anchor_number, header.hash_slow())
-        }
-    };
+    let (anchor_block_number, anchor_block_hash) = anchor;
     validate_settlement_anchor(
         context,
         commitments.tempo_block_number,
@@ -558,7 +540,24 @@ async fn propose_settlement<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
-    let Some(attestation) = build_settlement_attestation(provider, number, context, None).await?
+    let commitments = block_commitments(provider, number)?;
+    if commitments.withdrawal.is_none() {
+        return Ok(false);
+    }
+    let anchor = context
+        .store
+        .prepared_anchor(number)
+        .ok_or_else(|| eyre::eyre!("zone monitor has not prepared settlement boundary {number}"))?;
+    let Some(attestation) = build_settlement_attestation(
+        provider,
+        number,
+        context,
+        (
+            anchor.block_number(commitments.tempo_block_number),
+            anchor.block_hash(),
+        ),
+    )
+    .await?
     else {
         return Ok(false);
     };

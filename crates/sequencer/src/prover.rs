@@ -39,7 +39,7 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
+use crate::{BatchAnchor, BatchData, PreparedBatch, ZoneSequencerProvider, metrics::ProverMetrics};
 
 /// Number of candidates allowed to wait behind the active validation.
 const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
@@ -85,7 +85,7 @@ pub(crate) struct SettlementProver {
 struct ProverJob {
     from: u64,
     to: u64,
-    batch: BatchData,
+    prepared: PreparedBatch,
     enqueued_at: Instant,
     response: oneshot::Sender<Result<ProofBundle>>,
 }
@@ -104,7 +104,6 @@ struct ValidationStats {
 struct ProverContext<P> {
     config: SettlementProverConfig,
     portal: Address,
-    anchor_config: BatchAnchorConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 }
@@ -117,16 +116,9 @@ struct ZoneInputs {
     initial_tempo_hash: B256,
 }
 
-struct Anchor {
-    number: u64,
-    hash: B256,
-    ancestry_headers: Vec<Bytes>,
-}
-
 pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     config: SettlementProverConfig,
     portal: Address,
-    anchor_config: BatchAnchorConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 ) -> SettlementProver {
@@ -141,7 +133,6 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     let context = ProverContext {
         config,
         portal,
-        anchor_config,
         zone_provider,
         l1_provider,
     };
@@ -179,8 +170,8 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
                         zone_to = job.to,
-                        prev_block_hash = %job.batch.prev_block_hash,
-                        next_block_hash = %job.batch.next_block_hash,
+                        prev_block_hash = %job.prepared.batch.prev_block_hash,
+                        next_block_hash = %job.prepared.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
                         witness_bytes = stats.witness_bytes,
                         blocks = stats.blocks,
@@ -199,8 +190,8 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
                         zone_to = job.to,
-                        prev_block_hash = %job.batch.prev_block_hash,
-                        next_block_hash = %job.batch.next_block_hash,
+                        prev_block_hash = %job.prepared.batch.prev_block_hash,
+                        next_block_hash = %job.prepared.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
                         error = ?err,
                         "Settlement prover failed to produce an attested batch proof"
@@ -217,13 +208,18 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
 
 impl SettlementProver {
     /// Produce the proof required to settle one finalized batch.
-    pub(crate) async fn prove(&self, from: u64, to: u64, batch: BatchData) -> Result<ProofBundle> {
+    pub(crate) async fn prove(
+        &self,
+        from: u64,
+        to: u64,
+        prepared: PreparedBatch,
+    ) -> Result<ProofBundle> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ProverJob {
                 from,
                 to,
-                batch,
+                prepared,
                 enqueued_at: Instant::now(),
                 response,
             })
@@ -251,23 +247,24 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     job: &ProverJob,
     metrics: &ProverMetrics,
 ) -> Result<(ValidationStats, ProofBundle)> {
+    let batch = &job.prepared.batch;
     ensure!(
-        job.batch.zone_height == job.to,
+        batch.zone_height == job.to,
         "candidate zone height {} does not match range end {}",
-        job.batch.zone_height,
+        batch.zone_height,
         job.to
     );
     ensure!(
-        job.from != 1 || job.batch.prev_block_hash.is_zero(),
+        job.from != 1 || batch.prev_block_hash.is_zero(),
         "first Zone batch must use the zero portal prev_block_hash sentinel, found {}",
-        job.batch.prev_block_hash
+        batch.prev_block_hash
     );
 
     let zone_provider = context.zone_provider.clone();
     let from = job.from;
     let to = job.to;
-    let expected_prev_hash = job.batch.prev_block_hash;
-    let expected_next_hash = job.batch.next_block_hash;
+    let expected_prev_hash = batch.prev_block_hash;
+    let expected_next_hash = batch.next_block_hash;
 
     let started = Instant::now();
     let zone_inputs = tokio::task::spawn_blocking(move || {
@@ -293,7 +290,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    let (initial_tempo_header, final_tempo_header, anchor) = async {
+    let (initial_tempo_header, final_tempo_header) = async {
         let initial_tempo_header =
             tempo_header(&context.l1_provider, zone_inputs.initial_tempo_number)
                 .await
@@ -313,20 +310,18 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             .transpose()?
             .unwrap_or_else(|| initial_tempo_header.clone());
         ensure!(
-            final_tempo_header.number() == job.batch.tempo_block_number,
+            final_tempo_header.number() == batch.tempo_block_number,
             "candidate Tempo block is {}, but the final advanceTempo header is {}",
-            job.batch.tempo_block_number,
+            batch.tempo_block_number,
             final_tempo_header.number()
         );
 
-        let anchor = resolve_anchor(
-            &context.l1_provider,
+        validate_prepared_anchor(
+            &job.prepared.anchor,
             final_tempo_header.number(),
             final_tempo_header.hash_slow(),
-            context.anchor_config,
-        )
-        .await?;
-        Ok::<_, eyre::Report>((initial_tempo_header, final_tempo_header, anchor))
+        )?;
+        Ok::<_, eyre::Report>((initial_tempo_header, final_tempo_header))
     }
     .await?;
     metrics
@@ -348,15 +343,15 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             zone_id: context.config.zone_id,
             portal: context.portal,
             tempo_block_number: final_tempo_header.number(),
-            anchor_block_number: anchor.number,
-            anchor_block_hash: anchor.hash,
-            expected_withdrawal_batch_index: job.batch.withdrawal_batch_index,
+            anchor_block_number: job.prepared.anchor.block_number(batch.tempo_block_number),
+            anchor_block_hash: job.prepared.anchor.block_hash(),
+            expected_withdrawal_batch_index: batch.withdrawal_batch_index,
         },
         parent_header: zone_inputs.parent_header,
         zone_blocks: zone_inputs.blocks,
         zone_state_witness,
         tempo_state_witness,
-        tempo_ancestry_headers: anchor.ancestry_headers,
+        tempo_ancestry_headers: job.prepared.anchor.ancestry_headers().to_vec(),
     };
 
     let started = Instant::now();
@@ -378,7 +373,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
+    compare_output(&output, batch, witness.parent_header.hash_slow())?;
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -419,7 +414,7 @@ async fn verify_remotely(
         version: PROTOCOL_VERSION,
         request_id: format!(
             "zone-{zone_id}-{}-{}-{}",
-            job.from, job.to, job.batch.next_block_hash
+            job.from, job.to, job.prepared.batch.next_block_hash
         ),
         witness: witness.clone(),
     };
@@ -808,48 +803,54 @@ async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Resu
         .ok_or_eyre(format!("Tempo block {number} not found"))
 }
 
-async fn resolve_anchor(
-    provider: &DynProvider<TempoNetwork>,
+fn validate_prepared_anchor(
+    anchor: &BatchAnchor,
     checkpoint_number: u64,
     checkpoint_hash: B256,
-    config: BatchAnchorConfig,
-) -> Result<Anchor> {
-    let tip = provider.get_block_number().await?;
-    ensure!(
-        checkpoint_number <= tip,
-        "Tempo checkpoint {checkpoint_number} is not yet confirmed behind tip {tip}"
-    );
-    let gap = tip - checkpoint_number;
-    if gap < config.effective_window() {
-        return Ok(Anchor {
-            number: checkpoint_number,
-            hash: checkpoint_hash,
-            ancestry_headers: Vec::new(),
-        });
-    }
+) -> Result<()> {
+    let BatchAnchor::Ancestry {
+        block_number,
+        block_hash,
+        ancestry_headers,
+    } = anchor
+    else {
+        ensure!(
+            anchor.block_hash() == checkpoint_hash,
+            "direct Tempo anchor hash {} does not match checkpoint {checkpoint_hash}",
+            anchor.block_hash()
+        );
+        return Ok(());
+    };
 
-    let anchor_number = tip.saturating_sub(config.safety_margin());
     ensure!(
-        anchor_number > checkpoint_number,
-        "Tempo ancestry anchor {anchor_number} does not follow checkpoint {checkpoint_number}"
+        *block_number > checkpoint_number,
+        "Tempo ancestry anchor {block_number} does not follow checkpoint {checkpoint_number}"
+    );
+    ensure!(
+        ancestry_headers.len() == (*block_number - checkpoint_number) as usize,
+        "Tempo ancestry header count does not cover checkpoint {checkpoint_number} through anchor {block_number}"
     );
     let mut expected_parent = checkpoint_hash;
-    let mut ancestry_headers = Vec::with_capacity((anchor_number - checkpoint_number) as usize);
-    for number in checkpoint_number + 1..=anchor_number {
-        let header = tempo_header(provider, number).await?;
+    for (offset, encoded) in ancestry_headers.iter().enumerate() {
+        let number = checkpoint_number + 1 + offset as u64;
+        let header = decode_tempo_header(encoded)?;
+        ensure!(
+            header.number() == number,
+            "Tempo ancestry returned block {} at expected height {number}",
+            header.number()
+        );
         ensure!(
             header.parent_hash() == expected_parent,
             "Tempo ancestry broke at block {number}: expected parent {expected_parent}, found {}",
             header.parent_hash()
         );
         expected_parent = header.hash_slow();
-        ancestry_headers.push(Bytes::from(alloy_rlp::encode(&header)));
     }
-    Ok(Anchor {
-        number: anchor_number,
-        hash: expected_parent,
-        ancestry_headers,
-    })
+    ensure!(
+        expected_parent == *block_hash,
+        "Tempo ancestry ends at {expected_parent}, not prepared anchor hash {block_hash}"
+    );
+    Ok(())
 }
 
 fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B256) -> Result<()> {
@@ -932,6 +933,7 @@ fn witness_size(witness: &BatchWitness) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header as ConsensusHeader;
 
     #[test]
     fn rejects_noncanonical_verifier_config() {
@@ -947,5 +949,49 @@ mod tests {
                 .to_string()
                 .contains("unsupported verifier config 0x02; expected 0x01")
         );
+    }
+
+    fn ancestry_header(number: u64, parent_hash: B256) -> (Bytes, B256) {
+        let header = TempoHeader {
+            inner: ConsensusHeader {
+                number,
+                parent_hash,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let hash = header.hash_slow();
+        (Bytes::from(alloy_rlp::encode(&header)), hash)
+    }
+
+    #[test]
+    fn prover_uses_the_prepared_ancestry_without_sampling_a_head() {
+        let checkpoint_number = 162_000;
+        let checkpoint_hash = B256::repeat_byte(0x11);
+        let (first, first_hash) = ancestry_header(checkpoint_number + 1, checkpoint_hash);
+        let (second, anchor_hash) = ancestry_header(checkpoint_number + 2, first_hash);
+        let anchor = BatchAnchor::Ancestry {
+            block_number: checkpoint_number + 2,
+            block_hash: anchor_hash,
+            ancestry_headers: vec![first, second],
+        };
+
+        validate_prepared_anchor(&anchor, checkpoint_number, checkpoint_hash).unwrap();
+    }
+
+    #[test]
+    fn prover_rejects_a_prepared_anchor_with_a_different_terminal_hash() {
+        let checkpoint_number = 162_000;
+        let checkpoint_hash = B256::repeat_byte(0x11);
+        let (header, _) = ancestry_header(checkpoint_number + 1, checkpoint_hash);
+        let anchor = BatchAnchor::Ancestry {
+            block_number: checkpoint_number + 1,
+            block_hash: B256::repeat_byte(0x22),
+            ancestry_headers: vec![header],
+        };
+
+        let error = validate_prepared_anchor(&anchor, checkpoint_number, checkpoint_hash)
+            .expect_err("terminal anchor mismatch must fail proving");
+        assert!(error.to_string().contains("not prepared anchor hash"));
     }
 }
