@@ -339,7 +339,7 @@ jobs:
           planned_singleton_withdrawal_gas=0
           case "$neobank_preset" in
             encrypted-deposit) ;;
-            # Startup creates and retains an Earn anchor position with the full
+            # Startup creates and retains an Earn warmup position with the full
             # callback allowance before measured steady-state withdrawals.
             *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10000000)) ;;
           esac

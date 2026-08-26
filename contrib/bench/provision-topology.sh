@@ -704,7 +704,7 @@ provision_up() {
     local planned_singleton_withdrawal_gas=0
     case "$neobank_preset" in
         encrypted-deposit) ;;
-        # The untimed Earn anchor always uses the 10M protocol maximum.
+        # The untimed Earn warmup always uses the 10M protocol maximum.
         *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10000000)) ;;
     esac
     (( planned_singleton_withdrawal_gas == 0 ||
