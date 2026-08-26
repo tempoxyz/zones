@@ -107,6 +107,7 @@ jobs:
     outputs:
       candidate_repository: ${{ steps.candidate.outputs.repository }}
       candidate_tag: ${{ steps.candidate.outputs.tag }}
+      candidate_digest: ${{ steps.bake.outputs.digest }}
     env:
       CANDIDATE_REPOSITORY: ghcr.io/tempoxyz/tempo-zone-repro
       SOURCE_DATE_EPOCH: ${{ needs.reproducible-verify-resolve.outputs.source_date_epoch }}
@@ -141,14 +142,28 @@ jobs:
           echo "tag=$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build and push reproducible candidate image
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
-        with:
-          files: docker/docker-bake.hcl
-          targets: tempo-zone-reproducible
-          project: 0c6tg19qsp
-          push: true
-          set: |
-            tempo-zone-reproducible.tags=${{ steps.candidate.outputs.repository }}:${{ steps.candidate.outputs.tag }}
+        id: bake
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          metadata_file="$RUNNER_TEMP/depot-bake-metadata.json"
+          depot bake \
+            --project 0c6tg19qsp \
+            --push \
+            --metadata-file "$metadata_file" \
+            -f docker/docker-bake.hcl \
+            --set "tempo-zone-reproducible.tags=${{ steps.candidate.outputs.repository }}:${{ steps.candidate.outputs.tag }}" \
+            tempo-zone-reproducible
+
+          digest="$(jq -er \
+            '.["tempo-zone-reproducible"]["containerimage.digest"]' \
+            "$metadata_file")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "Depot did not return a valid image digest: $digest" >&2
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   reproducible-verify-clean-rebuild:
     name: Rebuild reproducibly without Docker cache
@@ -213,13 +228,14 @@ jobs:
           COMMIT_SHA: ${{ needs.reproducible-verify-resolve.outputs.commit_sha }}
           CANDIDATE_REPOSITORY: ${{ needs.reproducible-verify-depot-build-and-push.outputs.candidate_repository }}
           CANDIDATE_TAG: ${{ needs.reproducible-verify-depot-build-and-push.outputs.candidate_tag }}
+          CANDIDATE_DIGEST: ${{ needs.reproducible-verify-depot-build-and-push.outputs.candidate_digest }}
           CLEAN_SHA256: ${{ needs.reproducible-verify-clean-rebuild.outputs.clean_sha256 }}
           BINARY_PATH: /usr/local/bin/tempo-zone
           MANIFEST: ${{ runner.temp }}/reproducible-image-verification.json
         run: |
           set -Eeuo pipefail
 
-          image_digest=""
+          image_digest="$CANDIDATE_DIGEST"
           depot_sha256=""
           comparison_result="failed"
           failure=""
@@ -259,24 +275,28 @@ jobs:
           }
           trap cleanup EXIT
 
-          tagged_image="$CANDIDATE_REPOSITORY:$CANDIDATE_TAG"
-          for attempt in {1..12}; do
-            image_digest="$(docker buildx imagetools inspect "$tagged_image" \
-              --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
-            if [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              break
-            fi
-            echo "Waiting for $tagged_image to become readable (attempt $attempt/12)"
-            sleep 5
-          done
           if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            failure="could not resolve candidate image digest"
-            echo "Could not resolve a valid digest for $tagged_image" >&2
+            failure="Depot returned an invalid candidate image digest"
+            echo "Invalid Depot digest: $image_digest" >&2
             exit 1
           fi
 
           immutable_image="$CANDIDATE_REPOSITORY@$image_digest"
-          docker pull "$immutable_image"
+          pulled=false
+          for attempt in {1..12}; do
+            if docker pull "$immutable_image"; then
+              pulled=true
+              break
+            fi
+            echo "Waiting for $immutable_image to become readable (attempt $attempt/12)"
+            sleep 5
+          done
+          if [[ "$pulled" != true ]]; then
+            failure="could not pull Depot-produced candidate image digest"
+            echo "Could not pull $immutable_image" >&2
+            exit 1
+          fi
+
           container_id="$(docker create "$immutable_image")"
           docker cp "$container_id:$BINARY_PATH" "$RUNNER_TEMP/tempo-zone"
           depot_sha256="$(sha256sum "$RUNNER_TEMP/tempo-zone" | awk '{print $1}')"
