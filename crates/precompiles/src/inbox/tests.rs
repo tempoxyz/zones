@@ -121,12 +121,17 @@ impl Harness {
             .unwrap();
     }
 
-    fn set_token_enablement_hash(&self, hash: B256) {
+    fn set_token_enablements(&self, enabled_tokens: &[EnabledToken]) {
+        let hash = enabled_tokens
+            .iter()
+            .fold(B256::ZERO, |hash, enabled| enabled.hash_with_previous(hash));
+        let tokens = enabled_tokens.iter().map(|enabled| enabled.token).collect();
         self.l1
             .with_storage(1, || {
-                ZonePortalStorage::new(PORTAL)
-                    .token_enablement_hash
-                    .write(hash)
+                let mut portal = ZonePortalStorage::new(PORTAL);
+                portal.token_enablement_hash.write(hash)?;
+                portal.enabled_tokens.write(tokens)?;
+                Ok(())
             })
             .unwrap();
     }
@@ -261,10 +266,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
     let enabled_tokens = (1..=token_enablements)
         .map(|index| maximum_metadata_token(index as u16))
         .collect::<Vec<_>>();
-    let token_enablement_hash = enabled_tokens
-        .iter()
-        .fold(B256::ZERO, |hash, enabled| enabled.hash_with_previous(hash));
-    harness.set_token_enablement_hash(token_enablement_hash);
+    harness.set_token_enablements(&enabled_tokens);
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -599,7 +601,7 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         symbol: "EXD".into(),
         currency: "USD".into(),
     };
-    harness.set_token_enablement_hash(enabled.hash_with_previous(B256::ZERO));
+    harness.set_token_enablements(std::slice::from_ref(&enabled));
 
     harness.call(
         Address::ZERO,
@@ -636,7 +638,7 @@ fn omitted_token_enablement_reverts() -> eyre::Result<()> {
         currency: "USD".into(),
     };
 
-    harness.set_token_enablement_hash(enabled.hash_with_previous(B256::ZERO));
+    harness.set_token_enablements(std::slice::from_ref(&enabled));
     harness.set_queue_hash(B256::ZERO);
 
     let output = harness.call(
