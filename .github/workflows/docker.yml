@@ -61,6 +61,7 @@ jobs:
       commit_sha: ${{ steps.commit.outputs.commit_sha }}
       short_sha: ${{ steps.commit.outputs.short_sha }}
       source_date_epoch: ${{ steps.commit.outputs.source_date_epoch }}
+      staging_tag: ${{ steps.commit.outputs.staging_tag }}
       version: ${{ steps.commit.outputs.version }}
     steps:
       - name: Check out workflow commit
@@ -94,6 +95,7 @@ jobs:
             echo "commit_sha=$commit_sha"
             echo "short_sha=$short_sha"
             echo "source_date_epoch=$source_date_epoch"
+            echo "staging_tag=verify-${commit_sha}-${GITHUB_RUN_ID}"
             echo "version=sha-$short_sha"
           } >> "$GITHUB_OUTPUT"
 
@@ -474,9 +476,14 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    env:
+      GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
+      SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
+      VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
+      VERGEN_GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
+      VERGEN_GIT_SHA_SHORT: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
     outputs:
-      production_repository: ${{ steps.production-image.outputs.repository }}
-      production_tag: ${{ steps.production-image.outputs.tag }}
+      tempo_zone_tags: ${{ steps.meta-tempo-zone.outputs.tags }}
     steps:
       - name: Check out resolved commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -549,16 +556,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Record immutable verification reference
-        id: production-image
-        shell: bash
-        env:
-          SHORT_SHA: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
-        run: |
-          set -euo pipefail
-          echo "repository=${REGISTRY}/tempo-zone" >> "$GITHUB_OUTPUT"
-          echo "tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
       - name: Download Tempo devnet genesis
         shell: bash
         run: |
@@ -575,7 +572,29 @@ jobs:
           genesis_sha=$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)
           echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
 
-      - name: Build and push Docker images
+      # Main and release-tag production tags are attached only after the staged
+      # image passes binary reproducibility verification.
+      - name: Build and stage production tempo-zone
+        if: >-
+          github.repository == 'tempoxyz/zones' &&
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        with:
+          files: |
+            docker/docker-bake.hcl
+            ${{ steps.meta-tempo-zone.outputs.bake-file }}
+          targets: tempo-zone
+          project: 0c6tg19qsp
+          push: true
+          set: |
+            tempo-zone.tags=${{ env.REGISTRY }}/tempo-zone:${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
+
+      - name: Build and push non-production Docker images
+        if: >-
+          !(github.repository == 'tempoxyz/zones' &&
+            github.event_name == 'push' &&
+            (github.ref == 'refs/heads/main' || github.ref_type == 'tag'))
         uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
         with:
           files: |
@@ -585,17 +604,22 @@ jobs:
           targets: default
           project: 0c6tg19qsp
           push: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
-          # Scheduled builds refresh moving external tools and base images. All
-          # commit/tag/manual builds can safely reuse Depot's content-addressed
-          # layer cache and will still invalidate layers when inputs change.
           no-cache: ${{ github.event_name == 'schedule' }}
           pull: ${{ github.event_name == 'schedule' }}
-        env:
-          GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
-          SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
-          VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
-          VERGEN_GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
-          VERGEN_GIT_SHA_SHORT: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
+
+      - name: Build and push production tempo-zone-xtask
+        if: >-
+          github.repository == 'tempoxyz/zones' &&
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        with:
+          files: |
+            docker/docker-bake.hcl
+            ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
+          targets: tempo-zone-xtask
+          project: 0c6tg19qsp
+          push: true
 
       # Nitro CLI converts an image from the runner's local Docker image store.
       - name: Load tempo-zone-prover enclave payload
@@ -664,79 +688,6 @@ jobs:
           path: target/tempo-zone-prover-eif/measurements.json
           if-no-files-found: error
 
-      - name: Publish Zones CI event
-        if: >-
-          github.repository == 'tempoxyz/zones' &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main'
-        shell: bash
-        env:
-          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
-          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
-          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
-          COMMIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
-          SHORT_SHA: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
-        run: |
-          set -euo pipefail
-
-          image="${REGISTRY}/tempo-zone:sha-${SHORT_SHA}"
-          digest=""
-          for attempt in {1..12}; do
-            digest=$(docker buildx imagetools inspect "$image" \
-              --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-            if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              break
-            fi
-            echo "Waiting for $image to become readable (attempt $attempt/12)"
-            sleep 5
-          done
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "Could not resolve a valid digest for $image" >&2
-            exit 1
-          }
-
-          install -m 0700 -d "$RUNNER_TEMP/events"
-          printf '%s' "$EVENTS_KEY" > "$RUNNER_TEMP/events/key.pem"
-          printf '%s' "$EVENTS_CERT" > "$RUNNER_TEMP/events/cert.pem"
-          payload=$(jq -cn \
-            --arg tag "sha-${SHORT_SHA}" \
-            --arg sha "$COMMIT_SHA" \
-            --arg branch "$GITHUB_REF_NAME" \
-            --arg digest "$digest" \
-            '{
-              repository: "tempoxyz/zones",
-              event: "registry_package",
-              data: {
-                tag: $tag,
-                sha: $sha,
-                branch: $branch,
-                digest: $digest
-              }
-            }')
-          command -v python3 >/dev/null || {
-            echo "python3 is required to parse EVENTS_ARGS" >&2
-            exit 1
-          }
-          mapfile -t events_args < <(
-            python3 - "$EVENTS_ARGS" <<'PY'
-          import shlex
-          import sys
-
-          for argument in shlex.split(sys.argv[1]):
-              print(argument)
-          PY
-          )
-          (( ${#events_args[@]} > 0 )) || {
-            echo "EVENTS_ARGS is empty" >&2
-            exit 1
-          }
-          curl --fail-with-body --silent --show-error \
-            --key "$RUNNER_TEMP/events/key.pem" \
-            --cert "$RUNNER_TEMP/events/cert.pem" \
-            "${events_args[@]}" \
-            -H "Content-Type: application/json" \
-            -d "$payload"
-
   production-reproducible-clean-rebuild:
     name: Rebuild production contract without Docker cache
     needs: resolve-production-build-inputs
@@ -782,7 +733,7 @@ jobs:
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
 
   production-reproducible-verify:
-    name: Verify production tempo-zone binary
+    name: Verify staged production tempo-zone binary
     needs:
       - resolve-production-build-inputs
       - build-and-push
@@ -794,6 +745,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: read
+    outputs:
+      image_digest: ${{ steps.compare.outputs.image_digest }}
+      image_sha256: ${{ steps.compare.outputs.image_sha256 }}
     steps:
       - name: Log in to Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -802,14 +756,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the image digest, extract the binary, and compare
+      - name: Resolve the staged digest, extract the binary, and compare
+        id: compare
         shell: bash
         env:
           COMMIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
           SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
           VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
-          IMAGE_REPOSITORY: ${{ needs.build-and-push.outputs.production_repository }}
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.production_tag }}
+          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/tempo-zone
+          IMAGE_TAG: ${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
           CLEAN_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_sha256 }}
           BINARY_PATH: /usr/local/bin/tempo-zone
           CONTRACT_NAME: tempo-zone-linux-x86_64-reproducible
@@ -881,7 +836,7 @@ jobs:
             sleep 5
           done
           if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            failure="could not resolve production image digest"
+            failure="could not resolve staged production image digest"
             echo "Could not resolve a valid digest for $tagged_image" >&2
             exit 1
           fi
@@ -899,12 +854,17 @@ jobs:
 
           if [[ "$image_sha256" == "$CLEAN_SHA256" ]]; then
             comparison_result="success"
-            echo "Production tempo-zone binary checksum matches clean rebuild"
+            echo "Staged production tempo-zone binary checksum matches clean rebuild"
           else
-            failure="production image binary checksum does not match clean rebuild"
-            echo "::error::Production reproducible binary verification mismatch"
+            failure="staged production image binary checksum does not match clean rebuild"
+            echo "::error::Staged production reproducible binary verification mismatch"
             exit 1
           fi
+
+          {
+            echo "image_digest=$image_digest"
+            echo "image_sha256=$image_sha256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload verification manifest
         if: always()
@@ -914,3 +874,162 @@ jobs:
           path: ${{ runner.temp }}/production-reproducible-image-verification.json
           if-no-files-found: warn
           retention-days: 7
+
+  promote-verified-tempo-zone:
+    name: Promote verified tempo-zone image
+    needs:
+      - resolve-production-build-inputs
+      - build-and-push
+      - production-reproducible-verify
+    if: >-
+      needs.production-reproducible-verify.result == 'success' &&
+      github.repository == 'tempoxyz/zones' &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Log in to Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote the verified manifest and recheck its binary
+        id: promote
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/tempo-zone
+          STAGING_DIGEST: ${{ needs.production-reproducible-verify.outputs.image_digest }}
+          VERIFIED_BINARY_SHA256: ${{ needs.production-reproducible-verify.outputs.image_sha256 }}
+          METADATA_TAGS: ${{ needs.build-and-push.outputs.tempo_zone_tags }}
+          BINARY_PATH: /usr/local/bin/tempo-zone
+        run: |
+          set -Eeuo pipefail
+
+          [[ "$STAGING_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "Invalid staged image digest: $STAGING_DIGEST" >&2
+            exit 1
+          }
+          [[ "$VERIFIED_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Invalid verified binary SHA-256: $VERIFIED_BINARY_SHA256" >&2
+            exit 1
+          }
+
+          mapfile -t metadata_tags <<< "$METADATA_TAGS"
+          tag_args=()
+          tags=()
+          for tag in "${metadata_tags[@]}"; do
+            tag="${tag%$'\r'}"
+            [[ -z "$tag" ]] && continue
+            [[ "$tag" == "$IMAGE_REPOSITORY:"* ]] || {
+              echo "Unexpected tempo-zone tag: $tag" >&2
+              exit 1
+            }
+            tag_args+=(--tag "$tag")
+            tags+=("$tag")
+          done
+          (( ${#tags[@]} > 0 )) || {
+            echo "No production tempo-zone tags were generated" >&2
+            exit 1
+          }
+
+          source_image="$IMAGE_REPOSITORY@$STAGING_DIGEST"
+          docker buildx imagetools create --prefer-index=false \
+            "${tag_args[@]}" "$source_image"
+
+          for tag in "${tags[@]}"; do
+            tag_digest=""
+            for attempt in {1..12}; do
+              tag_digest="$(docker buildx imagetools inspect "$tag" \
+                --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+              if [[ "$tag_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                break
+              fi
+              echo "Waiting for $tag to become readable (attempt $attempt/12)"
+              sleep 5
+            done
+            [[ "$tag_digest" == "$STAGING_DIGEST" ]] || {
+              echo "Promotion changed $tag from $STAGING_DIGEST to $tag_digest" >&2
+              exit 1
+            }
+          done
+
+          container_id=""
+          cleanup() {
+            if [[ -n "$container_id" ]]; then
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          docker pull "$source_image"
+          container_id="$(docker create "$source_image")"
+          docker cp "$container_id:$BINARY_PATH" "$RUNNER_TEMP/tempo-zone"
+          promoted_sha256="$(sha256sum "$RUNNER_TEMP/tempo-zone" | awk '{print $1}')"
+          [[ "$promoted_sha256" == "$VERIFIED_BINARY_SHA256" ]] || {
+            echo "Promoted tempo-zone binary checksum changed" >&2
+            exit 1
+          }
+
+          {
+            echo "image_digest=$STAGING_DIGEST"
+            echo "binary_sha256=$promoted_sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish Zones CI event
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
+          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
+          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
+          COMMIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
+          SHORT_SHA: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
+          IMAGE_DIGEST: ${{ steps.promote.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+
+          install -m 0700 -d "$RUNNER_TEMP/events"
+          printf '%s' "$EVENTS_KEY" > "$RUNNER_TEMP/events/key.pem"
+          printf '%s' "$EVENTS_CERT" > "$RUNNER_TEMP/events/cert.pem"
+          payload=$(jq -cn \
+            --arg tag "sha-${SHORT_SHA}" \
+            --arg sha "$COMMIT_SHA" \
+            --arg branch "$GITHUB_REF_NAME" \
+            --arg digest "$IMAGE_DIGEST" \
+            '{
+              repository: "tempoxyz/zones",
+              event: "registry_package",
+              data: {
+                tag: $tag,
+                sha: $sha,
+                branch: $branch,
+                digest: $digest
+              }
+            }')
+          command -v python3 >/dev/null || {
+            echo "python3 is required to parse EVENTS_ARGS" >&2
+            exit 1
+          }
+          mapfile -t events_args < <(
+            python3 - "$EVENTS_ARGS" <<'PY'
+          import shlex
+          import sys
+
+          for argument in shlex.split(sys.argv[1]):
+              print(argument)
+          PY
+          )
+          (( ${#events_args[@]} > 0 )) || {
+            echo "EVENTS_ARGS is empty" >&2
+            exit 1
+          }
+          curl --fail-with-body --silent --show-error \
+            --key "$RUNNER_TEMP/events/key.pem" \
+            --cert "$RUNNER_TEMP/events/cert.pem" \
+            "${events_args[@]}" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
