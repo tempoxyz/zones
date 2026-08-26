@@ -446,31 +446,44 @@ fn zone_timestamp_millis(
         .max(parent_timestamp_millis.saturating_add(1))
 }
 
-/// Wait until the next valid Zone timestamp is no longer ahead of wall-clock time.
+/// Wait until the next valid Zone timestamp is not in the future, then return it.
 async fn paced_zone_timestamp_millis(
     l1_timestamp_millis: u64,
     parent_timestamp_millis: u64,
 ) -> eyre::Result<u64> {
-    loop {
-        let wall_clock_timestamp_millis = SystemTime::now()
+    let mut wall_clock_timestamp_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    let timestamp_millis = zone_timestamp_millis(
+        l1_timestamp_millis,
+        parent_timestamp_millis,
+        wall_clock_timestamp_millis,
+    );
+
+    // If the next Zone timestamp is ahead of wall-clock time, wait until wall-clock catches up
+    // since validation doesn't allow future timestamps.
+    if timestamp_millis > wall_clock_timestamp_millis {
+        // We'll sleep for a max of 1 second. If the delay is > 1 second, something more serious is wrong
+        // (eg. clock skew, system time jump, etc.). In this case, we'll return the timestamp anyway, and
+        // the engine will fail to produce a block (the validation will fail), which is the correct behavior.
+        tokio::time::sleep(
+            Duration::from_millis(timestamp_millis - wall_clock_timestamp_millis)
+                .min(Duration::from_secs(1)),
+        )
+        .await;
+
+        wall_clock_timestamp_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_millis()
             .try_into()?;
-        let timestamp_millis = zone_timestamp_millis(
-            l1_timestamp_millis,
-            parent_timestamp_millis,
-            wall_clock_timestamp_millis,
-        );
-
-        if timestamp_millis == wall_clock_timestamp_millis {
-            return Ok(timestamp_millis);
-        }
-
-        tokio::time::sleep(Duration::from_millis(
-            timestamp_millis - wall_clock_timestamp_millis,
-        ))
-        .await;
     }
+
+    Ok(zone_timestamp_millis(
+        l1_timestamp_millis,
+        parent_timestamp_millis,
+        wall_clock_timestamp_millis,
+    ))
 }
 
 #[cfg(test)]
