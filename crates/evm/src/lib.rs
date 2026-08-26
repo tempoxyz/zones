@@ -56,7 +56,6 @@ use tempo_primitives::{
 };
 use tempo_revm::TempoTxEnv;
 use tempo_zone_contracts as _;
-use tracing::warn;
 use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
@@ -283,24 +282,15 @@ where
 }
 
 impl ZoneEvmConfig {
-    /// Creates a Zone EVM config for CLI subcommands.
+    /// Creates a Zone EVM config without a usable L1 provider.
     ///
-    /// CLI subcommands such as `re-execute` can set `L1_HTTP_RPC_URL` to make authenticated
-    /// historical L1 storage reads. Commands that do not need L1 data keep the unusable local
-    /// fallback, preserving their existing offline behavior. Tempo hardfork conditions come from
-    /// `chain_spec` because the parent L1 spec cannot be resolved in this mode.
+    /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible
+    /// EVM config but don't have access to an L1 RPC connection. Tempo hardfork conditions come
+    /// from `chain_spec` because the parent L1 spec cannot be resolved in this mode.
     pub fn new_without_l1(chain_spec: Arc<ZoneChainSpec>) -> Self {
-        let l1_rpc_url = std::env::var("L1_HTTP_RPC_URL")
-            .ok()
-            .filter(|url| !url.is_empty())
-            .unwrap_or_else(|| "http://127.0.0.1:1".to_owned());
-        let l1_rpc_url = l1_rpc_url.parse().unwrap_or_else(|error| {
-            warn!(%error, "invalid L1_HTTP_RPC_URL; using the offline L1 fallback");
-            "http://127.0.0.1:1".parse().expect("valid fallback URL")
-        });
         let cache = L1StateCache::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_http(l1_rpc_url)
+            .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
         let config = L1StateProviderConfig {
