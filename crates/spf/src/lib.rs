@@ -122,6 +122,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // predecessor. Replay feeds the execution result through Tempo's block
     // assembler, which derives the aggregate logs bloom from the receipts.
     let initial_parent_hash = witness.parent_header.hash_slow();
+    // ZonePortal represents the parent of the first submitted batch with the
+    // zero pre-genesis sentinel, even though block 1 executes on top of the
+    // canonical (non-zero) genesis block hash.
+    let output_parent_hash = if witness.zone_blocks[0].number == 1 {
+        B256::ZERO
+    } else {
+        initial_parent_hash
+    };
     let mut previous_header = witness.parent_header.clone();
     for (block_index, block) in witness.zone_blocks.iter().enumerate() {
         let expected_parent_hash = previous_header.hash_slow();
@@ -294,7 +302,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     }
     Ok(BatchOutput {
         block_transition: BlockTransition {
-            prevBlockHash: initial_parent_hash,
+            prevBlockHash: output_parent_hash,
             nextBlockHash: previous_header.hash_slow(),
         },
         deposit_queue_transition: DepositQueueTransition {
