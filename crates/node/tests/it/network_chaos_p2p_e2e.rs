@@ -24,10 +24,46 @@ const RECOVERY_GAP: u64 = 6;
 const INITIAL_DEPOSIT: u128 = 10_000_000;
 const WITHDRAWAL_AMOUNT: u128 = 250_000;
 
-#[derive(Clone, Copy)]
-struct LeadershipDisconnect {
-    l1: bool,
-    p2p: bool,
+const OUTGOING_LEADER: usize = 0;
+const INCOMING_LEADER: usize = 1;
+const FOLLOWER: usize = 2;
+
+#[derive(Clone, Copy, Debug)]
+enum FaultTiming {
+    BeforeHandoff,
+    OutgoingLeaderBeforeActivation,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FaultPlanes {
+    L1,
+    P2p,
+    Both,
+}
+
+impl FaultPlanes {
+    const fn disconnects_l1(self) -> bool {
+        matches!(self, Self::L1 | Self::Both)
+    }
+
+    const fn disconnects_p2p(self) -> bool {
+        matches!(self, Self::P2p | Self::Both)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExpectedDuringFault {
+    WaitForIncomingLeader,
+    WaitForOutgoingLeader,
+    ContinueAndSettle,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LeadershipFaultCase {
+    disconnected_nodes: &'static [usize],
+    planes: FaultPlanes,
+    timing: FaultTiming,
+    expected: ExpectedDuringFault,
 }
 
 async fn start_cluster() -> eyre::Result<(
@@ -80,6 +116,36 @@ async fn rotate_leadership(cluster: &RealP2pCluster, target_index: usize) -> eyr
         "leadership rotation to node {target_index} was not submitted: {response}"
     );
     Ok(previous_epoch + 1)
+}
+
+async fn submit_leadership_rotation_direct(
+    cluster: &RealP2pCluster,
+    target_index: usize,
+) -> eyre::Result<(u64, u64)> {
+    let provider = cluster.l1.admin_provider();
+    let portal = ZonePortal::new(cluster.portal_address, &provider);
+    let previous_epoch = portal.leaderEpoch().call().await?;
+    let target = cluster
+        .attestation_signers
+        .get(target_index)
+        .ok_or_else(|| eyre::eyre!("leadership target node {target_index} does not exist"))?
+        .address();
+
+    let receipt = portal
+        .setLeader(target, previous_epoch)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(receipt.status(), "leadership rotation transaction reverted");
+
+    let epoch = portal.leaderEpoch().call().await?;
+    let activation_tempo_block = portal.leaderActivationTempoBlock().call().await?;
+    eyre::ensure!(
+        epoch == previous_epoch + 1,
+        "leadership epoch did not advance after direct submission"
+    );
+    Ok((epoch, activation_tempo_block))
 }
 
 async fn wait_for_leadership_epoch(
@@ -207,49 +273,84 @@ async fn assert_batch_history_is_canonical(
     Ok(settled_height)
 }
 
-async fn assert_leadership_rotation_recovers(
-    cluster: &RealP2pCluster,
+async fn disconnect_leadership_case(
     network: &P2pChaosNetwork,
-    b_l1: &crate::utils::TcpChaosProxy,
-    disconnect: LeadershipDisconnect,
-) -> eyre::Result<()> {
-    let baseline = synchronized_head(cluster).await?;
-    let accepted_before_outage = b_l1.accepted_connections();
+    l1_proxies: &[crate::utils::TcpChaosProxy; 3],
+    case: LeadershipFaultCase,
+) -> eyre::Result<[u64; 3]> {
+    let accepted_before_outage =
+        std::array::from_fn(|index| l1_proxies[index].accepted_connections());
 
-    if disconnect.l1 {
-        b_l1.disconnect();
-        b_l1.wait_for_no_connections(NETWORK_TIMEOUT).await?;
+    if case.planes.disconnects_l1() {
+        for &index in case.disconnected_nodes {
+            l1_proxies[index].disconnect();
+        }
+        for &index in case.disconnected_nodes {
+            l1_proxies[index]
+                .wait_for_no_connections(NETWORK_TIMEOUT)
+                .await?;
+        }
     }
-    if disconnect.p2p {
-        network.disconnect_nodes(&[1]);
+    if case.planes.disconnects_p2p() {
+        network.disconnect_nodes(case.disconnected_nodes);
         network
-            .wait_for_nodes_disconnected(&[1], NETWORK_TIMEOUT)
+            .wait_for_nodes_disconnected(case.disconnected_nodes, NETWORK_TIMEOUT)
             .await?;
     }
 
-    let expected_epoch = rotate_leadership(cluster, 1).await?;
+    Ok(accepted_before_outage)
+}
 
-    // A and C see the finalized transition and fence A at its activation boundary. B either has
-    // not seen the transition (L1 outage), or cannot satisfy its P2P promotion barrier (P2P
-    // outage), so no member may keep extending the chain before the requested links return.
-    wait_for_leadership_epoch(
-        cluster,
-        &[0, 2],
-        expected_epoch,
-        "healthy nodes to observe the A→B leadership transition",
-    )
-    .await?;
-    let a_fenced_height = cluster.nodes[0].provider().get_block_number().await?;
-    let b_height_before_fence = cluster.nodes[1].provider().get_block_number().await?;
+async fn resume_leadership_case(
+    network: &P2pChaosNetwork,
+    l1_proxies: &[crate::utils::TcpChaosProxy; 3],
+    accepted_before_outage: [u64; 3],
+    case: LeadershipFaultCase,
+) -> eyre::Result<()> {
+    if case.planes.disconnects_l1() {
+        for &index in case.disconnected_nodes {
+            l1_proxies[index].resume();
+        }
+        for &index in case.disconnected_nodes {
+            l1_proxies[index]
+                .wait_for_connections_after(accepted_before_outage[index], 1, NETWORK_TIMEOUT)
+                .await?;
+        }
+    }
+    if case.planes.disconnects_p2p() {
+        network.resume_nodes(case.disconnected_nodes);
+    }
+    Ok(())
+}
+
+async fn assert_handoff_stalls_without_incoming_leader(
+    cluster: &RealP2pCluster,
+) -> eyre::Result<()> {
+    let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
+    let b_height_before_fence = cluster.nodes[INCOMING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     eyre::ensure!(
-        cluster.nodes[0].provider().get_block_number().await? == a_fenced_height,
+        cluster.nodes[OUTGOING_LEADER]
+            .provider()
+            .get_block_number()
+            .await?
+            == a_fenced_height,
         "outgoing leader A continued producing after finalized leadership moved to disconnected B"
     );
-    let b_height_after_fence = cluster.nodes[1].provider().get_block_number().await?;
-    let b_producer = cluster.attestation_signers[1].address();
+
+    let b_height_after_fence = cluster.nodes[INCOMING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
+    let b_producer = cluster.attestation_signers[INCOMING_LEADER].address();
     for height in b_height_before_fence + 1..=b_height_after_fence {
-        let block = cluster.nodes[1]
+        let block = cluster.nodes[INCOMING_LEADER]
             .provider()
             .get_block_by_number(BlockNumberOrTag::Number(height))
             .await?
@@ -259,34 +360,110 @@ async fn assert_leadership_rotation_recovers(
             "incoming leader B produced block {height} before its requested links were restored"
         );
     }
+    Ok(())
+}
 
-    if disconnect.l1 {
-        b_l1.resume();
-        b_l1.wait_for_connections_after(accepted_before_outage, 1, NETWORK_TIMEOUT)
-            .await?;
+async fn assert_handoff_waits_for_outgoing_leader(cluster: &RealP2pCluster) -> eyre::Result<()> {
+    let b_height_before_wait = cluster.nodes[INCOMING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let b_height_after_wait = cluster.nodes[INCOMING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
+    let b_producer = cluster.attestation_signers[INCOMING_LEADER].address();
+    for height in b_height_before_wait + 1..=b_height_after_wait {
+        let block = cluster.nodes[INCOMING_LEADER]
+            .provider()
+            .get_block_by_number(BlockNumberOrTag::Number(height))
+            .await?
+            .ok_or_else(|| eyre::eyre!("B is missing block {height} from its local chain"))?;
+        eyre::ensure!(
+            block.header.beneficiary() != b_producer,
+            "incoming leader B produced block {height} before outgoing A reached the activation boundary"
+        );
     }
-    if disconnect.p2p {
-        network.resume_nodes(&[1]);
-    }
+    Ok(())
+}
 
-    wait_for_leadership_epoch(
+async fn assert_handoff_preserves_quorum(
+    cluster: &RealP2pCluster,
+    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
+    baseline: u64,
+    healthy_nodes: &[usize],
+    p2p_disconnected_nodes: &[usize],
+) -> eyre::Result<u64> {
+    eyre::ensure!(
+        healthy_nodes.len() == 2 && healthy_nodes.contains(&INCOMING_LEADER),
+        "continuing handoff requires B and one healthy follower"
+    );
+    let b_height = wait_for_producer_block(
         cluster,
-        &[1],
-        expected_epoch,
-        "reconnected B to observe its finalized leadership epoch",
+        INCOMING_LEADER,
+        baseline,
+        "B to assume leadership with a healthy 2-of-3 quorum",
     )
     .await?;
 
+    // Require a settlement strictly beyond the first observed B block. This rules out an
+    // in-flight A-era submission and proves the remaining B-led quorum formed a new certificate.
+    let settled_height = wait_for_settlement_after(portal, b_height).await?;
+    for &index in healthy_nodes {
+        cluster.nodes[index]
+            .wait_for_block_number(settled_height, NETWORK_TIMEOUT)
+            .await?;
+    }
+    let first_block = cluster.nodes[healthy_nodes[0]]
+        .provider()
+        .get_block_by_number(BlockNumberOrTag::Number(settled_height))
+        .await?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "healthy node {} is missing settled block {settled_height}",
+                healthy_nodes[0]
+            )
+        })?;
+    let second_block = cluster.nodes[healthy_nodes[1]]
+        .provider()
+        .get_block_by_number(BlockNumberOrTag::Number(settled_height))
+        .await?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "healthy node {} is missing settled block {settled_height}",
+                healthy_nodes[1]
+            )
+        })?;
+    eyre::ensure!(
+        first_block.header.hash == second_block.header.hash,
+        "healthy quorum members diverged at settled height {settled_height}"
+    );
+    eyre::ensure!(
+        first_block.header.beneficiary() == cluster.attestation_signers[INCOMING_LEADER].address(),
+        "settled block {settled_height} was not produced under leader B"
+    );
+    for &index in p2p_disconnected_nodes {
+        eyre::ensure!(
+            cluster.nodes[index].provider().get_block_number().await? < settled_height,
+            "P2P-isolated node {index} reached the B-era settlement height"
+        );
+    }
+    Ok(settled_height)
+}
+
+async fn assert_stable_b_leadership(cluster: &RealP2pCluster, baseline: u64) -> eyre::Result<u64> {
     let produced_height = wait_for_producer_block(
         cluster,
-        1,
+        INCOMING_LEADER,
         baseline,
-        "reconnected B to recover and produce a canonical block",
+        "B to recover and produce a canonical block",
     )
     .await?;
     cluster
         .wait_all_at(produced_height, NETWORK_TIMEOUT)
         .await?;
+    let b_producer = cluster.attestation_signers[INCOMING_LEADER].address();
     let header = cluster.assert_same_block(produced_height).await?;
     eyre::ensure!(
         header.beneficiary() == b_producer,
@@ -296,7 +473,7 @@ async fn assert_leadership_rotation_recovers(
     // One further B-produced block proves this was a stable promotion, rather than a transient
     // block observed while the cluster was still reconciling the handoff.
     let next_height = produced_height + 1;
-    cluster.nodes[1]
+    cluster.nodes[INCOMING_LEADER]
         .wait_for_block_number(next_height, NETWORK_TIMEOUT)
         .await?;
     cluster.wait_all_at(next_height, NETWORK_TIMEOUT).await?;
@@ -305,150 +482,168 @@ async fn assert_leadership_rotation_recovers(
         header.beneficiary() == b_producer,
         "B did not retain leadership after recovery at block {next_height}"
     );
-    Ok(())
+    Ok(next_height)
 }
 
-/// B stays connected to the quorum but cannot observe L1 when the finalized A→B transition
-/// occurs. Once its L1 link returns, it replays the missed transition and assumes leadership.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_incoming_leader_recovers_after_l1_disconnect() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (cluster, network, [_a_l1, b_l1, _c_l1]) = start_cluster().await?;
-    assert_leadership_rotation_recovers(
-        &cluster,
-        &network,
-        &b_l1,
-        LeadershipDisconnect {
-            l1: true,
-            p2p: false,
-        },
-    )
-    .await
-}
-
-/// B observes the finalized A→B transition on L1 while isolated from the quorum. Restoring its
-/// P2P links lets it backfill, satisfy the promotion barrier, and assume leadership.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_incoming_leader_recovers_after_p2p_disconnect() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (cluster, network, [_a_l1, b_l1, _c_l1]) = start_cluster().await?;
-    assert_leadership_rotation_recovers(
-        &cluster,
-        &network,
-        &b_l1,
-        LeadershipDisconnect {
-            l1: false,
-            p2p: true,
-        },
-    )
-    .await
-}
-
-/// B is isolated from both L1 and the P2P quorum during the finalized A→B transition. Restoring
-/// both planes lets it replay L1, recover the canonical P2P tip, and assume leadership.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_incoming_leader_recovers_after_l1_and_p2p_disconnect() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (cluster, network, [_a_l1, b_l1, _c_l1]) = start_cluster().await?;
-    assert_leadership_rotation_recovers(
-        &cluster,
-        &network,
-        &b_l1,
-        LeadershipDisconnect {
-            l1: true,
-            p2p: true,
-        },
-    )
-    .await
-}
-
-/// C loses both network planes while healthy A and B rotate leadership. The remaining 2-of-3
-/// quorum must hand off and settle under B without waiting for C; C then reconnects, replays the
-/// transition, and converges on the settled B-produced chain.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_handoff_and_settlement_continue_while_follower_is_disconnected() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (cluster, network, [_a_l1, _b_l1, c_l1]) = start_cluster().await?;
+async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()> {
+    let (cluster, network, l1_proxies) = start_cluster().await?;
     let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     eyre::ensure!(
         portal.sequencerThreshold().call().await? == 2,
         "test requires a 2-of-3 settlement quorum"
     );
     let baseline = synchronized_head(&cluster).await?;
-    let c_accepted_before_outage = c_l1.accepted_connections();
+    let (expected_epoch, accepted_before_outage) = match case.timing {
+        FaultTiming::BeforeHandoff => {
+            let accepted = disconnect_leadership_case(&network, &l1_proxies, case).await?;
+            let epoch = rotate_leadership(&cluster, INCOMING_LEADER).await?;
+            (epoch, accepted)
+        }
+        FaultTiming::OutgoingLeaderBeforeActivation => {
+            eyre::ensure!(
+                case.disconnected_nodes == [OUTGOING_LEADER]
+                    && matches!(case.planes, FaultPlanes::Both),
+                "pre-activation outgoing-leader timing requires disconnecting A from both planes"
+            );
 
-    c_l1.disconnect();
-    c_l1.wait_for_no_connections(NETWORK_TIMEOUT).await?;
-    network.disconnect_nodes(&[2]);
-    network
-        .wait_for_nodes_disconnected(&[2], NETWORK_TIMEOUT)
-        .await?;
+            // Hold L1 responses to A while a direct relayer submits the transition. This makes
+            // the activation block observable to B and C but impossible for A to consume before
+            // its L1 and P2P links are cut.
+            l1_proxies[OUTGOING_LEADER].pause_upstream_to_client(true);
+            let (epoch, activation_tempo_block) =
+                submit_leadership_rotation_direct(&cluster, INCOMING_LEADER).await?;
+            let accepted = disconnect_leadership_case(&network, &l1_proxies, case).await?;
+            l1_proxies[OUTGOING_LEADER].pause_upstream_to_client(false);
 
-    let expected_epoch = rotate_leadership(&cluster, 1).await?;
+            let a_tempo_block = cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
+            eyre::ensure!(
+                a_tempo_block < activation_tempo_block,
+                "outgoing A consumed Tempo block {a_tempo_block} before being isolated at activation block {activation_tempo_block}"
+            );
+            (epoch, accepted)
+        }
+    };
+
+    let healthy_nodes: Vec<_> = [OUTGOING_LEADER, INCOMING_LEADER, FOLLOWER]
+        .into_iter()
+        .filter(|index| !case.disconnected_nodes.contains(index))
+        .collect();
     wait_for_leadership_epoch(
         &cluster,
-        &[0, 1],
+        &healthy_nodes,
         expected_epoch,
-        "healthy A and B to observe the leadership transition",
-    )
-    .await?;
-    let b_height = wait_for_producer_block(
-        &cluster,
-        1,
-        baseline,
-        "B to assume leadership while C is disconnected",
+        "healthy nodes to observe the A→B leadership transition",
     )
     .await?;
 
-    // Require a settlement strictly beyond the first observed B block. This rules out an
-    // in-flight A-era submission and proves A+B alone formed a new certificate under leader B.
-    let settled_height = wait_for_settlement_after(&portal, b_height).await?;
-    for index in [0, 1] {
-        cluster.nodes[index]
-            .wait_for_block_number(settled_height, NETWORK_TIMEOUT)
-            .await?;
+    let settled_during_outage = match case.expected {
+        ExpectedDuringFault::WaitForIncomingLeader => {
+            assert_handoff_stalls_without_incoming_leader(&cluster).await?;
+            None
+        }
+        ExpectedDuringFault::WaitForOutgoingLeader => {
+            assert_handoff_waits_for_outgoing_leader(&cluster).await?;
+            None
+        }
+        ExpectedDuringFault::ContinueAndSettle => Some(
+            assert_handoff_preserves_quorum(
+                &cluster,
+                &portal,
+                baseline,
+                &healthy_nodes,
+                if case.planes.disconnects_p2p() {
+                    case.disconnected_nodes
+                } else {
+                    &[]
+                },
+            )
+            .await?,
+        ),
+    };
+
+    resume_leadership_case(&network, &l1_proxies, accepted_before_outage, case).await?;
+    wait_for_leadership_epoch(
+        &cluster,
+        &[OUTGOING_LEADER, INCOMING_LEADER, FOLLOWER],
+        expected_epoch,
+        "reconnected nodes to observe the finalized leadership epoch",
+    )
+    .await?;
+
+    if let Some(settled_height) = settled_during_outage {
+        cluster.wait_all_at(settled_height, NETWORK_TIMEOUT).await?;
+        cluster.assert_same_block(settled_height).await?;
     }
-    let a_block = cluster.nodes[0]
-        .provider()
-        .get_block_by_number(BlockNumberOrTag::Number(settled_height))
-        .await?
-        .ok_or_else(|| eyre::eyre!("A is missing settled block {settled_height}"))?;
-    let b_block = cluster.nodes[1]
-        .provider()
-        .get_block_by_number(BlockNumberOrTag::Number(settled_height))
-        .await?
-        .ok_or_else(|| eyre::eyre!("B is missing settled block {settled_height}"))?;
-    eyre::ensure!(
-        a_block.header.hash == b_block.header.hash,
-        "healthy A and B diverged at settled height {settled_height}"
-    );
-    eyre::ensure!(
-        b_block.header.beneficiary() == cluster.attestation_signers[1].address(),
-        "settled block {settled_height} was not produced under leader B"
-    );
-    eyre::ensure!(
-        cluster.nodes[2].provider().get_block_number().await? < settled_height,
-        "isolated C reached the B-era settlement height without either network plane"
-    );
-
-    c_l1.resume();
-    c_l1.wait_for_connections_after(c_accepted_before_outage, 1, NETWORK_TIMEOUT)
-        .await?;
-    network.resume_nodes(&[2]);
-    wait_for_leadership_epoch(
-        &cluster,
-        &[2],
-        expected_epoch,
-        "reconnected C to replay the A→B leadership transition",
-    )
-    .await?;
-    cluster.wait_all_at(settled_height, NETWORK_TIMEOUT).await?;
-    cluster.assert_same_block(settled_height).await?;
+    let stable_height = assert_stable_b_leadership(&cluster, baseline).await?;
+    if settled_during_outage.is_none() {
+        wait_for_settlement_after(&portal, stable_height).await?;
+        assert_batch_history_is_canonical(&cluster, &portal).await?;
+    }
     Ok(())
+}
+
+macro_rules! leadership_fault_tests {
+    ($($(#[$doc:meta])* $test_name:ident => $case:expr),+ $(,)?) => {
+        $(
+            $(#[$doc])*
+            #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+            async fn $test_name() -> eyre::Result<()> {
+                reth_tracing::init_test_tracing();
+                run_leadership_fault_case($case).await
+            }
+        )+
+    };
+}
+
+leadership_fault_tests! {
+    /// B stays connected to the quorum but cannot observe L1 when the finalized A→B transition
+    /// occurs. Once its L1 link returns, it replays the missed transition and assumes leadership.
+    test_incoming_leader_recovers_after_l1_disconnect => LeadershipFaultCase {
+        disconnected_nodes: &[INCOMING_LEADER],
+        planes: FaultPlanes::L1,
+        timing: FaultTiming::BeforeHandoff,
+        expected: ExpectedDuringFault::WaitForIncomingLeader,
+    },
+    /// B observes the finalized A→B transition on L1 while isolated from the quorum. Restoring its
+    /// P2P links lets it backfill, satisfy the promotion barrier, and assume leadership.
+    test_incoming_leader_recovers_after_p2p_disconnect => LeadershipFaultCase {
+        disconnected_nodes: &[INCOMING_LEADER],
+        planes: FaultPlanes::P2p,
+        timing: FaultTiming::BeforeHandoff,
+        expected: ExpectedDuringFault::WaitForIncomingLeader,
+    },
+    /// B is isolated from both L1 and the P2P quorum during the finalized A→B transition.
+    /// Restoring both planes lets it replay L1, recover the canonical tip, and assume leadership.
+    test_incoming_leader_recovers_after_l1_and_p2p_disconnect => LeadershipFaultCase {
+        disconnected_nodes: &[INCOMING_LEADER],
+        planes: FaultPlanes::Both,
+        timing: FaultTiming::BeforeHandoff,
+        expected: ExpectedDuringFault::WaitForIncomingLeader,
+    },
+    /// C loses both network planes while healthy A and B rotate leadership. The remaining 2-of-3
+    /// quorum must hand off and settle under B before C reconnects and converges.
+    test_handoff_and_settlement_continue_while_follower_is_disconnected => LeadershipFaultCase {
+        disconnected_nodes: &[FOLLOWER],
+        planes: FaultPlanes::Both,
+        timing: FaultTiming::BeforeHandoff,
+        expected: ExpectedDuringFault::ContinueAndSettle,
+    },
+    /// B and C lose both network planes before the handoff. A must fence at the activation
+    /// boundary, then the full cluster must recover and settle under B after reconnection.
+    test_handoff_waits_when_incoming_leader_and_follower_are_disconnected => LeadershipFaultCase {
+        disconnected_nodes: &[INCOMING_LEADER, FOLLOWER],
+        planes: FaultPlanes::Both,
+        timing: FaultTiming::BeforeHandoff,
+        expected: ExpectedDuringFault::WaitForIncomingLeader,
+    },
+    /// A loses both network planes before it can consume the handoff activation block. B and C
+    /// must wait for A's boundary tip, then recover and settle under B after A reconnects.
+    test_handoff_waits_when_outgoing_leader_disconnects_before_activation => LeadershipFaultCase {
+        disconnected_nodes: &[OUTGOING_LEADER],
+        planes: FaultPlanes::Both,
+        timing: FaultTiming::OutgoingLeaderBeforeActivation,
+        expected: ExpectedDuringFault::WaitForOutgoingLeader,
+    },
 }
 
 /// B is P2P-isolated during an A→B handoff and retains a withdrawal in its local pool. After
