@@ -147,10 +147,17 @@ fn finding_survives_restart_and_clears_on_reset() {
     assert_eq!(reopened, diverged);
 
     let observed = block(2, 12);
-    let extended = store.observe(&reopened, observed).unwrap();
+    let extended = store.observe(reopened, observed).unwrap();
     assert_eq!(extended.metadata.verified_zone, genesis);
     assert_eq!(extended.metadata.observed_zone, observed);
     assert_eq!(extended.metadata.status, Status::Diverged { finding });
+
+    let replayed = store.observe(extended, block(1, 99)).unwrap();
+    assert_eq!(replayed.metadata.observed_zone, observed);
+    assert!(matches!(
+        store.observe(replayed, block(2, 99)),
+        Err(PersistenceError::Invalid(_))
+    ));
 
     let recovered = store.reset(&checkpoint).unwrap();
     assert_eq!(recovered.metadata.observed_zone, genesis);

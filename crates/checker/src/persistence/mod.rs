@@ -310,19 +310,31 @@ impl Store {
     /// Persist the latest delivered canonical tip, whether verifying or diverged.
     pub(crate) fn observe(
         &self,
-        prior: &Snapshot,
+        prior: Snapshot,
         observed: BlockRef,
     ) -> Result<Snapshot, PersistenceError> {
-        let mut metadata = prior.metadata.clone();
-        metadata.observed_zone = observed;
+        let current = prior.metadata.observed_zone;
+        if observed.number <= current.number {
+            let tx = self.db.tx()?;
+            ensure_current(&tx, &prior.metadata)?;
+            if observed.number < current.number || observed.hash == current.hash {
+                return Ok(prior);
+            }
+            return Err(PersistenceError::Invalid(format!(
+                "Zone append-only invariant violated: observed block {} changed from {} to {}",
+                observed.number, current.hash, observed.hash
+            )));
+        }
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, &prior.metadata)?;
+        let Snapshot {
+            mut metadata,
+            state,
+        } = prior;
+        metadata.observed_zone = observed;
         write_metadata(&tx, &metadata)?;
         tx.commit()?;
-        Ok(Snapshot {
-            metadata,
-            state: Arc::clone(&prior.state),
-        })
+        Ok(Snapshot { metadata, state })
     }
 }
 

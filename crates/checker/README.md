@@ -83,10 +83,12 @@ Portal, and creation identity matches the authenticated bootstrap result.
 
 MDBX stores current nonzero account rows, per-token accounting, metadata, and
 the active finding. Storage therefore scales with the current number of nonzero
-derived entitlements rather than Zone history. Zones are append-only; if the
-saved checker tip is absent from local Zone history or Reth reports an
-unexpected revert, the checker atomically resets to authenticated genesis and
-replays local history.
+derived entitlements rather than Zone history. If the saved checker tip is
+absent from local Zone history after local storage replacement or recovery, the
+checker atomically resets to authenticated genesis and replays local history.
+Zones are append-only, so a live Reth reorg or revert notification is an
+invariant violation that disables verification rather than rewriting checker
+history.
 
 On normal restart, Reth replays notifications after the last durably verified
 Zone block. Each block transition is persisted before the ExEx acknowledges its
@@ -95,22 +97,45 @@ height.
 ## Failure behavior
 
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
-or acknowledging the block. Each retry budget is bounded. Tempo retries use
+or acknowledging the block. Initial connection, bootstrap, and each block's
+verification have deadlines. Individual Tempo RPC requests are bounded so an
+accepted request that never answers becomes retryable; there is no
+separate limit on the number of semantic retry attempts. Tempo retries use
 exponential backoff, while unavailable local Zone state retries once per second.
-Pruned state disables immediately because it cannot recover.
+Pruned state disables immediately because it cannot recover. Alloy owns the
+established WebSocket lifecycle: it detects a dropped connection, reconnects
+with backoff, and replays in-flight requests. The checker reuses that provider
+while retrying unavailable Tempo data and retryable RPC responses under the
+enclosing bootstrap or block deadline. If Alloy exhausts its finite reconnect
+budget, restarting the node creates a fresh provider and resumes from the last
+durably verified Zone block.
+
+While bootstrap or block verification is waiting, the checker continues
+consuming ExEx notifications without acknowledging unverified heights. It keeps
+only the latest delivered block reference and drops the full notification, then
+asks Reth to reconstruct the skipped canonical range from the durable verified
+tip. Observed height remains monotonic while those historical notifications are
+replayed. Catch-up execution is split into batches of at most 64 blocks or five
+seconds so historical replay cannot monopolize memory or the runtime.
+
+Zone history is append-only. Reorg and revert notifications disable verification
+immediately. Before resetting catch-up, the checker also confirms that the
+latest tip delivered to it remains canonical; a missing or changed hash is a
+fatal invariant violation, not a recoverable fork.
 
 A deterministic mismatch records one durable finding, freezes the verified tip,
 and continues acknowledging subsequent notifications while recording how far the
 unchecked range extends. A finding remains active until the checker is rebuilt
 from authenticated genesis.
 
-An exhausted retry budget or an unrecoverable checker-local error disables the
-checker and drains ExEx notifications so it cannot terminate or stall Zone
-execution. Verification then stays disabled for the life of the process; since
-the checker runs as an ExEx inside the node, restarting the node attempts to
-resume from the last durably verified Zone block. Observe mode never changes
-block execution or consensus behavior; operators must alert on lag or an active
-divergence.
+An expired deadline, append-only invariant violation, or other unrecoverable
+checker-local error disables the checker. It releases the latest
+delivered height and continues draining ExEx notifications so it cannot
+terminate or stall Zone execution. Verification then stays disabled for the
+life of the process; since the checker runs as an ExEx inside the node,
+restarting the node attempts to resume from the last durably verified Zone
+block. Observe mode never changes block execution or consensus behavior;
+operators must alert on lag or an active divergence.
 
 The node's existing metrics endpoint exports:
 

@@ -21,6 +21,7 @@ reth-node-api.workspace = true
 reth-metrics.workspace = true
 reth-primitives-traits = { workspace = true, features = ["std"] }
 reth-storage-api.workspace = true
+reth-stages-api.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -58,6 +59,7 @@ bincode.workspace = true
 bytes.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["time"] }
+tower.workspace = true
 
 [dev-dependencies]
 alloy-consensus = { workspace = true, features = ["std"] }
@@ -67,4 +69,4 @@ reth-ethereum-primitives.workspace = true
 reth-primitives-traits = { workspace = true, features = ["std", "test-utils"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 tempo-primitives.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

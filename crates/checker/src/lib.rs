@@ -127,7 +127,7 @@ impl CheckerExEx {
     pub async fn run<Node>(self, mut ctx: ExExContext<Node>) -> eyre::Result<()>
     where
         Node: FullNodeComponents,
-        Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
+        Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory + Clone,
         <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
     {
         runtime::run(self.config, &mut ctx).await

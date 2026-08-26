@@ -27,7 +27,7 @@ const BALANCE_CONCURRENCY: usize = 8;
 /// Failure acquiring or interpreting exact Tempo state.
 #[derive(Debug)]
 pub(crate) enum L1ReadError {
-    /// Required RPC data is not currently available.
+    /// Required RPC data or transport is not currently available.
     Unavailable(eyre::Report),
     /// Authenticated protocol evidence cannot be verified.
     Finding(eyre::Report),
