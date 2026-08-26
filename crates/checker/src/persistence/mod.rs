@@ -18,7 +18,7 @@ use reth_db::{
 
 use crate::accounting::{AccountingError, ChangedRows, Effect, State};
 
-pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
+pub(crate) use model::{BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
 use schema::{AccountValue, Accounts, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens};
 
 const SCHEMA_VERSION: u32 = 1;

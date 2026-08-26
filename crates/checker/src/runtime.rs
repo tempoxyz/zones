@@ -3,17 +3,16 @@
 use std::{collections::BTreeSet, future::Future, time::Duration};
 
 use alloy_consensus::BlockHeader as _;
-use alloy_eips::BlockNumHash;
+use alloy_eips::{BlockHashOrNumber, BlockNumHash};
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
 use alloy_rpc_client::{ConnectionConfig, RpcClient, WebSocketConfig};
 use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
 use futures::{Stream, StreamExt as _, TryStreamExt as _, future};
 use reth_chainspec::ChainSpecProvider;
-use reth_exex::{ExExContext, ExExHead, ExExNotification, ExExNotificationsStream as _};
+use reth_exex::{ExExContext, ExExNotification};
 use reth_node_api::{BlockBody as _, FullNodeComponents, NodePrimitives};
 use reth_primitives_traits::RecoveredBlock;
-use reth_stages_api::ExecutionStageThresholds;
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, BlockReader, StateProviderFactory, TransactionVariant};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoHardforks;
 use tower::{
@@ -28,7 +27,7 @@ use crate::{
     bootstrap,
     l1::{L1ReadError, classify_rpc_error, collect_l1_block_at, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
-    persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
+    persistence::{BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
     telemetry::{self, CheckerMetrics},
 };
 
@@ -46,8 +45,6 @@ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const BOOTSTRAP_TOTAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// The only bound on one block's retry loops, so it is sized to ride out a transient outage.
 const BLOCK_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const BACKFILL_MAX_BLOCKS: u64 = 64;
-const BACKFILL_MAX_DURATION: Duration = Duration::from_secs(5);
 
 /// Runtime limits are private policy rather than node CLI surface.
 #[derive(Debug, Clone, Copy)]
@@ -77,14 +74,12 @@ impl RuntimeLimits {
 #[derive(Debug, Clone, Copy)]
 struct RuntimeProgress {
     last_delivered_tip: BlockNumHash,
-    catch_up_required: bool,
 }
 
 impl RuntimeProgress {
     const fn new(node_head: BlockNumHash) -> Self {
         Self {
             last_delivered_tip: node_head,
-            catch_up_required: false,
         }
     }
 
@@ -111,9 +106,9 @@ impl RuntimeProgress {
         }
     }
 
-    fn drained_while_busy(&mut self, delivery: DeliveredNotification) -> eyre::Result<()> {
+    fn delivered_checked(&mut self, delivery: DeliveredNotification) -> eyre::Result<()> {
         self.ensure_no_conflicting_commit(delivery)?;
-        self.catch_up_required = true;
+        ensure_append_only(delivery)?;
         self.delivered(delivery);
         Ok(())
     }
@@ -156,13 +151,21 @@ pub(crate) async fn run<Node>(
 ) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
-    Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory + Clone,
+    Node::Provider: BlockReader<
+            Block = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Block,
+            Receipt = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Receipt,
+        > + ChainSpecProvider
+        + StateProviderFactory
+        + Clone,
     <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
     let limits = RuntimeLimits::PRODUCTION;
     let metrics = CheckerMetrics::default();
     let mut progress = RuntimeProgress::new(ctx.head);
+    // The checker reconstructs canonical history itself and uses ExEx notifications only as
+    // append-only tip signals. This avoids Reth backfill execution and private buffered state.
+    ctx.set_notifications_without_head();
     metrics.disabled.set(0.0);
     let result = run_inner(config, ctx, &metrics, &mut progress, limits).await;
     metrics.disabled.set(1.0);
@@ -177,34 +180,17 @@ where
             "checker disabled; Zone execution continues"
         ),
     }
-    if let Err(error) = ctx.send_finished_height(progress.last_delivered_tip) {
-        tracing::error!(
-            target: "zone::checker",
-            %error,
-            "checker cannot release its last delivered height; parking ExEx"
-        );
-        return future::pending().await;
-    }
-    // After verification stops, drain and acknowledge notifications so the ExEx cannot block the node.
+    // Delivery already releases ExEx channel backpressure. Keep draining without advancing
+    // FinishedHeight beyond durable verification so restart history remains available.
     while let Some(notification) = ctx.notifications.next().await {
         match notification.and_then(|notification| classify_notification(&notification)) {
             Ok(delivery) => {
-                if let Err(error) = progress.ensure_no_conflicting_commit(delivery) {
+                if let Err(error) = progress.delivered_checked(delivery) {
                     tracing::error!(
                         target: "zone::checker",
                         %error,
-                        "checker received conflicting history while disabled; continuing to drain"
+                        "checker received invalid history while disabled; continuing to drain"
                     );
-                } else {
-                    progress.delivered(delivery);
-                }
-                if let Err(error) = ctx.send_finished_height(progress.last_delivered_tip) {
-                    tracing::error!(
-                        target: "zone::checker",
-                        %error,
-                        "checker cannot acknowledge a drained notification; parking ExEx"
-                    );
-                    return future::pending().await;
                 }
             }
             Err(error) => {
@@ -219,7 +205,7 @@ where
     future::pending().await
 }
 
-/// Bootstrap or open durable state, then verify each append-only notification in turn.
+/// Bootstrap or open durable state, then verify canonical Zone blocks in order.
 ///
 /// Transient acquisition failures are retried until their enclosing deadline. An authenticated
 /// divergence is persisted until the checker is rebuilt, while deterministic failures or expired
@@ -233,7 +219,12 @@ async fn run_inner<Node>(
 ) -> eyre::Result<()>
 where
     Node: FullNodeComponents,
-    Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory + Clone,
+    Node::Provider: BlockReader<
+            Block = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Block,
+            Receipt = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Receipt,
+        > + ChainSpecProvider
+        + StateProviderFactory
+        + Clone,
     <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
     <Node::Types as reth_node_api::NodeTypes>::Primitives: CheckedPrimitives,
 {
@@ -244,9 +235,8 @@ where
         .await
         .map_err(drive_eyre_error)?;
 
-    ensure_canonical_tip(&provider, progress.last_delivered_tip)?;
-    configure_catch_up(ctx, snapshot.metadata.verified_zone.into())?;
-    progress.catch_up_required = false;
+    snapshot = observe_tip(&provider, &store, snapshot, progress.last_delivered_tip)?;
+    metrics.update(&snapshot);
     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
     let verification_context = VerificationContext {
         config: &config,
@@ -254,46 +244,42 @@ where
         limits,
     };
 
-    while let Some(notification) = ctx.notifications.try_next().await? {
-        let delivery = classify_notification(&notification)?;
-        progress.ensure_no_conflicting_commit(delivery)?;
-        progress.delivered(delivery);
-        ensure_append_only(delivery)?;
-        let delivered_tip = delivery.tip;
-        if matches!(&snapshot.metadata.status, Status::Diverged { .. }) {
-            snapshot = store.observe(snapshot, delivered_tip.into())?;
-            metrics.update(&snapshot);
-            ctx.send_finished_height(delivered_tip)?;
-            continue;
-        }
-        snapshot = store.observe(snapshot, delivered_tip.into())?;
+    loop {
+        snapshot = observe_tip(&provider, &store, snapshot, progress.last_delivered_tip)?;
         metrics.update(&snapshot);
 
-        let previous_verified = snapshot.metadata.verified_zone.number;
-        let verification = process_notification(
-            &notification,
-            &provider,
-            &l1,
-            &store,
-            snapshot,
-            &verification_context,
+        if matches!(&snapshot.metadata.status, Status::Diverged { .. })
+            || snapshot.metadata.verified_zone.number >= progress.last_delivered_tip.number
+        {
+            let Some(notification) = ctx.notifications.try_next().await? else {
+                break;
+            };
+            progress.delivered_checked(classify_notification(&notification)?)?;
+            continue;
+        }
+
+        let number = snapshot
+            .metadata
+            .verified_zone
+            .number
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("Zone block number overflow after verification"))?;
+        let verification = with_block_timeout(
+            process_next_block::<<Node::Types as reth_node_api::NodeTypes>::Primitives, _>(
+                number,
+                &provider,
+                &l1,
+                &store,
+                snapshot,
+                &verification_context,
+            ),
+            number,
+            limits.block_verification_timeout,
         );
         match drive_exex_work(ctx, progress, verification).await {
             Ok(next) => {
-                let next = *next;
-                let verified = next
-                    .metadata
-                    .verified_zone
-                    .number
-                    .saturating_sub(previous_verified);
                 snapshot = next;
-                metrics.verified_zone_blocks_total.increment(verified);
-                if progress.catch_up_required {
-                    ensure_canonical_tip(&provider, progress.last_delivered_tip)?;
-                    snapshot = store.observe(snapshot, progress.last_delivered_tip.into())?;
-                    configure_catch_up(ctx, snapshot.metadata.verified_zone.into())?;
-                    progress.catch_up_required = false;
-                }
+                metrics.verified_zone_blocks_total.increment(1);
                 metrics.update(&snapshot);
                 ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
             }
@@ -307,13 +293,7 @@ where
                         summary: error.to_string(),
                     },
                 )?;
-                if progress.catch_up_required {
-                    ensure_canonical_tip(&provider, progress.last_delivered_tip)?;
-                    snapshot = store.observe(snapshot, progress.last_delivered_tip.into())?;
-                    progress.catch_up_required = false;
-                }
                 metrics.update(&snapshot);
-                ctx.send_finished_height(progress.last_delivered_tip)?;
             }
             Err(DriveError::Work(BlockError::Disable(error))) => return Err(error),
             Err(DriveError::Notifications(error)) => return Err(error),
@@ -321,6 +301,83 @@ where
     }
     tracing::info!(target: "zone::checker", "checker notification stream closed");
     Ok(())
+}
+
+fn observe_tip<P: BlockNumReader>(
+    provider: &P,
+    store: &Store,
+    snapshot: Snapshot,
+    tip: BlockNumHash,
+) -> eyre::Result<Snapshot> {
+    let observed = tip.into();
+    if snapshot.metadata.observed_zone == observed {
+        return Ok(snapshot);
+    }
+    ensure_canonical_tip(provider, tip)?;
+    Ok(store.observe(snapshot, observed)?)
+}
+
+/// Load and verify exactly one canonical block after the durable verified tip.
+async fn process_next_block<N, P>(
+    number: u64,
+    provider: &P,
+    l1: &DynProvider<TempoNetwork>,
+    store: &Store,
+    snapshot: Snapshot,
+    context: &VerificationContext<'_>,
+) -> Result<Snapshot, BlockError>
+where
+    N: CheckedPrimitives,
+    P: BlockReader<Block = N::Block, Receipt = N::Receipt>
+        + ChainSpecProvider
+        + StateProviderFactory,
+    P::ChainSpec: TempoHardforks,
+{
+    let disable = |error| BlockError::Disable(error);
+    let hash = provider
+        .block_hash(number)
+        .map_err(|error| disable(eyre::Report::new(error)))?
+        .ok_or_else(|| {
+            disable(eyre::eyre!(
+                "canonical Zone block {number} is unavailable; checker restart history may have been pruned"
+            ))
+        })?;
+    let id = BlockHashOrNumber::Hash(hash);
+    let block = provider
+        .recovered_block(id, TransactionVariant::WithHash)
+        .map_err(|error| disable(eyre::Report::new(error)))?
+        .ok_or_else(|| {
+            disable(eyre::eyre!(
+                "canonical Zone block {number} ({hash}) body is unavailable; checker restart history may have been pruned"
+            ))
+        })?;
+    let receipts = provider
+        .receipts_by_block(id)
+        .map_err(|error| disable(eyre::Report::new(error)))?
+        .ok_or_else(|| {
+            disable(eyre::eyre!(
+                "canonical Zone block {number} ({hash}) receipts are unavailable; checker restart history may have been pruned"
+            ))
+        })?;
+
+    if block.number() != number || block.hash() != hash {
+        return Err(disable(eyre::eyre!(
+            "canonical Zone block {number} ({hash}) resolved to {} ({})",
+            block.number(),
+            block.hash()
+        )));
+    }
+    let verified = snapshot.metadata.verified_zone;
+    if block.parent_hash() != verified.hash {
+        return Err(disable(eyre::eyre!(
+            "Zone append-only invariant violated: canonical block {number} ({hash}) has parent {}, expected verified block {} ({})",
+            block.parent_hash(),
+            verified.number,
+            verified.hash
+        )));
+    }
+
+    verify_block::<N, _>(provider, l1, store, snapshot, context, &block, &receipts).await
 }
 
 async fn initialize<P>(
@@ -431,20 +488,6 @@ fn rpc_connection_config() -> ConnectionConfig {
         )
 }
 
-fn configure_catch_up<Node>(ctx: &mut ExExContext<Node>, verified: BlockNumHash) -> eyre::Result<()>
-where
-    Node: FullNodeComponents,
-{
-    ctx.catch_up_notifications_with_head(ExExHead::new(verified))?;
-    ctx.notifications
-        .set_backfill_thresholds(ExecutionStageThresholds {
-            max_blocks: Some(BACKFILL_MAX_BLOCKS),
-            max_duration: Some(BACKFILL_MAX_DURATION),
-            ..Default::default()
-        });
-    Ok(())
-}
-
 /// Assert the append-only Zone history still contains the latest tip delivered to the checker.
 fn ensure_canonical_tip<P: BlockNumReader>(provider: &P, tip: BlockNumHash) -> eyre::Result<()> {
     let canonical = provider.block_hash(tip.number)?;
@@ -474,8 +517,8 @@ where
     drive_while_draining(work, notifications, progress).await
 }
 
-/// Drive `work` while draining and dropping deliveries so the ExEx cannot stall the node or retain
-/// unbounded execution payloads. Reth reconstructs the skipped canonical range afterward.
+/// Drive `work` while retaining only lightweight delivered tips. The checker later walks the
+/// canonical provider range itself, so notification payloads never need to be buffered or replayed.
 async fn drive_while_draining<F, S, T, E>(
     work: F,
     mut notifications: S,
@@ -494,8 +537,7 @@ where
                     .ok_or_else(|| eyre::eyre!("checker notification stream closed while work was pending"))
                     .and_then(|result| result)
                     .map_err(DriveError::Notifications)?;
-                progress.drained_while_busy(delivery).map_err(DriveError::Notifications)?;
-                ensure_append_only(delivery).map_err(DriveError::Notifications)?;
+                progress.delivered_checked(delivery).map_err(DriveError::Notifications)?;
             }
         }
     }
@@ -634,48 +676,9 @@ impl Backoff {
     }
 }
 
-/// Verify one append-only notification's blocks.
-async fn process_notification<N, P>(
-    notification: &ExExNotification<N>,
-    provider: &P,
-    l1: &DynProvider<TempoNetwork>,
-    store: &Store,
-    snapshot: Snapshot,
-    context: &VerificationContext<'_>,
-) -> Result<Box<Snapshot>, BlockError>
-where
-    N: CheckedPrimitives,
-    P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
-    P::ChainSpec: TempoHardforks,
-{
-    let mut current = snapshot;
-    let new = match notification {
-        ExExNotification::ChainCommitted { new } => new,
-        ExExNotification::ChainReorged { .. } | ExExNotification::ChainReverted { .. } => {
-            return Err(BlockError::Disable(eyre::eyre!(
-                "unexpected Zone revert reached block verification"
-            )));
-        }
-    };
-    let limits = context.limits;
-    for (block, receipts) in new.blocks_and_receipts() {
-        if already_applied(&current, block.header().number(), block.hash())? {
-            continue;
-        }
-        let zone = BlockRef::new(block.number(), block.hash());
-        current = with_block_timeout(
-            verify_block::<N, _>(provider, l1, store, current, context, block, receipts),
-            zone,
-            limits.block_verification_timeout,
-        )
-        .await?;
-    }
-    Ok(Box::new(current))
-}
-
 async fn with_block_timeout<T, F>(
     future: F,
-    zone: BlockRef,
+    number: u64,
     duration: Duration,
 ) -> Result<T, BlockError>
 where
@@ -683,29 +686,10 @@ where
 {
     tokio::time::timeout(duration, future).await.map_err(|_| {
         BlockError::Disable(eyre::eyre!(
-            "Zone block {} ({}) verification timed out after {:?}",
-            zone.number,
-            zone.hash,
+            "Zone block {number} verification timed out after {:?}",
             duration
         ))
     })?
-}
-
-fn already_applied(
-    snapshot: &Snapshot,
-    number: u64,
-    hash: alloy_primitives::B256,
-) -> Result<bool, BlockError> {
-    let verified = snapshot.metadata.verified_zone;
-    match snapshot.metadata.classify(number, hash) {
-        AppliedStatus::New => Ok(false),
-        AppliedStatus::Applied => Ok(true),
-        AppliedStatus::Conflicts => Err(BlockError::Disable(eyre::eyre!(
-            "notification block {number} ({hash}) conflicts with verified Zone block {} ({})",
-            verified.number,
-            verified.hash
-        ))),
-    }
 }
 
 /// Verify one Zone block's bridge accounting against Tempo history and Portal
@@ -1002,7 +986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_work_drains_notifications_and_requests_replay() {
+    async fn busy_work_drains_notifications_and_tracks_latest_tip() {
         let (sender_guard, receiver) = mpsc::channel(1);
         let mut sender = sender_guard.clone();
         let (release, released) = futures::channel::oneshot::channel();
@@ -1029,7 +1013,6 @@ mod tests {
         result.unwrap();
         drop(sender_guard);
         assert!(progress.last_delivered_tip.number >= 3);
-        assert!(progress.catch_up_required);
     }
 
     #[tokio::test]
@@ -1045,8 +1028,7 @@ mod tests {
         .expect_err("a Zone reorg must disable the checker");
 
         assert!(matches!(error, DriveError::Notifications(_)));
-        assert_eq!(progress.last_delivered_tip.number, 7);
-        assert!(progress.catch_up_required);
+        assert_eq!(progress.last_delivered_tip.number, 0);
     }
 
     #[test]
@@ -1114,49 +1096,14 @@ mod tests {
         assert!(validate_tempo_advance(u64::MAX, u64::MAX).is_err());
     }
 
-    #[test]
-    fn conflicting_verified_coordinate_disables() {
-        let verified = BlockRef::new(10, alloy_primitives::B256::repeat_byte(1));
-        let snapshot = Snapshot {
-            metadata: crate::persistence::Metadata {
-                identity: crate::persistence::Identity {
-                    l1_chain_id: 1,
-                    zone_chain_id: 2,
-                    zone_id: 3,
-                    portal: alloy_primitives::Address::repeat_byte(4),
-                    creation: BlockRef::new(5, alloy_primitives::B256::repeat_byte(5)),
-                },
-                verified_zone: verified,
-                imported_tempo: BlockRef::new(20, alloy_primitives::B256::repeat_byte(2)),
-                observed_zone: verified,
-                status: Status::Verifying,
-            },
-            state: Default::default(),
-        };
-
-        assert!(matches!(
-            already_applied(&snapshot, verified.number, verified.hash),
-            Ok(true)
-        ));
-        assert!(matches!(
-            already_applied(
-                &snapshot,
-                verified.number,
-                alloy_primitives::B256::repeat_byte(9)
-            ),
-            Err(BlockError::Disable(_))
-        ));
-    }
-
     #[tokio::test(start_paused = true)]
     async fn hung_acquisition_ends_at_the_block_deadline() {
         let limits = test_limits();
-        let zone = BlockRef::new(3, alloy_primitives::B256::repeat_byte(3));
         let started = tokio::time::Instant::now();
 
         let result = with_block_timeout(
             future::pending::<Result<(), BlockError>>(),
-            zone,
+            3,
             limits.block_verification_timeout,
         )
         .await;

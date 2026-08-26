@@ -16,8 +16,8 @@ use alloy_primitives::Address;
 use eyre::WrapErr as _;
 use reth_chainspec::ChainSpecProvider;
 use reth_exex::ExExContext;
-use reth_node_api::FullNodeComponents;
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_node_api::{FullNodeComponents, NodePrimitives};
+use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_chainspec::spec::TempoHardforks;
 
 /// Whether an operation should be retried or disable the checker.
@@ -127,8 +127,17 @@ impl CheckerExEx {
     pub async fn run<Node>(self, mut ctx: ExExContext<Node>) -> eyre::Result<()>
     where
         Node: FullNodeComponents,
-        Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory + Clone,
+        Node::Provider: BlockReader<
+                Block = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Block,
+                Receipt = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Receipt,
+            > + ChainSpecProvider
+            + StateProviderFactory
+            + Clone,
         <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
+        <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::SignedTx:
+            alloy_consensus::transaction::TxHashRef,
+        <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Receipt:
+            alloy_consensus::TxReceipt<Log = alloy_primitives::Log>,
     {
         runtime::run(self.config, &mut ctx).await
     }
