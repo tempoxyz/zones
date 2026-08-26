@@ -105,16 +105,16 @@ that verified height as finished.
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
 or acknowledging the block. Initial connection, bootstrap, and each block's
 verification have deadlines. Individual Tempo RPC requests are bounded so an
-accepted request that never answers becomes retryable; there is no
-separate limit on the number of semantic retry attempts. Tempo retries use
-exponential backoff, while unavailable local Zone state retries once per second.
-Pruned state disables immediately because it cannot recover. Alloy owns the
-established WebSocket lifecycle: it detects a dropped connection, reconnects
-with backoff, and replays in-flight requests. The checker reuses that provider
-while retrying unavailable Tempo data and retryable RPC responses under the
-enclosing bootstrap or block deadline. If Alloy exhausts its finite reconnect
-budget, restarting the node creates a fresh provider and resumes from the last
-durably verified Zone block.
+accepted request that never answers disables verification and drops the Tempo
+provider, preventing abandoned WebSocket requests from accumulating or being
+replayed on reconnect. Other unavailable Tempo data and retryable RPC responses
+use exponential backoff under the enclosing bootstrap or block deadline, while
+unavailable local Zone state retries once per second. Pruned state disables
+immediately because it cannot recover. Alloy owns the established WebSocket
+lifecycle for live requests: it detects a dropped connection, reconnects with
+backoff, and replays them. If Alloy exhausts its finite reconnect budget,
+restarting the node creates a fresh provider and resumes from the last durably
+verified Zone block.
 
 While bootstrap or block verification is waiting, the checker continues
 consuming ExEx notifications without acknowledging unverified heights. It keeps

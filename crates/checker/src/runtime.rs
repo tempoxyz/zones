@@ -460,7 +460,9 @@ async fn connect_once(
         .layer(MapFutureLayer::new(|future| -> TransportFut<'static> {
             Box::pin(future)
         }))
-        .layer(MapErrLayer::new(map_timeout_error))
+        .layer(MapErrLayer::new(move |error| {
+            map_timeout_error(error, request_timeout)
+        }))
         .layer(TimeoutLayer::new(request_timeout))
         .connect_with_config(url, rpc_connection_config())
         .await
@@ -470,10 +472,15 @@ async fn connect_once(
         .erased())
 }
 
-fn map_timeout_error(error: BoxError) -> TransportError {
+fn map_timeout_error(error: BoxError, request_timeout: Duration) -> TransportError {
     match error.downcast::<TransportError>() {
         Ok(error) => *error,
-        Err(error) => TransportErrorKind::custom_str(&error.to_string()),
+        Err(error) => match error.downcast::<tower::timeout::error::Elapsed>() {
+            Ok(_) => TransportErrorKind::non_retryable_str(&format!(
+                "Tempo RPC request timed out after {request_timeout:?}"
+            )),
+            Err(error) => TransportErrorKind::custom_str(&error.to_string()),
+        },
     }
 }
 
