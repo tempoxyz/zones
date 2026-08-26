@@ -10,6 +10,7 @@ mod l1_e2e;
 mod network_chaos_e2e;
 mod network_chaos_p2p_e2e;
 mod precompiles;
+mod process_chaos_e2e;
 mod redacted_rpc;
 mod redacted_rpc_e2e;
 mod restart_e2e;

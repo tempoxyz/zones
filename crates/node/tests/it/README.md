@@ -106,6 +106,19 @@ template (`crates/node/assets/zone-dev-genesis.json`, via `zone_node::genesis`):
 | `test_zone_advances_with_real_l1` | Full L1Subscriber → DepositQueue → ZoneEngine pipeline |
 | `test_deposit_via_real_l1` | Zone startup from real L1 + initial state verification |
 
+### `process_chaos_e2e.rs` — Process Recovery Tests
+
+These tests keep the real Tempo L1 in the parent process and launch three Zone P2P nodes as
+isolated child processes. Each child runs the production `ZoneCli` with stable keys, ports, and
+datadir, so restart exercises the same persisted database after an actual Unix signal.
+
+| Test | What it exercises |
+|------|-------------------|
+| `test_leader_recovers_after_sigkill` | Followers stall after abrupt leader death; the restarted leader resumes canonical settlement |
+| `test_leader_recovers_after_sigterm` | Leader shuts down cleanly and resumes from the same datadir |
+| `test_follower_recovers_after_sigkill` | The surviving 2-of-3 quorum settles while a follower is dead; the follower catches up after restart |
+| `test_follower_recovers_after_sigterm` | Gracefully stopped follower rejoins and converges without duplicate settlement |
+
 ### `deposit.rs` — Testnet Integration Tests (ignored by default)
 
 | Test | What it exercises |

@@ -94,7 +94,7 @@ vergen.workspace = true
 vergen-git2.workspace = true
 
 [dev-dependencies]
-zone-node = { path = ".", features = ["test-utils"] }
+zone-node = { path = ".", features = ["cli", "test-utils"] }
 
 alloy = { workspace = true, features = [
   "full",
@@ -112,6 +112,7 @@ base64.workspace = true
 const-hex.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
+libc.workspace = true
 p256.workspace = true
 rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
@@ -119,11 +120,13 @@ reth-tracing.workspace = true
 reth-trie-common.workspace = true
 reqwest.workspace = true
 revm.workspace = true
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-revm.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true

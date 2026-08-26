@@ -2831,7 +2831,7 @@ async fn patch_clean_portal_snapshot<P: Provider<TempoNetwork>>(
 /// Build a zone test genesis anchored to a real L1 block.
 ///
 /// Returns `(genesis, genesis_block_number)`.
-async fn build_l1_anchored_genesis(
+pub(crate) async fn build_l1_anchored_genesis(
     l1_http_url: &url::Url,
     portal_address: Address,
 ) -> eyre::Result<(Genesis, u64)> {
@@ -3852,6 +3852,7 @@ pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
         L1ProxyMode::Direct,
         None,
         false,
+        None,
     )
     .await?
     .cluster)
@@ -3869,6 +3870,7 @@ pub(crate) async fn start_real_p2p_cluster_with_l1_proxy(
         L1ProxyMode::All,
         Some(l1_block_time),
         false,
+        None,
     )
     .await?;
     Ok((
@@ -3891,6 +3893,7 @@ pub(crate) async fn start_real_p2p_cluster_with_per_node_l1_proxies(
         L1ProxyMode::PerNode,
         Some(l1_block_time),
         false,
+        None,
     )
     .await?;
     let proxies: [TcpChaosProxy; 3] = parts
@@ -3905,6 +3908,7 @@ pub(crate) async fn start_real_p2p_cluster_with_per_node_l1_proxies(
 pub(crate) async fn start_real_p2p_network_chaos_cluster(
     withdrawal_batch_interval_blocks: u64,
     l1_block_time: Duration,
+    l1_proxy_latency: Option<Duration>,
 ) -> eyre::Result<(RealP2pCluster, P2pChaosNetwork, [TcpChaosProxy; 3])> {
     let parts = start_real_p2p_cluster_inner(
         withdrawal_batch_interval_blocks,
@@ -3912,6 +3916,7 @@ pub(crate) async fn start_real_p2p_network_chaos_cluster(
         L1ProxyMode::PerNode,
         Some(l1_block_time),
         true,
+        l1_proxy_latency,
     )
     .await?;
     let proxies = parts
@@ -3946,6 +3951,7 @@ async fn start_real_p2p_cluster_inner(
     proxy_mode: L1ProxyMode,
     l1_block_time: Option<Duration>,
     proxy_p2p: bool,
+    l1_proxy_latency: Option<Duration>,
 ) -> eyre::Result<RealP2pClusterParts> {
     eyre::ensure!(
         (2..=3).contains(&active_nodes),
@@ -3978,6 +3984,10 @@ async fn start_real_p2p_cluster_inner(
             let mut urls = Vec::with_capacity(active_nodes);
             for _ in 0..active_nodes {
                 let proxy = TcpChaosProxy::start(upstream).await?;
+                if let Some(latency) = l1_proxy_latency {
+                    proxy.set_client_to_upstream_latency(latency);
+                    proxy.set_upstream_to_client_latency(latency);
+                }
                 urls.push(proxy.proxy_url(l1.ws_url())?.to_string());
                 proxies.push(proxy);
             }

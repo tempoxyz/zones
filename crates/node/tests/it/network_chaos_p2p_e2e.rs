@@ -18,6 +18,7 @@ use crate::utils::{
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const L1_BLOCK_TIME: Duration = Duration::from_millis(250);
+const L1_PROXY_PACING: Duration = Duration::from_millis(5);
 const P2P_LATENCY: Duration = Duration::from_millis(400);
 const L1_LATENCY: Duration = Duration::from_millis(500);
 const RECOVERY_GAP: u64 = 6;
@@ -66,12 +67,14 @@ struct LeadershipFaultCase {
     expected: ExpectedDuringFault,
 }
 
-async fn start_cluster() -> eyre::Result<(
+async fn start_cluster_with_l1_proxy_latency(
+    l1_proxy_latency: Option<Duration>,
+) -> eyre::Result<(
     RealP2pCluster,
     P2pChaosNetwork,
     [crate::utils::TcpChaosProxy; 3],
 )> {
-    let fixture = start_real_p2p_network_chaos_cluster(4, L1_BLOCK_TIME).await?;
+    let fixture = start_real_p2p_network_chaos_cluster(4, L1_BLOCK_TIME, l1_proxy_latency).await?;
     let cluster = &fixture.0;
     eyre::ensure!(
         cluster.nodes.len() == 3,
@@ -87,6 +90,14 @@ async fn start_cluster() -> eyre::Result<(
     cluster.wait_all_at(head, NETWORK_TIMEOUT).await?;
     cluster.assert_same_block(head).await?;
     Ok(fixture)
+}
+
+async fn start_cluster() -> eyre::Result<(
+    RealP2pCluster,
+    P2pChaosNetwork,
+    [crate::utils::TcpChaosProxy; 3],
+)> {
+    start_cluster_with_l1_proxy_latency(None).await
 }
 
 async fn synchronized_head(cluster: &RealP2pCluster) -> eyre::Result<u64> {
@@ -486,7 +497,10 @@ async fn assert_stable_b_leadership(cluster: &RealP2pCluster, baseline: u64) -> 
 }
 
 async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()> {
-    let (cluster, network, l1_proxies) = start_cluster().await?;
+    let l1_proxy_latency = matches!(case.timing, FaultTiming::OutgoingLeaderBeforeActivation)
+        .then_some(L1_PROXY_PACING);
+    let (cluster, network, l1_proxies) =
+        start_cluster_with_l1_proxy_latency(l1_proxy_latency).await?;
     let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     eyre::ensure!(
         portal.sequencerThreshold().call().await? == 2,
