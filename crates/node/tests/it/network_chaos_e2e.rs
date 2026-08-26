@@ -25,6 +25,10 @@ const OUTAGE_BLOCK_GAP: u64 = 8;
 const INITIAL_DEPOSIT: u128 = 10_000_000;
 const OUTAGE_DEPOSIT: u128 = 1_000_000;
 const OUTAGE_WITHDRAWAL: u128 = 250_000;
+const ACTIVE_CONNECTION_RESET_SEED: u64 = 0x503;
+const ACTIVE_CONNECTION_RESET_COUNT: u64 = 4;
+const MIN_ACTIVE_CONNECTION_RESET_DELAY: Duration = Duration::from_millis(100);
+const ACTIVE_CONNECTION_RESET_JITTER: Duration = Duration::from_millis(400);
 
 // This seeded 95% schedule starts with 64 rejected attempts. That gives the short E2E outage a
 // deterministic failure window while retaining probability-based behavior in the proxy itself.
@@ -636,6 +640,96 @@ async fn run_l1_outage_case(
             case
         ),
     }
+}
+
+fn active_connection_reset_delay(attempt: u64) -> Duration {
+    let mut sample = ACTIVE_CONNECTION_RESET_SEED.wrapping_add(attempt);
+    sample = sample.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    sample = (sample ^ (sample >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    sample = (sample ^ (sample >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    sample ^= sample >> 31;
+    let jitter_bound = ACTIVE_CONNECTION_RESET_JITTER.as_millis() as u64;
+    MIN_ACTIVE_CONNECTION_RESET_DELAY + Duration::from_millis(sample % (jitter_bound + 1))
+}
+
+async fn randomly_reset_active_connections(proxy: &TcpChaosProxy) -> eyre::Result<()> {
+    for attempt in 0..ACTIVE_CONNECTION_RESET_COUNT {
+        tokio::time::sleep(active_connection_reset_delay(attempt)).await;
+        eyre::ensure!(
+            proxy.active_connections() >= 3,
+            "shared L1 proxy had fewer than three active connections before reset {attempt}"
+        );
+        let accepted_before_reset = proxy.accepted_connections();
+        proxy.drop_active_connections();
+        proxy
+            .wait_for_connections_after(accepted_before_reset, 3, NETWORK_TIMEOUT)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Repeatedly reset established L1 WebSockets at seeded random times while the cluster remains in
+/// normal operation. Every reset must drive fresh connections, without preventing zone progress,
+/// node convergence, or quorum settlement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_three_sequencers_tolerate_random_active_l1_connection_resets() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (cluster, proxy) = start_real_p2p_cluster_with_l1_proxy(4, L1_BLOCK_TIME).await?;
+    eyre::ensure!(
+        cluster.nodes.len() == 3,
+        "network-chaos fixture must start three nodes"
+    );
+    proxy
+        .wait_for_connections_after(0, 3, NETWORK_TIMEOUT)
+        .await?;
+
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    poll_until(
+        NETWORK_TIMEOUT,
+        POLL_INTERVAL,
+        "an initial settled batch before active L1 connection resets",
+        || {
+            let portal = &portal;
+            async move {
+                let count = batch_count(portal).await?;
+                Ok((count > 0).then_some(count))
+            }
+        },
+    )
+    .await?;
+    let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
+    cluster
+        .wait_all_at(baseline_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(baseline_height).await?;
+
+    let target = baseline_height + OUTAGE_BLOCK_GAP;
+    let reset_connections = randomly_reset_active_connections(&proxy);
+    let maintain_progress = cluster.nodes[0].wait_for_tempo_block_number(target, NETWORK_TIMEOUT);
+    tokio::try_join!(reset_connections, maintain_progress)?;
+    cluster.wait_all_at(target, NETWORK_TIMEOUT).await?;
+
+    let mut recovered_height = u64::MAX;
+    for node in &cluster.nodes {
+        recovered_height = recovered_height.min(node.provider().get_block_number().await?);
+    }
+    eyre::ensure!(
+        recovered_height >= target,
+        "zone did not reach target {target} during random active connection resets"
+    );
+    cluster
+        .wait_all_at(recovered_height, NETWORK_TIMEOUT)
+        .await?;
+    cluster.assert_same_block(recovered_height).await?;
+    wait_for_settled_height(
+        &portal,
+        recovered_height,
+        "quorum settlement after random active L1 connection resets",
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// All three sequencers lose their established L1 connections, remain running while L1 advances,
