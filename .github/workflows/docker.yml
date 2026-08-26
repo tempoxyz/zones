@@ -144,6 +144,8 @@ jobs:
       - name: Build and push reproducible candidate image
         id: bake
         shell: bash
+        env:
+          CANDIDATE_IMAGE: ${{ steps.candidate.outputs.repository }}:${{ steps.candidate.outputs.tag }}
         run: |
           set -euo pipefail
 
@@ -153,7 +155,7 @@ jobs:
             --push \
             --metadata-file "$metadata_file" \
             -f docker/docker-bake.hcl \
-            --set "tempo-zone-reproducible.tags=${{ steps.candidate.outputs.repository }}:${{ steps.candidate.outputs.tag }}" \
+            --set "tempo-zone-reproducible.tags=$CANDIDATE_IMAGE" \
             tempo-zone-reproducible
 
           digest="$(jq -er \
