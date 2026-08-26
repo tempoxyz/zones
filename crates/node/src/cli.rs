@@ -99,17 +99,28 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let l1_rpc_url = match std::env::var("L1_HTTP_RPC_URL") {
-        Ok(url) if !url.is_empty() => Some(
-            url.parse()
-                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?,
-        ),
+    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            validate_portal_address(portal_address)?;
+            Some((url, portal_address))
+        }
         Ok(_) | Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
     };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
-        let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
+        let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
         (evm_config, TempoConsensus::new(spec))
     };
 
@@ -197,8 +208,11 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 }
 
 /// Creates the EVM config used by CLI subcommands.
-fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) -> ZoneEvmConfig {
-    let Some(l1_rpc_url) = l1_rpc_url else {
+fn cli_evm_config(
+    chain_spec: Arc<ZoneChainSpec>,
+    l1_config: Option<(url::Url, Address)>,
+) -> ZoneEvmConfig {
+    let Some((l1_rpc_url, portal_address)) = l1_config else {
         return ZoneEvmConfig::new_without_l1(chain_spec);
     };
 
@@ -212,7 +226,7 @@ fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) 
         ..Default::default()
     };
     let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-    ZoneEvmConfig::new(chain_spec, l1_provider, Address::ZERO)
+    ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
 }
 
 /// Load and attach all sequencer resources to the node.
