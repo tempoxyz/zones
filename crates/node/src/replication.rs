@@ -626,10 +626,10 @@ where
         provider,
         height,
         attestation,
-        Some((
+        (
             signed.attestation.anchorBlockNumber,
             signed.attestation.anchorBlockHash,
-        )),
+        ),
     )
     .await?
     .ok_or_eyre("signed block is not a batch boundary")?;
@@ -830,7 +830,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                                 &provider,
                                 height,
                                 &attestation,
-                                Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
+                                (proposal.anchorBlockNumber, proposal.anchorBlockHash),
                             ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
                             eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
 
