@@ -221,6 +221,34 @@ just set-access-mode true
 just set-gateway-mode true
 ```
 
+If the portal admin is a Safe, have `tempo-xtask` simulate each call from the Safe and
+create an unsigned Safe Transaction Builder file instead of setting `ADMIN_KEY`:
+
+```bash
+export L1_RPC_URL=https://...
+export L1_PORTAL_ADDRESS=0x<portal>
+export SAFE_ADDRESS=0x<safe>
+unset ADMIN_KEY
+
+cargo run -p tempo-xtask -- set-allowed-account 0x<account> --allowed \
+  --safe-address "$SAFE_ADDRESS" \
+  --safe-output allow-account.json
+
+cargo run -p tempo-xtask -- set-gateway 0x<gateway> --allowed \
+  --safe-address "$SAFE_ADDRESS" \
+  --safe-output allow-gateway.json
+```
+
+Import each JSON file in Safe's Transaction Builder, collect the configured approvals,
+and execute it. Safe proposal mode requires the supplied Safe to equal the current portal
+admin, requires deployed bytecode at that address, and simulates the portal call before
+creating the file. The admin contract must also expose Safe's `getThreshold()` view and
+report a nonzero threshold. Proposal mode never signs or broadcasts a transaction, and it
+refuses to overwrite an existing output file. Omit `--allowed` to create a role-revocation
+proposal. The same `--safe-address` and `--safe-output` options work with
+`set-access-mode` and `set-gateway-mode`; omit `--enforced` to disable the corresponding
+mode.
+
 Account and gateway roles are mutually exclusive. To move an address between roles,
 remove its current role before adding the new one. Disabling enforcement leaves stored
 roles intact, so they take effect again if the mode is re-enabled.
@@ -237,8 +265,10 @@ and gateways that have been revoked bounce back; revoked refund recipients canno
 parked refunds until their account role is restored. Before closing access or removing a
 role, confirm that affected deposits, withdrawals, callbacks, and refunds have completed.
 
-Each command verifies the signer is the current portal admin, waits for the transaction,
-and reads the resulting mode or role back from the portal.
+Direct-key mode verifies the signer is the current portal admin, waits for the transaction,
+and reads the resulting mode or role back from the portal. Safe proposal mode stops after
+simulation and file creation, so verify the resulting role or mode after the Safe executes
+the imported transaction.
 
 ### 5. Start the Zone Node
 
@@ -489,6 +519,24 @@ just enable-token alphausd
 ```
 
 If `ZONE_RPC_URL` is set (defaults to `http://localhost:8546`), the command waits for the zone to process the L1 block and confirms the token is available on L2.
+
+To perform only the L1 portal update through `tempo-xtask`, use the same address or alias:
+
+```bash
+cargo run -p tempo-xtask -- enable-token <token-address>
+cargo run -p tempo-xtask -- enable-token alphausd
+```
+
+The xtask waits for the L1 receipt and verifies `ZonePortal.isTokenEnabled`, but unlike the
+Justfile recipe it does not wait for a running zone node to ingest the enablement. If the
+portal admin is a Safe, create an unsigned Transaction Builder proposal instead:
+
+```bash
+unset ADMIN_KEY
+cargo run -p tempo-xtask -- enable-token <token-address> \
+  --safe-address 0x<safe> \
+  --safe-output enable-token.json
+```
 
 The portal admin can also pause and resume deposits for an enabled token (withdrawals are unaffected). These calls are `onlyAdmin`, so they use the same `ADMIN_KEY` as `enable-token`:
 

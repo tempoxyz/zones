@@ -1,15 +1,30 @@
-//! Updates ZonePortal closed-loop enforcement and membership.
+//! Updates ZonePortal access policy and enabled tokens.
 
 use alloy::{
     network::{EthereumWallet, ReceiptResponse as _},
-    primitives::Address,
+    primitives::{Address, U256, address, keccak256},
     providers::{DynProvider, Provider as _, ProviderBuilder},
     signers::local::PrivateKeySigner,
+    sol_types::SolCall as _,
 };
 use eyre::{WrapErr as _, ensure};
+use serde::Serialize;
+use std::{
+    fs::OpenOptions,
+    io::Write as _,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role};
 use zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY;
+
+alloy::sol! {
+    #[sol(rpc)]
+    interface SafeView {
+        function getThreshold() external view returns (uint256);
+    }
+}
 
 #[derive(Debug, clap::Args)]
 struct PortalAccessArgs {
@@ -21,9 +36,67 @@ struct PortalAccessArgs {
     #[arg(long, env = "L1_PORTAL_ADDRESS")]
     portal: Address,
 
-    /// ZonePortal admin private key.
-    #[arg(long, env = "ADMIN_KEY", hide_env_values = true)]
-    admin_key: String,
+    /// ZonePortal admin private key. Required unless --safe-address is used.
+    #[arg(
+        long,
+        env = "ADMIN_KEY",
+        hide_env_values = true,
+        required_unless_present = "safe_address",
+        conflicts_with = "safe_address"
+    )]
+    admin_key: Option<String>,
+
+    /// Safe contract that is the ZonePortal admin. Emits an unsigned proposal instead of sending.
+    #[arg(long, value_name = "ADDRESS", requires = "safe_output")]
+    safe_address: Option<Address>,
+
+    /// New Safe Transaction Builder JSON file to create.
+    #[arg(long, value_name = "PATH", requires = "safe_address")]
+    safe_output: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct SafeProposalConfig {
+    address: Address,
+    output: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeBatchFile {
+    version: &'static str,
+    chain_id: String,
+    created_at: u64,
+    meta: SafeBatchMeta,
+    transactions: Vec<SafeBatchTransaction>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeBatchMeta {
+    name: String,
+    description: String,
+    created_from_safe_address: String,
+    created_from_owner_address: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksum: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SafeBatchTransaction {
+    to: String,
+    value: &'static str,
+    data: String,
+}
+
+#[derive(Debug, clap::Parser)]
+pub(crate) struct EnableToken {
+    #[command(flatten)]
+    args: PortalAccessArgs,
+
+    /// TIP-20 token address or well-known alias (pathusd, alphausd, betausd).
+    #[arg(value_parser = parse_token)]
+    token: Address,
 }
 
 #[derive(Debug, clap::Parser)]
@@ -72,8 +145,83 @@ pub(crate) struct SetGateway {
     allowed: bool,
 }
 
+impl EnableToken {
+    pub(crate) async fn run(self) -> eyre::Result<()> {
+        if let Some(proposal) = self.args.safe_proposal() {
+            let (portal, provider) = connect_safe(&self.args, proposal.address).await?;
+            portal
+                .enableToken(self.token)
+                .from(proposal.address)
+                .call()
+                .await
+                .wrap_err("ZonePortal.enableToken Safe simulation failed")?;
+            let calldata = ZonePortal::enableTokenCall { token: self.token }.abi_encode();
+            return write_safe_proposal(
+                &provider,
+                self.args.portal,
+                proposal,
+                "enableToken",
+                calldata,
+            )
+            .await;
+        }
+
+        let token = self.token;
+        let (portal, provider, nonce) = connect(self.args).await?;
+        ensure!(
+            !portal
+                .isTokenEnabled(token)
+                .call()
+                .await
+                .wrap_err("failed checking whether token is already enabled")?,
+            "token {token} is already enabled"
+        );
+        let receipt = portal
+            .enableToken(token)
+            .nonce_key(ADMIN_OPS_NONCE_KEY)
+            .nonce(nonce)
+            .send()
+            .await
+            .wrap_err("failed sending ZonePortal.enableToken")?
+            .get_receipt()
+            .await
+            .wrap_err("failed waiting for enableToken receipt")?;
+        ensure!(receipt.status(), "enableToken transaction reverted");
+        ensure!(
+            portal.isTokenEnabled(token).call().await?,
+            "portal did not enable token {token}"
+        );
+        println!("Enabled token {token}");
+        println!("Transaction: {}", receipt.transaction_hash());
+        drop(provider);
+        Ok(())
+    }
+}
+
 impl SetAccessMode {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        if let Some(proposal) = self.args.safe_proposal() {
+            let (portal, provider) = connect_safe(&self.args, proposal.address).await?;
+            portal
+                .setAccessMode(self.enforced)
+                .from(proposal.address)
+                .call()
+                .await
+                .wrap_err("ZonePortal.setAccessMode Safe simulation failed")?;
+            let calldata = ZonePortal::setAccessModeCall {
+                enforced: self.enforced,
+            }
+            .abi_encode();
+            return write_safe_proposal(
+                &provider,
+                self.args.portal,
+                proposal,
+                "setAccessMode",
+                calldata,
+            )
+            .await;
+        }
+
         let (portal, provider, nonce) = connect(self.args).await?;
         let receipt = portal
             .setAccessMode(self.enforced)
@@ -98,6 +246,28 @@ impl SetAccessMode {
 
 impl SetGatewayMode {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        if let Some(proposal) = self.args.safe_proposal() {
+            let (portal, provider) = connect_safe(&self.args, proposal.address).await?;
+            portal
+                .setGatewayMode(self.enforced)
+                .from(proposal.address)
+                .call()
+                .await
+                .wrap_err("ZonePortal.setGatewayMode Safe simulation failed")?;
+            let calldata = ZonePortal::setGatewayModeCall {
+                enforced: self.enforced,
+            }
+            .abi_encode();
+            return write_safe_proposal(
+                &provider,
+                self.args.portal,
+                proposal,
+                "setGatewayMode",
+                calldata,
+            )
+            .await;
+        }
+
         let (portal, provider, nonce) = connect(self.args).await?;
         let receipt = portal
             .setGatewayMode(self.enforced)
@@ -122,6 +292,29 @@ impl SetGatewayMode {
 
 impl SetAllowedAccount {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        if let Some(proposal) = self.args.safe_proposal() {
+            let (portal, provider) = connect_safe(&self.args, proposal.address).await?;
+            portal
+                .setAllowedAccount(self.account, self.allowed)
+                .from(proposal.address)
+                .call()
+                .await
+                .wrap_err("ZonePortal.setAllowedAccount Safe simulation failed")?;
+            let calldata = ZonePortal::setAllowedAccountCall {
+                account: self.account,
+                allowed: self.allowed,
+            }
+            .abi_encode();
+            return write_safe_proposal(
+                &provider,
+                self.args.portal,
+                proposal,
+                "setAllowedAccount",
+                calldata,
+            )
+            .await;
+        }
+
         let (portal, provider, nonce) = connect(self.args).await?;
         let receipt = portal
             .setAllowedAccount(self.account, self.allowed)
@@ -146,6 +339,29 @@ impl SetAllowedAccount {
 
 impl SetGateway {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        if let Some(proposal) = self.args.safe_proposal() {
+            let (portal, provider) = connect_safe(&self.args, proposal.address).await?;
+            portal
+                .setGateway(self.account, self.allowed)
+                .from(proposal.address)
+                .call()
+                .await
+                .wrap_err("ZonePortal.setGateway Safe simulation failed")?;
+            let calldata = ZonePortal::setGatewayCall {
+                account: self.account,
+                allowed: self.allowed,
+            }
+            .abi_encode();
+            return write_safe_proposal(
+                &provider,
+                self.args.portal,
+                proposal,
+                "setGateway",
+                calldata,
+            )
+            .await;
+        }
+
         let (portal, provider, nonce) = connect(self.args).await?;
         let receipt = portal
             .setGateway(self.account, self.allowed)
@@ -172,6 +388,35 @@ impl SetGateway {
     }
 }
 
+impl PortalAccessArgs {
+    fn safe_proposal(&self) -> Option<SafeProposalConfig> {
+        self.safe_address.map(|address| SafeProposalConfig {
+            address,
+            output: self
+                .safe_output
+                .clone()
+                .expect("clap requires --safe-output with --safe-address"),
+        })
+    }
+}
+
+fn parse_token(value: &str) -> Result<Address, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "pathusd" | "path-usd" | "path_usd" => {
+            Ok(address!("0x20c0000000000000000000000000000000000000"))
+        }
+        "alphausd" | "alpha-usd" | "alpha_usd" => {
+            Ok(address!("0x20c0000000000000000000000000000000000001"))
+        }
+        "betausd" | "beta-usd" | "beta_usd" => {
+            Ok(address!("0x20c0000000000000000000000000000000000002"))
+        }
+        _ => value
+            .parse()
+            .map_err(|error| format!("invalid token address or alias `{value}`: {error}")),
+    }
+}
+
 async fn connect(
     args: PortalAccessArgs,
 ) -> eyre::Result<(
@@ -179,7 +424,11 @@ async fn connect(
     DynProvider<TempoNetwork>,
     u64,
 )> {
-    let key = args.admin_key.strip_prefix("0x").unwrap_or(&args.admin_key);
+    let admin_key = args
+        .admin_key
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("ADMIN_KEY is required for direct portal updates"))?;
+    let key = admin_key.strip_prefix("0x").unwrap_or(admin_key);
     let signer: PrivateKeySigner = key.parse().wrap_err("ADMIN_KEY is not valid")?;
     let signer_address = signer.address();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -205,7 +454,286 @@ async fn connect(
     Ok((portal, provider, nonce))
 }
 
+async fn connect_safe(
+    args: &PortalAccessArgs,
+    safe: Address,
+) -> eyre::Result<(
+    tempo_zone_contracts::ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    DynProvider<TempoNetwork>,
+)> {
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect(&args.l1_rpc_url)
+        .await
+        .wrap_err("failed connecting to Tempo L1 RPC")?
+        .erased();
+    let portal = ZonePortal::new(args.portal, provider.clone());
+    let admin = portal
+        .admin()
+        .call()
+        .await
+        .wrap_err("failed reading portal admin")?;
+    ensure!(safe == admin, "Safe {safe} is not portal admin {admin}");
+    ensure!(
+        !provider
+            .get_code_at(safe)
+            .await
+            .wrap_err("failed reading Safe bytecode")?
+            .is_empty(),
+        "Safe address {safe} has no deployed bytecode"
+    );
+    let threshold = SafeView::new(safe, provider.clone())
+        .getThreshold()
+        .call()
+        .await
+        .wrap_err("portal admin does not expose Safe-compatible getThreshold()")?;
+    ensure!(
+        threshold != U256::ZERO,
+        "Safe address {safe} reports a zero signature threshold"
+    );
+    Ok((portal, provider))
+}
+
+async fn write_safe_proposal(
+    provider: &DynProvider<TempoNetwork>,
+    portal: Address,
+    proposal: SafeProposalConfig,
+    method: &str,
+    calldata: Vec<u8>,
+) -> eyre::Result<()> {
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .wrap_err("failed reading Tempo L1 chain ID")?;
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .wrap_err("system clock is before the Unix epoch")?
+        .as_millis()
+        .try_into()
+        .wrap_err("current timestamp does not fit in u64")?;
+    let batch = SafeBatchFile::new(
+        chain_id,
+        created_at,
+        proposal.address,
+        portal,
+        method,
+        calldata,
+    )?;
+    write_safe_batch_file(&proposal.output, &batch)?;
+
+    println!("Prepared Safe Transaction Builder proposal");
+    println!("  Safe:      {}", proposal.address);
+    println!("  Portal:    {portal}");
+    println!("  Operation: ZonePortal.{method}");
+    println!("  Output:    {}", proposal.output.display());
+    Ok(())
+}
+
+impl SafeBatchFile {
+    fn new(
+        chain_id: u64,
+        created_at: u64,
+        safe: Address,
+        portal: Address,
+        method: &str,
+        calldata: Vec<u8>,
+    ) -> eyre::Result<Self> {
+        let mut batch = Self {
+            version: "1.0",
+            chain_id: chain_id.to_string(),
+            created_at,
+            meta: SafeBatchMeta {
+                name: format!("ZonePortal.{method}"),
+                description: "Generated by tempo-xtask for Safe execution".to_owned(),
+                created_from_safe_address: safe.to_string(),
+                created_from_owner_address: "",
+                checksum: None,
+            },
+            transactions: vec![SafeBatchTransaction {
+                to: portal.to_string(),
+                value: "0",
+                data: format!("0x{}", const_hex::encode(calldata)),
+            }],
+        };
+        batch.meta.checksum = Some(calculate_safe_checksum(&batch)?);
+        Ok(batch)
+    }
+}
+
+fn write_safe_batch_file(path: &Path, batch: &SafeBatchFile) -> eyre::Result<()> {
+    let mut json = serde_json::to_string_pretty(batch)
+        .wrap_err("failed encoding Safe Transaction Builder JSON")?;
+    json.push('\n');
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .wrap_err_with(|| {
+            format!(
+                "failed creating Safe Transaction Builder file `{}`; the path must not already exist",
+                path.display()
+            )
+        })?;
+    file.write_all(json.as_bytes())
+        .wrap_err_with(|| format!("failed writing `{}`", path.display()))?;
+    Ok(())
+}
+
+/// Safe Transaction Builder checksums use a canonicalizer that sorts object keys and then
+/// serializes the key list followed by the values. Keep this aligned with Safe's checksum.ts.
+fn calculate_safe_checksum(batch: &SafeBatchFile) -> eyre::Result<String> {
+    let mut value = serde_json::to_value(batch)
+        .wrap_err("failed preparing Safe Transaction Builder checksum")?;
+    let meta = value
+        .get_mut("meta")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| eyre::eyre!("Safe Transaction Builder metadata is not an object"))?;
+    meta.remove("checksum");
+    meta.insert("name".to_owned(), serde_json::Value::Null);
+    Ok(keccak256(safe_serialize_json(&value).as_bytes()).to_string())
+}
+
+fn safe_serialize_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_owned(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).expect("serializing a JSON string cannot fail")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(safe_serialize_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        serde_json::Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut serialized = format!(
+                "{{{}",
+                serde_json::to_string(&keys).expect("serializing JSON object keys cannot fail")
+            );
+            for key in keys {
+                serialized.push_str(&safe_serialize_json(&object[key]));
+                serialized.push(',');
+            }
+            serialized.push('}');
+            serialized
+        }
+    }
+}
+
 fn print_success(operation: &str, tx_hash: &impl std::fmt::Display) {
     println!("Updated {operation}");
     println!("Transaction: {tx_hash}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_serializer_matches_transaction_builder_canonicalization() {
+        let value = serde_json::json!({"b": 2, "a": "x"});
+        assert_eq!(safe_serialize_json(&value), r#"{["a","b"]"x",2,}"#);
+    }
+
+    #[test]
+    fn safe_batch_contains_raw_allowed_account_call_and_checksum() {
+        let safe = Address::repeat_byte(0x11);
+        let portal = Address::repeat_byte(0x22);
+        let account = Address::repeat_byte(0x33);
+        let calldata = ZonePortal::setAllowedAccountCall {
+            account,
+            allowed: true,
+        }
+        .abi_encode();
+        assert_eq!(&calldata[..4], &[0x90, 0xf5, 0x95, 0x98]);
+
+        let batch = SafeBatchFile::new(
+            42_431,
+            1_725_000_000_000,
+            safe,
+            portal,
+            "setAllowedAccount",
+            calldata.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(batch.chain_id, "42431");
+        assert_eq!(batch.meta.created_from_safe_address, safe.to_string());
+        assert_eq!(batch.transactions[0].to, portal.to_string());
+        assert_eq!(
+            batch.transactions[0].data,
+            format!("0x{}", const_hex::encode(calldata))
+        );
+        let checksum = calculate_safe_checksum(&batch).unwrap();
+        assert_eq!(batch.meta.checksum.as_deref(), Some(checksum.as_str()));
+    }
+
+    #[test]
+    fn gateway_calldata_has_expected_selector() {
+        let calldata = ZonePortal::setGatewayCall {
+            account: Address::repeat_byte(0x44),
+            allowed: false,
+        }
+        .abi_encode();
+        assert_eq!(&calldata[..4], &[0x10, 0xce, 0xa8, 0x57]);
+    }
+
+    #[test]
+    fn token_aliases_resolve_case_insensitively() {
+        assert_eq!(
+            parse_token("pathUSD").unwrap(),
+            address!("0x20c0000000000000000000000000000000000000")
+        );
+        assert_eq!(
+            parse_token("ALPHA-USD").unwrap(),
+            address!("0x20c0000000000000000000000000000000000001")
+        );
+        assert_eq!(
+            parse_token("beta_usd").unwrap(),
+            address!("0x20c0000000000000000000000000000000000002")
+        );
+    }
+
+    #[test]
+    fn enable_token_calldata_has_expected_selector() {
+        let calldata = ZonePortal::enableTokenCall {
+            token: Address::repeat_byte(0x55),
+        }
+        .abi_encode();
+        assert_eq!(&calldata[..4], &[0xc6, 0x90, 0x90, 0x8a]);
+    }
+
+    #[test]
+    fn safe_batch_file_is_valid_json_and_is_not_overwritten() {
+        let batch = SafeBatchFile::new(
+            42_431,
+            1_725_000_000_000,
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0x22),
+            "setGateway",
+            ZonePortal::setGatewayCall {
+                account: Address::repeat_byte(0x44),
+                allowed: true,
+            }
+            .abi_encode(),
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("proposal.json");
+
+        write_safe_batch_file(&path, &batch).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["version"], "1.0");
+        assert_eq!(written["chainId"], "42431");
+        assert_eq!(written["transactions"][0]["value"], "0");
+
+        let error = write_safe_batch_file(&path, &batch).unwrap_err();
+        assert!(error.to_string().contains("must not already exist"));
+    }
 }
