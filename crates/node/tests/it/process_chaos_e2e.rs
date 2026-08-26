@@ -15,7 +15,7 @@ use std::{
 };
 
 use alloy::{
-    eips::BlockNumberOrTag,
+    eips::{BlockId, BlockNumberOrTag},
     primitives::{B256, U256},
     providers::{Provider as _, ProviderBuilder},
 };
@@ -36,6 +36,7 @@ const CHILD_TEST_NAME: &str = "process_chaos_e2e::process_chaos_node";
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(90);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const STALL_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const L1_BLOCK_TIME: Duration = Duration::from_millis(250);
 const BATCH_INTERVAL: u64 = 4;
 
@@ -423,6 +424,43 @@ impl ProcessChaosCluster {
         Ok(())
     }
 
+    /// Wait until the selected nodes agree on a head and that head remains unchanged long enough
+    /// to rule out blocks that were already in flight when the leader exited.
+    async fn wait_for_stable_head(&self, nodes: &[usize]) -> eyre::Result<u64> {
+        eyre::ensure!(
+            !nodes.is_empty(),
+            "stable-head check requires at least one node"
+        );
+        let deadline = tokio::time::Instant::now() + NETWORK_TIMEOUT;
+        let mut observation: Option<(u64, tokio::time::Instant)> = None;
+
+        loop {
+            let mut heads = Vec::with_capacity(nodes.len());
+            for &index in nodes {
+                heads.push(self.nodes[index].provider().get_block_number().await?);
+            }
+
+            if heads.iter().all(|height| *height == heads[0]) {
+                match observation {
+                    Some((height, since)) if height == heads[0] => {
+                        if since.elapsed() >= STALL_QUIET_PERIOD {
+                            return Ok(height);
+                        }
+                    }
+                    _ => observation = Some((heads[0], tokio::time::Instant::now())),
+                }
+            } else {
+                observation = None;
+            }
+
+            eyre::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "nodes {nodes:?} did not reach a common stable head; last observed heads: {heads:?}"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     async fn assert_same_block(&self, height: u64) -> eyre::Result<B256> {
         let mut expected = None;
         for (index, node) in self.nodes.iter().enumerate() {
@@ -460,6 +498,21 @@ impl ProcessChaosCluster {
             .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))
     }
 
+    /// Read the portal's height and hash from the same L1 block so they describe one settlement.
+    async fn settlement_snapshot(&self) -> eyre::Result<(u64, B256)> {
+        let portal = ZonePortal::new(self.portal_address, self.l1.provider());
+        let l1_block = self.l1.provider().get_block_number().await?;
+        let block_id = BlockId::number(l1_block);
+        let height = portal
+            .zoneHeight()
+            .block(block_id)
+            .call()
+            .await?
+            .try_into()?;
+        let hash = portal.blockHash().block(block_id).call().await?;
+        Ok((height, hash))
+    }
+
     async fn assert_canonical_settlement_history(&self) -> eyre::Result<()> {
         let portal = ZonePortal::new(self.portal_address, self.l1.provider());
         let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
@@ -485,11 +538,11 @@ impl ProcessChaosCluster {
             }
         }
 
-        let settled_height: u64 = portal.zoneHeight().call().await?.try_into()?;
+        let (settled_height, settled_hash) = self.settlement_snapshot().await?;
         self.wait_all_at(settled_height).await?;
         let canonical_hash = self.assert_same_block(settled_height).await?;
         eyre::ensure!(
-            portal.blockHash().call().await? == canonical_hash,
+            settled_hash == canonical_hash,
             "Portal settled hash is not canonical at zone block {settled_height}"
         );
         Ok(())
@@ -519,35 +572,30 @@ async fn run_recovery_case(victim: usize, signal: ChaosSignal) -> eyre::Result<(
         let baseline = cluster.synchronized_head().await?;
         cluster.nodes[victim].stop(signal).await?;
 
-        let settlement_before_restart = if victim == LEADER {
+        let head_boundary = if victim == LEADER {
             // Leadership is explicit, so followers must not elect themselves while A is down.
-            // Allow a block already broadcast by A before SIGKILL to finish importing first.
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let follower_heads = [
-                cluster.nodes[1].provider().get_block_number().await?,
-                cluster.nodes[2].provider().get_block_number().await?,
-            ];
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            for (offset, index) in [1, 2].into_iter().enumerate() {
-                let height = cluster.nodes[index].provider().get_block_number().await?;
-                eyre::ensure!(
-                    height == follower_heads[offset],
-                    "follower {index} advanced from {} to {height} while leader was down",
-                    follower_heads[offset]
-                );
-            }
-            baseline
+            // Drain any blocks already broadcast by A, then use the common quiet head as the
+            // recovery fence. A settlement beyond it necessarily contains post-restart work.
+            cluster.wait_for_stable_head(&[1, 2]).await?
         } else {
             // A and the remaining follower retain a 2-of-3 quorum and must keep settling.
             let settled = cluster.wait_for_settlement_after(baseline).await?;
             cluster.wait_nodes_at(&[LEADER, 1], settled).await?;
-            settled
+            // Fence recovery at the current producer head, not merely the settlement we just
+            // observed, so the final settlement covers new work after this phase.
+            let healthy_head = cluster.nodes[LEADER].provider().get_block_number().await?;
+            cluster.wait_nodes_at(&[1], healthy_head).await?;
+            healthy_head
         };
 
+        // A settlement that landed while the victim was stopped must not satisfy recovery.
+        // Combine the current portal height with the drained/healthy node head so recovery must
+        // advance both observations after the child process is relaunched.
+        let (settlement_before_restart, _) = cluster.settlement_snapshot().await?;
+        let recovery_boundary = head_boundary.max(settlement_before_restart);
+
         cluster.nodes[victim].restart().await?;
-        let recovered_settlement = cluster
-            .wait_for_settlement_after(settlement_before_restart)
-            .await?;
+        let recovered_settlement = cluster.wait_for_settlement_after(recovery_boundary).await?;
         cluster.wait_all_at(recovered_settlement).await?;
         cluster.assert_same_block(recovered_settlement).await?;
         cluster.assert_canonical_settlement_history().await
