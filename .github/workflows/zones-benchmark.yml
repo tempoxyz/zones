@@ -92,12 +92,12 @@ on:
         required: true
         default: "10000000000"
       l1-gas-limit:
-        description: Tempo L1 and Zone block gas limit.
+        description: Tempo L1 block gas limit.
         type: string
         required: true
         default: "30000000"
       l1-general-gas-limit:
-        description: Tempo L1 per-block aggregate gas limit for general transactions.
+        description: Tempo L1 general transaction gas limit.
         type: string
         required: true
         default: "30000000"
