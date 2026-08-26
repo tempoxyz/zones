@@ -26,6 +26,212 @@ const INITIAL_DEPOSIT: u128 = 10_000_000;
 const OUTAGE_DEPOSIT: u128 = 1_000_000;
 const OUTAGE_WITHDRAWAL: u128 = 250_000;
 
+// This seeded 95% schedule starts with 64 rejected attempts. That gives the short E2E outage a
+// deterministic failure window while retaining probability-based behavior in the proxy itself.
+const WEBSOCKET_503_SEED: u64 = 385;
+const WEBSOCKET_503_PROBABILITY_PERCENT: u8 = 95;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AffectedNodes {
+    Leader,
+    BothFollowers,
+    OneFollower,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum L1Fault {
+    Disconnect,
+    RandomWebSocket503,
+    SilentBidirectionalStall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgressExpectation {
+    Stalls,
+    Continues,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct L1OutageCase {
+    phase: &'static str,
+    affected_nodes: AffectedNodes,
+    fault: L1Fault,
+    production: ProgressExpectation,
+    settlement: ProgressExpectation,
+}
+
+const L1_OUTAGE_CASES: &[L1OutageCase] = &[
+    L1OutageCase {
+        phase: "both followers disconnected",
+        affected_nodes: AffectedNodes::BothFollowers,
+        fault: L1Fault::Disconnect,
+        production: ProgressExpectation::Continues,
+        settlement: ProgressExpectation::Stalls,
+    },
+    L1OutageCase {
+        phase: "leader disconnected",
+        affected_nodes: AffectedNodes::Leader,
+        fault: L1Fault::Disconnect,
+        production: ProgressExpectation::Stalls,
+        settlement: ProgressExpectation::Stalls,
+    },
+    L1OutageCase {
+        phase: "one follower disconnected",
+        affected_nodes: AffectedNodes::OneFollower,
+        fault: L1Fault::Disconnect,
+        production: ProgressExpectation::Continues,
+        settlement: ProgressExpectation::Continues,
+    },
+    L1OutageCase {
+        phase: "both followers receiving WebSocket 503s",
+        affected_nodes: AffectedNodes::BothFollowers,
+        fault: L1Fault::RandomWebSocket503,
+        production: ProgressExpectation::Continues,
+        settlement: ProgressExpectation::Stalls,
+    },
+    L1OutageCase {
+        phase: "leader receiving WebSocket 503s",
+        affected_nodes: AffectedNodes::Leader,
+        fault: L1Fault::RandomWebSocket503,
+        production: ProgressExpectation::Stalls,
+        settlement: ProgressExpectation::Stalls,
+    },
+    L1OutageCase {
+        phase: "one follower receiving WebSocket 503s",
+        affected_nodes: AffectedNodes::OneFollower,
+        fault: L1Fault::RandomWebSocket503,
+        production: ProgressExpectation::Continues,
+        settlement: ProgressExpectation::Continues,
+    },
+    L1OutageCase {
+        phase: "both followers silently stalled",
+        affected_nodes: AffectedNodes::BothFollowers,
+        fault: L1Fault::SilentBidirectionalStall,
+        production: ProgressExpectation::Continues,
+        settlement: ProgressExpectation::Stalls,
+    },
+    L1OutageCase {
+        phase: "leader silently stalled",
+        affected_nodes: AffectedNodes::Leader,
+        fault: L1Fault::SilentBidirectionalStall,
+        production: ProgressExpectation::Stalls,
+        settlement: ProgressExpectation::Stalls,
+    },
+    L1OutageCase {
+        phase: "one follower silently stalled",
+        affected_nodes: AffectedNodes::OneFollower,
+        fault: L1Fault::SilentBidirectionalStall,
+        production: ProgressExpectation::Continues,
+        settlement: ProgressExpectation::Continues,
+    },
+];
+
+struct ActiveFault {
+    accepted_before: Vec<u64>,
+    active_before: Vec<u64>,
+}
+
+async fn start_fault(fault: L1Fault, proxies: &[&TcpChaosProxy]) -> eyre::Result<ActiveFault> {
+    let accepted_before = proxies
+        .iter()
+        .map(|proxy| proxy.accepted_connections())
+        .collect();
+    let active_before: Vec<_> = proxies
+        .iter()
+        .map(|proxy| proxy.active_connections())
+        .collect();
+    let injected_before: Vec<_> = proxies
+        .iter()
+        .map(|proxy| proxy.injected_websocket_503s())
+        .collect();
+
+    match fault {
+        L1Fault::Disconnect => {
+            for proxy in proxies {
+                proxy.disconnect();
+            }
+        }
+        L1Fault::RandomWebSocket503 => {
+            for proxy in proxies {
+                proxy
+                    .set_websocket_503_fault(WEBSOCKET_503_SEED, WEBSOCKET_503_PROBABILITY_PERCENT);
+                proxy.drop_active_connections();
+            }
+        }
+        L1Fault::SilentBidirectionalStall => {
+            for (proxy, active) in proxies.iter().zip(&active_before) {
+                eyre::ensure!(
+                    *active > 0,
+                    "cannot silently stall proxy {} without an established connection",
+                    proxy.listen_addr()
+                );
+                proxy.pause_client_to_upstream(true);
+                proxy.pause_upstream_to_client(true);
+            }
+        }
+    }
+    if fault != L1Fault::SilentBidirectionalStall {
+        for proxy in proxies {
+            proxy.wait_for_no_connections(NETWORK_TIMEOUT).await?;
+        }
+    }
+    if fault == L1Fault::RandomWebSocket503 {
+        for (proxy, previous) in proxies.iter().zip(injected_before) {
+            proxy
+                .wait_for_injected_websocket_503s_after(previous, 1, NETWORK_TIMEOUT)
+                .await?;
+        }
+    }
+    Ok(ActiveFault {
+        accepted_before,
+        active_before,
+    })
+}
+
+async fn clear_fault(
+    fault: L1Fault,
+    proxies: &[&TcpChaosProxy],
+    active: ActiveFault,
+) -> eyre::Result<()> {
+    match fault {
+        L1Fault::Disconnect | L1Fault::RandomWebSocket503 => {
+            for proxy in proxies {
+                match fault {
+                    L1Fault::Disconnect => proxy.resume(),
+                    L1Fault::RandomWebSocket503 => proxy.clear_websocket_503_fault(),
+                    L1Fault::SilentBidirectionalStall => unreachable!(),
+                }
+            }
+            for (proxy, accepted) in proxies.iter().zip(active.accepted_before) {
+                proxy
+                    .wait_for_connections_after(accepted, 1, NETWORK_TIMEOUT)
+                    .await?;
+            }
+        }
+        L1Fault::SilentBidirectionalStall => {
+            for ((proxy, accepted_before), active_before) in proxies
+                .iter()
+                .zip(active.accepted_before)
+                .zip(active.active_before)
+            {
+                eyre::ensure!(
+                    proxy.accepted_connections() == accepted_before,
+                    "silently stalled proxy {} accepted a replacement connection",
+                    proxy.listen_addr()
+                );
+                eyre::ensure!(
+                    proxy.active_connections() == active_before,
+                    "silently stalled proxy {} did not preserve its established connections",
+                    proxy.listen_addr()
+                );
+                proxy.pause_client_to_upstream(false);
+                proxy.pause_upstream_to_client(false);
+            }
+        }
+    }
+    Ok(())
+}
+
 struct OutageAssetFlow {
     phase: &'static str,
     l2_balance_before: U256,
@@ -181,21 +387,13 @@ async fn recover_both_followers(
     follower_one_proxy: &TcpChaosProxy,
     follower_two_proxy: &TcpChaosProxy,
     baseline_height: u64,
+    case: L1OutageCase,
 ) -> eyre::Result<()> {
-    let accepted_before_outage = [
-        follower_one_proxy.accepted_connections(),
-        follower_two_proxy.accepted_connections(),
-    ];
-    for proxy in [follower_one_proxy, follower_two_proxy] {
-        proxy.disconnect();
-    }
-    for proxy in [follower_one_proxy, follower_two_proxy] {
-        proxy.wait_for_no_connections(NETWORK_TIMEOUT).await?;
-    }
+    let affected_proxies = [follower_one_proxy, follower_two_proxy];
+    let active_fault = start_fault(case.fault, &affected_proxies).await?;
 
     let outage_start = cluster.l1.provider().get_block_number().await?;
-    let assets =
-        submit_outage_asset_flow(cluster, account, "both-follower outage", outage_start).await?;
+    let assets = submit_outage_asset_flow(cluster, account, case.phase, outage_start).await?;
     let target = (outage_start + OUTAGE_BLOCK_GAP).max(assets.deposit_block + 1);
     cluster.nodes[0]
         .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
@@ -207,17 +405,14 @@ async fn recover_both_followers(
             index + 1
         );
     }
-    for proxy in [follower_one_proxy, follower_two_proxy] {
-        proxy.resume();
-    }
-    for (proxy, accepted) in [follower_one_proxy, follower_two_proxy]
-        .into_iter()
-        .zip(accepted_before_outage)
-    {
-        proxy
-            .wait_for_connections_after(accepted, 1, NETWORK_TIMEOUT)
-            .await?;
-    }
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    let settled_during_outage = portal.zoneHeight().call().await?;
+    eyre::ensure!(
+        settled_during_outage < U256::from(target),
+        "{} unexpectedly settled through height {target} without follower quorum",
+        case.phase
+    );
+    clear_fault(case.fault, &affected_proxies, active_fault).await?;
     for follower in &cluster.nodes[1..] {
         follower
             .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
@@ -233,7 +428,6 @@ async fn recover_both_followers(
         .wait_all_at(recovered_height, NETWORK_TIMEOUT)
         .await?;
     cluster.assert_same_block(recovered_height).await?;
-    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     wait_for_settled_height(
         &portal,
         recovered_height,
@@ -249,6 +443,7 @@ async fn recover_leader(
     leader_proxy: &TcpChaosProxy,
     follower_one_proxy: &TcpChaosProxy,
     follower_two_proxy: &TcpChaosProxy,
+    case: L1OutageCase,
 ) -> eyre::Result<()> {
     let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
     cluster
@@ -258,14 +453,11 @@ async fn recover_leader(
     leader_proxy
         .wait_for_connections_after(0, 1, NETWORK_TIMEOUT)
         .await?;
-    let accepted_before_outage = leader_proxy.accepted_connections();
-    leader_proxy.disconnect();
-    leader_proxy
-        .wait_for_no_connections(NETWORK_TIMEOUT)
-        .await?;
+    let affected_proxies = [leader_proxy];
+    let active_fault = start_fault(case.fault, &affected_proxies).await?;
 
     let outage_start = cluster.l1.provider().get_block_number().await?;
-    let assets = submit_outage_asset_flow(cluster, account, "leader outage", outage_start).await?;
+    let assets = submit_outage_asset_flow(cluster, account, case.phase, outage_start).await?;
     let target = (outage_start + OUTAGE_BLOCK_GAP).max(assets.deposit_block + 1);
     for (index, follower) in cluster.nodes[1..].iter().enumerate() {
         poll_until(
@@ -295,10 +487,14 @@ async fn recover_leader(
             "node {index} advanced zone state without a connected leader"
         );
     }
-    leader_proxy.resume();
-    leader_proxy
-        .wait_for_connections_after(accepted_before_outage, 1, NETWORK_TIMEOUT)
-        .await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
+    let settled_during_outage = portal.zoneHeight().call().await?;
+    eyre::ensure!(
+        settled_during_outage < U256::from(target),
+        "{} unexpectedly settled through height {target} without leader production",
+        case.phase
+    );
+    clear_fault(case.fault, &affected_proxies, active_fault).await?;
     for node in &cluster.nodes {
         node.wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
             .await?;
@@ -313,7 +509,6 @@ async fn recover_leader(
         .wait_all_at(recovered_height, NETWORK_TIMEOUT)
         .await?;
     cluster.assert_same_block(recovered_height).await?;
-    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     wait_for_settled_height(
         &portal,
         recovered_height,
@@ -329,21 +524,18 @@ async fn recover_single_follower(
     leader_proxy: &TcpChaosProxy,
     follower_one_proxy: &TcpChaosProxy,
     follower_two_proxy: &TcpChaosProxy,
+    case: L1OutageCase,
 ) -> eyre::Result<()> {
     let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
     cluster
         .wait_all_at(baseline_height, NETWORK_TIMEOUT)
         .await?;
     cluster.assert_same_block(baseline_height).await?;
-    let accepted_before_outage = follower_one_proxy.accepted_connections();
-    follower_one_proxy.disconnect();
-    follower_one_proxy
-        .wait_for_no_connections(NETWORK_TIMEOUT)
-        .await?;
+    let affected_proxies = [follower_one_proxy];
+    let active_fault = start_fault(case.fault, &affected_proxies).await?;
 
     let outage_start = cluster.l1.provider().get_block_number().await?;
-    let assets =
-        submit_outage_asset_flow(cluster, account, "single-follower outage", outage_start).await?;
+    let assets = submit_outage_asset_flow(cluster, account, case.phase, outage_start).await?;
     let target = (outage_start + OUTAGE_BLOCK_GAP).max(assets.deposit_block + 1);
     cluster.nodes[0]
         .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
@@ -371,10 +563,7 @@ async fn recover_single_follower(
     )
     .await?;
 
-    follower_one_proxy.resume();
-    follower_one_proxy
-        .wait_for_connections_after(accepted_before_outage, 1, NETWORK_TIMEOUT)
-        .await?;
+    clear_fault(case.fault, &affected_proxies, active_fault).await?;
     cluster.nodes[1]
         .wait_for_tempo_block_number(target, NETWORK_TIMEOUT)
         .await?;
@@ -389,6 +578,64 @@ async fn recover_single_follower(
         .await?;
     cluster.assert_same_block(recovered_height).await?;
     assert_outage_asset_flow(cluster, account, assets).await
+}
+
+async fn run_l1_outage_case(
+    cluster: &RealP2pCluster,
+    account: &mut ZoneAccount,
+    proxies: &[TcpChaosProxy; 3],
+    case: L1OutageCase,
+) -> eyre::Result<()> {
+    let [leader_proxy, follower_one_proxy, follower_two_proxy] = proxies;
+    match (case.affected_nodes, case.production, case.settlement) {
+        (
+            AffectedNodes::BothFollowers,
+            ProgressExpectation::Continues,
+            ProgressExpectation::Stalls,
+        ) => {
+            let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
+            recover_both_followers(
+                cluster,
+                account,
+                follower_one_proxy,
+                follower_two_proxy,
+                baseline_height,
+                case,
+            )
+            .await
+        }
+        (AffectedNodes::Leader, ProgressExpectation::Stalls, ProgressExpectation::Stalls) => {
+            recover_leader(
+                cluster,
+                account,
+                leader_proxy,
+                follower_one_proxy,
+                follower_two_proxy,
+                case,
+            )
+            .await
+        }
+        (
+            AffectedNodes::OneFollower,
+            ProgressExpectation::Continues,
+            ProgressExpectation::Continues,
+        ) => {
+            recover_single_follower(
+                cluster,
+                account,
+                leader_proxy,
+                follower_one_proxy,
+                follower_two_proxy,
+                case,
+            )
+            .await
+        }
+        _ => eyre::bail!(
+            "unsupported L1 outage matrix row {}: {:?}",
+            case.phase,
+            case
+        ),
+    }
 }
 
 /// All three sequencers lose their established L1 connections, remain running while L1 advances,
@@ -504,12 +751,12 @@ async fn test_three_sequencers_reconnect_and_catch_up_after_l1_network_outage() 
     Ok(())
 }
 
-/// Exercise three asymmetric L1 outages: both followers, the leader, then one follower. Each
-/// restored side must backfill its missed anchors, process a deposit and withdrawal submitted
-/// during the outage, and converge before the next phase. The final phase also proves that one
-/// healthy follower preserves 2-of-3 settlement.
+/// Exercise the asymmetric L1 fault matrix. Each restored side must backfill its missed anchors,
+/// process a deposit and withdrawal submitted during the fault, and converge before the next row.
+/// HTTP 503 faults happen during the WebSocket upgrade because established WebSockets do not have
+/// per-request HTTP status codes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Result<()> {
+async fn test_asymmetric_l1_fault_matrix() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (cluster, [leader_proxy, follower_one_proxy, follower_two_proxy]) =
@@ -548,7 +795,7 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
         .l1
         .fund_user(
             account.address(),
-            INITIAL_DEPOSIT + 3 * OUTAGE_DEPOSIT + 10_000_000,
+            INITIAL_DEPOSIT + L1_OUTAGE_CASES.len() as u128 * OUTAGE_DEPOSIT + 10_000_000,
         )
         .await?;
     let initial_balance = account
@@ -566,41 +813,10 @@ async fn test_asymmetric_l1_outages_recover_followers_then_leader() -> eyre::Res
     }
     account.approve_outbox(ZONE_TOKEN_ADDRESS).await?;
 
-    let baseline_height = cluster.nodes[0].provider().get_block_number().await?;
-    cluster
-        .wait_all_at(baseline_height, NETWORK_TIMEOUT)
-        .await?;
-    cluster.assert_same_block(baseline_height).await?;
-
-    recover_both_followers(
-        &cluster,
-        &mut account,
-        &follower_one_proxy,
-        &follower_two_proxy,
-        baseline_height,
-    )
-    .await?;
-
-    // Phase 2 reverses the fault: followers observe L1, but zone state cannot move without the
-    // disconnected leader.
-    recover_leader(
-        &cluster,
-        &mut account,
-        &leader_proxy,
-        &follower_one_proxy,
-        &follower_two_proxy,
-    )
-    .await?;
-
-    // Phase 3 leaves a healthy 2-of-3 quorum while one follower catches up after reconnection.
-    recover_single_follower(
-        &cluster,
-        &mut account,
-        &leader_proxy,
-        &follower_one_proxy,
-        &follower_two_proxy,
-    )
-    .await?;
+    let proxies = [leader_proxy, follower_one_proxy, follower_two_proxy];
+    for &case in L1_OUTAGE_CASES {
+        run_l1_outage_case(&cluster, &mut account, &proxies, case).await?;
+    }
 
     Ok(())
 }
