@@ -195,6 +195,14 @@ jobs:
 
           docker run --rm \
             --platform linux/amd64 \
+            --entrypoint /bin/cp \
+            --volume "$PWD/$EIF_OUTPUT_DIR:/output" \
+            "$EIF_BUILDER_IMAGE" \
+            /usr/share/nitro_enclaves/components.sha384 \
+            /output/components.sha384
+
+          docker run --rm \
+            --platform linux/amd64 \
             --volume /var/run/docker.sock:/var/run/docker.sock \
             --volume "$PWD/$EIF_OUTPUT_DIR:/output" \
             "$EIF_BUILDER_IMAGE" \
@@ -222,7 +230,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tempo-zone-prover-measurements-${{ steps.shortsha.outputs.shortsha }}
-          path: target/tempo-zone-prover-eif/measurements.json
+          path: |
+            target/tempo-zone-prover-eif/measurements.json
+            target/tempo-zone-prover-eif/components.sha384
           if-no-files-found: error
 
       - name: Publish Zones CI event

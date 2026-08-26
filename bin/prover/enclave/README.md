@@ -79,11 +79,22 @@ docker buildx bake \
 ```
 
 The EIF and PCR measurements are written under `target/tempo-zone-prover-eif/`. CI embeds the EIF
-in the published image and uploads the measurements as a commit-specific workflow artifact.
+in the published image and uploads the measurements and `components.sha384` as commit-specific
+workflow artifacts.
 
-The EIF uses Linux 6.6.79 and its matching NSM driver, built from a pinned AWS Nitro bootstrap
-commit. Changing either one changes the EIF PCR measurements, so the expected measurements must
-also be updated.
+The EIF uses Linux 6.6.79 and a complete matched bootstrap set built from a pinned AWS Nitro
+bootstrap commit: kernel, resolved config, command line, NSM driver, init, and linuxkit. The Nix
+builder image is pinned by digest, and `components.sha384` records the SHA-384 digest of each
+bootstrap artifact. Changing any of these inputs changes the EIF PCR measurements, so the expected
+measurements must also be reviewed and updated.
+
+The x86_64 kernel build applies `docker/nitro/zones-hardening-x86_64.config` over AWS's baseline.
+CI asserts the resolved configuration after `olddefconfig`. The enforced delta enables kernel and
+kernel-memory ASLR, hardened user copies, slab-freelist randomization, and unprivileged `dmesg`
+restriction. It disables debugfs, Magic SysRq, kexec, io_uring, the BPF syscall/JIT, userfaultfd,
+user and network namespaces, 32-bit compatibility, `modify_ldt`, `/dev/mem`, and `/proc/kcore`.
+The stateless prover does not use these kernel interfaces; removing them reduces unnecessary attack
+surface.
 
 Verifying a batch does not use local randomness or wall-clock time. If we add key or nonce
 generation or KMS/HTTPS calls, configure `random.trust_bootloader=off random.trust_cpu=off` and

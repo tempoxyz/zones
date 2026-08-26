@@ -70,13 +70,17 @@ target "tempo-zone-prover-enclave" {
   platforms = ["linux/amd64"]
 }
 
-# Build a matched Nitro guest kernel and NSM module from AWS's bootstrap sources. Keep this
-# source pinned: changing it changes the EIF kernel and its PCR measurements.
-target "nitro-enclaves-kernel" {
-  context = "https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap.git#f718dea60a9d9bb8b8682fd852ad793912f3c5db"
+# Build a hardened, matched set of Nitro bootstrap artifacts from pinned AWS sources. The local
+# wrapper pins the Nix builder and applies the reviewed Zones kernel-config delta.
+target "nitro-enclaves-bootstrap" {
+  dockerfile = "docker/Dockerfile.nitro-enclaves-bootstrap"
+  context = "."
+  contexts = {
+    nitro-bootstrap-source = "https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap.git#f718dea60a9d9bb8b8682fd852ad793912f3c5db"
+  }
   target = "artifacts"
   args = {
-    TARGET = "kernel"
+    TARGET = "all"
   }
   platforms = ["linux/amd64"]
 }
@@ -85,7 +89,7 @@ target "tempo-zone-prover-eif-builder" {
   dockerfile = "docker/Dockerfile.prover-eif-builder"
   context = "."
   contexts = {
-    nitro-kernel = "target:nitro-enclaves-kernel"
+    nitro-bootstrap = "target:nitro-enclaves-bootstrap"
   }
   platforms = ["linux/amd64"]
 }
