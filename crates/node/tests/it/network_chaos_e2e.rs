@@ -39,7 +39,7 @@ async fn batch_count(
     portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
 ) -> eyre::Result<usize> {
     Ok(portal
-        .BatchSubmitted_1_filter()
+        .BatchSubmitted_0_filter()
         .from_block(0)
         .query()
         .await?
