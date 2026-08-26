@@ -47,6 +47,7 @@ revm.workspace = true
 # misc
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 alloy-genesis.workspace = true
