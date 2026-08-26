@@ -124,7 +124,7 @@ crate::sol! {
         function processedDepositQueueHash() external view returns (bytes32);
         function processedDepositNumber() external view returns (uint64);
         function processedTokenEnablementHash() external view returns (bytes32);
-        /// Get the number of enabled tokens processed by the Zone Inbox. Active from Z1.
+        /// Get the number of enabled tokens processed by the Zone Inbox. Active from T12.
         function processedEnabledTokenCount() external view returns (uint64);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
