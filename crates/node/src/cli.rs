@@ -1,6 +1,6 @@
 //! Tempo Zone CLI.
 
-use std::{net::SocketAddr, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
@@ -221,10 +221,7 @@ fn cli_evm_config(
         .connect_http(l1_rpc_url)
         .erased();
     let runtime_handle = tokio::runtime::Handle::current();
-    let config = L1StateProviderConfig {
-        max_sync_attempts: Some(NonZeroU32::MIN),
-        ..Default::default()
-    };
+    let config = L1StateProviderConfig::default();
     let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
     ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
 }
