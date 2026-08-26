@@ -99,8 +99,17 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<ZoneChainSpec>| {
-        let evm_config = cli_evm_config(spec.clone());
+    let l1_rpc_url = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => Some(
+            url.parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?,
+        ),
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
+
+    let components = move |spec: Arc<ZoneChainSpec>| {
+        let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
         (evm_config, TempoConsensus::new(spec))
     };
 
@@ -188,20 +197,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 }
 
 /// Creates the EVM config used by CLI subcommands.
-fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>) -> ZoneEvmConfig {
-    let Some(l1_rpc_url) = std::env::var("L1_HTTP_RPC_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-    else {
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_rpc_url else {
         return ZoneEvmConfig::new_without_l1(chain_spec);
-    };
-
-    let l1_rpc_url = match l1_rpc_url.parse() {
-        Ok(url) => url,
-        Err(error) => {
-            warn!(%error, "invalid L1_HTTP_RPC_URL; using the offline L1 fallback");
-            return ZoneEvmConfig::new_without_l1(chain_spec);
-        }
     };
 
     let cache = L1StateCache::default();
