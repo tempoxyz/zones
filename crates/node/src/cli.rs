@@ -3,15 +3,18 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
+use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
+use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
@@ -96,11 +99,32 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<ZoneChainSpec>| {
-        (
-            ZoneEvmConfig::new_without_l1(spec.clone()),
-            TempoConsensus::new(spec),
-        )
+    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            eyre::ensure!(
+                !portal_address.is_zero(),
+                "L1_PORTAL_ADDRESS must be nonzero"
+            );
+            Some((url, portal_address))
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
+
+    let components = move |spec: Arc<ZoneChainSpec>| {
+        let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
+        (evm_config, TempoConsensus::new(spec))
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
@@ -182,6 +206,25 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             }
         }
     })
+}
+
+/// Creates the EVM config used by CLI subcommands.
+fn cli_evm_config(
+    chain_spec: Arc<ZoneChainSpec>,
+    l1_config: Option<(url::Url, Address)>,
+) -> ZoneEvmConfig {
+    let Some((l1_rpc_url, portal_address)) = l1_config else {
+        return ZoneEvmConfig::new_without_l1(chain_spec);
+    };
+
+    let cache = L1StateCache::default();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_http(l1_rpc_url)
+        .erased();
+    let runtime_handle = tokio::runtime::Handle::current();
+    let config = L1StateProviderConfig::default();
+    let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+    ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
 }
 
 /// Load and attach all sequencer resources to the node.
