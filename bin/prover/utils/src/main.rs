@@ -12,7 +12,7 @@ use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{Block, BlockNumberOrTag, EIP1186AccountProofResponse, Transaction};
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolCall as _;
+use alloy_sol_types::{SolCall as _, SolInterface as _};
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
 use futures::{StreamExt, TryStreamExt, stream};
@@ -863,37 +863,35 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                         header.number()
                     );
                 }
-                if envelope
-                    .input()
-                    .starts_with(&ZoneInbox::advanceTempoCall::SELECTOR)
-                {
-                    let call = ZoneInbox::advanceTempoCall::abi_decode(envelope.input())
-                        .wrap_err_with(|| {
-                            format!("decode advanceTempo in Zone block {}", header.number())
-                        })?;
-                    checkpoint_number = Some(decode_tempo_header(&call.header)?.number());
-                    tempo_header_rlp = Some(call.header);
-                    deposits = call.deposits;
-                    decryptions = call.decryptions;
-                    enabled_tokens = call.enabledTokens;
-                } else {
-                    let call = ZoneInbox::advanceTempoHeadersCall::abi_decode(envelope.input())
-                        .wrap_err_with(|| {
-                            format!(
-                                "decode advanceTempoHeaders in Zone block {}",
-                                header.number()
-                            )
-                        })?;
-                    let final_header = call
-                        .headers
-                        .last()
-                        .ok_or_eyre("checkpoint-only Zone block has no Tempo headers")?;
-                    checkpoint_number = Some(decode_tempo_header(final_header)?.number());
-                    for encoded in &call.headers {
-                        decode_tempo_header(encoded)?;
+                let call = ZoneInbox::IZoneInboxCalls::abi_decode(envelope.input()).wrap_err_with(
+                    || format!("decode ZoneInbox call in Zone block {}", header.number()),
+                )?;
+                match call {
+                    ZoneInbox::IZoneInboxCalls::advanceTempo(call) => {
+                        checkpoint_number = Some(decode_tempo_header(&call.header)?.number());
+                        tempo_header_rlp = Some(call.header);
+                        deposits = call.deposits;
+                        decryptions = call.decryptions;
+                        enabled_tokens = call.enabledTokens;
                     }
-                    tempo_headers_rlp = call.headers;
-                    tempo_header_rlp = Some(Bytes::new());
+                    ZoneInbox::IZoneInboxCalls::advanceTempoHeaders(call) => {
+                        let final_header = call
+                            .headers
+                            .last()
+                            .ok_or_eyre("checkpoint-only Zone block has no Tempo headers")?;
+                        checkpoint_number = Some(decode_tempo_header(final_header)?.number());
+                        for encoded in &call.headers {
+                            decode_tempo_header(encoded)?;
+                        }
+                        tempo_headers_rlp = call.headers;
+                        tempo_header_rlp = Some(Bytes::new());
+                    }
+                    _ => {
+                        return Err(eyre!(
+                            "unexpected ZoneInbox call in Zone block {}",
+                            header.number()
+                        ));
+                    }
                 }
             }
             Some(to) if to == ZONE_OUTBOX_ADDRESS => {
