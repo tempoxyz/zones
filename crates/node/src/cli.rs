@@ -227,10 +227,9 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        eyre::ensure!(
-            args.sequencer_manifest.is_none(),
-            "--sequencer.manifest is not supported with `tempo-zone dev`"
-        );
+        if args.sequencer_manifest.is_some() {
+            warn!(target: "reth::cli", "Ignoring sequencer manifest in Tempo Zone dev mode");
+        }
         eyre::ensure!(
             args.checker_mode == CheckerMode::Off,
             "--checker.mode is not supported with `tempo-zone dev`"
