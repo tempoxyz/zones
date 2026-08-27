@@ -348,6 +348,16 @@ async fn configure_sequencing(
     }
 
     let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+    eyre::ensure!(
+        args.enable_sequencer || p2p_config.is_some(),
+        "--sequencer.manifest is required for node startup"
+    );
+    if args.enable_sequencer {
+        warn!(
+            target: "reth::cli",
+            "--sequencer is deprecated; configure --sequencer.manifest, --p2p.key, and --secp256k1.key"
+        );
+    }
     let should_sequence_blocks = args.enable_sequencer
         || p2p_config
             .as_ref()
@@ -633,12 +643,15 @@ pub struct ZoneArgs {
     )]
     pub redacted_rpc_max_auth_token_validity_secs: u64,
 
-    /// Enable the Zone node in sequencer mode. This advances block production and submits
-    /// withdrawal batches.
+    /// Deprecated manifestless node startup.
+    ///
+    /// Use `--sequencer.manifest` with the node's P2P and settlement identity keys. Local
+    /// development should use `tempo-zone dev` instead.
     #[arg(
         long = "sequencer",
         env = "SEQUENCER",
-        conflicts_with = "sequencer_manifest"
+        conflicts_with = "sequencer_manifest",
+        help = "Deprecated: start a node without a sequencer manifest"
     )]
     pub enable_sequencer: bool,
 
