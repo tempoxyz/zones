@@ -1346,7 +1346,7 @@ fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_bloc
             .operational_work(&queue.peek().unwrap())
             .unwrap()
             .len(),
-        3
+        2
     );
 
     queue.confirm_operational_through(third.num_hash()).unwrap();
@@ -1396,7 +1396,7 @@ fn deferred_checkpoint_work_survives_until_operational_confirmation() {
         work.iter()
             .map(|block| block.header.number())
             .collect::<Vec<_>>(),
-        vec![10, 11, 12]
+        vec![11, 12]
     );
 
     queue
@@ -1410,25 +1410,140 @@ fn restart_can_seed_deferred_checkpoint_work() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
     let h11 = make_chained_header(11, header_hash(&h10));
-    queue
-        .seed_deferred(vec![
-            L1BlockDeposits {
-                header: seal(h10),
-                events: L1PortalEvents::default(),
-            },
-            L1BlockDeposits {
-                header: seal(h11),
-                events: L1PortalEvents::default(),
-            },
-        ])
-        .unwrap();
+    let mut deferred = crate::queue::DeferredPortalWork::new(L1BlockDeposits {
+        header: seal(h10),
+        events: L1PortalEvents::default(),
+    })
+    .unwrap();
+    deferred.push(L1BlockDeposits {
+        header: seal(h11),
+        events: L1PortalEvents::default(),
+    });
+    queue.seed_deferred(deferred).unwrap();
 
     let h12 = make_chained_header(12, queue.last_enqueued().unwrap().hash);
     queue
         .try_enqueue_sealed(seal(h12), L1PortalEvents::default())
         .unwrap();
     let current = queue.peek().unwrap();
-    assert_eq!(queue.operational_work(&current).unwrap().len(), 3);
+    assert_eq!(queue.operational_work(&current).unwrap().len(), 2);
+}
+
+#[test]
+fn deferred_empty_blocks_use_constant_space() {
+    let mut queue = PendingDeposits::default();
+    let mut parent_hash = B256::ZERO;
+    for number in 1..=10_000 {
+        let header = if number == 1 {
+            make_test_header(number)
+        } else {
+            make_chained_header(number, parent_hash)
+        };
+        let header = seal(header);
+        let anchor = header.num_hash();
+        parent_hash = anchor.hash;
+        queue
+            .try_enqueue(header, L1PortalEvents::default())
+            .unwrap();
+        queue.defer(anchor).unwrap();
+    }
+
+    assert_eq!(queue.deferred_event_block_len(), 0);
+    assert_eq!(queue.deferred_range(), Some((1, 10_000)));
+}
+
+#[test]
+fn compacted_deferred_work_releases_only_a_confirmed_prefix() {
+    let mut queue = PendingDeposits::default();
+    let tokens: Vec<_> = (1..=4)
+        .map(|index| EnabledToken {
+            token: Address::repeat_byte(index),
+            name: format!("Token {index}"),
+            symbol: format!("T{index}"),
+            currency: "USD".into(),
+        })
+        .collect();
+    let mut parent_hash = B256::ZERO;
+    let mut anchors = Vec::new();
+    for (index, token) in tokens[..3].iter().enumerate() {
+        let number = index as u64 + 1;
+        let header = if number == 1 {
+            make_test_header(number)
+        } else {
+            make_chained_header(number, parent_hash)
+        };
+        let header = seal(header);
+        let anchor = header.num_hash();
+        parent_hash = anchor.hash;
+        queue
+            .try_enqueue(
+                header,
+                L1PortalEvents {
+                    enabled_tokens: vec![token.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        queue.defer(anchor).unwrap();
+        anchors.push(anchor);
+    }
+
+    queue.confirm_operational_through(anchors[1]).unwrap();
+    assert_eq!(queue.deferred_range(), Some((3, 3)));
+
+    let current = seal(make_chained_header(4, parent_hash));
+    queue
+        .try_enqueue(
+            current,
+            L1PortalEvents {
+                enabled_tokens: vec![tokens[3].clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let work = queue.operational_work(queue.peek().unwrap()).unwrap();
+    assert_eq!(work.len(), 2);
+    assert_eq!(work[0].events.enabled_tokens[0].token, tokens[2].token);
+    assert_eq!(work[1].events.enabled_tokens[0].token, tokens[3].token);
+}
+
+#[test]
+fn deferred_work_enforces_token_capacity_before_removing_the_front() {
+    let mut queue = PendingDeposits::default();
+    let mut parent_hash = B256::ZERO;
+    for index in 0..=zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS {
+        let number = index as u64 + 1;
+        let header = if number == 1 {
+            make_test_header(number)
+        } else {
+            make_chained_header(number, parent_hash)
+        };
+        let header = seal(header);
+        let anchor = header.num_hash();
+        parent_hash = anchor.hash;
+        queue
+            .try_enqueue(
+                header,
+                L1PortalEvents {
+                    enabled_tokens: vec![EnabledToken {
+                        token: Address::repeat_byte(number as u8),
+                        name: format!("Token {number}"),
+                        symbol: format!("T{number}"),
+                        currency: "USD".into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        if index < zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS {
+            queue.defer(anchor).unwrap();
+        } else {
+            let err = queue.defer(anchor).unwrap_err();
+            assert!(err.to_string().contains("protocol capacity"));
+            assert_eq!(queue.peek().unwrap().header.num_hash(), anchor);
+        }
+    }
 }
 
 #[test]

@@ -918,7 +918,7 @@ impl L1Subscriber {
             return Ok(());
         }
 
-        let mut blocks = Vec::with_capacity((checkpoint.number - from + 1) as usize);
+        let mut deferred: Option<crate::queue::DeferredPortalWork> = None;
         for block_number in from..=checkpoint.number {
             let header = l1_provider
                 .get_header_by_number(block_number.into())
@@ -933,12 +933,22 @@ impl L1Subscriber {
             )
             .await?;
             let (events, _, _) = self.extract_events(block_number, &receipts)?;
-            blocks.push(L1BlockDeposits {
+            let block = L1BlockDeposits {
                 header: SealedHeader::seal_slow(header.inner.inner),
                 events,
-            });
+            };
+            match &mut deferred {
+                Some(work) => work.push(block),
+                None => deferred = Some(crate::queue::DeferredPortalWork::new(block)?),
+            }
         }
-        self.deposit_queue.seed_deferred(blocks)?;
+        let deferred = deferred.expect("the recovered deferred range is nonempty");
+        eyre::ensure!(
+            deferred.last_num_hash() == checkpoint,
+            "recovered deferred L1 range ends at {:?}, but the local checkpoint is {checkpoint:?}",
+            deferred.last_num_hash()
+        );
+        self.deposit_queue.seed_deferred(deferred)?;
         info!(
             from,
             to = checkpoint.number,

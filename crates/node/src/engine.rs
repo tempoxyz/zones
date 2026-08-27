@@ -119,7 +119,7 @@ trait AvailableBlockDrain {
     type Block;
 
     /// Returns the next available block without consuming it.
-    fn next_available(&self) -> Option<Self::Block>;
+    fn next_available(&self) -> eyre::Result<Option<Self::Block>>;
 
     /// Checks the leadership permit for one available block.
     ///
@@ -147,7 +147,7 @@ where
         if stop.is_cancelled() {
             return Ok(Some(EngineExit::Cancelled));
         }
-        let Some(block) = drain.next_available() else {
+        let Some(block) = drain.next_available()? else {
             return Ok(None);
         };
         if let Some(exit) = drain.permit(&block) {
@@ -191,6 +191,20 @@ pub struct ZoneEngine {
     portal_address: Address,
     /// Optional per-anchor leadership permit. `None` runs the legacy single-sequencer mode.
     production_permit: Option<ProductionPermit>,
+}
+
+#[derive(Debug)]
+struct AvailableTempoImport {
+    l1_block: L1BlockDeposits,
+    checkpoint_headers: Vec<SealedHeader<TempoHeader>>,
+    wall_clock_timestamp_millis: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempoImportDecision {
+    WaitForHardforkMatch,
+    Full,
+    CheckpointOnly(usize),
 }
 
 impl ZoneEngine {
@@ -321,46 +335,26 @@ impl ZoneEngine {
     /// with those attributes, waits for the payload to be built, then submits
     /// via `newPayload`. Only confirms (removes) the L1 block from the
     /// deposit queue after `newPayload` succeeds.
-    async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
-        let queued_headers = self
-            .deposit_queue
-            .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
-        // Do not checkpoint across the T12 activation boundary. A pre-T12 queue front must be
-        // imported operationally before a later T12 header can enable advanceTempoHeaders.
-        let checkpoint_count = checkpoint_header_count(
-            &self.chain_spec,
-            &queued_headers,
-            self.l1_block_tracker.finalized_target(),
-        );
-        let checkpoint_headers = &queued_headers[..checkpoint_count];
+    async fn advance(&mut self, available: AvailableTempoImport) -> eyre::Result<()> {
+        let AvailableTempoImport {
+            l1_block,
+            checkpoint_headers,
+            wall_clock_timestamp_millis,
+        } = available;
         let checkpoint_only = !checkpoint_headers.is_empty();
         let final_header = checkpoint_headers.last().unwrap_or(&l1_block.header);
         let l1_num_hash = final_header.num_hash();
 
-        let (timestamp_secs, timestamp_millis_part) = if self
-            .chain_spec
-            .tempo_hardfork_at(final_header.timestamp())
-            .is_t12()
-        {
-            // T12 locks the Zone block timestamp to the final imported Tempo header.
-            (final_header.timestamp(), final_header.timestamp_millis_part)
-        } else {
-            // Before T12, the L1 timestamp remains a lower bound. Use wall-clock time to avoid
-            // backdating transactions during catch-up, and keep consecutive blocks monotonic.
-            let wall_clock_timestamp_millis = SystemTime::now()
-                .duration_since(UNIX_EPOCH)?
-                .as_millis()
-                .try_into()?;
-            let timestamp_millis = zone_timestamp_millis(
-                l1_block.header.timestamp_millis(),
-                self.last_header.timestamp_millis(),
-                wall_clock_timestamp_millis,
-            );
-            (timestamp_millis / 1000, timestamp_millis % 1000)
-        };
+        let timestamp_millis = zone_timestamp_millis(
+            final_header.timestamp_millis(),
+            self.last_header.timestamp_millis(),
+            wall_clock_timestamp_millis,
+        );
+        let timestamp_secs = timestamp_millis / 1000;
+        let timestamp_millis_part = timestamp_millis % 1000;
 
         let tempo_import = if checkpoint_only {
-            TempoImport::CheckpointOnly(checkpoint_headers.to_vec())
+            TempoImport::CheckpointOnly(checkpoint_headers.clone())
         } else {
             let portal_work = self.deposit_queue.operational_work(&l1_block)?;
             TempoImport::Full(Box::new(
@@ -426,7 +420,7 @@ impl ZoneEngine {
         // newPayload succeeded — remove the exact finalized L1 block that
         // produced it. A mismatch indicates an internal consumer-ordering bug.
         if checkpoint_only {
-            for header in checkpoint_headers {
+            for header in &checkpoint_headers {
                 self.deposit_queue.defer(header.num_hash())?;
             }
         } else {
@@ -450,17 +444,38 @@ impl ZoneEngine {
     }
 }
 
-fn checkpoint_header_count(
+fn tempo_import_decision(
     chain_spec: &ZoneChainSpec,
     queued_headers: &[SealedHeader<TempoHeader>],
+    latest_l1_header: &SealedHeader<TempoHeader>,
     finalized_target: Option<u64>,
-) -> usize {
-    if !queued_headers
-        .first()
-        .is_some_and(|header| chain_spec.tempo_hardfork_at(header.timestamp()).is_t12())
-    {
-        return 0;
+    parent_timestamp_millis: u64,
+    wall_clock_timestamp_millis: u64,
+) -> TempoImportDecision {
+    let Some(first_header) = queued_headers.first() else {
+        return TempoImportDecision::Full;
+    };
+    let first_l1_is_t12 = chain_spec
+        .tempo_hardfork_at(first_header.timestamp())
+        .is_t12();
+    let next_timestamp_millis = zone_timestamp_millis(
+        first_header.timestamp_millis(),
+        parent_timestamp_millis,
+        wall_clock_timestamp_millis,
+    );
+    let zone_hardfork = chain_spec.tempo_hardfork_at(next_timestamp_millis / 1000);
+    let l1_tip_hardfork = chain_spec.tempo_hardfork_at(latest_l1_header.timestamp());
+
+    // Zone execution must not activate a hardfork before L1. Wait whenever the prospective Zone
+    // block is ahead of the latest queued L1 header, but allow L1 to be ahead while the Zone
+    // imports the remaining pre-fork prefix under its currently active rules.
+    if zone_hardfork > l1_tip_hardfork {
+        return TempoImportDecision::WaitForHardforkMatch;
     }
+    if !zone_hardfork.is_t12() {
+        return TempoImportDecision::Full;
+    }
+
     // During backfill, the subscriber announces its finalized target before filling the queue.
     // Until that target is visible, every queued header may be checkpointed because a later header
     // is known to exist for the required full block. Once the target is queued (or no target is
@@ -470,36 +485,67 @@ fn checkpoint_header_count(
             .last()
             .is_some_and(|header| header.number() >= target)
     });
-    queued_headers
+    let checkpoint_count = queued_headers
         .len()
         .saturating_sub(usize::from(reserve_for_full))
         .min(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK)
+        // Never reserve a T11 queue front for a full T12 import. This also closes the small race
+        // where the T12 successor is appended between the bounded queue snapshot and tip read.
+        .max(usize::from(!first_l1_is_t12));
+    if checkpoint_count == 0 {
+        TempoImportDecision::Full
+    } else {
+        TempoImportDecision::CheckpointOnly(checkpoint_count)
+    }
 }
 
 impl AvailableBlockDrain for ZoneEngine {
-    type Block = L1BlockDeposits;
+    type Block = AvailableTempoImport;
 
-    fn next_available(&self) -> Option<Self::Block> {
-        self.deposit_queue.peek()
-    }
-
-    fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+    fn next_available(&self) -> eyre::Result<Option<Self::Block>> {
+        let Some(l1_block) = self.deposit_queue.peek() else {
+            return Ok(None);
+        };
         let queued_headers = self
             .deposit_queue
             .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
-        if checkpoint_header_count(
+        let latest_l1_header = self
+            .deposit_queue
+            .latest_header()
+            .ok_or_eyre("L1 deposit queue lost its latest header")?;
+        let wall_clock_timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let decision = tempo_import_decision(
             &self.chain_spec,
             &queued_headers,
+            &latest_l1_header,
             self.l1_block_tracker.finalized_target(),
-        ) > 0
-        {
+            self.last_header.timestamp_millis(),
+            wall_clock_timestamp_millis,
+        );
+        let checkpoint_headers = match decision {
+            TempoImportDecision::WaitForHardforkMatch => return Ok(None),
+            TempoImportDecision::Full => Vec::new(),
+            TempoImportDecision::CheckpointOnly(count) => queued_headers[..count].to_vec(),
+        };
+        Ok(Some(AvailableTempoImport {
+            l1_block,
+            checkpoint_headers,
+            wall_clock_timestamp_millis,
+        }))
+    }
+
+    fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+        if !block.checkpoint_headers.is_empty() {
             // TIP-1096 assigns no leader to checkpoint-only blocks. Leader authority resumes at
             // the final full block, whose single imported Tempo header is checked below.
             return None;
         }
         self.production_permit
             .as_ref()
-            .and_then(|permit| permit.check(block.header.number()))
+            .and_then(|permit| permit.check(block.l1_block.header.number()))
     }
 
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -565,19 +611,76 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_batching_does_not_cross_t12_activation() {
+    fn t12_boundary_waits_for_l1_then_checkpoints_the_t11_prefix() {
         let spec = t12_spec(100);
+        let t11 = header(1, 99);
+        let t12 = header(2, 100);
+
         assert_eq!(
-            checkpoint_header_count(&spec, &[header(1, 99), header(2, 100)], Some(2)),
-            0
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&t11),
+                &t11,
+                Some(1),
+                98_000,
+                100_000
+            ),
+            TempoImportDecision::WaitForHardforkMatch
         );
         assert_eq!(
-            checkpoint_header_count(&spec, &[header(2, 100), header(3, 101)], Some(3)),
-            1
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&t11),
+                &t12,
+                None,
+                98_000,
+                100_000,
+            ),
+            TempoImportDecision::CheckpointOnly(1)
         );
         assert_eq!(
-            checkpoint_header_count(&spec, &[header(2, 100)], Some(2)),
-            0
+            tempo_import_decision(&spec, &[t11, t12.clone()], &t12, Some(2), 98_000, 100_000,),
+            TempoImportDecision::CheckpointOnly(1)
+        );
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&t12),
+                &t12,
+                Some(2),
+                99_000,
+                100_000
+            ),
+            TempoImportDecision::Full
+        );
+    }
+
+    #[test]
+    fn pre_t12_zone_block_imports_the_t11_front_normally() {
+        let spec = t12_spec(100);
+        let t11 = header(1, 99);
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&t11),
+                &t11,
+                Some(1),
+                98_000,
+                99_000
+            ),
+            TempoImportDecision::Full
+        );
+    }
+
+    #[test]
+    fn hardfork_gate_does_not_wait_when_l1_is_ahead_of_the_zone() {
+        let spec = t12_spec(100);
+        let t11 = header(1, 99);
+        let t12 = header(2, 100);
+
+        assert_eq!(
+            tempo_import_decision(&spec, &[t11], &t12, Some(2), 98_000, 99_000),
+            TempoImportDecision::Full
         );
     }
 
@@ -587,9 +690,17 @@ mod tests {
 
         // Backfill has announced 100 missing blocks, but only the first is verified and queued.
         // It must remain a checkpoint-only import instead of becoming a premature full block.
+        let first = header(100, 100);
         assert_eq!(
-            checkpoint_header_count(&spec, &[header(100, 100)], Some(199)),
-            1
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&first),
+                &first,
+                Some(199),
+                99_000,
+                100_000,
+            ),
+            TempoImportDecision::CheckpointOnly(1)
         );
 
         // Once all 100 are queued, reserve the target header for the full operational import and
@@ -597,7 +708,17 @@ mod tests {
         let headers = (100..=199)
             .map(|number| header(number, number))
             .collect::<Vec<_>>();
-        assert_eq!(checkpoint_header_count(&spec, &headers, Some(199)), 99);
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                &headers,
+                headers.last().unwrap(),
+                Some(199),
+                99_000,
+                100_000,
+            ),
+            TempoImportDecision::CheckpointOnly(99)
+        );
     }
 
     struct PausedDrain {
@@ -612,8 +733,8 @@ mod tests {
     impl AvailableBlockDrain for PausedDrain {
         type Block = u64;
 
-        fn next_available(&self) -> Option<Self::Block> {
-            self.pending.front().copied()
+        fn next_available(&self) -> eyre::Result<Option<Self::Block>> {
+            Ok(self.pending.front().copied())
         }
 
         fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
