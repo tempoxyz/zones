@@ -99,7 +99,28 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let l1_config = l1_evm_config_from_env()?;
+    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            eyre::ensure!(
+                !portal_address.is_zero(),
+                "L1_PORTAL_ADDRESS must be nonzero"
+            );
+            Some((url, portal_address))
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
         let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
@@ -127,12 +148,32 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
+        let additional_decryption_keys =
+            load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
+
         builder.config_mut().network.discovery.disable_discovery = true;
         builder.config_mut().rpc.disable_auth_server = true;
         builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-        let mut node = base_zone_node(&args, zone_id).await?;
+        let mut node = ZoneNode::new(
+            args.l1_rpc_url.clone(),
+            args.portal_address,
+            args.l1_fetch_concurrency,
+            Duration::from_millis(args.l1_retry_connection_interval_ms),
+        )
+        .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
+        .with_redacted_rpc(ZoneRedactedRpcConfig {
+            redacted_rpc_port: args.redacted_rpc_port,
+            zone_id,
+            max_auth_token_validity: Duration::from_secs(
+                args.redacted_rpc_max_auth_token_validity_secs,
+            ),
+        });
+        if !additional_decryption_keys.is_empty() {
+            node = node.with_deposit_decryption_keys(additional_decryption_keys);
+        }
+
         node = configure_sequencing(&args, zone_id, node).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
@@ -190,6 +231,10 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
             args.sequencer_manifest.is_none(),
             "--sequencer.manifest is not supported with `tempo-zone dev`"
         );
+        eyre::ensure!(
+            args.checker_mode == CheckerMode::Off,
+            "--checker.mode is not supported with `tempo-zone dev`"
+        );
 
         let zone_id = builder.config().chain.zone_id();
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
@@ -198,7 +243,7 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
         builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-        let mut node = base_zone_node(&args, zone_id).await?;
+        let mut node = create_zone_node(&args, zone_id).await?;
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
@@ -215,34 +260,12 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
             prover_address: args.prover_address.clone(),
         });
 
-        match args.checker_mode {
-            CheckerMode::Off => {
-                let handle = builder
-                    .node(node)
-                    .launch_with_debug_capabilities()
-                    .await?;
-                handle.wait_for_node_exit().await
-            }
-            CheckerMode::Observe => {
-                info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
-                let node = node.with_portal_evidence_retention();
-                let checker = CheckerExEx::new(CheckerConfig {
-                    l1_rpc_url: args.l1_rpc_url.clone(),
-                    portal_address: args.portal_address,
-                    zone_id,
-                    zone_chain_id: builder.config().chain.chain().id(),
-                    database_path: builder.config().datadir().data_dir().join("checker"),
-                    l1_block_tracker: node.l1_block_tracker(),
-                });
-                builder
-                    .node(node)
-                    .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
-                    .launch_with_debug_capabilities()
-                    .await?
-                    .wait_for_node_exit()
-                    .await
-            }
-        }
+        builder
+            .node(node)
+            .launch_with_debug_capabilities()
+            .await?
+            .wait_for_node_exit()
+            .await
     })
 }
 
@@ -271,7 +294,7 @@ fn l1_evm_config_from_env() -> eyre::Result<Option<(url::Url, Address)>> {
     }
 }
 
-async fn base_zone_node(args: &ZoneArgs, zone_id: u32) -> eyre::Result<ZoneNode> {
+async fn create_zone_node(args: &ZoneArgs, zone_id: u32) -> eyre::Result<ZoneNode> {
     let additional_decryption_keys =
         load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
     let mut node = ZoneNode::new(
