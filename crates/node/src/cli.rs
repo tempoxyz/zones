@@ -132,7 +132,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-        let mut node = base_zone_node(&args, zone_id).await?;
+        let mut node = create_zone_node(&args, zone_id).await?;
         node = configure_sequencing(&args, zone_id, node).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
@@ -198,7 +198,7 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
         builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-        let mut node = base_zone_node(&args, zone_id).await?;
+        let mut node = create_zone_node(&args, zone_id).await?;
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
@@ -271,7 +271,7 @@ fn l1_evm_config_from_env() -> eyre::Result<Option<(url::Url, Address)>> {
     }
 }
 
-async fn base_zone_node(args: &ZoneArgs, zone_id: u32) -> eyre::Result<ZoneNode> {
+async fn create_zone_node(args: &ZoneArgs, zone_id: u32) -> eyre::Result<ZoneNode> {
     let additional_decryption_keys =
         load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
     let mut node = ZoneNode::new(
