@@ -37,6 +37,7 @@ target "_common" {
 }
 
 target "tempo-zone" {
+  dockerfile = "docker/Dockerfile"
   inherits = ["_common", "docker-metadata"]
   target = "tempo-zone"
 }
