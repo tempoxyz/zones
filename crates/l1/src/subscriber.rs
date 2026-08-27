@@ -1,3 +1,5 @@
+use crate::queue::DeferredPortalWork;
+
 use super::*;
 use eyre::WrapErr as _;
 use std::collections::HashSet;
@@ -16,7 +18,15 @@ struct L1BlockTrackerState {
     recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
-    finalized_target: Option<u64>,
+    finalized_target: Option<FinalizedTarget>,
+}
+
+/// Highest finalized L1 height announced by the subscriber and whether catch-up has verified that
+/// no newer finalized block remains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizedTarget {
+    pub number: u64,
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,17 +82,46 @@ impl L1BlockTracker {
     /// Record the highest finalized L1 height the subscriber has been asked to ingest.
     ///
     /// This is published before backfill starts so the Zone engine does not mistake a partially
-    /// filled queue for the end of the finalized range. The watermark remains monotonic across
-    /// reconnects so a lagging RPC endpoint cannot move the target backwards.
+    /// filled queue for the end of the finalized range.
     pub fn record_finalized_target(&self, number: u64) {
         let mut state = self.state.write();
-        state.finalized_target = Some(state.finalized_target.map_or(number, |old| old.max(number)));
+        let advanced = state
+            .finalized_target
+            .is_none_or(|target| number > target.number);
+        if !advanced {
+            return;
+        }
+        state.finalized_target = Some(FinalizedTarget {
+            number,
+            ready: false,
+        });
         drop(state);
         self.changed.send_replace(());
     }
 
-    /// Return the highest finalized L1 height announced by the subscriber.
-    pub fn finalized_target(&self) -> Option<u64> {
+    /// Mark an announced target ready after a second finalized read observes no remaining delta.
+    pub fn mark_finalized_target_ready(&self, number: u64) -> eyre::Result<()> {
+        let mut state = self.state.write();
+        let target = state
+            .finalized_target
+            .as_mut()
+            .ok_or_else(|| eyre::eyre!("cannot mark an unannounced finalized target ready"))?;
+        eyre::ensure!(
+            target.number == number,
+            "cannot mark finalized target {number} ready; latest announced target is {}",
+            target.number
+        );
+        if target.ready {
+            return Ok(());
+        }
+        target.ready = true;
+        drop(state);
+        self.changed.send_replace(());
+        Ok(())
+    }
+
+    /// Return the highest finalized L1 height announced by the subscriber and its sync status.
+    pub fn finalized_target(&self) -> Option<FinalizedTarget> {
         self.state.read().finalized_target
     }
 
@@ -652,36 +691,54 @@ impl L1Subscriber {
 
     /// Synchronize all missing blocks through the current finalized L1 head.
     ///
+    /// The finalized L1 head is continuously updated on every iteration,
+    /// so the loop will terminate when `next_block` reaches or exceeds the finalized height.
+    ///
     /// Callers provide the next block number and receive the next cursor after
     /// a successful sync.
-    pub(crate) async fn sync_finalized_once(
+    pub(crate) async fn sync_to_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        next_block: u64,
+        mut next_block: u64,
     ) -> eyre::Result<u64> {
-        let finalized = self.finalized_block_number(l1_provider).await?;
-        self.config.block_tracker.record_finalized_target(finalized);
-        if next_block > finalized {
-            self.record_seen_block(finalized, 0);
-            return Ok(next_block);
+        let mut finalized = self.finalized_block_number(l1_provider).await?;
+        loop {
+            self.config.block_tracker.record_finalized_target(finalized);
+            if next_block <= finalized {
+                let blocks = finalized - next_block + 1;
+                self.record_seen_block(finalized, blocks);
+                info!(
+                    from = next_block,
+                    to = finalized,
+                    blocks,
+                    "Synchronizing finalized L1 blocks"
+                );
+
+                let start = std::time::Instant::now();
+                self.backfill(l1_provider, next_block, finalized).await?;
+                self.subscriber_metrics
+                    .backfill_duration_seconds
+                    .record(start.elapsed().as_secs_f64());
+                next_block = finalized.saturating_add(1);
+            } else {
+                self.record_seen_block(finalized, 0);
+            }
+
+            let refreshed = self.finalized_block_number(l1_provider).await?;
+            eyre::ensure!(
+                refreshed >= finalized,
+                "finalized L1 target regressed from {finalized} to {refreshed}"
+            );
+            self.config.block_tracker.record_finalized_target(refreshed);
+            if refreshed == finalized {
+                self.config
+                    .block_tracker
+                    .mark_finalized_target_ready(refreshed)?;
+                self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
+                return Ok(next_block);
+            }
+            finalized = refreshed;
         }
-
-        let blocks = finalized - next_block + 1;
-        self.record_seen_block(finalized, blocks);
-        info!(
-            from = next_block,
-            to = finalized,
-            blocks,
-            "Synchronizing finalized L1 blocks"
-        );
-
-        let start = std::time::Instant::now();
-        self.backfill(l1_provider, next_block, finalized).await?;
-        self.subscriber_metrics
-            .backfill_duration_seconds
-            .record(start.elapsed().as_secs_f64());
-        self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
-        Ok(finalized.saturating_add(1))
     }
 
     /// Follow finalized L1 using transport-specific head notifications as wakeups.
@@ -701,11 +758,11 @@ impl L1Subscriber {
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued as another trigger.
-        next_block = self.sync_finalized_once(l1_provider, next_block).await?;
+        next_block = self.sync_to_finalized(l1_provider, next_block).await?;
 
         while let Some(trigger) = triggers.next().await {
             trigger?;
-            next_block = self.sync_finalized_once(l1_provider, next_block).await?;
+            next_block = self.sync_to_finalized(l1_provider, next_block).await?;
         }
 
         Err(eyre::eyre!("L1 head notification stream ended"))
@@ -918,7 +975,7 @@ impl L1Subscriber {
             return Ok(());
         }
 
-        let mut deferred: Option<crate::queue::DeferredPortalWork> = None;
+        let mut deferred: Option<DeferredPortalWork> = None;
         for block_number in from..=checkpoint.number {
             let header = l1_provider
                 .get_header_by_number(block_number.into())
@@ -937,9 +994,10 @@ impl L1Subscriber {
                 header: SealedHeader::seal_slow(header.inner.inner),
                 events,
             };
-            match &mut deferred {
-                Some(work) => work.push(block),
-                None => deferred = Some(crate::queue::DeferredPortalWork::new(block)?),
+            if let Some(deferred) = &mut deferred {
+                deferred.push(block);
+            } else {
+                deferred = Some(DeferredPortalWork::new(block));
             }
         }
         let deferred = deferred.expect("the recovered deferred range is nonempty");
@@ -948,7 +1006,7 @@ impl L1Subscriber {
             "recovered deferred L1 range ends at {:?}, but the local checkpoint is {checkpoint:?}",
             deferred.last_num_hash()
         );
-        self.deposit_queue.seed_deferred(deferred)?;
+        self.deposit_queue.restore_deferred(deferred)?;
         info!(
             from,
             to = checkpoint.number,

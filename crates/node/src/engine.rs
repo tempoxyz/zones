@@ -56,7 +56,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker};
+use zone_l1::{DepositQueue, EncryptionKeyRing, FinalizedTarget, L1BlockDeposits, L1BlockTracker};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
@@ -203,8 +203,11 @@ struct AvailableTempoImport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TempoImportDecision {
     WaitForHardforkMatch,
-    Full,
-    CheckpointOnly(usize),
+    WaitForFinalizedTarget,
+    /// Import the full block with `advanceTempo`.
+    ImportFull,
+    /// Import specified number of checkpoint headers with `advanceTempoHeaders`.
+    ImportCheckpoints(usize),
 }
 
 impl ZoneEngine {
@@ -354,7 +357,7 @@ impl ZoneEngine {
         let timestamp_millis_part = timestamp_millis % 1000;
 
         let tempo_import = if checkpoint_only {
-            TempoImport::CheckpointOnly(checkpoint_headers.clone())
+            TempoImport::CheckpointOnly(checkpoint_headers)
         } else {
             let portal_work = self.deposit_queue.operational_work(&l1_block)?;
             TempoImport::Full(Box::new(
@@ -420,9 +423,7 @@ impl ZoneEngine {
         // newPayload succeeded — remove the exact finalized L1 block that
         // produced it. A mismatch indicates an internal consumer-ordering bug.
         if checkpoint_only {
-            for header in &checkpoint_headers {
-                self.deposit_queue.defer(header.num_hash())?;
-            }
+            self.deposit_queue.defer_through(l1_num_hash)?;
         } else {
             self.deposit_queue.confirm_operational(l1_num_hash)?;
         }
@@ -448,16 +449,14 @@ fn tempo_import_decision(
     chain_spec: &ZoneChainSpec,
     queued_headers: &[SealedHeader<TempoHeader>],
     latest_l1_header: &SealedHeader<TempoHeader>,
-    finalized_target: Option<u64>,
+    finalized_target: Option<FinalizedTarget>,
     parent_timestamp_millis: u64,
     wall_clock_timestamp_millis: u64,
 ) -> TempoImportDecision {
     let Some(first_header) = queued_headers.first() else {
-        return TempoImportDecision::Full;
+        return TempoImportDecision::ImportFull;
     };
-    let first_l1_is_t12 = chain_spec
-        .tempo_hardfork_at(first_header.timestamp())
-        .is_t12();
+    let first_l1_hardfork = chain_spec.tempo_hardfork_at(first_header.timestamp());
     let next_timestamp_millis = zone_timestamp_millis(
         first_header.timestamp_millis(),
         parent_timestamp_millis,
@@ -466,36 +465,43 @@ fn tempo_import_decision(
     let zone_hardfork = chain_spec.tempo_hardfork_at(next_timestamp_millis / 1000);
     let l1_tip_hardfork = chain_spec.tempo_hardfork_at(latest_l1_header.timestamp());
 
+    if !zone_hardfork.is_t12() {
+        return TempoImportDecision::ImportFull;
+    }
     // Zone execution must not activate a hardfork before L1. Wait whenever the prospective Zone
     // block is ahead of the latest queued L1 header, but allow L1 to be ahead while the Zone
     // imports the remaining pre-fork prefix under its currently active rules.
     if zone_hardfork > l1_tip_hardfork {
         return TempoImportDecision::WaitForHardforkMatch;
     }
-    if !zone_hardfork.is_t12() {
-        return TempoImportDecision::Full;
-    }
 
     // During backfill, the subscriber announces its finalized target before filling the queue.
-    // Until that target is visible, every queued header may be checkpointed because a later header
-    // is known to exist for the required full block. Once the target is queued (or no target is
-    // known), reserve the final visible header for the operational import.
-    let reserve_for_full = finalized_target.is_none_or(|target| {
+    // Until the announced target is visible, every queued header may be checkpointed because a
+    // later header is known to exist for the required full block. Once the target is queued,
+    // reserve it while the subscriber checks whether finalized advanced again. Only a stable
+    // target may become the operational import.
+    let target_is_visible = finalized_target.is_some_and(|target| {
         queued_headers
             .last()
-            .is_some_and(|header| header.number() >= target)
+            .is_some_and(|header| header.number() >= target.number)
     });
+    let reserve_for_full = finalized_target.is_none() || target_is_visible;
     let checkpoint_count = queued_headers
         .len()
         .saturating_sub(usize::from(reserve_for_full))
         .min(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK)
-        // Never reserve a T11 queue front for a full T12 import. This also closes the small race
-        // where the T12 successor is appended between the bounded queue snapshot and tip read.
-        .max(usize::from(!first_l1_is_t12));
+        // Never reserve a queue front from an older hardfork for a full import under newer Zone
+        // rules. This also closes the small race where the hardfork successor is appended between
+        // the bounded queue snapshot and tip read.
+        .max(usize::from(first_l1_hardfork < zone_hardfork));
     if checkpoint_count == 0 {
-        TempoImportDecision::Full
+        if target_is_visible && finalized_target.is_some_and(|target| !target.ready) {
+            TempoImportDecision::WaitForFinalizedTarget
+        } else {
+            TempoImportDecision::ImportFull
+        }
     } else {
-        TempoImportDecision::CheckpointOnly(checkpoint_count)
+        TempoImportDecision::ImportCheckpoints(checkpoint_count)
     }
 }
 
@@ -506,7 +512,7 @@ impl AvailableBlockDrain for ZoneEngine {
         let Some(l1_block) = self.deposit_queue.peek() else {
             return Ok(None);
         };
-        let queued_headers = self
+        let mut queued_headers = self
             .deposit_queue
             .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
         let latest_l1_header = self
@@ -526,9 +532,13 @@ impl AvailableBlockDrain for ZoneEngine {
             wall_clock_timestamp_millis,
         );
         let checkpoint_headers = match decision {
-            TempoImportDecision::WaitForHardforkMatch => return Ok(None),
-            TempoImportDecision::Full => Vec::new(),
-            TempoImportDecision::CheckpointOnly(count) => queued_headers[..count].to_vec(),
+            TempoImportDecision::WaitForHardforkMatch
+            | TempoImportDecision::WaitForFinalizedTarget => return Ok(None),
+            TempoImportDecision::ImportFull => Vec::new(),
+            TempoImportDecision::ImportCheckpoints(count) => {
+                queued_headers.truncate(count);
+                queued_headers
+            }
         };
         Ok(Some(AvailableTempoImport {
             l1_block,
@@ -610,6 +620,10 @@ mod tests {
         })
     }
 
+    fn finalized_target(number: u64, ready: bool) -> Option<FinalizedTarget> {
+        Some(FinalizedTarget { number, ready })
+    }
+
     #[test]
     fn t12_boundary_waits_for_l1_then_checkpoints_the_t11_prefix() {
         let spec = t12_spec(100);
@@ -621,7 +635,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t11),
                 &t11,
-                Some(1),
+                finalized_target(1, true),
                 98_000,
                 100_000
             ),
@@ -636,22 +650,29 @@ mod tests {
                 98_000,
                 100_000,
             ),
-            TempoImportDecision::CheckpointOnly(1)
+            TempoImportDecision::ImportCheckpoints(1)
         );
         assert_eq!(
-            tempo_import_decision(&spec, &[t11, t12.clone()], &t12, Some(2), 98_000, 100_000,),
-            TempoImportDecision::CheckpointOnly(1)
+            tempo_import_decision(
+                &spec,
+                &[t11, t12.clone()],
+                &t12,
+                finalized_target(2, false),
+                98_000,
+                100_000,
+            ),
+            TempoImportDecision::ImportCheckpoints(1)
         );
         assert_eq!(
             tempo_import_decision(
                 &spec,
                 std::slice::from_ref(&t12),
                 &t12,
-                Some(2),
+                finalized_target(2, true),
                 99_000,
                 100_000
             ),
-            TempoImportDecision::Full
+            TempoImportDecision::ImportFull
         );
     }
 
@@ -664,11 +685,11 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t11),
                 &t11,
-                Some(1),
+                finalized_target(1, true),
                 98_000,
                 99_000
             ),
-            TempoImportDecision::Full
+            TempoImportDecision::ImportFull
         );
     }
 
@@ -679,8 +700,15 @@ mod tests {
         let t12 = header(2, 100);
 
         assert_eq!(
-            tempo_import_decision(&spec, &[t11], &t12, Some(2), 98_000, 99_000),
-            TempoImportDecision::Full
+            tempo_import_decision(
+                &spec,
+                &[t11],
+                &t12,
+                finalized_target(2, true),
+                98_000,
+                99_000,
+            ),
+            TempoImportDecision::ImportFull
         );
     }
 
@@ -696,11 +724,11 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&first),
                 &first,
-                Some(199),
+                finalized_target(199, false),
                 99_000,
                 100_000,
             ),
-            TempoImportDecision::CheckpointOnly(1)
+            TempoImportDecision::ImportCheckpoints(1)
         );
 
         // Once all 100 are queued, reserve the target header for the full operational import and
@@ -713,11 +741,35 @@ mod tests {
                 &spec,
                 &headers,
                 headers.last().unwrap(),
-                Some(199),
+                finalized_target(199, false),
                 99_000,
                 100_000,
             ),
-            TempoImportDecision::CheckpointOnly(99)
+            TempoImportDecision::ImportCheckpoints(99)
+        );
+
+        let target = header(199, 199);
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&target),
+                &target,
+                finalized_target(199, false),
+                99_000,
+                100_000,
+            ),
+            TempoImportDecision::WaitForFinalizedTarget
+        );
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&target),
+                &target,
+                finalized_target(199, true),
+                99_000,
+                100_000,
+            ),
+            TempoImportDecision::ImportFull
         );
     }
 

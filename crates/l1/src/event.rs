@@ -98,20 +98,6 @@ impl L1PortalEvents {
         }
     }
 
-    /// Ensure the portal work used by `advanceTempo` remains within its protocol bounds.
-    pub(crate) fn ensure_operational_capacity(&self) -> eyre::Result<()> {
-        eyre::ensure!(
-            self.deposits.len() <= zone_primitives::constants::MAX_UNPROCESSED_DEPOSITS,
-            "outstanding deposit suffix exceeds protocol capacity"
-        );
-        eyre::ensure!(
-            self.enabled_tokens.len()
-                <= zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS,
-            "outstanding token-enablement suffix exceeds protocol capacity"
-        );
-        Ok(())
-    }
-
     /// Append only events consumed by `advanceTempo`.
     ///
     /// Key rotations and leadership transitions are applied during L1 ingestion and must not be

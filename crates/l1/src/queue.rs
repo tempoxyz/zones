@@ -23,32 +23,27 @@ struct DeferredPortalEventBlock {
 }
 
 impl DeferredPortalWork {
-    pub(crate) fn new(block: L1BlockDeposits) -> eyre::Result<Self> {
-        let number = block.header.number();
+    pub(crate) fn new(block: L1BlockDeposits) -> Self {
+        let first_number = block.header.number();
         let mut work = Self {
-            first_number: number,
+            first_number,
             last_header: block.header,
             event_blocks: Vec::new(),
             deposit_count: 0,
             enabled_token_count: 0,
         };
-        work.push_events(number, block.events);
-        Ok(work)
+        work.push_events(first_number, block.events);
+        work
+    }
+
+    pub(crate) fn last_num_hash(&self) -> NumHash {
+        self.last_header.num_hash()
     }
 
     pub(crate) fn push(&mut self, block: L1BlockDeposits) {
         let number = block.header.number();
         self.last_header = block.header;
         self.push_events(number, block.events);
-    }
-
-    fn push_events(&mut self, number: u64, events: L1PortalEvents) {
-        if !events.deposits.is_empty() || !events.enabled_tokens.is_empty() {
-            self.deposit_count += events.deposits.len();
-            self.enabled_token_count += events.enabled_tokens.len();
-            self.event_blocks
-                .push(DeferredPortalEventBlock { number, events });
-        }
     }
 
     fn aggregated_block(&self) -> L1BlockDeposits {
@@ -62,8 +57,13 @@ impl DeferredPortalWork {
         }
     }
 
-    pub(crate) fn last_num_hash(&self) -> NumHash {
-        self.last_header.num_hash()
+    fn push_events(&mut self, number: u64, events: L1PortalEvents) {
+        if !events.deposits.is_empty() || !events.enabled_tokens.is_empty() {
+            self.deposit_count += events.deposits.len();
+            self.enabled_token_count += events.enabled_tokens.len();
+            self.event_blocks
+                .push(DeferredPortalEventBlock { number, events });
+        }
     }
 
     fn retain_after(&mut self, number: u64) {
@@ -171,6 +171,7 @@ impl PendingDeposits {
         self.pending.front()
     }
 
+    /// Peek at the next `maximum` pending L1 block headers without removing them.
     pub(crate) fn peek_headers(&self, maximum: usize) -> Vec<SealedHeader<TempoHeader>> {
         self.pending
             .iter()
@@ -179,6 +180,7 @@ impl PendingDeposits {
             .collect()
     }
 
+    /// Return the latest queued L1 header, including headers beyond a bounded checkpoint batch.
     pub(crate) fn latest_header(&self) -> Option<&SealedHeader<TempoHeader>> {
         self.pending.back().map(|block| &block.header)
     }
@@ -204,42 +206,11 @@ impl PendingDeposits {
             .expect("front was checked immediately before pop"))
     }
 
-    pub(crate) fn defer(&mut self, expected: NumHash) -> eyre::Result<()> {
-        let front = self
-            .pending
-            .front()
-            .ok_or_else(|| eyre::eyre!("cannot defer an empty finalized L1 queue"))?;
-        eyre::ensure!(
-            front.header.num_hash() == expected,
-            "finalized L1 queue confirmation mismatch: expected {expected:?}, front is {:?}",
-            front.header.num_hash()
-        );
-
-        let block = self
-            .pending
-            .pop_front()
-            .expect("front was checked immediately before pop");
-        if let Some(deferred) = &mut self.deferred {
-            deferred.push(block);
-        } else {
-            self.deferred = Some(
-                DeferredPortalWork::new(block)
-                    .expect("deferred block capacity was checked before removal"),
-            );
-        }
-        Ok(())
-    }
-
     /// Defer every pending block through a canonical checkpoint anchor.
-    ///
-    /// This is idempotent so follower imports can replay their post-forkchoice bookkeeping after
-    /// an interruption. Entries older than `expected` are also deferred because they belong to
-    /// the same checkpoint-only range.
     pub(crate) fn defer_through(&mut self, expected: NumHash) -> eyre::Result<()> {
-        while let Some(front) = self.pending.front().map(|entry| entry.header.num_hash()) {
-            if front.number > expected.number {
-                break;
-            }
+        while let Some(front) = self.pending.front().map(|entry| entry.header.num_hash())
+            && front.number <= expected.number
+        {
             eyre::ensure!(
                 front.number < expected.number || front.hash == expected.hash,
                 "deposit queue holds L1 block {} with hash {}, but the checkpoint consumed {}",
@@ -247,7 +218,7 @@ impl PendingDeposits {
                 front.hash,
                 expected.hash,
             );
-            self.defer(front)?;
+            self.defer_front();
         }
         if let Some(deferred) = &self.deferred
             && deferred.last_header.number() == expected.number
@@ -263,6 +234,20 @@ impl PendingDeposits {
         Ok(())
     }
 
+    /// Move the front block from the pending queue to the deferred state.
+    fn defer_front(&mut self) {
+        let block = self
+            .pending
+            .pop_front()
+            .expect("defer_through checked the queue front");
+        if let Some(deferred) = &mut self.deferred {
+            deferred.push(block);
+        } else {
+            self.deferred = Some(DeferredPortalWork::new(block));
+        }
+    }
+
+    /// Return deferred portal work followed by the provided current operational L1 block.
     pub(crate) fn operational_work(
         &self,
         current: &L1BlockDeposits,
@@ -275,7 +260,6 @@ impl PendingDeposits {
             front.header.num_hash() == current.header.num_hash(),
             "operational L1 work does not match the queue front"
         );
-        current.events.ensure_operational_capacity()?;
         let mut work = Vec::with_capacity(usize::from(self.deferred.is_some()) + 1);
         if let Some(deferred) = &self.deferred {
             work.push(deferred.aggregated_block());
@@ -284,6 +268,7 @@ impl PendingDeposits {
         Ok(work)
     }
 
+    /// Confirm a full operational import and release all deferred work it consumed.
     pub(crate) fn confirm_operational(&mut self, expected: NumHash) -> eyre::Result<()> {
         self.confirm(expected)?;
         self.deferred = None;
@@ -329,6 +314,11 @@ impl PendingDeposits {
         Ok(())
     }
 
+    /// Returns the most recently enqueued L1 block (number + hash), if any.
+    pub(crate) fn last_enqueued(&self) -> Option<NumHash> {
+        self.last_enqueued
+    }
+
     /// Drain all pending L1 block deposits.
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<L1BlockDeposits> {
@@ -353,11 +343,6 @@ impl PendingDeposits {
         self.deferred
             .as_ref()
             .map(|work| (work.first_number, work.last_header.number()))
-    }
-
-    /// Returns the most recently enqueued L1 block (number + hash), if any.
-    pub(crate) fn last_enqueued(&self) -> Option<NumHash> {
-        self.last_enqueued
     }
 }
 
@@ -441,7 +426,7 @@ impl DepositQueue {
         self.inner.lock().peek().cloned()
     }
 
-    /// Return up to `maximum` consecutive queued headers without consuming portal work.
+    /// Peek at the next `maximum` pending L1 block headers without removing them.
     pub fn peek_headers(&self, maximum: usize) -> Vec<SealedHeader<TempoHeader>> {
         self.inner.lock().peek_headers(maximum)
     }
@@ -457,19 +442,13 @@ impl DepositQueue {
         self.inner.lock().confirm(expected)
     }
 
-    /// Move checkpointed portal work out of the header queue while retaining it for the next full
-    /// operational import. This state is shared across leadership-engine instances.
-    pub fn defer(&self, expected: NumHash) -> eyre::Result<()> {
-        self.inner.lock().defer(expected)
-    }
-
     /// Idempotently move every pending block through a canonical checkpoint anchor to deferred
     /// portal work.
     pub fn defer_through(&self, expected: NumHash) -> eyre::Result<()> {
         self.inner.lock().defer_through(expected)
     }
 
-    /// Return deferred portal work followed by the current operational L1 block.
+    /// Return deferred portal work followed by the provided current operational L1 block.
     pub fn operational_work(
         &self,
         current: &L1BlockDeposits,
@@ -478,7 +457,7 @@ impl DepositQueue {
     }
 
     /// Restore portal work crossed by already-canonical checkpoint-only blocks after restart.
-    pub(crate) fn seed_deferred(&self, deferred: DeferredPortalWork) -> eyre::Result<()> {
+    pub(crate) fn restore_deferred(&self, deferred: DeferredPortalWork) -> eyre::Result<()> {
         let mut queue = self.inner.lock();
         eyre::ensure!(
             queue.pending.is_empty() && queue.deferred.is_none() && queue.last_enqueued.is_none(),

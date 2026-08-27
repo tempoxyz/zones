@@ -375,9 +375,33 @@ fn l1_block_tracker_finalized_target_is_monotonic() {
     assert_eq!(tracker.finalized_target(), None);
 
     tracker.record_finalized_target(200);
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 200,
+            ready: false,
+        })
+    );
+    tracker.mark_finalized_target_ready(200).unwrap();
     tracker.record_finalized_target(199);
+    tracker.record_finalized_target(200);
 
-    assert_eq!(tracker.finalized_target(), Some(200));
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 200,
+            ready: true,
+        })
+    );
+
+    tracker.record_finalized_target(201);
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 201,
+            ready: false,
+        })
+    );
 }
 
 #[test]
@@ -787,12 +811,14 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
     push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(make_test_header(10))));
 
     // One newHeads notification wakes the subscriber. The finalized tag has
     // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
     push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
+    push_header_and_empty_receipts(&asserter, header_12.clone());
+    asserter.push_success(&Some(header_response(header_12)));
 
     let err = subscriber
         .follow_finalized(
@@ -847,15 +873,65 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(make_test_header(10))));
+    asserter.push_success(&Some(header_response(make_test_header(10))));
 
     let next = subscriber
-        .sync_finalized_once(&l1_provider, 11)
+        .sync_to_finalized(&l1_provider, 11)
         .await
         .unwrap();
 
     assert_eq!(next, 11);
-    assert_eq!(subscriber.config.block_tracker.finalized_target(), Some(10));
+    assert_eq!(
+        subscriber.config.block_tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 10,
+            ready: true,
+        })
+    );
     assert!(subscriber.deposit_queue.drain().is_empty());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let header_12 = make_chained_header(12, header_hash(&header_11));
+
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_11);
+    push_header_and_empty_receipts(&asserter, header_12.clone());
+    asserter.push_success(&Some(header_response(header_12)));
+
+    let next = subscriber
+        .sync_to_finalized(&l1_provider, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(next, 13);
+    assert_eq!(
+        subscriber
+            .deposit_queue
+            .drain()
+            .iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 12,
+            ready: true,
+        })
+    );
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1387,9 +1463,9 @@ fn deferred_checkpoint_work_survives_until_operational_confirmation() {
     }
 
     let first = queue.peek().unwrap();
-    queue.defer(first.header.num_hash()).unwrap();
+    queue.defer_through(first.header.num_hash()).unwrap();
     let second = queue.peek().unwrap();
-    queue.defer(second.header.num_hash()).unwrap();
+    queue.defer_through(second.header.num_hash()).unwrap();
     let current = queue.peek().unwrap();
     let work = queue.operational_work(&current).unwrap();
     assert_eq!(
@@ -1413,13 +1489,12 @@ fn restart_can_seed_deferred_checkpoint_work() {
     let mut deferred = crate::queue::DeferredPortalWork::new(L1BlockDeposits {
         header: seal(h10),
         events: L1PortalEvents::default(),
-    })
-    .unwrap();
+    });
     deferred.push(L1BlockDeposits {
         header: seal(h11),
         events: L1PortalEvents::default(),
     });
-    queue.seed_deferred(deferred).unwrap();
+    queue.restore_deferred(deferred).unwrap();
 
     let h12 = make_chained_header(12, queue.last_enqueued().unwrap().hash);
     queue
@@ -1445,7 +1520,7 @@ fn deferred_empty_blocks_use_constant_space() {
         queue
             .try_enqueue(header, L1PortalEvents::default())
             .unwrap();
-        queue.defer(anchor).unwrap();
+        queue.defer_through(anchor).unwrap();
     }
 
     assert_eq!(queue.deferred_event_block_len(), 0);
@@ -1484,7 +1559,7 @@ fn compacted_deferred_work_releases_only_a_confirmed_prefix() {
                 },
             )
             .unwrap();
-        queue.defer(anchor).unwrap();
+        queue.defer_through(anchor).unwrap();
         anchors.push(anchor);
     }
 
@@ -1505,45 +1580,6 @@ fn compacted_deferred_work_releases_only_a_confirmed_prefix() {
     assert_eq!(work.len(), 2);
     assert_eq!(work[0].events.enabled_tokens[0].token, tokens[2].token);
     assert_eq!(work[1].events.enabled_tokens[0].token, tokens[3].token);
-}
-
-#[test]
-fn deferred_work_enforces_token_capacity_before_removing_the_front() {
-    let mut queue = PendingDeposits::default();
-    let mut parent_hash = B256::ZERO;
-    for index in 0..=zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS {
-        let number = index as u64 + 1;
-        let header = if number == 1 {
-            make_test_header(number)
-        } else {
-            make_chained_header(number, parent_hash)
-        };
-        let header = seal(header);
-        let anchor = header.num_hash();
-        parent_hash = anchor.hash;
-        queue
-            .try_enqueue(
-                header,
-                L1PortalEvents {
-                    enabled_tokens: vec![EnabledToken {
-                        token: Address::repeat_byte(number as u8),
-                        name: format!("Token {number}"),
-                        symbol: format!("T{number}"),
-                        currency: "USD".into(),
-                    }],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        if index < zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS {
-            queue.defer(anchor).unwrap();
-        } else {
-            let err = queue.defer(anchor).unwrap_err();
-            assert!(err.to_string().contains("protocol capacity"));
-            assert_eq!(queue.peek().unwrap().header.num_hash(), anchor);
-        }
-    }
 }
 
 #[test]
@@ -1984,7 +2020,7 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_to_finalized(&l1_provider, 10)
         .await
         .unwrap_err();
     assert!(is_fenced_ingestion_error(&err));
@@ -2043,10 +2079,11 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(header_response(header_10)));
 
     assert_eq!(
         subscriber
-            .sync_finalized_once(&l1_provider, 10)
+            .sync_to_finalized(&l1_provider, 10)
             .await
             .unwrap(),
         11
@@ -2091,7 +2128,7 @@ async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition()
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_to_finalized(&l1_provider, 10)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("leadership transition"));

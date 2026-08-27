@@ -127,42 +127,6 @@ fn validate_configured_zone_id(
     Ok(())
 }
 
-fn latest_operational_tempo_block<P>(provider: &P) -> eyre::Result<u64>
-where
-    P: BlockNumReader + ReceiptProvider + StateProviderFactory,
-{
-    let best = provider.best_block_number()?;
-    for number in (1..=best).rev() {
-        let Some(receipts) = provider.receipts_by_block(BlockHashOrNumber::Number(number))? else {
-            continue;
-        };
-        for receipt in receipts {
-            for log in receipt.logs() {
-                if log.address != ZONE_INBOX_ADDRESS {
-                    continue;
-                }
-                match log.topics().first() {
-                    Some(topic) if topic == &TempoAdvanced::SIGNATURE_HASH => {
-                        return Ok(TempoAdvanced::decode_log(log)?.tempoBlockNumber);
-                    }
-                    Some(topic) if topic == &LegacyTempoAdvanced::SIGNATURE_HASH => {
-                        return Ok(LegacyTempoAdvanced::decode_log(log)?.tempoBlockNumber);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let genesis_hash = provider
-        .block_hash(0)?
-        .ok_or_else(|| eyre::eyre!("zone genesis block hash is unavailable"))?;
-    Ok(provider
-        .state_by_block_hash(genesis_hash)?
-        .tempo_num_hash()?
-        .number)
-}
-
 /// Network primitives for Zone Nodes
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
@@ -1907,6 +1871,49 @@ where
 
         Ok(transaction_pool)
     }
+}
+
+/// Returns the latest Tempo block whose portal work was processed by a full `advanceTempo` import.
+///
+/// Checkpoint-only `advanceTempoHeaders` imports move the Zone's Tempo checkpoint without consuming
+/// their deposits, withdrawals, token updates, key rotations, or leader transitions. On restart,
+/// the caller uses the block after this operational boundary as the beginning of the deferred-work
+/// recovery range. If no operational import exists after genesis, the genesis Tempo anchor is the
+/// boundary.
+fn latest_operational_tempo_block<P>(provider: &P) -> eyre::Result<u64>
+where
+    P: BlockNumReader + ReceiptProvider + StateProviderFactory,
+{
+    let best = provider.best_block_number()?;
+    for number in (1..=best).rev() {
+        let Some(receipts) = provider.receipts_by_block(BlockHashOrNumber::Number(number))? else {
+            continue;
+        };
+        for receipt in receipts {
+            for log in receipt.logs() {
+                if log.address != ZONE_INBOX_ADDRESS {
+                    continue;
+                }
+                match log.topics().first() {
+                    Some(topic) if topic == &TempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(TempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    Some(topic) if topic == &LegacyTempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(LegacyTempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let genesis_hash = provider
+        .block_hash(0)?
+        .ok_or_else(|| eyre::eyre!("zone genesis block hash is unavailable"))?;
+    Ok(provider
+        .state_by_block_hash(genesis_hash)?
+        .tempo_num_hash()?
+        .number)
 }
 
 #[cfg(test)]
