@@ -116,11 +116,6 @@ on:
         type: string
         required: true
         default: "600"
-      zone-block-time-ms:
-        description: Experimental single-sequencer Zone block cadence in milliseconds; Tempo L1 remains at its 500 ms cadence.
-        type: string
-        required: true
-        default: "100"
       withdrawal-poll-interval-secs:
         description: Seconds between L1 withdrawal-queue polls.
         type: string
@@ -235,7 +230,9 @@ jobs:
           INPUT_WITHDRAWAL_MAX_BATCH_GAS: ${{ inputs.withdrawal-max-batch-gas || '20000000' }}
           INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ inputs.withdrawal-max-in-flight-batches || '12' }}
           INPUT_ZONE_BATCH_INTERVAL_BLOCKS: ${{ inputs.zone-batch-interval-blocks || '600' }}
-          INPUT_ZONE_BLOCK_TIME_MS: ${{ inputs.zone-block-time-ms || '100' }}
+          # workflow_dispatch is limited to 25 inputs. Keep the experimental
+          # benchmark cadence fixed while Tempo L1 continues at 500 ms.
+          INPUT_ZONE_BLOCK_TIME_MS: "100"
           INPUT_WITHDRAWAL_POLL_INTERVAL_SECS: ${{ inputs.withdrawal-poll-interval-secs || '5' }}
           INPUT_STEP_TIMEOUT: ${{ inputs.step-timeout || '10m' }}
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
