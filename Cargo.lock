@@ -11796,6 +11796,7 @@ name = "tempo-zone"
 version = "0.2.1"
 dependencies = [
  "reth-cli-util",
+ "reth-node-core",
  "rustls",
  "zone-node",
 ]
