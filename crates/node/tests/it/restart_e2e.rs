@@ -39,7 +39,7 @@ async fn portal_queue_state(l1: &L1TestNode, portal_address: Address) -> eyre::R
 async fn batch_submitted_count(l1: &L1TestNode, portal_address: Address) -> eyre::Result<usize> {
     let portal = ZonePortal::new(portal_address, l1.provider());
     let events = portal
-        .BatchSubmitted_0_filter()
+        .BatchSubmitted_1_filter()
         .from_block(0)
         .query()
         .await?;

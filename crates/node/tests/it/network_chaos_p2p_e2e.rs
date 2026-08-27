@@ -202,7 +202,7 @@ async fn batch_count(
     portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
 ) -> eyre::Result<usize> {
     Ok(portal
-        .BatchSubmitted_0_filter()
+        .BatchSubmitted_1_filter()
         .from_block(0)
         .query()
         .await?
@@ -233,7 +233,7 @@ async fn assert_batch_history_is_canonical(
     portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
 ) -> eyre::Result<u64> {
     let events = portal
-        .BatchSubmitted_0_filter()
+        .BatchSubmitted_1_filter()
         .from_block(0)
         .query()
         .await?;
@@ -775,7 +775,7 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
             let portal = &portal;
             async move {
                 let events = portal
-                    .BatchSubmitted_0_filter()
+                    .BatchSubmitted_1_filter()
                     .from_block(0)
                     .query()
                     .await?;

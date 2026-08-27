@@ -11,7 +11,7 @@ use crate::utils::{
 use alloy::providers::Provider;
 use alloy_sol_types::SolCall;
 use std::time::Duration;
-use tempo_zone_contracts::{ZonePortal, legacySubmitBatchCall};
+use tempo_zone_contracts::{ZonePortal, submitBatchCall};
 use zone_sequencer::BatchAnchorConfig;
 
 /// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
@@ -41,7 +41,7 @@ const SHORT_STEPPING_TIMEOUT: Duration = Duration::from_secs(60);
 async fn fetch_submit_batch_call(
     l1: &L1TestNode,
     tx_hash: alloy_primitives::B256,
-) -> eyre::Result<(legacySubmitBatchCall, u64)> {
+) -> eyre::Result<(submitBatchCall, u64)> {
     let response: serde_json::Value = reqwest::Client::new()
         .post(l1.http_url().clone())
         .json(&serde_json::json!({
@@ -84,7 +84,7 @@ async fn fetch_submit_batch_call(
     let calldata = const_hex::decode(input.strip_prefix("0x").unwrap_or(input)).map_err(|err| {
         eyre::eyre!("failed to hex-decode submitBatch calldata for {tx_hash}: {err}")
     })?;
-    let call = legacySubmitBatchCall::abi_decode(&calldata)
+    let call = submitBatchCall::abi_decode(&calldata)
         .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))?;
 
     let block_number = tx
@@ -128,7 +128,7 @@ async fn test_current_tip_batch_submission_lands_in_successor_block() -> eyre::R
         .await?;
     eyre::ensure!(
         portal
-            .BatchSubmitted_0_filter()
+            .BatchSubmitted_1_filter()
             .from_block(0)
             .query()
             .await?
@@ -156,7 +156,7 @@ async fn test_current_tip_batch_submission_lands_in_successor_block() -> eyre::R
                 }
 
                 let events = portal
-                    .BatchSubmitted_0_filter()
+                    .BatchSubmitted_1_filter()
                     .from_block(0)
                     .query()
                     .await?;
@@ -296,7 +296,7 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
                 }
 
                 let events = portal
-                    .BatchSubmitted_0_filter()
+                    .BatchSubmitted_1_filter()
                     .from_block(0)
                     .query()
                     .await?;
@@ -405,7 +405,7 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
                 }
 
                 let events = portal
-                    .BatchSubmitted_0_filter()
+                    .BatchSubmitted_1_filter()
                     .from_block(0)
                     .query()
                     .await?;
@@ -518,7 +518,7 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
                 }
 
                 let events = portal
-                    .BatchSubmitted_0_filter()
+                    .BatchSubmitted_1_filter()
                     .from_block(0)
                     .query()
                     .await?;
@@ -656,7 +656,7 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
                 }
 
                 let events = portal
-                    .BatchSubmitted_0_filter()
+                    .BatchSubmitted_1_filter()
                     .from_block(0)
                     .query()
                     .await?;

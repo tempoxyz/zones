@@ -744,7 +744,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
 
     // Query TempoAdvanced events from ZoneInbox
     let zone_inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, zone.provider());
-    let tempo_advanced_filter = zone_inbox.TempoAdvanced_0_filter().from_block(0);
+    let tempo_advanced_filter = zone_inbox.TempoAdvanced_1_filter().from_block(0);
     let tempo_advanced_events = tempo_advanced_filter.query().await?;
 
     assert!(
