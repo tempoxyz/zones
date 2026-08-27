@@ -30,7 +30,7 @@ fn identity() -> Identity {
 }
 
 #[test]
-fn rows_survive_restart_and_clear_on_reset() {
+fn rows_survive_restart() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("checker");
     let genesis = block(0, 10);
@@ -77,17 +77,12 @@ fn rows_survive_restart_and_clear_on_reset() {
     let one = store.apply(candidate).unwrap();
     drop(store);
 
-    let (store, loaded) = Store::open(&path, identity()).unwrap();
+    let (_store, loaded) = Store::open(&path, identity()).unwrap();
     assert_eq!(loaded, one);
     assert_eq!(loaded.state.account(account), Some(U256::from(100)));
     let token_state = loaded.state.token(token).unwrap();
     assert_eq!(token_state.pending_tempo_refunds, U256::from(5));
     assert_eq!(token_state.pending_zone_refunds, U256::from(7));
-
-    let reset = store.reset(&checkpoint).unwrap();
-    assert_eq!(reset.metadata.verified_zone, genesis);
-    assert_eq!(reset.state.account(account), None);
-    assert_eq!(reset.state.token(token), Some(TokenState::default()));
 }
 
 #[test]
@@ -115,7 +110,7 @@ fn inspect_identity_validates_schema() {
 }
 
 #[test]
-fn finding_survives_restart_and_clears_on_reset() {
+fn finding_survives_restart() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("checker");
     let genesis = block(0, 10);
@@ -158,10 +153,6 @@ fn finding_survives_restart_and_clears_on_reset() {
         store.observe(replayed, block(2, 99)),
         Err(PersistenceError::Invalid(_))
     ));
-
-    let recovered = store.reset(&checkpoint).unwrap();
-    assert_eq!(recovered.metadata.observed_zone, genesis);
-    assert_eq!(recovered.metadata.status, Status::Verifying);
 }
 
 #[test]

@@ -257,35 +257,6 @@ impl Store {
         })
     }
 
-    /// Atomically discard derived rows and restart from authenticated genesis.
-    pub(crate) fn reset(&self, checkpoint: &Checkpoint) -> Result<Snapshot, PersistenceError> {
-        if checkpoint.identity != self.identity {
-            return Err(PersistenceError::Identity);
-        }
-        let metadata = Metadata {
-            identity: self.identity,
-            verified_zone: checkpoint.zone,
-            imported_tempo: checkpoint.tempo,
-            observed_zone: checkpoint.zone,
-            status: Status::Verifying,
-        };
-        let tx = self.db.tx_mut()?;
-        tx.clear::<Accounts>()?;
-        tx.clear::<Tokens>()?;
-        for (key, value) in checkpoint.state.accounts() {
-            tx.put::<Accounts>(key, AccountValue(value))?;
-        }
-        for (token, value) in checkpoint.state.tokens() {
-            tx.put::<Tokens>(token, TokenValue(value))?;
-        }
-        write_metadata(&tx, &metadata)?;
-        tx.commit()?;
-        Ok(Snapshot {
-            metadata,
-            state: Arc::new(checkpoint.state.clone()),
-        })
-    }
-
     /// Persist a terminal finding without advancing verified accounting state.
     pub(crate) fn record_finding(
         &self,

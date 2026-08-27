@@ -12,12 +12,15 @@ mod telemetry;
 
 use std::{fmt, path::PathBuf, str::FromStr};
 
-use alloy_primitives::Address;
+use alloy_consensus::{TxReceipt, transaction::TxHashRef};
+use alloy_primitives::{Address, Log};
 use eyre::WrapErr as _;
 use reth_chainspec::ChainSpecProvider;
 use reth_exex::ExExContext;
-use reth_node_api::{FullNodeComponents, NodePrimitives};
-use reth_storage_api::{BlockReader, StateProviderFactory};
+use reth_node_api::{FullNodeComponents, NodePrimitives, PrimitivesTy};
+use reth_storage_api::{
+    BlockReader, PruneCheckpointReader, StageCheckpointReader, StateProviderFactory,
+};
 use tempo_chainspec::spec::TempoHardforks;
 
 /// Whether an operation should be retried or disable the checker.
@@ -128,16 +131,15 @@ impl CheckerExEx {
     where
         Node: FullNodeComponents,
         Node::Provider: BlockReader<
-                Block = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Block,
-                Receipt = <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Receipt,
-            > + ChainSpecProvider
+                Block = <PrimitivesTy<Node::Types> as NodePrimitives>::Block,
+                Receipt = <PrimitivesTy<Node::Types> as NodePrimitives>::Receipt,
+            > + ChainSpecProvider<ChainSpec: TempoHardforks>
+            + PruneCheckpointReader
+            + StageCheckpointReader
             + StateProviderFactory
             + Clone,
-        <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
-        <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::SignedTx:
-            alloy_consensus::transaction::TxHashRef,
-        <<Node::Types as reth_node_api::NodeTypes>::Primitives as NodePrimitives>::Receipt:
-            alloy_consensus::TxReceipt<Log = alloy_primitives::Log>,
+        <PrimitivesTy<Node::Types> as NodePrimitives>::SignedTx: TxHashRef,
+        <PrimitivesTy<Node::Types> as NodePrimitives>::Receipt: TxReceipt<Log = Log>,
     {
         runtime::run(self.config, &mut ctx).await
     }

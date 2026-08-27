@@ -164,21 +164,19 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 handle.wait_for_node_exit().await
             }
             CheckerMode::Observe => {
-                let prune_config = match builder.config().prune_config() {
-                    Some(prune_config) => prune_config,
-                    None => {
-                        let config_path = builder
-                            .config()
-                            .config
-                            .clone()
-                            .unwrap_or_else(|| builder.config().datadir().config());
-                        reth_config::Config::from_path(config_path)?.prune
-                    }
-                };
+                let config_path = builder
+                    .config()
+                    .config
+                    .clone()
+                    .unwrap_or_else(|| builder.config().datadir().config());
+                let mut prune_config = builder.config().prune_config().unwrap_or_default();
+                prune_config.merge(reth_config::Config::from_path(config_path)?.prune);
                 eyre::ensure!(
                     prune_config.segments.account_history.is_none()
-                        && prune_config.segments.storage_history.is_none(),
-                    "checker observe mode requires unpruned Zone state; disable account and storage history pruning and resync if historical state was already pruned"
+                        && prune_config.segments.storage_history.is_none()
+                        && prune_config.segments.bodies_history.is_none()
+                        && !prune_config.has_receipts_pruning(),
+                    "checker observe mode requires unpruned Zone state, bodies, and receipts; disable account history, storage history, bodies history, receipts, and receipt-log pruning, then resync if required history was already pruned"
                 );
                 info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
                 let node = node.with_portal_evidence_retention();

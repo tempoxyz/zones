@@ -13744,6 +13744,8 @@ dependencies = [
  "reth-node-api",
  "reth-primitives-traits",
  "reth-provider",
+ "reth-prune-types",
+ "reth-stages-api",
  "reth-storage-api",
  "serde",
  "tempfile",
