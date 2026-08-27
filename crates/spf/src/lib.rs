@@ -71,7 +71,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         let full_positions: Vec<_> = t12_blocks
             .iter()
             .enumerate()
-            .filter_map(|(index, block)| block.tempo_headers_rlp.is_empty().then_some(index))
+            .filter_map(|(index, block)| (block.tempo_headers_rlp.len() == 1).then_some(index))
             .collect();
         if full_positions.len() != 1
             || full_positions[0] + 1 != t12_blocks.len()
@@ -198,7 +198,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         let final_imported_header = block
             .tempo_headers_rlp
             .last()
-            .unwrap_or(&block.tempo_header_rlp);
+            .expect("validated nonempty Tempo headers");
         tempo_database = tempo_database.with_imported_checkpoint(final_imported_header)?;
         let executed_block = execution::evm::execute_zone_block(
             &mut zone_state,
@@ -450,14 +450,16 @@ fn validate_tempo_anchor(
 }
 
 fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
+    if block.tempo_headers_rlp.is_empty() {
+        return Err(Error::MissingTempoHeaders { block_index: index });
+    }
     if block.deposits.len() > MAX_UNPROCESSED_DEPOSITS
         || block.enabled_tokens.len() > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
     {
         return Err(Error::PortalWorkCapacityExceeded { block_index: index });
     }
-    if !block.tempo_headers_rlp.is_empty()
-        && (!block.tempo_header_rlp.is_empty()
-            || !block.deposits.is_empty()
+    if block.tempo_headers_rlp.len() > 1
+        && (!block.deposits.is_empty()
             || !block.decryptions.is_empty()
             || !block.enabled_tokens.is_empty()
             || !block.transactions.is_empty()
@@ -510,6 +512,9 @@ pub enum Error {
     /// A checkpoint-only block carried operational inputs or transactions.
     #[error("checkpoint-only zone block {block_index} contains operational inputs")]
     InvalidCheckpointOnlyBlock { block_index: usize },
+    /// A block did not import any Tempo headers.
+    #[error("zone block {block_index} contains no Tempo headers")]
+    MissingTempoHeaders { block_index: usize },
     /// A full block exceeded a protocol-wide outstanding portal-work bound.
     #[error("zone block {block_index} exceeds portal-work capacity")]
     PortalWorkCapacityExceeded { block_index: usize },
@@ -839,8 +844,7 @@ mod tests {
                 timestamp: 100,
                 timestamp_millis_part: 0,
                 beneficiary: Address::ZERO,
-                tempo_header_rlp: Bytes::from([0x01]),
-                tempo_headers_rlp: Vec::new(),
+                tempo_headers_rlp: vec![Bytes::from([0x01])],
                 deposits: Vec::new(),
                 decryptions: Vec::new(),
                 enabled_tokens: Vec::new(),
@@ -864,8 +868,7 @@ mod tests {
             timestamp: 100,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::new(),
-            tempo_headers_rlp: vec![Bytes::from([0x01])],
+            tempo_headers_rlp: vec![Bytes::from([0x01]), Bytes::from([0x02])],
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -889,7 +892,6 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::new(),
             tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
@@ -919,7 +921,6 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::new(),
             tempo_headers_rlp: Vec::new(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
@@ -1187,8 +1188,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 321,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
-            tempo_headers_rlp: Vec::new(),
+            tempo_headers_rlp: vec![witness.tempo_state_witness.initial_tempo_header_rlp.clone()],
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1224,14 +1224,13 @@ mod tests {
     #[test]
     fn accepts_an_open_snapshot_without_finalization() {
         let witness = minimal_batch_witness();
-        let block = ZoneBlock {
+        let mut block = ZoneBlock {
             number: 1,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::from([0x01]),
-            tempo_headers_rlp: Vec::new(),
+            tempo_headers_rlp: vec![Bytes::from([0x01])],
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1241,6 +1240,11 @@ mod tests {
         };
 
         assert_eq!(validate_system_inputs(&block, 0), Ok(()));
+        block.tempo_headers_rlp.clear();
+        assert_eq!(
+            validate_system_inputs(&block, 0),
+            Err(Error::MissingTempoHeaders { block_index: 0 })
+        );
     }
 
     #[test]
@@ -1252,8 +1256,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::from([0x01]),
-            tempo_headers_rlp: Vec::new(),
+            tempo_headers_rlp: vec![Bytes::from([0x01])],
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1282,8 +1285,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::from([0x01]),
-            tempo_headers_rlp: Vec::new(),
+            tempo_headers_rlp: vec![Bytes::from([0x01])],
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),

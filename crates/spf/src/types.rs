@@ -100,10 +100,8 @@ pub struct ZoneBlock {
     pub timestamp: u64,
     pub timestamp_millis_part: u64,
     pub beneficiary: Address,
-    /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`.
-    pub tempo_header_rlp: Bytes,
-    /// RLP-encoded consecutive Tempo headers for a checkpoint-only block. Nonempty means this is
-    /// the explicit `advanceTempoHeaders` variant and all operational fields must be empty.
+    /// RLP-encoded consecutive Tempo headers imported by this block. A full block contains exactly
+    /// one header; a checkpoint-only block contains more than one and has no operational inputs.
     #[cfg_attr(feature = "serde", serde(default))]
     pub tempo_headers_rlp: Vec<Bytes>,
     /// Deposits processed by `ZoneInbox.advanceTempo`, in calldata order.
