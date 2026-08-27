@@ -241,9 +241,12 @@ mod command {
 
     use alloy_primitives::Address;
     use alloy_signer_local::PrivateKeySigner;
+    use clap::Parser as _;
+    use reth_ethereum::cli::Cli;
+    use zone_chainspec::ZoneChainSpecParser;
 
     use super::{ProvisionConfig, provision_zone};
-    use crate::cli::ZoneCli;
+    use crate::cli::{ZoneArgs, run_dev_node};
     use tempo_contracts::precompiles::PATH_USD_ADDRESS;
 
     /// Default dev private key (account #0 of the standard `test test ... junk` mnemonic).
@@ -447,7 +450,6 @@ mod command {
                 &self.datadir.join("node").display().to_string(),
                 "--log.file.directory",
                 &self.datadir.join("logs").display().to_string(),
-                "--sequencer",
                 "--sequencer-key-file",
                 &sequencer_key_path.display().to_string(),
             ]
@@ -455,7 +457,8 @@ mod command {
             .to_vec();
             argv.extend(self.node_args);
 
-            ZoneCli::parse_from(argv).run()
+            let cli = Cli::<ZoneChainSpecParser, ZoneArgs>::parse_from(argv);
+            run_dev_node(cli)
         }
     }
 
