@@ -54,7 +54,7 @@ cast rpc --rpc-url "$L1_HTTP_URL" \
 `DEV_KEY` is also the environment variable for `--dev.key`, so the zone uses the funded account. Start it after any required funding:
 
 ```bash
-target/release/tempo-zone dev \
+target/release/tempo-zone node --dev \
   --l1.rpc-url "$L1_RPC_URL" \
   --datadir "$ZONE_DATADIR" \
   --http.port "$ZONE_HTTP_PORT" \
@@ -65,7 +65,7 @@ target/release/tempo-zone dev \
 
 Anvil may log one RPC deserialization error when the zone probes the unsupported `tempo_fundAddress` method. This is expected when the selected dev account is already funded; repeating funding or transaction errors are not.
 
-The default batch interval is 120 zone blocks, which takes about two minutes with one-second Anvil blocks. For a faster smoke test, append `-- --zone.batch-interval-blocks 10` to the `tempo-zone dev` command.
+The default batch interval is 120 zone blocks, which takes about two minutes with one-second Anvil blocks. For a faster smoke test, append `-- --zone.batch-interval-blocks 10` to the `tempo-zone node --dev` command.
 
 ## Run with a native Tempo dev L1
 
@@ -77,7 +77,7 @@ export ZONE_DATADIR=/tmp/tempo-zone-dev-native
 export ZONE_HTTP_PORT=9545
 export ZONE_PRIVATE_RPC_PORT=8544
 cast rpc --rpc-url "$L1_RPC_URL" web3_clientVersion
-target/release/tempo-zone dev \
+target/release/tempo-zone node --dev \
   --l1.rpc-url "$L1_RPC_URL" \
   --datadir "$ZONE_DATADIR" \
   --http.port "$ZONE_HTTP_PORT" \
