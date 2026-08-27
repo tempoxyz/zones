@@ -57,7 +57,7 @@ use tracing::{error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
-use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
+use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
@@ -362,7 +362,7 @@ impl ZoneEngine {
                 target_gas_limit: None,
             },
             timestamp_millis_part,
-            l1_block,
+            tempo_import: TempoImport::Full(Box::new(l1_block)),
         };
 
         // Send FCU with payload attributes through the engine API to trigger
