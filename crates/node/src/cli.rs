@@ -99,7 +99,28 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let l1_config = l1_evm_config_from_env()?;
+    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            eyre::ensure!(
+                !portal_address.is_zero(),
+                "L1_PORTAL_ADDRESS must be nonzero"
+            );
+            Some((url, portal_address))
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
         let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
@@ -127,12 +148,32 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
+        let additional_decryption_keys =
+            load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
+
         builder.config_mut().network.discovery.disable_discovery = true;
         builder.config_mut().rpc.disable_auth_server = true;
         builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-        let mut node = create_zone_node(&args, zone_id).await?;
+        let mut node = ZoneNode::new(
+            args.l1_rpc_url.clone(),
+            args.portal_address,
+            args.l1_fetch_concurrency,
+            Duration::from_millis(args.l1_retry_connection_interval_ms),
+        )
+        .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
+        .with_redacted_rpc(ZoneRedactedRpcConfig {
+            redacted_rpc_port: args.redacted_rpc_port,
+            zone_id,
+            max_auth_token_validity: Duration::from_secs(
+                args.redacted_rpc_max_auth_token_validity_secs,
+            ),
+        });
+        if !additional_decryption_keys.is_empty() {
+            node = node.with_deposit_decryption_keys(additional_decryption_keys);
+        }
+
         node = configure_sequencing(&args, zone_id, node).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
