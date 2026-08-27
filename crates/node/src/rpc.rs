@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use alloy_consensus::BlockHeader;
+use alloy_consensus::{BlockHeader, transaction::TxHashRef};
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256, keccak256};
@@ -36,8 +36,8 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
-use reth_trie_common::{ExecutionWitnessMode, HashedStorage};
+use reth_storage_api::{BlockNumReader, StateProofProvider, StateProviderFactory};
+use reth_trie_common::{ExecutionWitnessMode, HashedPostState, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
     provider::ext::TempoProviderExt as _,
@@ -286,17 +286,41 @@ where
                 let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
                 let block_executor = evm_config.executor(&mut db);
                 let mode = ExecutionWitnessMode::default();
-                let mut witness_record = ExecutionWitnessRecord::default();
 
+                let mut witness = None;
                 let _ = block_executor
                     .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        witness_record.record_executed_state(statedb, mode);
-                        record_block_hash_storage_proofs(&mut witness_record, statedb);
+                        let state_provider = &statedb.database.database.0;
+                        let result = ExecutionWitnessRecord::new(statedb)
+                            .into_execution_witness(
+                                state_provider,
+                                eth_api.provider(),
+                                block_number,
+                                mode,
+                            )
+                            .and_then(|mut witness| {
+                                let targets = block_hash_storage_targets(statedb);
+                                if !targets.is_empty() {
+                                    let supplemental = state_provider.witness(
+                                        Default::default(),
+                                        targets,
+                                        mode,
+                                    )?;
+                                    let mut seen =
+                                        witness.state.iter().map(keccak256).collect::<HashSet<_>>();
+                                    witness.state.extend(
+                                        supplemental
+                                            .into_iter()
+                                            .filter(|node| seen.insert(keccak256(node))),
+                                    );
+                                }
+                                Ok(witness)
+                            });
+                        witness = Some(result);
                     })
                     .map_err(|error| EthApiError::Internal(error.into()))?;
-
-                let witness = witness_record
-                    .into_execution_witness(&db.database.0, eth_api.provider(), block_number, mode)
+                let witness = witness
+                    .expect("state closure is called after successful execution")
                     .map_err(EthApiError::from)?;
                 Ok(ZoneExecutionWitness {
                     execution_witness: witness,
@@ -315,22 +339,19 @@ where
     }
 }
 
-/// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.
+/// Build EIP-2935 history-contract storage targets for every BLOCKHASH value read during replay.
 ///
-/// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
-/// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
-/// storage targets lets the SPF authenticate the same values against the parent state root.
-fn record_block_hash_storage_proofs<DB>(witness: &mut ExecutionWitnessRecord, state: &State<DB>) {
+/// Reth's execution-witness record proves the REVM account cache and represents these reads with
+/// ancestor headers. Zones instead authenticate the same values against the EIP-2935 history
+/// contract committed in the parent state root, so the caller generates a supplemental trie
+/// witness for these targets and merges its unique nodes into the execution witness.
+fn block_hash_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
     let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
     if block_hashes.is_empty() {
-        return;
+        return HashedPostState::default();
     }
 
-    let history_storage = witness
-        .hashed_state
-        .storages
-        .entry(keccak256(HISTORY_STORAGE_ADDRESS))
-        .or_insert_with(|| HashedStorage::new(false));
+    let mut history_storage = HashedStorage::default();
     for (number, hash) in block_hashes {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         history_storage.storage.insert(
@@ -338,6 +359,7 @@ fn record_block_hash_storage_proofs<DB>(witness: &mut ExecutionWitnessRecord, st
             U256::from_be_bytes(hash.0),
         );
     }
+    HashedPostState::from_hashed_storage(keccak256(HISTORY_STORAGE_ADDRESS), history_storage)
 }
 
 fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
@@ -1186,6 +1208,7 @@ where
 
     fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
+            let api = self.eth.api.clone();
             let provider = self.eth.api.provider().clone();
             let caller = auth.caller;
 
@@ -1195,18 +1218,38 @@ where
 
             let stream = provider
                 .canonical_state_stream()
-                .flat_map(|canon_state| futures::stream::iter(canon_state.block_receipts()))
-                .flat_map(move |(block_receipts, removed)| {
-                    let all_logs = logs_utils::matching_block_logs_with_tx_hashes(
-                        &filter,
-                        block_receipts.block,
-                        block_receipts.timestamp,
-                        block_receipts
-                            .tx_receipts
-                            .iter()
-                            .map(|(tx, receipt)| (*tx, receipt)),
-                        removed,
-                    );
+                .flat_map(move |canon_state| {
+                    let reverted_chains = canon_state.reverted();
+                    let committed_chain = canon_state.committed();
+                    let reverted = reverted_chains.iter().flat_map(|chain| {
+                        chain
+                            .blocks_and_receipts()
+                            .map(|(block, receipts)| (block, receipts, true))
+                    });
+                    let committed = committed_chain
+                        .blocks_and_receipts()
+                        .map(|(block, receipts)| (block, receipts, false));
+                    let mut all_logs = Vec::new();
+
+                    for (block, receipts, removed) in reverted.chain(committed) {
+                        match logs_utils::matching_block_logs_with_tx_hashes(
+                            api.converter(),
+                            &filter,
+                            block.sealed_header(),
+                            block
+                                .transactions_recovered()
+                                .zip(receipts.iter())
+                                .map(|(tx, receipt)| (*tx.tx_hash(), receipt)),
+                            removed,
+                        ) {
+                            Ok(logs) => all_logs.extend(logs),
+                            Err(error) => tracing::error!(
+                                target: "rpc",
+                                %error,
+                                "Failed to convert subscription logs"
+                            ),
+                        }
+                    }
                     futures::stream::iter(all_logs)
                 });
 
@@ -1484,12 +1527,9 @@ mod tests {
             .with_database(revm::database::EmptyDB::default())
             .build();
         state.block_hashes.insert(number, hash);
-        let mut witness = ExecutionWitnessRecord::default();
+        let targets = block_hash_storage_targets(&state);
 
-        record_block_hash_storage_proofs(&mut witness, &state);
-
-        let storage = witness
-            .hashed_state
+        let storage = targets
             .storages
             .get(&keccak256(HISTORY_STORAGE_ADDRESS))
             .unwrap();
