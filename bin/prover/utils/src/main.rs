@@ -36,8 +36,8 @@ use zone_rpc::{
     types::{TempoStorageRead, ZoneExecutionWitness},
 };
 use zone_spf::{
-    BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
-    ZoneStateWitness, prove_zone_batch,
+    BOOTSTRAP_PORTAL_SEQUENCERS_SLOT, BatchOutput, BatchWitness, PublicInputs, SpfConfig,
+    TempoStateWitness, ZoneBlock, ZoneStateWitness, prove_zone_batch,
 };
 
 const EIP2935_HISTORY_WINDOW: u64 = 8191;
@@ -313,7 +313,21 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .iter()
         .map(|block| (block.input.number, block.checkpoint_number))
         .collect();
-    let reads = collect_l1_reads(tempo_reads, &checkpoint_by_zone_block)?;
+    let mut reads = collect_l1_reads(tempo_reads, &checkpoint_by_zone_block)?;
+    if from_block == 1 {
+        let checkpoint = checkpoint_by_zone_block
+            .get(&1)
+            .copied()
+            .ok_or_eyre("bootstrap Zone block has no Tempo checkpoint")?;
+        reads
+            .entry(checkpoint)
+            .or_default()
+            .entry(discovery.portal)
+            .or_default()
+            .insert(B256::from(
+                BOOTSTRAP_PORTAL_SEQUENCERS_SLOT.to_be_bytes::<32>(),
+            ));
+    }
     let initial_tempo_state_witness =
         tempo_state_witness(&tempo_provider, &initial_tempo_header, reads).await?;
     timings.record("Tempo state witness", started, ());
@@ -799,7 +813,14 @@ async fn discover_batch(
             has_finalization = extracted.has_finalization,
             "extracted Zone block"
         );
+        let closes_batch = extracted.has_finalization;
         blocks.push(extracted);
+        if to_override.is_none() && closes_batch {
+            break;
+        }
+    }
+    if !blocks.last().is_some_and(|block| block.has_finalization) {
+        bail!("requested Zone range {from}..={limit} does not end at a finalized withdrawal batch");
     }
     Ok((parent_header, parent_number, blocks))
 }

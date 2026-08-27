@@ -37,8 +37,8 @@ use zone_prover::{
 };
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
-    BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
-    ZoneStateWitness, prove_zone_batch,
+    BOOTSTRAP_PORTAL_SEQUENCERS_SLOT, BatchOutput, BatchWitness, PublicInputs, SpfConfig,
+    TempoStateWitness, ZoneBlock, ZoneStateWitness, prove_zone_batch,
 };
 
 use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
@@ -367,7 +367,22 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     let tempo_state_witness = async {
-        let reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
+        let mut reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
+        if from == 1 {
+            let checkpoint = zone_inputs
+                .checkpoint_by_zone_block
+                .get(&1)
+                .copied()
+                .ok_or_eyre("bootstrap Zone block has no Tempo checkpoint")?;
+            reads
+                .entry(checkpoint)
+                .or_default()
+                .entry(context.portal)
+                .or_default()
+                .insert(B256::from(
+                    BOOTSTRAP_PORTAL_SEQUENCERS_SLOT.to_be_bytes::<32>(),
+                ));
+        }
         tempo_state_witness(&context.l1_provider, &initial_tempo_header, reads).await
     }
     .await?;

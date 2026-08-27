@@ -13,6 +13,11 @@ use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_precompiles::L1StorageReader;
 
+/// ZonePortal `_sequencers` dynamic-array length slot. A non-zero value proves that the
+/// verifier-selected portal was initialized by the time the bootstrap block imports Tempo.
+pub const BOOTSTRAP_PORTAL_SEQUENCERS_SLOT: U256 =
+    tempo_precompiles::zone_factory::portal::slots::SEQUENCERS;
+
 /// Trusted network configuration for Zone execution.
 ///
 /// This is deliberately separate from [`BatchWitness`]: it is selected by the
@@ -76,10 +81,12 @@ pub struct PublicInputs {
 pub struct BatchWitness {
     /// Values committed by the verifier.
     pub public_inputs: PublicInputs,
-    /// Canonical Tempo header of the first Zone block's parent. Its hash and
-    /// state root anchor the batch and its execution fields seed replay.
+    /// Canonical Tempo header of the first executed Zone block's parent. Its
+    /// hash and state root anchor the batch and its execution fields seed replay.
+    /// For the bootstrap proof this must be the verifier-selected genesis header.
     pub parent_header: TempoHeader,
-    /// Zone blocks in execution order.
+    /// Non-genesis Zone blocks in execution order. A bootstrap proof starts at block 1;
+    /// genesis is authenticated through `parent_header` and is not re-executed.
     pub zone_blocks: Vec<ZoneBlock>,
     /// Stateless witness for the Zone state at the start of the batch.
     pub zone_state_witness: ZoneStateWitness,

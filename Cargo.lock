@@ -14169,6 +14169,7 @@ dependencies = [
  "serde",
  "tempo-chainspec",
  "tempo-evm",
+ "tempo-precompiles",
  "tempo-primitives",
  "tempo-revm",
  "tempo-zone-contracts",

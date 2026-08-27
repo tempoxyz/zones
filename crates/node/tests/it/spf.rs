@@ -28,8 +28,8 @@ use tempo_primitives::TempoHeader;
 use zone_chainspec::ZoneChainSpec;
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
-    BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock, ZoneStateWitness,
-    prove_zone_batch,
+    BOOTSTRAP_PORTAL_SEQUENCERS_SLOT, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness,
+    ZoneBlock, ZoneStateWitness, prove_zone_batch,
 };
 
 use crate::utils::{
@@ -54,7 +54,9 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         )))
         .await?;
     let first_transaction_hash = *first_pending.tx_hash();
-    let first_tempo_block = fixture.next_block();
+    let (tempo_state_root, tempo_state_nodes) = tempo_state_with_portal_initialized();
+    let mut first_tempo_block = fixture.next_block();
+    first_tempo_block.header.inner.state_root = tempo_state_root;
     fixture.enqueue(&first_tempo_block, zone.deposit_queue(), vec![]);
     assert!(first_pending.get_receipt().await?.status());
     zone.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
@@ -65,7 +67,9 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         )))
         .await?;
     let second_transaction_hash = *second_pending.tx_hash();
-    let second_tempo_block = fixture.next_block();
+    let mut second_tempo_block = fixture.next_block();
+    second_tempo_block.header.inner.parent_hash = first_tempo_block.header.hash_slow();
+    second_tempo_block.header.inner.state_root = tempo_state_root;
     fixture.enqueue(&second_tempo_block, zone.deposit_queue(), vec![]);
     assert!(second_pending.get_receipt().await?.status());
     zone.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
@@ -153,7 +157,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         zone_state_witness,
         tempo_state_witness: TempoStateWitness {
             initial_tempo_header_rlp: tempo_header_rlp,
-            node_pool: vec![],
+            node_pool: tempo_state_nodes,
         },
         tempo_ancestry_headers: vec![],
     };
@@ -180,13 +184,14 @@ async fn spf_batch_execute() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn spf_builder_equivalence() -> eyre::Result<()> {
     let genesis = funded_zone_genesis();
-    let built = build_single_transaction_block(&genesis, None).await?;
+    let (tempo_state_root, tempo_state_nodes) = tempo_state_with_portal_initialized();
+    let built = build_single_transaction_block(&genesis, Some(tempo_state_root)).await?;
 
     let (state_root, zone_state_witness) = zone_state_witness(&genesis);
     assert_eq!(state_root, built.genesis_state_root);
 
     let config = spf_config(&genesis);
-    let witness = built.batch_witness(&config, zone_state_witness, vec![]);
+    let witness = built.batch_witness(&config, zone_state_witness, tempo_state_nodes);
 
     let output = prove_zone_batch(&config, witness)?;
 
@@ -415,25 +420,53 @@ fn tempo_state_with_transfer_policy(token: Address, policy_id: u64) -> (B256, Ve
         .to_be_bytes::<32>();
     let packed_policy = U256::from(policy_id) | (U256::ONE << u64::BITS);
     let genesis = Genesis {
-        alloc: [(
-            TIP403_REGISTRY_ADDRESS,
-            GenesisAccount {
-                storage: Some(
-                    [(
-                        B256::from(policy_slot),
-                        B256::from(packed_policy.to_be_bytes::<32>()),
-                    )]
-                    .into(),
-                ),
-                ..Default::default()
-            },
-        )]
+        alloc: [
+            (
+                TIP403_REGISTRY_ADDRESS,
+                GenesisAccount {
+                    storage: Some(
+                        [(
+                            B256::from(policy_slot),
+                            B256::from(packed_policy.to_be_bytes::<32>()),
+                        )]
+                        .into(),
+                    ),
+                    ..Default::default()
+                },
+            ),
+            initialized_portal_account(),
+        ]
         .into(),
         ..Default::default()
     };
 
     let (state_root, nodes, _) = genesis_state_witness(&genesis);
     (state_root, nodes)
+}
+
+fn tempo_state_with_portal_initialized() -> (B256, Vec<Bytes>) {
+    let genesis = Genesis {
+        alloc: [initialized_portal_account()].into(),
+        ..Default::default()
+    };
+    let (state_root, nodes, _) = genesis_state_witness(&genesis);
+    (state_root, nodes)
+}
+
+fn initialized_portal_account() -> (Address, GenesisAccount) {
+    (
+        Address::ZERO,
+        GenesisAccount {
+            storage: Some(
+                [(
+                    B256::from(BOOTSTRAP_PORTAL_SEQUENCERS_SLOT.to_be_bytes::<32>()),
+                    B256::from(U256::ONE.to_be_bytes::<32>()),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        },
+    )
 }
 
 fn config_state_root(genesis: &Genesis) -> B256 {
