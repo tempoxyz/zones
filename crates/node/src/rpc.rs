@@ -351,7 +351,7 @@ fn block_hash_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
         return HashedPostState::default();
     }
 
-    let mut history_storage = HashedStorage::new(false);
+    let mut history_storage = HashedStorage::default();
     for (number, hash) in block_hashes {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         history_storage.storage.insert(
