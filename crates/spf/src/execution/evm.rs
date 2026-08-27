@@ -117,10 +117,10 @@ pub(crate) fn execute_zone_block(
         )
     })?;
 
-    if block.tempo_headers_rlp.is_empty() {
+    if block.tempo_headers_rlp.len() == 1 {
         transactions.push(execute_advance_tempo(
             &mut executor,
-            &block.tempo_header_rlp,
+            &block.tempo_headers_rlp[0],
             block,
             zone_block_index,
             chain_id,
