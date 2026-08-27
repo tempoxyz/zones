@@ -104,6 +104,11 @@ impl ZoneInbox {
 
         let has_token_enablements = !call.enabledTokens.is_empty();
         let enabled_token_count = call.enabledTokens.len();
+        let previous_token_count = StorageCtx
+            .spec()
+            .is_t12()
+            .then(|| self.processed_enabled_token_count.read())
+            .transpose()?;
         let mut next_token_enablement_hash = self.processed_token_enablement_hash.read()?;
         for enabled in &call.enabledTokens {
             next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
@@ -114,11 +119,14 @@ impl ZoneInbox {
             {
                 return Err(ZoneInboxError::invalid_token_enablement_hash().into());
             }
-            StorageCtx
-                .spec()
-                .is_t12()
-                .then(|| l1.read_portal_vec_len(|portal| &portal.enabled_tokens))
-                .transpose()?
+            // T12 adds the count cursor after zones may already have applied a historical token
+            // prefix. Bootstrap that prefix once; afterward the hash check authenticates the
+            // supplied suffix, so the stored count can advance locally.
+            if previous_token_count == Some(0) {
+                Some(l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -128,12 +136,12 @@ impl ZoneInbox {
             self.processed_token_enablement_hash
                 .write(next_token_enablement_hash)?;
         }
-        let processed_enabled_token_count = if StorageCtx.spec().is_t12() {
+        let processed_enabled_token_count = if let Some(previous_token_count) = previous_token_count
+        {
             let next_token_count = if let Some(portal_count) = portal_enabled_token_count {
                 u64::try_from(portal_count).map_err(|_| TempoPrecompileError::under_overflow())?
             } else {
-                self.processed_enabled_token_count
-                    .read()?
+                previous_token_count
                     .checked_add(
                         u64::try_from(enabled_token_count)
                             .map_err(|_| TempoPrecompileError::under_overflow())?,
