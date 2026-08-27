@@ -104,65 +104,24 @@ impl ZoneInbox {
 
         let has_token_enablements = !call.enabledTokens.is_empty();
         let enabled_token_count = call.enabledTokens.len();
-        let mut previous_token_count = self.processed_enabled_token_count.read()?;
-        if StorageCtx.spec().is_t12() && !portal.is_zero() && previous_token_count == 0 {
-            let portal_count = l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?;
-            let supplied_count = call.enabledTokens.len();
-            if supplied_count > portal_count {
-                return Err(ZoneInboxError::invalid_token_enablement_hash().into());
-            }
-            // T12 activation adds the count cursor to zones that already committed the old
-            // append-only token hash. Derive the existing prefix from the final-root array; the
-            // hash check below authenticates that prefix and the complete supplied suffix.
-            previous_token_count = u64::try_from(portal_count - supplied_count)
-                .map_err(|_| TempoPrecompileError::under_overflow())?;
-            if previous_token_count != 0 {
-                self.processed_enabled_token_count
-                    .write(previous_token_count)?;
-            }
-        }
         let mut next_token_enablement_hash = self.processed_token_enablement_hash.read()?;
         for enabled in &call.enabledTokens {
             next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
         }
 
-        if !portal.is_zero() {
-            if !StorageCtx.spec().is_t12() {
-                if l1.read_portal(|portal| &portal.token_enablement_hash)?
-                    != next_token_enablement_hash
-                {
-                    return Err(ZoneInboxError::invalid_token_enablement_hash().into());
-                }
-            } else {
-                let previous = usize::try_from(previous_token_count)
-                    .map_err(|_| TempoPrecompileError::under_overflow())?;
-                let enabled_token_count =
-                    l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?;
-                let complete_suffix = enabled_token_count
-                    .checked_sub(previous)
-                    .is_some_and(|len| len == call.enabledTokens.len());
-                let mut addresses_match = complete_suffix;
-                if complete_suffix {
-                    for (index, enabled_token) in
-                        (previous..enabled_token_count).zip(&call.enabledTokens)
-                    {
-                        let portal_token =
-                            l1.read_portal(|portal| &portal.enabled_tokens[index])?;
-
-                        if portal_token != enabled_token.token {
-                            addresses_match = false;
-                            break;
-                        }
-                    }
-                }
-                if !addresses_match
-                    || l1.read_portal(|portal| &portal.token_enablement_hash)?
-                        != next_token_enablement_hash
-                {
-                    return Err(ZoneInboxError::invalid_token_enablement_hash().into());
-                }
+        let portal_enabled_token_count = if !portal.is_zero() {
+            if l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
+            {
+                return Err(ZoneInboxError::invalid_token_enablement_hash().into());
             }
-        }
+            StorageCtx
+                .spec()
+                .is_t12()
+                .then(|| l1.read_portal_vec_len(|portal| &portal.enabled_tokens))
+                .transpose()?
+        } else {
+            None
+        };
 
         self.enable_tokens(call.enabledTokens)?;
         if has_token_enablements {
@@ -170,12 +129,17 @@ impl ZoneInbox {
                 .write(next_token_enablement_hash)?;
         }
         let processed_enabled_token_count = if StorageCtx.spec().is_t12() {
-            let next_token_count = previous_token_count
-                .checked_add(
-                    u64::try_from(enabled_token_count)
-                        .map_err(|_| TempoPrecompileError::under_overflow())?,
-                )
-                .ok_or_else(TempoPrecompileError::under_overflow)?;
+            let next_token_count = if let Some(portal_count) = portal_enabled_token_count {
+                u64::try_from(portal_count).map_err(|_| TempoPrecompileError::under_overflow())?
+            } else {
+                self.processed_enabled_token_count
+                    .read()?
+                    .checked_add(
+                        u64::try_from(enabled_token_count)
+                            .map_err(|_| TempoPrecompileError::under_overflow())?,
+                    )
+                    .ok_or_else(TempoPrecompileError::under_overflow)?
+            };
             self.processed_enabled_token_count.write(next_token_count)?;
             next_token_count
         } else {
