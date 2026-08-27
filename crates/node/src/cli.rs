@@ -230,10 +230,6 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
         if args.sequencer_manifest.is_some() {
             warn!(target: "reth::cli", "Ignoring sequencer manifest in Tempo Zone dev mode");
         }
-        eyre::ensure!(
-            args.checker_mode == CheckerMode::Off,
-            "--checker.mode is not supported with `tempo-zone dev`"
-        );
 
         let zone_id = builder.config().chain.zone_id();
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
@@ -259,12 +255,35 @@ pub(crate) fn run_dev_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre:
             prover_address: args.prover_address.clone(),
         });
 
-        builder
-            .node(node)
-            .launch_with_debug_capabilities()
-            .await?
-            .wait_for_node_exit()
-            .await
+        match args.checker_mode {
+            CheckerMode::Off => {
+                builder
+                    .node(node)
+                    .launch_with_debug_capabilities()
+                    .await?
+                    .wait_for_node_exit()
+                    .await
+            }
+            CheckerMode::Observe => {
+                info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
+                let node = node.with_portal_evidence_retention();
+                let checker = CheckerExEx::new(CheckerConfig {
+                    l1_rpc_url: args.l1_rpc_url.clone(),
+                    portal_address: args.portal_address,
+                    zone_id,
+                    zone_chain_id: builder.config().chain.chain().id(),
+                    database_path: builder.config().datadir().data_dir().join("checker"),
+                    l1_block_tracker: node.l1_block_tracker(),
+                });
+                builder
+                    .node(node)
+                    .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
+                    .launch_with_debug_capabilities()
+                    .await?
+                    .wait_for_node_exit()
+                    .await
+            }
+        }
     })
 }
 
