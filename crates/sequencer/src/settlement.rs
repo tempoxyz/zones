@@ -28,10 +28,13 @@ use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 use crate::{
     ZoneSequencerProvider,
     abi::{
-        self, BlockTransition, DepositQueueTransition, IZoneOutbox, LegacyBatchSubmitted,
-        LegacyTempoAdvanced, ZonePortal,
+        self, BatchSubmitted, BlockTransition, DepositQueueTransition, IZoneOutbox,
+        LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
+        ZonePortal,
     },
-    attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
+    attestation::{
+        AttestationDomain, AttestationStore, SettlementAttestation, SettlementCertificate,
+    },
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_eips::BlockHashOrNumber;
@@ -39,15 +42,17 @@ use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
+use alloy_rpc_types_eth::Filter;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain};
+use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
@@ -337,7 +342,8 @@ impl BatchSubmitter {
         &self,
         batch: &BatchData,
         shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<LegacyBatchSubmitted, BatchSubmitError> {
+    ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
+        let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -348,6 +354,10 @@ impl BatchSubmitter {
             nextProcessedHash: batch.next_processed_deposit_hash,
             prevDepositNumber: batch.prev_deposit_number,
             nextDepositNumber: batch.next_deposit_number,
+        };
+        let token_transition = TokenEnablementTransition {
+            prevProcessedTokenCount: batch.prev_processed_token_count,
+            nextProcessedTokenCount: batch.next_processed_token_count,
         };
 
         let verifier_config = Bytes::new();
@@ -373,7 +383,13 @@ impl BatchSubmitter {
                     )
                     .await?;
                 let anchor_mode = match self
-                    .validate_certificate(batch, batch.zone_height, metadata, &certificate)
+                    .validate_certificate(
+                        batch,
+                        settlement_abi,
+                        batch.zone_height,
+                        metadata,
+                        &certificate,
+                    )
                     .await
                 {
                     Ok(anchor_mode) => anchor_mode,
@@ -426,6 +442,7 @@ impl BatchSubmitter {
                 metadata,
                 SettlementAttestationInput {
                     batch,
+                    settlement_abi,
                     anchor_block_number,
                     anchor_block_hash,
                     block_transition: &block_transition,
@@ -458,34 +475,57 @@ impl BatchSubmitter {
             "Submitting batch to ZonePortal on L1"
         );
 
-        let mut submission = self
-            .portal
-            .submitBatch_0(
-                batch.tempo_block_number,
-                recent_tempo_block_number,
-                block_transition,
-                deposit_transition,
-                batch.withdrawal_queue_hash,
-                verifier_config,
-                Bytes::new(),
-                U256::from(batch.zone_height),
-                signatures,
-            )
-            .nonce_key(SUBMIT_BATCH_NONCE_KEY)
-            .nonce(nonce)
-            .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
-            .max_priority_fee_per_gas(0);
-        // Estimation against state N cannot see hash(N), although execution in N+1 can. If this
-        // send does not settle, a retry after the head advances uses normal estimation.
-        if anchors_to_current_tip {
-            submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+        let receipt = match settlement_abi {
+            SettlementAbi::Legacy => {
+                let mut submission = self
+                    .portal
+                    .submitBatch_0(
+                        batch.tempo_block_number,
+                        recent_tempo_block_number,
+                        block_transition,
+                        deposit_transition,
+                        batch.withdrawal_queue_hash,
+                        verifier_config,
+                        Bytes::new(),
+                        U256::from(batch.zone_height),
+                        signatures,
+                    )
+                    .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                    .nonce(nonce)
+                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                    .max_priority_fee_per_gas(0);
+                if anchors_to_current_tip {
+                    submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+                }
+                tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
+            }
+            SettlementAbi::T12 => {
+                let mut submission = self
+                    .portal
+                    .submitBatch_1(
+                        batch.tempo_block_number,
+                        recent_tempo_block_number,
+                        block_transition,
+                        deposit_transition,
+                        token_transition,
+                        batch.withdrawal_queue_hash,
+                        verifier_config,
+                        Bytes::new(),
+                        U256::from(batch.zone_height),
+                        signatures,
+                    )
+                    .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                    .nonce(nonce)
+                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                    .max_priority_fee_per_gas(0);
+                if anchors_to_current_tip {
+                    submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
+                }
+                tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
+            }
         }
-
-        let receipt =
-            tokio::time::timeout(std::time::Duration::from_secs(30), submission.send_sync())
-                .await
-                .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))?
-                .map_err(|error| BatchSubmitError::Other(error.into()))?;
+        .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))?
+        .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
@@ -554,17 +594,17 @@ impl BatchSubmitter {
     ) -> Result<Bytes> {
         let SettlementAttestationInput {
             batch,
+            settlement_abi,
             anchor_block_number,
             anchor_block_hash,
             block_transition,
             deposit_transition,
             verifier_config,
         } = attestation;
-        let domain = eip712_domain! {
-            name: "ZonePortal",
-            version: "1",
-            chain_id: metadata.stable.chain_id,
-            verifying_contract: self.portal_address,
+        let domain = AttestationDomain {
+            l1_chain_id: metadata.stable.chain_id,
+            portal_address: self.portal_address,
+            zone_id: metadata.stable.zone_id,
         };
         let message = SettlementAttestation {
             zoneId: metadata.stable.zone_id,
@@ -577,10 +617,14 @@ impl BatchSubmitter {
             anchorBlockHash: anchor_block_hash,
             blockTransitionHash: keccak256(block_transition.abi_encode()),
             depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
+            tokenEnablementTransitionHash: settlement_abi.token_transition_hash(
+                batch.prev_processed_token_count,
+                batch.next_processed_token_count,
+            ),
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfigHash: keccak256(verifier_config),
         };
-        let digest = message.eip712_signing_hash(&domain);
+        let digest = domain.settlement_digest(&message);
         let signature = signer.sign_hash_sync(&digest)?;
         let mut encoded = Vec::with_capacity(65);
         encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
@@ -706,14 +750,11 @@ impl BatchSubmitter {
     }
 
     /// Decode the `BatchSubmitted` event from a confirmed `submitBatch` receipt's logs.
-    fn decode_batch_submitted(
-        &self,
-        logs: &[alloy_rpc_types_eth::Log],
-    ) -> Result<LegacyBatchSubmitted> {
+    fn decode_batch_submitted(&self, logs: &[alloy_rpc_types_eth::Log]) -> Result<BatchSubmitted> {
         logs.iter()
             .filter(|log| log.address() == self.portal_address)
-            .find_map(|log| LegacyBatchSubmitted::decode_log(&log.inner).ok())
-            .map(|log| log.data)
+            .find_map(|log| decode_batch_submitted_log(&log.inner))
+            .transpose()?
             .ok_or_else(|| {
                 eyre::eyre!("confirmed submitBatch receipt is missing the BatchSubmitted event")
             })
@@ -724,6 +765,7 @@ impl BatchSubmitter {
     async fn validate_certificate(
         &self,
         batch: &BatchData,
+        settlement_abi: SettlementAbi,
         zone_height: u64,
         metadata: PortalSubmissionMetadata,
         certificate: &SettlementCertificate,
@@ -747,6 +789,10 @@ impl BatchSubmitter {
                 batch.next_deposit_number,
             )
                 .abi_encode(),
+        );
+        let expected_token_transition_hash = settlement_abi.token_transition_hash(
+            batch.prev_processed_token_count,
+            batch.next_processed_token_count,
         );
 
         // Run a bunch of checks to verify that whats in the attestation certificate is exactly what
@@ -782,6 +828,10 @@ impl BatchSubmitter {
         eyre::ensure!(
             attestation.depositQueueTransitionHash == expected_deposit_transition_hash,
             "certificate deposit transition changed"
+        );
+        eyre::ensure!(
+            attestation.tokenEnablementTransitionHash == expected_token_transition_hash,
+            "certificate token transition changed"
         );
         eyre::ensure!(
             attestation.withdrawalQueueHash == batch.withdrawal_queue_hash,
@@ -1111,7 +1161,7 @@ impl BatchSubmitter {
         &self,
         first_index: u64,
         tail: u64,
-    ) -> Result<BTreeMap<u64, LegacyBatchSubmitted>> {
+    ) -> Result<BTreeMap<u64, BatchSubmitted>> {
         if first_index >= tail {
             return Ok(BTreeMap::new());
         }
@@ -1127,16 +1177,21 @@ impl BatchSubmitter {
         while found.len() < needed {
             let lo = backward_log_query_start(hi, 0);
 
-            let events = self
-                .portal
-                .BatchSubmitted_0_filter()
+            let filter = Filter::new()
+                .address(self.portal_address)
+                .event_signature(vec![
+                    BatchSubmitted::SIGNATURE_HASH,
+                    LegacyBatchSubmitted::SIGNATURE_HASH,
+                ])
                 .topic2(index_topics.clone())
                 .from_block(lo)
-                .to_block(hi)
-                .query()
-                .await?;
+                .to_block(hi);
+            let events = self.l1_provider.get_logs(&filter).await?;
 
-            for (event, _) in events {
+            for log in events {
+                let event = decode_batch_submitted_log(&log.inner)
+                    .transpose()?
+                    .ok_or_else(|| eyre::eyre!("unexpected event in BatchSubmitted query"))?;
                 let index: u64 = event.withdrawalQueueIndex.try_into().map_err(|_| {
                     eyre::eyre!("withdrawal queue index overflow in BatchSubmitted")
                 })?;
@@ -1155,6 +1210,30 @@ impl BatchSubmitter {
     }
 }
 
+fn decode_batch_submitted_log(log: &alloy_primitives::Log) -> Option<Result<BatchSubmitted>> {
+    match log.topics().first() {
+        Some(topic) if topic == &BatchSubmitted::SIGNATURE_HASH => Some(
+            BatchSubmitted::decode_log(log)
+                .map(|event| event.data)
+                .map_err(Into::into),
+        ),
+        Some(topic) if topic == &LegacyBatchSubmitted::SIGNATURE_HASH => Some(
+            LegacyBatchSubmitted::decode_log(log)
+                .map(|event| BatchSubmitted {
+                    withdrawalBatchIndex: event.withdrawalBatchIndex,
+                    withdrawalQueueIndex: event.withdrawalQueueIndex,
+                    nextProcessedDepositQueueHash: event.nextProcessedDepositQueueHash,
+                    nextBlockHash: event.nextBlockHash,
+                    withdrawalQueueHash: event.withdrawalQueueHash,
+                    lastProcessedDepositNumber: event.lastProcessedDepositNumber,
+                    lastProcessedEnabledTokenCount: 0,
+                })
+                .map_err(Into::into),
+        ),
+        _ => None,
+    }
+}
+
 /// Verified bounded window of the portal withdrawal queue reconstructed from chain history.
 #[derive(Debug)]
 pub struct WithdrawalPage {
@@ -1164,6 +1243,34 @@ pub struct WithdrawalPage {
     pub tail: u64,
     /// Verified payloads keyed by logical portal queue index.
     pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
+}
+
+/// Settlement ABI selected by the fork rules of the batch's imported Tempo block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementAbi {
+    /// Pre-T12 selector and EIP-712 statement.
+    Legacy,
+    /// T12 selector and token-enablement-bound EIP-712 statement.
+    T12,
+}
+
+impl SettlementAbi {
+    /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
+    pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
+        let t12_active = provider
+            .is_hardfork_active(TempoHardfork::T12)
+            .await
+            .wrap_err("failed reading the live Tempo L1 hardfork")?;
+        Ok(if t12_active { Self::T12 } else { Self::Legacy })
+    }
+
+    /// Hash the token transition exactly as the selected settlement statement expects.
+    pub fn token_transition_hash(self, previous: u64, next: u64) -> B256 {
+        match self {
+            Self::Legacy => B256::ZERO,
+            Self::T12 => keccak256((previous, next).abi_encode()),
+        }
+    }
 }
 
 /// Data required to submit a single batch to the ZonePortal on L1.
@@ -1187,6 +1294,10 @@ pub struct BatchData {
     pub prev_deposit_number: u64,
     /// Deposit counter after processing.
     pub next_deposit_number: u64,
+    /// Enabled-token prefix at the start of the batch.
+    pub prev_processed_token_count: u64,
+    /// Enabled-token prefix after the batch.
+    pub next_processed_token_count: u64,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
     /// L2 withdrawal batch index validated against the portal before submission.
@@ -1222,12 +1333,15 @@ pub(crate) struct ZoneBlockSnapshot {
     pub processed_deposit_hash: B256,
     /// Total number of deposits processed by the zone up to this block.
     pub processed_deposit_number: u64,
+    /// Number of portal token enablements processed by the zone.
+    pub processed_token_count: u64,
     /// Zone L2 block hash.
     pub block_hash: B256,
 }
 
 struct SettlementAttestationInput<'a> {
     batch: &'a BatchData,
+    settlement_abi: SettlementAbi,
     anchor_block_number: u64,
     anchor_block_hash: B256,
     block_transition: &'a BlockTransition,
@@ -1430,7 +1544,7 @@ fn resolve_ancestry_headers(
 fn resolve_pending_slots(
     head: u64,
     tail: u64,
-    events: &BTreeMap<u64, LegacyBatchSubmitted>,
+    events: &BTreeMap<u64, BatchSubmitted>,
     slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
     head_slot_hash: B256,
 ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
@@ -1524,26 +1638,57 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     number: u64,
 ) -> Result<ZoneBlockSnapshot> {
     let (_, receipts) = block_with_receipts(provider, number)?;
+    let block_hash = provider
+        .block_hash(number)?
+        .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?;
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
+    let mut processed_token_count = None;
 
     for receipt in receipts {
         for log in receipt.logs() {
-            if log.address != inbox_address
-                || log.topics().first() != Some(&LegacyTempoAdvanced::SIGNATURE_HASH)
-            {
+            if log.address != inbox_address {
                 continue;
             }
-            let event = LegacyTempoAdvanced::decode_log(log)
-                .map_err(|err| eyre::eyre!("invalid TempoAdvanced log in block {number}: {err}"))?;
-            if tempo_block_number.replace(event.tempoBlockNumber).is_some() {
+            let Some(topic) = log.topics().first() else {
+                continue;
+            };
+            let (block_number, deposit_hash, deposit_number, token_count) = match *topic {
+                TempoAdvanced::SIGNATURE_HASH => {
+                    let event = TempoAdvanced::decode_log(log).map_err(|err| {
+                        eyre::eyre!("invalid post-T12 TempoAdvanced log in block {number}: {err}")
+                    })?;
+                    (
+                        event.tempoBlockNumber,
+                        event.newProcessedDepositQueueHash,
+                        event.lastProcessedDepositNumber,
+                        event.lastProcessedEnabledTokenCount,
+                    )
+                }
+                LegacyTempoAdvanced::SIGNATURE_HASH => {
+                    let event = LegacyTempoAdvanced::decode_log(log).map_err(|err| {
+                        eyre::eyre!("invalid legacy TempoAdvanced log in block {number}: {err}")
+                    })?;
+                    (
+                        event.tempoBlockNumber,
+                        event.newProcessedDepositQueueHash,
+                        event.lastProcessedDepositNumber,
+                        0,
+                    )
+                }
+                _ => {
+                    continue;
+                }
+            };
+            if tempo_block_number.replace(block_number).is_some() {
                 return Err(eyre::eyre!(
                     "zone block {number} contains more than one TempoAdvanced event"
                 ));
             }
-            processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
-            processed_deposit_number = Some(event.lastProcessedDepositNumber);
+            processed_deposit_hash = Some(deposit_hash);
+            processed_deposit_number = Some(deposit_number);
+            processed_token_count = Some(token_count);
         }
     }
 
@@ -1554,9 +1699,9 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
             .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit commitment"))?,
         processed_deposit_number: processed_deposit_number
             .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit number"))?,
-        block_hash: provider
-            .block_hash(number)?
-            .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?,
+        processed_token_count: processed_token_count
+            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its token cursor"))?,
+        block_hash,
     })
 }
 
@@ -1746,7 +1891,7 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi;
+    use crate::abi::{self, legacySubmitBatchCall, submitBatchCall};
     use alloy_consensus::Header as ConsensusHeader;
     use alloy_primitives::{B256, address};
     use alloy_provider::ProviderBuilder;
@@ -1762,6 +1907,47 @@ mod tests {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased()
+    }
+
+    #[test]
+    fn settlement_bindings_keep_legacy_and_t12_selectors_distinct() {
+        let legacy: [u8; 4] = keccak256(
+            "submitBatch(uint64,uint64,(bytes32,bytes32),(bytes32,bytes32,uint64,uint64),bytes32,bytes,bytes,uint256,bytes[])"
+        )[..4]
+            .try_into()
+            .unwrap();
+        assert_eq!(legacySubmitBatchCall::SELECTOR, legacy);
+        assert_ne!(legacySubmitBatchCall::SELECTOR, submitBatchCall::SELECTOR);
+    }
+
+    #[tokio::test]
+    async fn settlement_abi_follows_live_l1_hardfork() {
+        let legacy = Asserter::new();
+        legacy.push_success(&serde_json::json!({ "active": "T11" }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(legacy)).await.unwrap(),
+            SettlementAbi::Legacy
+        );
+
+        let t12 = Asserter::new();
+        t12.push_success(&serde_json::json!({ "active": "T12" }));
+        assert_eq!(
+            SettlementAbi::from_l1(&mock_l1(t12)).await.unwrap(),
+            SettlementAbi::T12
+        );
+    }
+
+    #[test]
+    fn t12_uses_token_transition_for_legacy_boundary() {
+        assert_eq!(
+            SettlementAbi::Legacy.token_transition_hash(0, 0),
+            B256::ZERO
+        );
+        assert_eq!(
+            SettlementAbi::T12.token_transition_hash(0, 0),
+            keccak256((0_u64, 0_u64).abi_encode())
+        );
+        assert_ne!(SettlementAbi::T12.token_transition_hash(0, 0), B256::ZERO);
     }
 
     #[tokio::test]
@@ -2268,6 +2454,8 @@ mod tests {
             next_processed_deposit_hash: B256::ZERO,
             prev_deposit_number: 0,
             next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 1,
         };
@@ -2376,14 +2564,15 @@ mod tests {
         assert_eq!(backward_log_query_start(100, 50), 50);
     }
 
-    fn test_batch_event(withdrawal_queue_hash: B256) -> LegacyBatchSubmitted {
-        LegacyBatchSubmitted {
+    fn test_batch_event(withdrawal_queue_hash: B256) -> BatchSubmitted {
+        BatchSubmitted {
             withdrawalBatchIndex: 0,
             withdrawalQueueIndex: U256::ZERO,
             nextProcessedDepositQueueHash: B256::ZERO,
             nextBlockHash: B256::ZERO,
             withdrawalQueueHash: withdrawal_queue_hash,
             lastProcessedDepositNumber: 0,
+            lastProcessedEnabledTokenCount: 0,
         }
     }
 
@@ -2398,13 +2587,14 @@ mod tests {
             .erased();
         let submitter = BatchSubmitter::new(portal_address, provider);
 
-        let event = LegacyBatchSubmitted {
+        let event = BatchSubmitted {
             withdrawalBatchIndex: 7,
             withdrawalQueueIndex: U256::from(3),
             nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
             nextBlockHash: B256::repeat_byte(0x22),
             withdrawalQueueHash: B256::repeat_byte(0x33),
             lastProcessedDepositNumber: 9,
+            lastProcessedEnabledTokenCount: 5,
         };
         let log = alloy_rpc_types_eth::Log {
             inner: alloy_primitives::Log {
@@ -2427,6 +2617,26 @@ mod tests {
         assert_eq!(decoded.withdrawalBatchIndex, 7);
         assert_eq!(decoded.withdrawalQueueIndex, U256::from(3));
         assert_eq!(decoded.nextBlockHash, B256::repeat_byte(0x22));
+        assert_eq!(decoded.lastProcessedEnabledTokenCount, 5);
+
+        let legacy = abi::LegacyBatchSubmitted {
+            withdrawalBatchIndex: 6,
+            withdrawalQueueIndex: U256::from(2),
+            nextProcessedDepositQueueHash: B256::repeat_byte(0x44),
+            nextBlockHash: B256::repeat_byte(0x55),
+            withdrawalQueueHash: B256::repeat_byte(0x66),
+            lastProcessedDepositNumber: 8,
+        };
+        let legacy_log = alloy_rpc_types_eth::Log {
+            inner: alloy_primitives::Log {
+                address: portal_address,
+                data: legacy.encode_log_data(),
+            },
+            ..Default::default()
+        };
+        let decoded = submitter.decode_batch_submitted(&[legacy_log]).unwrap();
+        assert_eq!(decoded.withdrawalBatchIndex, 6);
+        assert_eq!(decoded.lastProcessedEnabledTokenCount, 0);
 
         assert!(submitter.decode_batch_submitted(&[unrelated]).is_err());
     }
@@ -2447,13 +2657,14 @@ mod tests {
         let logs: Vec<_> = [99_u64, 100, 101]
             .into_iter()
             .map(|index| {
-                let event = LegacyBatchSubmitted {
+                let event = BatchSubmitted {
                     withdrawalBatchIndex: index + 20,
                     withdrawalQueueIndex: U256::from(index),
                     nextProcessedDepositQueueHash: B256::ZERO,
                     nextBlockHash: B256::from(U256::from(index + 1)),
                     withdrawalQueueHash: B256::from(U256::from(index + 2)),
                     lastProcessedDepositNumber: 0,
+                    lastProcessedEnabledTokenCount: 0,
                 };
                 alloy_rpc_types_eth::Log {
                     inner: alloy_primitives::Log {

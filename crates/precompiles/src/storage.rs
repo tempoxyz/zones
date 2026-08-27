@@ -17,7 +17,8 @@ use revm::{
     precompile::PrecompileError,
 };
 use tempo_precompiles::{
-    error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
+    error::TempoPrecompileError, storage::vec::VecHandler,
+    zone_factory::ZonePortalStorage as ZonePortal,
 };
 use thiserror::Error;
 
@@ -114,12 +115,12 @@ impl<P> L1State<P> {
         }
     }
 
-    /// Selects the child anchor after `TempoState.finalizeTempo` validates the header transition.
+    /// Selects the final anchor after `TempoState.finalizeTempo` validates a contiguous range.
     ///
     /// Advancement is valid only before any L1 read has selected an anchor and only from a parent
-    /// to its direct child.
+    /// to a later checkpoint.
     pub fn advance_anchor(&self, from: u64, to: u64) -> Result<(), L1StateError> {
-        if from.checked_add(1) != Some(to) {
+        if to <= from {
             return Err(L1StateError::AdvanceTempoConflict { from, to });
         } else if let Some(current) = self.get_anchor() {
             return Err(L1StateError::AnchorConflict { current, new: to });
@@ -187,6 +188,19 @@ impl<P: L1StorageReader> L1State<P> {
     ) -> tempo_precompiles::Result<T> {
         let portal = ZonePortal::new(self.portal_address);
         self.read_l1(select_slot(&portal))
+    }
+
+    /// Selects and reads a [`VecHandler`] length slot from the configured `ZonePortal` at the active anchor.
+    pub fn read_portal_vec_len<T: Storable>(
+        &self,
+        select: impl for<'a> FnOnce(&'a ZonePortal) -> &'a VecHandler<T>,
+    ) -> tempo_precompiles::Result<usize> {
+        let portal = ZonePortal::new(self.portal_address);
+        let vec = select(&portal);
+        let len_slot = Slot::<U256>::new(vec.len_slot(), self.portal_address);
+
+        usize::try_from(self.read_l1(&len_slot)?)
+            .map_err(|_| TempoPrecompileError::under_overflow())
     }
 
     /// Returns whether `account` has `expected` in the configured ZonePortal's role mapping.
@@ -399,9 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn l1_state_rejects_non_contiguous_advance() {
+    fn l1_state_accepts_forward_range_and_rejects_non_forward_advance() {
         let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
-        assert!(l1.advance_anchor(10, 12).is_err());
+        l1.advance_anchor(10, 12).unwrap();
+        assert_eq!(l1.get_anchor(), Some(12));
+
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        assert!(l1.advance_anchor(10, 10).is_err());
+        assert!(l1.advance_anchor(10, 9).is_err());
         assert_eq!(l1.get_anchor(), None);
     }
 

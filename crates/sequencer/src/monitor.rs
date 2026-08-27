@@ -131,6 +131,8 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     /// Deposit counter from the previous batch, used to construct the
     /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
     prev_processed_deposit_number: u64,
+    /// Enabled-token prefix confirmed by the previous batch.
+    prev_processed_token_count: u64,
     /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
     /// Initialized from the portal's on-chain `blockHash()` at startup.
     prev_zone_block_hash: B256,
@@ -209,12 +211,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         )?;
         let prev_processed_deposit_hash = previous_snapshot.processed_deposit_hash;
         let prev_processed_deposit_number = previous_snapshot.processed_deposit_number;
+        let prev_processed_token_count = previous_snapshot.processed_token_count;
 
         info!(
             last_submitted_zone_block,
             %prev_zone_block_hash,
             %prev_processed_deposit_hash,
             prev_processed_deposit_number,
+            prev_processed_token_count,
             "Initialized from portal state"
         );
 
@@ -237,6 +241,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             last_submitted_zone_block,
             prev_processed_deposit_hash,
             prev_processed_deposit_number,
+            prev_processed_token_count,
             prev_zone_block_hash,
             latest_observed_zone_block: last_submitted_zone_block,
             shadow_prover,
@@ -486,6 +491,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             next_processed_deposit_hash: end_state.processed_deposit_hash,
             prev_deposit_number: self.prev_processed_deposit_number,
             next_deposit_number: end_state.processed_deposit_number,
+            prev_processed_token_count: self.prev_processed_token_count,
+            next_processed_token_count: end_state.processed_token_count,
             withdrawal_queue_hash: finalized_batch.finalized_hash,
             withdrawal_batch_index: finalized_batch.finalized_index,
         };
@@ -606,6 +613,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.prev_zone_block_hash = batch_data.next_block_hash;
                     self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
                     self.prev_processed_deposit_number = batch_data.next_deposit_number;
+                    self.prev_processed_token_count = batch_data.next_processed_token_count;
                     self.last_submitted_zone_block = last_zone_block;
                     self.metrics
                         .latest_zone_block_submitted_to_l1
@@ -748,6 +756,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         self.latest_observed_zone_block = last_submitted_zone_block;
         self.prev_processed_deposit_hash = deposit_hash;
         self.prev_processed_deposit_number = deposit_number;
+        self.prev_processed_token_count = snapshot.previous_snapshot.processed_token_count;
         self.replace_pending_withdrawals(snapshot.pending_withdrawals);
         self.metrics
             .latest_zone_block_submitted_to_l1
@@ -807,6 +816,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 tempo_block_number: 0,
                 processed_deposit_hash: B256::ZERO,
                 processed_deposit_number: 0,
+                processed_token_count: 0,
                 block_hash: B256::ZERO,
             });
         }
@@ -947,12 +957,13 @@ mod tests {
         processed_deposit_hash: B256,
     ) -> TestZoneProvider {
         let provider = TestZoneProvider::new();
-        let event = abi::LegacyTempoAdvanced {
+        let event = abi::TempoAdvanced {
             tempoBlockHash: B256::repeat_byte(0x55),
             tempoBlockNumber: 123,
             depositsProcessed: U256::ZERO,
             newProcessedDepositQueueHash: processed_deposit_hash,
             lastProcessedDepositNumber: 0,
+            lastProcessedEnabledTokenCount: 0,
         };
         let tx = TempoTxEnvelope::Legacy(Signed::new_unhashed(
             TxLegacy::default(),
@@ -1023,6 +1034,7 @@ mod tests {
             last_submitted_zone_block: 10,
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),
             prev_processed_deposit_number: 0,
+            prev_processed_token_count: 0,
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             latest_observed_zone_block: 50,
             shadow_prover: None,
@@ -1046,12 +1058,15 @@ mod tests {
             next_processed_deposit_hash: B256::repeat_byte(0xdd),
             prev_deposit_number: 0,
             next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 1,
         };
 
-        // Preflight portal hash, followed by submission metadata with a 2-of-N threshold.
+        // Preflight portal hash, live hardfork, then submission metadata with a 2-of-N threshold.
         l1.push_success(&abi_encode_b256(batch_data.prev_block_hash));
+        l1.push_success(&serde_json::json!({ "active": "T12" }));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(0),
             abi_encode_u64(1),
@@ -1152,6 +1167,7 @@ mod tests {
         l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), zone);
+        monitor.prev_processed_token_count = 99;
 
         let anchor = monitor.resync_from_portal().await.unwrap();
 
@@ -1159,6 +1175,7 @@ mod tests {
         assert_eq!(monitor.prev_zone_block_hash, portal_hash);
         assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
         assert_eq!(monitor.prev_processed_deposit_hash, confirmed_deposit_hash);
+        assert_eq!(monitor.prev_processed_token_count, 0);
     }
 
     #[tokio::test]
@@ -1331,6 +1348,8 @@ mod tests {
             next_processed_deposit_hash: B256::repeat_byte(0x66),
             prev_deposit_number: 0,
             next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 8,
         };
@@ -1378,6 +1397,8 @@ mod tests {
             next_processed_deposit_hash: B256::repeat_byte(0x66),
             prev_deposit_number: 0,
             next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 8,
         };
@@ -1421,6 +1442,8 @@ mod tests {
             next_processed_deposit_hash: B256::repeat_byte(0x66),
             prev_deposit_number: 0,
             next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 8,
         };
