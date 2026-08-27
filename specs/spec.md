@@ -818,7 +818,7 @@ Each zone block contains system transactions and user transactions in a fixed or
 2. User transactions, executed in order.
 3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called at each batch boundary even if there are zero withdrawals so the batch index advances. It is the unique final transaction and uses the zone system caller (`msg.sender == address(0)`).
 
-A batch covers one or more zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The bootstrap batch MUST contain at least two blocks. Its first block is the canonical genesis block, which contains no transactions, and every subsequent block follows the non-genesis rules above. This guarantees that the first submitted batch imports at least one finalized Tempo block, performs the corresponding Tempo state reads, and finalizes the withdrawal batch in a non-genesis block.
+A batch covers one or more executed zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The bootstrap transition MUST cover at least two blocks in total: the canonical genesis block supplied as `parent_header`, followed by at least one non-genesis block in `zone_blocks`. Genesis is authenticated but not re-executed. This guarantees that the first submitted batch imports at least one finalized Tempo block, performs the corresponding Tempo state reads, and finalizes the withdrawal batch in a non-genesis block.
 
 After bootstrap, zone blocks and imported Tempo blocks have a one-to-one, order-preserving correspondence: every zone block imports exactly one Tempo block, and every imported Tempo block is used by exactly one zone block. The imported Tempo block must be the immediate child of the block imported by the preceding zone block. A zone may lag the finalized Tempo head and catch up by producing blocks at full speed, but it cannot skip Tempo blocks, produce multiple blocks for the same Tempo block, or advance beyond the available finalized Tempo chain.
 
@@ -1081,7 +1081,7 @@ It takes a complete witness of zone blocks and their dependencies, executes EVM 
 The witness contains everything needed to re-execute the batch:
 
 - **PublicInputs**: `parent_chain_id`, `zone_id`, `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. The verifier binds `parent_chain_id` to the L1 execution environment's chain ID; the portal supplies the remaining values, and the proof must be consistent with them.
-- **BatchWitness**: the public inputs, the parent header, the zone blocks to execute, the initial zone state, the Tempo state witness, and Tempo ancestry headers (for ancestry validation).
+- **BatchWitness**: the public inputs, the parent header, the non-genesis zone blocks to execute, the initial zone state, the Tempo state witness, and Tempo ancestry headers (for ancestry validation). In the bootstrap proof, `parent_header` is genesis and `zone_blocks[0]` is block 1.
 - **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `timestamp_millis_part`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: a deduplicated pool of zone-state trie nodes and a bytecode pool. Account and storage values are decoded directly from trie leaves; the initial state root comes from the parent header. The witness includes EIP-2935 history-contract slots used by `BLOCKHASH`. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
 - **TempoStateWitness**: the RLP-encoded Tempo header for the checkpoint already bound in the parent zone state and a deduplicated pool of Tempo-state trie nodes. The header supplies the authenticated initial Tempo state root for L1 storage reads.
@@ -1187,11 +1187,14 @@ pub struct BatchWitness {
     /// Public inputs committed by the proof system
     pub public_inputs: PublicInputs,
 
-    /// Parent header of the first zone block (binds the prior block hash and
-    /// supplies the initial zone-state root)
+    /// Parent header of the first executed zone block (binds the prior block
+    /// hash and supplies the initial zone-state root). This is the canonical
+    /// genesis header in the bootstrap proof.
     pub parent_header: ZoneHeader,
 
-    /// Zone blocks to execute
+    /// Non-genesis zone blocks to execute. The bootstrap proof begins with
+    /// block 1; genesis is authenticated through `parent_header` and is not
+    /// included or re-executed here.
     pub zone_blocks: Vec<ZoneBlock>,
 
     /// Initial zone-state witness
@@ -1339,7 +1342,7 @@ The state transition function produces:
 The stateless execution function must reject the witness on any failed check, missing read, or inconsistent state transition. A correct implementation proceeds in the following order:
 
 1. **Bind the parent header to the public inputs.**
-   Require `keccak256(rlp(parent_header)) == public_inputs.prev_block_hash`. Use `parent_header.state_root` as the initial zone-state root. This binds the witness to the exact predecessor block already committed on Tempo without duplicating its state root.
+   For an ordinary batch, require `keccak256(rlp(parent_header)) == public_inputs.prev_block_hash`. For the bootstrap proof, where `public_inputs.prev_block_hash == 0` is the portal's pre-genesis sentinel, require `parent_header` to equal the canonical genesis header from the verifier-selected Zone chain specification in full. The verifier selects this immutable specification by the complete Zone chain ID derived from `(parent_chain_id, zone_id)`; the witness cannot supply or override the genesis or fork schedule. Use `parent_header.state_root` as the initial zone-state root. The bootstrap transition reports zero as its public previous hash, but block 1 must name the authenticated genesis hash as its parent.
 
 2. **Initialize the initial zone-state reader.**
    Apply the [shared trie proof format](#shared-trie-proof-format) to `zone_state_witness`: index each node in `zone_state_witness.node_pool` by `keccak256(rlp(node))` and create a witness-backed reader rooted at `parent_header.state_root`. As execution first accesses an account or storage slot, derive its key from the operation, prove and decode its trie leaf, and cache the result in the in-memory execution state. Resolve `BLOCKHASH(n)` through the EIP-2935 history contract at slot `n % 8191`; the corresponding account and storage paths must be present in the Zone state witness. For non-empty account code, find its preimage in `zone_state_witness.bytecodes` by the committed code hash. Valid non-membership yields the canonical empty account or zero storage; an unavailable trie node or bytecode preimage is an error.
@@ -1348,7 +1351,7 @@ The stateless execution function must reject the witness on any failed check, mi
    Compute `keccak256(rlp(node))` for each node in `tempo_state_witness.node_pool` and build a hash-to-node index for proof traversal. Decode `tempo_state_witness.initial_tempo_header_rlp`; require its hash and block number to equal `TempoState.tempoBlockHash` and `TempoState.tempoBlockNumber` in the initial zone state. Set the active Tempo trie root to the decoded header's `state_root`.
 
 4. **For each `zone_blocks[i]`, verify the block witness before executing it.**
-   In the bootstrap proof, require at least two blocks. Require every field of `zone_blocks[0]` to equal the canonical genesis block derived from `(public_inputs.parent_chain_id, public_inputs.zone_id)`, including `chain_id = zone_chain_id(parent_chain_id, zone_id)` under the rules in [Chain ID](#chain-id); its parent hash is zero and it contains no user or system transactions. Apply the ordinary block rules to every remaining bootstrap block and to every block in an ordinary batch: require `block.parent_hash == prev_block_hash`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlp` to be present. Require `finalize_withdrawal_batch_count` to be absent in the genesis block and all intermediate blocks, and present in the final block of a batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
+   Require `zone_blocks` to be non-empty. In the bootstrap proof, `parent_header` is the authenticated canonical genesis header and `zone_blocks[0]` MUST be block 1, so the transition covers genesis plus at least one non-genesis block without replaying genesis. Apply the ordinary block rules to every executed block: require `block.parent_hash == keccak256(rlp(prev_header))`, `block.number == prev_header.number + 1`, `block.timestamp >= prev_header.timestamp`, `block.beneficiary == public_inputs.sequencer`, and `tempo_header_rlp` to be present. Require `finalize_withdrawal_batch_count` to be absent in every intermediate block and present exactly once in the final block of the batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
 
 5. **Execute `advanceTempo` if the block imports a Tempo header.**
    If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This requires the imported Tempo header's timestamp and millisecond component to exactly match the zone block, validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`, then replace the active Tempo trie root with the `state_root` decoded from that header. If `tempo_header_rlp` is absent, retain the active root from the previous Tempo checkpoint.
@@ -1471,11 +1474,11 @@ The proof must validate:
 3. The zone's `tempoBlockHash` matches `anchorBlockHash` (direct), or the parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber` is valid (ancestry).
 4. `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`.
 5. `ZoneOutbox.lastBatch().withdrawalQueueHash` matches the submitted `withdrawalQueueHash`.
-6. Every non-genesis zone block `beneficiary` is an active member of the versioned sequencer set committed by the settlement certificate; the genesis block must match the canonical header in full.
+6. Every executed zone block `beneficiary` is an active member of the versioned sequencer set committed by the settlement certificate; in the bootstrap proof, `parent_header` must match the verifier-selected canonical genesis header in full.
 7. Deposit processing is correct: deposits are processed oldest-first and contiguously from `prevProcessedHash`, `nextProcessedHash` equals the post-state `ZoneInbox.processedDepositQueueHash`, `nextDepositNumber` equals the post-state processed deposit number, and the proof shows `nextProcessedHash` equals the portal's `currentDepositQueueHash` read from Tempo state.
 8. Token enablement is correct in every non-genesis zone block: hashing the ordered `enabledTokens` calldata from the pre-state `ZoneInbox.processedTokenEnablementHash` produces the portal's `tokenEnablementHash` authenticated against the imported Tempo state; those tokens are initialized before deposits; and the resulting hash is stored as `ZoneInbox.processedTokenEnablementHash`.
 
-For the first proof, requirement 1 specifically means a transition from `prevBlockHash == 0` through the canonical zone genesis block derived from `parent_chain_id` and `zoneId` to the final non-genesis block of a batch containing at least two blocks. That batch's first Tempo import makes requirement 3 applicable immediately and includes the non-zero portal sequencer storage proof against the imported Tempo block described above.
+For the first proof, requirement 1 specifically means a transition from `prevBlockHash == 0`, through the canonical Zone genesis authenticated as `parent_header`, to the final non-genesis block. `zone_blocks` contains block 1 and any later blocks in that batch, so it must be non-empty and the complete transition covers at least two blocks without including genesis in `zone_blocks`. The first executed block imports Tempo, making requirement 3 applicable immediately, and includes the non-zero portal sequencer storage proof against that imported Tempo block. This authenticates the already-deployed Zone's exact genesis; it does not regenerate, replace, or migrate that genesis.
 
 ## Zone Precompiles
 
