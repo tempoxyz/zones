@@ -1513,48 +1513,68 @@ fn block_with_receipts<P: ZoneSequencerProvider>(
     Ok((block, receipts))
 }
 
-/// Read the settlement commitments emitted by the deterministic system transaction in a zone
-/// block.
+/// Read the settlement commitments at a Zone block.
+///
+/// A full Tempo import emits these commitments in its `TempoAdvanced` event. Paced Zone blocks
+/// retain the parent Tempo anchor, so their latest commitments are inherited from the most recent
+/// ancestor that emitted that event. The returned block hash always belongs to `number`, which is
+/// the Zone block the portal will settle.
 pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     provider: &P,
     inbox_address: Address,
     number: u64,
 ) -> Result<ZoneBlockSnapshot> {
-    let (_, receipts) = block_with_receipts(provider, number)?;
-    let mut tempo_block_number = None;
-    let mut processed_deposit_hash = None;
-    let mut processed_deposit_number = None;
+    let block_hash = provider
+        .block_hash(number)?
+        .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?;
 
-    for receipt in receipts {
-        for log in receipt.logs() {
-            if log.address != inbox_address
-                || log.topics().first() != Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
-            {
-                continue;
+    for event_block in (0..=number).rev() {
+        let (_, receipts) = block_with_receipts(provider, event_block)?;
+        let mut tempo_block_number = None;
+        let mut processed_deposit_hash = None;
+        let mut processed_deposit_number = None;
+
+        for receipt in receipts {
+            for log in receipt.logs() {
+                if log.address != inbox_address
+                    || log.topics().first() != Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
+                {
+                    continue;
+                }
+                let event = IZoneInbox::TempoAdvanced::decode_log(log).map_err(|err| {
+                    eyre::eyre!("invalid TempoAdvanced log in block {event_block}: {err}")
+                })?;
+                if tempo_block_number.replace(event.tempoBlockNumber).is_some() {
+                    return Err(eyre::eyre!(
+                        "zone block {event_block} contains more than one TempoAdvanced event"
+                    ));
+                }
+                processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
+                processed_deposit_number = Some(event.lastProcessedDepositNumber);
             }
-            let event = IZoneInbox::TempoAdvanced::decode_log(log)
-                .map_err(|err| eyre::eyre!("invalid TempoAdvanced log in block {number}: {err}"))?;
-            if tempo_block_number.replace(event.tempoBlockNumber).is_some() {
-                return Err(eyre::eyre!(
-                    "zone block {number} contains more than one TempoAdvanced event"
-                ));
-            }
-            processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
-            processed_deposit_number = Some(event.lastProcessedDepositNumber);
+        }
+
+        if let (
+            Some(tempo_block_number),
+            Some(processed_deposit_hash),
+            Some(processed_deposit_number),
+        ) = (
+            tempo_block_number,
+            processed_deposit_hash,
+            processed_deposit_number,
+        ) {
+            return Ok(ZoneBlockSnapshot {
+                tempo_block_number,
+                processed_deposit_hash,
+                processed_deposit_number,
+                block_hash,
+            });
         }
     }
 
-    Ok(ZoneBlockSnapshot {
-        tempo_block_number: tempo_block_number
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing TempoAdvanced"))?,
-        processed_deposit_hash: processed_deposit_hash
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit commitment"))?,
-        processed_deposit_number: processed_deposit_number
-            .ok_or_else(|| eyre::eyre!("zone block {number} is missing its deposit number"))?,
-        block_hash: provider
-            .block_hash(number)?
-            .ok_or_else(|| eyre::eyre!("canonical zone block {number} is missing its hash"))?,
-    })
+    Err(eyre::eyre!(
+        "zone block {number} and its ancestors are missing TempoAdvanced"
+    ))
 }
 
 /// Fetch all zone block numbers in `[from, to]` that finalized a withdrawal batch.
@@ -1744,21 +1764,85 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi;
-    use alloy_consensus::Header as ConsensusHeader;
-    use alloy_primitives::{B256, address};
+    use alloy_consensus::{Header as ConsensusHeader, Signed, TxLegacy};
+    use alloy_primitives::{B256, Log, Signature, U256, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
-    use alloy_sol_types::SolValue;
+    use alloy_sol_types::{SolEvent, SolValue};
     use alloy_transport::mock::Asserter;
     use proptest::prelude::*;
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
-    use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
+    use tempo_primitives::{
+        Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
+    };
 
     fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased()
+    }
+
+    fn add_zone_block(
+        provider: &MockEthProvider<TempoPrimitives>,
+        number: u64,
+        hash: B256,
+        tempo_advanced: Option<abi::IZoneInbox::TempoAdvanced>,
+    ) {
+        let (transactions, receipts) = match tempo_advanced {
+            Some(event) => (
+                vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                    TxLegacy::default(),
+                    Signature::test_signature(),
+                ))],
+                vec![TempoReceipt {
+                    tx_type: TempoTxType::Legacy,
+                    success: true,
+                    cumulative_gas_used: 0,
+                    logs: vec![Log {
+                        address: Address::repeat_byte(0x11),
+                        data: event.encode_log_data(),
+                    }],
+                }],
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut header = TempoHeader::default();
+        header.inner.number = number;
+        provider.add_block(
+            hash,
+            Block {
+                header,
+                body: alloy_consensus::BlockBody {
+                    transactions,
+                    ..Default::default()
+                },
+            },
+        );
+        provider.add_receipts(number, receipts);
+    }
+
+    #[test]
+    fn snapshot_at_paced_boundary_inherits_latest_tempo_advance() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let inbox_address = Address::repeat_byte(0x11);
+        let event = abi::IZoneInbox::TempoAdvanced {
+            tempoBlockHash: B256::repeat_byte(0x22),
+            tempoBlockNumber: 123,
+            depositsProcessed: U256::from(7),
+            newProcessedDepositQueueHash: B256::repeat_byte(0x33),
+            lastProcessedDepositNumber: 7,
+        };
+        add_zone_block(&provider, 8, B256::repeat_byte(0x88), Some(event));
+        add_zone_block(&provider, 9, B256::repeat_byte(0x99), None);
+        add_zone_block(&provider, 10, B256::repeat_byte(0xaa), None);
+
+        let snapshot = read_zone_block_snapshot(&provider, inbox_address, 10).unwrap();
+
+        assert_eq!(snapshot.tempo_block_number, 123);
+        assert_eq!(snapshot.processed_deposit_hash, B256::repeat_byte(0x33));
+        assert_eq!(snapshot.processed_deposit_number, 7);
+        assert_eq!(snapshot.block_hash, B256::repeat_byte(0xaa));
     }
 
     #[tokio::test]
