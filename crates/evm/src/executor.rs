@@ -32,9 +32,9 @@ use crate::{L1OverlayDB, ZoneEvm};
 /// The current transaction-ordering phase of a zone block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ZoneBlockPhase {
-    /// The block has not yet committed its required opening `advanceTempo` transaction.
-    AwaitingAdvanceTempo,
-    /// The block has committed `advanceTempo` and may execute ordinary transactions.
+    /// The block has not yet committed its first transaction.
+    Opening,
+    /// The block may execute ordinary transactions.
     Executing,
     /// The block has finalized withdrawals and cannot accept any more transactions.
     WithdrawalsFinalized,
@@ -52,11 +52,19 @@ impl ZoneBlockPhase {
         let tx_kind = ZoneTransactionKind::classify(tx);
 
         match (self, tx_kind) {
-            (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempo) => Ok(Self::Executing),
-            (Self::AwaitingAdvanceTempo, _) => Err(BlockValidationError::msg(
-                "advanceTempo must be the first transaction in a zone block",
-            )
-            .into()),
+            (Self::Opening, ZoneTransactionKind::AdvanceTempo | ZoneTransactionKind::Regular) => {
+                Ok(Self::Executing)
+            }
+            (Self::Opening, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
+                Ok(Self::WithdrawalsFinalized)
+            }
+            (Self::Opening, ZoneTransactionKind::UnexpectedSystem) => {
+                Err(BlockValidationError::msg(
+                    "a zone block must open with advanceTempo, a regular transaction, or \
+                 finalizeWithdrawalBatch",
+                )
+                .into())
+            }
             (Self::Executing, ZoneTransactionKind::AdvanceTempo) => Err(BlockValidationError::msg(
                 "advanceTempo must only execute once per zone block",
             )
@@ -140,8 +148,8 @@ where
 
 /// Simplified block executor for zone nodes.
 ///
-/// Enforces the successful block-opening `advanceTempo` system transaction and same-block
-/// finalization of requested withdrawals, then delegates ordinary execution to
+/// Enforces optional block-opening `advanceTempo` and same-block finalization of requested
+/// withdrawals, then delegates ordinary execution to
 /// [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or end-of-block
 /// metadata requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
@@ -168,7 +176,7 @@ where
                 chain_spec,
                 TempoReceiptBuilder::default(),
             ),
-            phase: ZoneBlockPhase::AwaitingAdvanceTempo,
+            phase: ZoneBlockPhase::Opening,
         }
     }
 }
@@ -229,13 +237,6 @@ where
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        if self.phase == ZoneBlockPhase::AwaitingAdvanceTempo {
-            return Err(BlockValidationError::msg(
-                "zone block is missing its advanceTempo system transaction",
-            )
-            .into());
-        }
-
         let requested_withdrawal = self
             .inner
             .receipts()
@@ -397,10 +398,10 @@ mod tests {
     #[test]
     fn discarded_advance_tempo_does_not_change_committed_ordering_state() {
         let advance_tempo = advance_tempo_tx();
-        let mut phase = ZoneBlockPhase::AwaitingAdvanceTempo;
+        let mut phase = ZoneBlockPhase::Opening;
 
         let next_phase = phase.validate_transaction(&advance_tempo).unwrap();
-        assert_eq!(phase, ZoneBlockPhase::AwaitingAdvanceTempo);
+        assert_eq!(phase, ZoneBlockPhase::Opening);
         assert_eq!(next_phase, ZoneBlockPhase::Executing);
 
         // Only committing the result records the opening transaction.
@@ -409,16 +410,25 @@ mod tests {
     }
 
     #[test]
-    fn advance_tempo_ordering_errors_are_reported() {
+    fn zone_blocks_may_open_without_a_tempo_import() {
         let advance_tempo = advance_tempo_tx();
-        let ordinary = system_tx(Address::ZERO, Bytes::new());
+        let regular = ordinary_tx(Address::ZERO, Bytes::new());
+        let unexpected_system = system_tx(Address::ZERO, Bytes::new());
 
-        let missing_first = ZoneBlockPhase::AwaitingAdvanceTempo
-            .validate_transaction(&ordinary)
+        assert_eq!(
+            ZoneBlockPhase::Opening
+                .validate_transaction(&regular)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+
+        let invalid_opening = ZoneBlockPhase::Opening
+            .validate_transaction(&unexpected_system)
             .unwrap_err();
         assert_eq!(
-            missing_first.to_string(),
-            "advanceTempo must be the first transaction in a zone block"
+            invalid_opening.to_string(),
+            "a zone block must open with advanceTempo, a regular transaction, or \
+             finalizeWithdrawalBatch"
         );
 
         let duplicate = ZoneBlockPhase::Executing
@@ -530,7 +540,7 @@ mod tests {
         assert!(subblock.subblock_proposer().is_some());
 
         for phase in [
-            ZoneBlockPhase::AwaitingAdvanceTempo,
+            ZoneBlockPhase::Opening,
             ZoneBlockPhase::Executing,
             ZoneBlockPhase::WithdrawalsFinalized,
         ] {
@@ -570,20 +580,31 @@ mod tests {
         let unexpected_system = system_tx(Address::ZERO, Bytes::new());
 
         assert_eq!(
-            ZoneBlockPhase::AwaitingAdvanceTempo
+            ZoneBlockPhase::Opening
                 .validate_transaction(&advance)
                 .unwrap(),
             ZoneBlockPhase::Executing
         );
-        for tx in [&regular, &finalize, &unexpected_system] {
-            assert_eq!(
-                ZoneBlockPhase::AwaitingAdvanceTempo
-                    .validate_transaction(tx)
-                    .unwrap_err()
-                    .to_string(),
-                "advanceTempo must be the first transaction in a zone block"
-            );
-        }
+        assert_eq!(
+            ZoneBlockPhase::Opening
+                .validate_transaction(&regular)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+        assert_eq!(
+            ZoneBlockPhase::Opening
+                .validate_transaction(&finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
+        );
+        assert_eq!(
+            ZoneBlockPhase::Opening
+                .validate_transaction(&unexpected_system)
+                .unwrap_err()
+                .to_string(),
+            "a zone block must open with advanceTempo, a regular transaction, or \
+             finalizeWithdrawalBatch"
+        );
 
         assert_eq!(
             ZoneBlockPhase::Executing
@@ -679,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn reverted_advance_tempo_does_not_satisfy_block_guard() {
+    fn reverted_advance_tempo_leaves_block_checkpoint_free() {
         let genesis = TempoHeader::default();
         let mut genesis_rlp = Vec::new();
         genesis.encode(&mut genesis_rlp);
@@ -756,13 +777,9 @@ mod tests {
                 .contains("system transaction execution failed"),
             "unexpected error: {error}"
         );
-        let finish_error = match executor.finish() {
-            Ok(_) => panic!("reverted advanceTempo unexpectedly satisfied the block guard"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            finish_error.to_string(),
-            "zone block is missing its advanceTempo system transaction"
+        assert!(
+            executor.finish().is_ok(),
+            "a reverted advanceTempo must not invalidate a checkpoint-free Zone block"
         );
     }
 

@@ -19,11 +19,24 @@ use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
 use tempo_primitives::{Block, TempoHeader};
 use zone_l1::PreparedL1Block;
 
+/// The Tempo import to include at the opening of a Zone payload.
+///
+/// A paced Zone block may leave the existing Tempo anchor in place. This is
+/// intended for the single-sequencer benchmark mode, where Zone blocks are
+/// produced more frequently than Tempo L1 blocks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TempoImport {
+    /// Process the next finalized Tempo block through `advanceTempo`.
+    Full(Box<PreparedL1Block>),
+    /// Retain the parent block's Tempo anchor and execute only Zone work.
+    None,
+}
+
 /// Zone RPC payload attributes — the type that flows through FCU.
 ///
 /// Carries standard Ethereum attributes, a millisecond timestamp portion, and
-/// the prepared L1 block whose deposits should be included in this zone block.
-/// The L1 data is set by the ZoneEngine before sending
+/// an optional prepared L1 block whose deposits should be included in this
+/// zone block. The L1 data is set by the ZoneEngine before sending
 /// FCU and is skipped during (de)serialisation since it only travels through
 /// in-process channels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,11 +47,11 @@ pub struct ZonePayloadAttributes {
     /// Milliseconds portion of the timestamp (0–999).
     pub timestamp_millis_part: u64,
 
-    /// Prepared L1 block to process in this zone block. Every zone block
-    /// processes exactly one L1 block via `advanceTempo`. Decryption and ABI
-    /// encoding have already been performed by the engine; TIP-403 policy is
-    /// enforced during `advanceTempo` when the deposits mint TIP-20 tokens.
-    pub l1_block: PreparedL1Block,
+    /// Tempo work to process in this zone block. For a full import,
+    /// decryption and ABI encoding have already been performed by the engine;
+    /// TIP-403 policy is enforced during `advanceTempo` when the deposits mint
+    /// TIP-20 tokens.
+    pub tempo_import: TempoImport,
 }
 
 impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
@@ -64,9 +77,12 @@ impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
 }
 
 impl ZonePayloadAttributes {
-    /// Returns a reference to the prepared L1 block data.
-    pub fn l1_block(&self) -> &PreparedL1Block {
-        &self.l1_block
+    /// Returns the prepared L1 block data when this payload advances Tempo.
+    pub fn l1_block(&self) -> Option<&PreparedL1Block> {
+        match &self.tempo_import {
+            TempoImport::Full(block) => Some(block),
+            TempoImport::None => None,
+        }
     }
 
     /// Returns the extra data for the block header (always empty for zones).

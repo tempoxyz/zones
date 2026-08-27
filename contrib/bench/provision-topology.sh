@@ -570,7 +570,8 @@ provision_up() {
     local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-5000000}"
     local withdrawal_max_batch_gas="${ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS:-20000000}"
     local withdrawal_max_in_flight_batches="${ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES:-12}"
-    local zone_batch_interval_blocks="${ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS:-120}"
+    local zone_batch_interval_blocks="${ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS:-600}"
+    local zone_block_time_ms="${ZONES_BENCH_ZONE_BLOCK_TIME_MS:-100}"
     local withdrawal_poll_interval_secs="${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS:-5}"
     local step_timeout="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
     local setup_settlement_timeout_secs="${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-120}"
@@ -605,6 +606,7 @@ provision_up() {
     ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS="$withdrawal_max_batch_gas"
     ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES="$withdrawal_max_in_flight_batches"
     ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS="$zone_batch_interval_blocks"
+    ZONES_BENCH_ZONE_BLOCK_TIME_MS="$zone_block_time_ms"
     ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS="$withdrawal_poll_interval_secs"
     ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS="$setup_settlement_timeout_secs"
     ZONES_BENCH_DRAIN_TIMEOUT="$drain_timeout"
@@ -618,7 +620,8 @@ provision_up() {
         ZONES_BENCH_SWAP_LIQUIDITY ZONES_BENCH_COUNT ZONES_BENCH_MAX_CONCURRENT \
         ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_CALLBACK_GAS_LIMIT \
         ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES \
-        ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS \
+        ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS ZONES_BENCH_ZONE_BLOCK_TIME_MS \
+        ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS \
         ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS ZONES_BENCH_DRAIN_TIMEOUT
     do
         require_uint "$name"
@@ -643,6 +646,7 @@ provision_up() {
     withdrawal_max_batch_gas=$((10#$withdrawal_max_batch_gas))
     withdrawal_max_in_flight_batches=$((10#$withdrawal_max_in_flight_batches))
     zone_batch_interval_blocks=$((10#$zone_batch_interval_blocks))
+    zone_block_time_ms=$((10#$zone_block_time_ms))
     withdrawal_poll_interval_secs=$((10#$withdrawal_poll_interval_secs))
     setup_settlement_timeout_secs=$((10#$setup_settlement_timeout_secs))
     drain_timeout=$((10#$drain_timeout))
@@ -716,6 +720,8 @@ provision_up() {
         || die "ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES cannot exceed 10000"
     (( zone_batch_interval_blocks > 0 && zone_batch_interval_blocks <= 1000000 )) \
         || die "ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS must be between 1 and 1000000"
+    (( zone_block_time_ms > 0 && zone_block_time_ms <= 60000 )) \
+        || die "ZONES_BENCH_ZONE_BLOCK_TIME_MS must be between 1 and 60000"
     (( withdrawal_poll_interval_secs > 0 && withdrawal_poll_interval_secs <= 86400 )) \
         || die "ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS must be between 1 and 86400"
     (( setup_settlement_timeout_secs > 0 && setup_settlement_timeout_secs <= 86400 )) \
@@ -733,7 +739,8 @@ provision_up() {
     export ZONES_BENCH_SWAP_MECHANISM ZONES_BENCH_RECIPIENT_MODE ZONES_BENCH_SWAP_LIQUIDITY
     export ZONES_BENCH_CALLBACK_GAS_LIMIT
     export ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES
-    export ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS
+    export ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS ZONES_BENCH_ZONE_BLOCK_TIME_MS
+    export ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS
 
     "$SCRIPT_DIR/l1-snapshot.sh" verify
 
@@ -842,6 +849,7 @@ provision_up() {
         --trusted-peers "$trusted_peers" \
         --port 8001 --discovery.port 8001 --discovery.v5.port 8004 \
         --p2p-secret-key "$validator_a/enode.key" --authrpc.port 8003 \
+        --consensus.target-block-time 500ms \
         --consensus.use-local-defaults --consensus.bypass-ip-check \
         "${common_l1_args[@]}"
 
@@ -860,6 +868,7 @@ provision_up() {
         --trusted-peers "$trusted_peers" \
         --port 8101 --discovery.port 8101 --discovery.v5.port 8104 \
         --p2p-secret-key "$validator_b/enode.key" --authrpc.port 8103 \
+        --consensus.target-block-time 500ms \
         --consensus.use-local-defaults --consensus.bypass-ip-check \
         "${common_l1_args[@]}"
 
@@ -963,6 +972,7 @@ provision_up() {
         --metrics 127.0.0.1:9201 \
         --redacted-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
+        --zone.block-time-ms "$zone_block_time_ms" \
         --withdrawal-poll-interval-secs "$withdrawal_poll_interval_secs" \
         --withdrawal-max-batch-gas "$withdrawal_max_batch_gas" \
         --withdrawal-max-in-flight-batches "$withdrawal_max_in_flight_batches" \
@@ -1028,6 +1038,7 @@ provision_up() {
         ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS "$withdrawal_max_batch_gas" \
         ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES "$withdrawal_max_in_flight_batches" \
         ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS "$zone_batch_interval_blocks" \
+        ZONES_BENCH_ZONE_BLOCK_TIME_MS "$zone_block_time_ms" \
         ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS "$withdrawal_poll_interval_secs" \
         ZONES_BENCH_STEP_TIMEOUT "$step_timeout" \
         ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS "$setup_settlement_timeout_secs" \

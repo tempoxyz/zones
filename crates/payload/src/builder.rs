@@ -1,7 +1,7 @@
 //! Zone payload builder.
 //!
-//! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
-//! followed by pool transactions and a withdrawal batch finalization.
+//! Builds Zone blocks with an optional `advanceTempo` system transaction, followed by pool
+//! transactions and a withdrawal batch finalization.
 
 use crate::{
     WithdrawalRevealEncryptor,
@@ -56,8 +56,8 @@ use crate::{ZonePayloadAttributes, ZonePayloadTypes};
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
 
 /// Safety margin reserved out of [`MAX_RLP_BLOCK_SIZE`] for everything in the block other than
-/// pool transactions: the header, RLP list framing, `advanceTempo`, `finalizeWithdrawalBatch`
-/// and the outer RLP string header.
+/// pool transactions: the header, RLP list framing, an optional `advanceTempo`,
+/// `finalizeWithdrawalBatch`, and the outer RLP string header.
 ///
 /// Note: `finalizeWithdrawalBatch` is not bounded(~200 bytes per withdrawal).
 /// So a large enough backlog can exceed this margin. OK because the cap is a soft target: block
@@ -130,7 +130,7 @@ where
     }
 }
 
-/// Zone payload builder that executes `advanceTempo` system txs + pool txs.
+/// Zone payload builder that executes an optional `advanceTempo` system tx plus pool txs.
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilder<Provider> {
     /// Transaction pool for selecting pool txs to include in the block.
@@ -173,18 +173,25 @@ where
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let prepared = attributes.l1_block();
-        validate_l1_continuity(state_provider.as_ref(), prepared)?;
+        let total_deposits = prepared.map_or(0, |block| block.queued_deposits.len());
 
-        let total_deposits = prepared.queued_deposits.len();
-
-        info!(
-            target: "zone::payload",
-            zone_block = parent_header.number() + 1,
-            l1_block = prepared.header.inner.number,
-            deposits = total_deposits,
-            enabled_tokens = prepared.enabled_tokens.len(),
-            "Including advanceTempo system tx (chain continuity OK)"
-        );
+        if let Some(prepared) = prepared {
+            validate_l1_continuity(state_provider.as_ref(), prepared)?;
+            info!(
+                target: "zone::payload",
+                zone_block = parent_header.number() + 1,
+                l1_block = prepared.header.inner.number,
+                deposits = total_deposits,
+                enabled_tokens = prepared.enabled_tokens.len(),
+                "Including advanceTempo system tx (chain continuity OK)"
+            );
+        } else {
+            info!(
+                target: "zone::payload",
+                zone_block = parent_header.number() + 1,
+                "Building Zone payload without a Tempo import"
+            );
+        }
 
         let state = StateProviderDatabase::new(state_provider.as_ref());
         let mut db = State::builder()
@@ -234,20 +241,21 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
-        // Execute advanceTempo system transaction — exactly one per zone block.
-        builder
-            .execute_transaction(build_advance_tempo_tx(prepared, chain_id))
-            .map(|_| ())
-            .map_err(PayloadBuilderError::evm)
-            .map_err(|err| {
-                error!(
-                    ?err,
-                    l1_block = prepared.header.inner.number,
-                    deposits = total_deposits,
-                    "advanceTempo system tx failed"
-                );
-                err
-            })?;
+        if let Some(prepared) = prepared {
+            builder
+                .execute_transaction(build_advance_tempo_tx(prepared, chain_id))
+                .map(|_| ())
+                .map_err(PayloadBuilderError::evm)
+                .map_err(|err| {
+                    error!(
+                        ?err,
+                        l1_block = prepared.header.inner.number,
+                        deposits = total_deposits,
+                        "advanceTempo system tx failed"
+                    );
+                    err
+                })?;
+        }
 
         // Execute pool transactions until either all of them fit or their packed RLP bytes reach
         // the size budget
@@ -309,8 +317,8 @@ where
         let elapsed = start.elapsed();
         info!(
             number = sealed_block.number(),
-            l1_block = prepared.header.number(),
-            l1_hash = ?prepared.header.hash(),
+            l1_block = ?prepared.map(|block| block.header.number()),
+            l1_hash = ?prepared.map(|block| block.header.hash()),
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
@@ -345,9 +353,9 @@ where
             execution_block_encoded,
         );
 
-        // Zone payloads are deterministic (one L1 block = one zone block), so freeze
-        // the payload to prevent reth from re-triggering try_build on the rebuild interval.
-        // Without this, the next rebuild attempt would find the deposit queue empty.
+        // Zone payloads are deterministic for their attributes, so freeze the payload to prevent
+        // reth from re-triggering `try_build` on the rebuild interval. A full Tempo import would
+        // otherwise be rebuilt after its queue entry has been confirmed.
         Ok(BuildOutcome::Freeze(payload))
     }
 

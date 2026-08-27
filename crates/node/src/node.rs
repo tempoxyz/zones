@@ -229,6 +229,8 @@ pub struct ZoneNode {
     portal_address: Address,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
+    /// Optional pacing interval for Zone blocks that do not import a new Tempo block.
+    block_time: Option<Duration>,
     /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
     /// Redacted RPC config.
@@ -283,6 +285,7 @@ impl ZoneNode {
             l1_block_tracker,
             portal_address,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
+            block_time: None,
             withdrawal_reveal_encryptor: None,
             redacted_rpc_config: ZoneRedactedRpcConfig::default(),
             sequencer_config: None,
@@ -379,6 +382,12 @@ impl ZoneNode {
         self
     }
 
+    /// Set the cadence for paced Zone blocks in a single-sequencer topology.
+    pub fn with_block_time(mut self, block_time: Duration) -> Self {
+        self.block_time = Some(block_time.max(Duration::from_millis(1)));
+        self
+    }
+
     /// Returns the current deposit queue
     pub fn deposit_queue(&self) -> DepositQueue {
         self.deposit_queue.clone()
@@ -440,6 +449,8 @@ where
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
+    /// Optional pacing interval for Zone blocks that do not import a new Tempo block.
+    block_time: Option<Duration>,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -465,6 +476,7 @@ where
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
+        block_time: Option<Duration>,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -482,6 +494,7 @@ where
             sequencer_config,
             p2p_config,
             external_deposit_consumer,
+            block_time,
         }
     }
 }
@@ -1401,6 +1414,10 @@ where
                 .expect("sequencer mode configures deposit decryption keys"),
             self.portal_address,
         );
+        let engine = match self.block_time {
+            Some(block_time) => engine.with_block_time(block_time),
+            None => engine,
+        };
         ctx.node
             .task_executor()
             .spawn_critical_task("zone-engine", engine.run());
@@ -1598,6 +1615,7 @@ where
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
+            self.block_time,
         )
     }
 }

@@ -23,6 +23,7 @@ build_scenario_report_args() {
         "withdrawal-max-batch-gas:ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS"
         "withdrawal-max-in-flight-batches:ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES"
         "zone-batch-interval-blocks:ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS"
+        "zone-block-time-ms:ZONES_BENCH_ZONE_BLOCK_TIME_MS"
         "withdrawal-poll-interval-secs:ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS"
         "step-timeout:ZONES_BENCH_STEP_TIMEOUT"
         "setup-settlement-timeout-secs:ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS"

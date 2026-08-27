@@ -57,7 +57,7 @@ use tracing::{error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
-use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
+use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
@@ -190,6 +190,8 @@ pub struct ZoneEngine {
     portal_address: Address,
     /// Optional per-anchor leadership permit. `None` runs the legacy single-sequencer mode.
     production_permit: Option<ProductionPermit>,
+    /// Optional cadence for blocks that retain their parent Tempo anchor.
+    block_time: Option<Duration>,
 }
 
 impl ZoneEngine {
@@ -215,6 +217,7 @@ impl ZoneEngine {
             encryption_keys,
             portal_address,
             production_permit: None,
+            block_time: None,
         }
     }
 
@@ -224,13 +227,28 @@ impl ZoneEngine {
         self
     }
 
+    /// Produce a Zone block at this cadence, including regular blocks between Tempo imports.
+    ///
+    /// This is intended for a single-sequencer benchmark topology. Multi-sequencer production
+    /// remains anchored to Tempo blocks because its leadership schedule is anchor-based.
+    pub fn with_block_time(mut self, block_time: Duration) -> Self {
+        self.block_time = Some(block_time.max(Duration::from_millis(1)));
+        self
+    }
+
     /// Runs the main Zone engine loop until cancelled or halted by the leadership permit.
     ///
-    /// Without a permit this method only returns on cancellation. It:
-    /// 1. Waits for L1 blocks to arrive in the deposit queue
-    /// 2. Advances the zone chain for each available L1 block (no delay between blocks)
-    /// 3. Sends periodic FCU heartbeats
-    pub async fn run_until(mut self, stop: CancellationToken) -> EngineExit {
+    /// By default it advances once per queued L1 block. With [`Self::with_block_time`], it
+    /// produces paced Zone blocks and consumes one queued L1 block on each tick.
+    pub async fn run_until(self, stop: CancellationToken) -> EngineExit {
+        match self.block_time {
+            Some(block_time) => self.run_paced_until(stop, block_time).await,
+            None => self.run_l1_driven_until(stop).await,
+        }
+    }
+
+    /// Produce one Zone block for every new L1 block, preserving the existing production mode.
+    async fn run_l1_driven_until(mut self, stop: CancellationToken) -> EngineExit {
         let mut fcu_interval = tokio::time::interval(Duration::from_secs(1));
         fcu_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -257,6 +275,56 @@ impl ZoneEngine {
                     if let Some(exit) = self.advance_all_available(&stop).await {
                         return exit;
                     }
+                    if let Err(e) = self.update_forkchoice_state().await {
+                        error!(target: "zone::engine", "Error updating fork choice: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Produce blocks at a fixed cadence, importing at most one queued Tempo block per tick.
+    async fn run_paced_until(
+        mut self,
+        stop: CancellationToken,
+        block_time: Duration,
+    ) -> EngineExit {
+        let mut fcu_interval = tokio::time::interval(Duration::from_secs(1));
+        fcu_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut block_interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + block_time, block_time);
+        block_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        if let Err(e) = self.update_forkchoice_state().await {
+            error!(target: "zone::engine", "Error sending initial FCU: {:?}", e);
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => {
+                    info!(target: "zone::engine", "paced ZoneEngine stopped at a block boundary");
+                    return EngineExit::Cancelled;
+                }
+                _ = block_interval.tick() => {
+                    let result = match self.deposit_queue.peek() {
+                        Some(block) => {
+                            if let Some(exit) = self.permit(&block) {
+                                return exit;
+                            }
+                            self.advance(block).await
+                        }
+                        // Anchor-based leadership cannot authorize a block that does not consume
+                        // an L1 anchor. The CLI rejects paced multi-sequencer operation, but keep
+                        // this guard here for programmatic callers too.
+                        None if self.production_permit.is_none() => self.advance_unanchored().await,
+                        None => Ok(()),
+                    };
+                    if let Err(e) = result {
+                        error!(target: "zone::engine", "Error advancing paced Zone chain: {:?}", e);
+                    }
+                }
+                _ = fcu_interval.tick() => {
                     if let Err(e) = self.update_forkchoice_state().await {
                         error!(target: "zone::engine", "Error updating fork choice: {:?}", e);
                     }
@@ -323,7 +391,7 @@ impl ZoneEngine {
             .await
     }
 
-    /// Advance the chain by one block.
+    /// Advance the chain by one block that imports an L1 block.
     ///
     /// Wraps the given L1 block into [`ZonePayloadAttributes`], sends FCU
     /// with those attributes, waits for the payload to be built, then submits
@@ -344,10 +412,46 @@ impl ZoneEngine {
             self.last_header.timestamp_millis(),
             wall_clock_timestamp_millis,
         );
+        let l1_block = self.prepare_l1_block(l1_block).await?;
+
+        self.submit_payload(timestamp_millis, TempoImport::Full(Box::new(l1_block)))
+            .await?;
+
+        // newPayload succeeded — remove the exact finalized L1 block that
+        // produced it. A mismatch indicates an internal consumer-ordering bug.
+        self.deposit_queue.confirm(l1_num_hash)?;
+        self.l1_block_tracker.prune_through(l1_num_hash.number);
+        if let Some(permit) = &self.production_permit {
+            permit.record_applied_anchor(l1_num_hash.number);
+        }
+
+        Ok(())
+    }
+
+    /// Produce a Zone block that retains the Tempo anchor in the parent state.
+    async fn advance_unanchored(&mut self) -> eyre::Result<()> {
+        let wall_clock_timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let timestamp_millis = zone_timestamp_millis(
+            0,
+            self.last_header.timestamp_millis(),
+            wall_clock_timestamp_millis,
+        );
+
+        self.submit_payload(timestamp_millis, TempoImport::None)
+            .await
+    }
+
+    /// Build, execute, and canonicalize one Zone payload.
+    async fn submit_payload(
+        &mut self,
+        timestamp_millis: u64,
+        tempo_import: TempoImport,
+    ) -> eyre::Result<()> {
         let timestamp_secs = timestamp_millis / 1000;
         let timestamp_millis_part = timestamp_millis % 1000;
-
-        let l1_block = self.prepare_l1_block(l1_block).await?;
 
         let attributes = ZonePayloadAttributes {
             inner: EthPayloadAttributes {
@@ -366,7 +470,7 @@ impl ZoneEngine {
                 target_gas_limit: None,
             },
             timestamp_millis_part,
-            l1_block,
+            tempo_import,
         };
 
         // Send FCU with payload attributes through the engine API to trigger
@@ -397,14 +501,6 @@ impl ZoneEngine {
 
         if !res.is_valid() {
             eyre::bail!("Invalid payload for block {block_number}");
-        }
-
-        // newPayload succeeded — remove the exact finalized L1 block that
-        // produced it. A mismatch indicates an internal consumer-ordering bug.
-        self.deposit_queue.confirm(l1_num_hash)?;
-        self.l1_block_tracker.prune_through(l1_num_hash.number);
-        if let Some(permit) = &self.production_permit {
-            permit.record_applied_anchor(l1_num_hash.number);
         }
 
         self.last_header = header;

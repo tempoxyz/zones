@@ -112,10 +112,15 @@ on:
         required: true
         default: "12"
       zone-batch-interval-blocks:
-        description: Zone blocks between withdrawal batch boundaries.
+        description: Zone blocks between withdrawal batch boundaries (600 preserves the existing one-minute cadence at 100 ms).
         type: string
         required: true
-        default: "120"
+        default: "600"
+      zone-block-time-ms:
+        description: Experimental single-sequencer Zone block cadence in milliseconds; Tempo L1 remains at its 500 ms cadence.
+        type: string
+        required: true
+        default: "100"
       withdrawal-poll-interval-secs:
         description: Seconds between L1 withdrawal-queue polls.
         type: string
@@ -193,6 +198,7 @@ jobs:
       withdrawal-max-batch-gas: ${{ steps.config.outputs.withdrawal-max-batch-gas }}
       withdrawal-max-in-flight-batches: ${{ steps.config.outputs.withdrawal-max-in-flight-batches }}
       zone-batch-interval-blocks: ${{ steps.config.outputs.zone-batch-interval-blocks }}
+      zone-block-time-ms: ${{ steps.config.outputs.zone-block-time-ms }}
       withdrawal-poll-interval-secs: ${{ steps.config.outputs.withdrawal-poll-interval-secs }}
       step-timeout: ${{ steps.config.outputs.step-timeout }}
       setup-settlement-timeout-secs: ${{ steps.config.outputs.setup-settlement-timeout-secs }}
@@ -228,7 +234,8 @@ jobs:
           INPUT_L1_GENERAL_GAS_LIMIT: ${{ inputs.l1-general-gas-limit || '30000000' }}
           INPUT_WITHDRAWAL_MAX_BATCH_GAS: ${{ inputs.withdrawal-max-batch-gas || '20000000' }}
           INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ inputs.withdrawal-max-in-flight-batches || '12' }}
-          INPUT_ZONE_BATCH_INTERVAL_BLOCKS: ${{ inputs.zone-batch-interval-blocks || '120' }}
+          INPUT_ZONE_BATCH_INTERVAL_BLOCKS: ${{ inputs.zone-batch-interval-blocks || '600' }}
+          INPUT_ZONE_BLOCK_TIME_MS: ${{ inputs.zone-block-time-ms || '100' }}
           INPUT_WITHDRAWAL_POLL_INTERVAL_SECS: ${{ inputs.withdrawal-poll-interval-secs || '5' }}
           INPUT_STEP_TIMEOUT: ${{ inputs.step-timeout || '10m' }}
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
@@ -264,7 +271,8 @@ jobs:
             INPUT_CALLBACK_GAS_LIMIT INPUT_SWAP_LIQUIDITY \
             INPUT_L1_GAS_LIMIT INPUT_L1_GENERAL_GAS_LIMIT \
             INPUT_WITHDRAWAL_MAX_BATCH_GAS INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES \
-            INPUT_ZONE_BATCH_INTERVAL_BLOCKS INPUT_WITHDRAWAL_POLL_INTERVAL_SECS \
+            INPUT_ZONE_BATCH_INTERVAL_BLOCKS INPUT_ZONE_BLOCK_TIME_MS \
+            INPUT_WITHDRAWAL_POLL_INTERVAL_SECS \
             INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS INPUT_DRAIN_TIMEOUT INPUT_SEED
           do
             value="${!name}"
@@ -319,7 +327,8 @@ jobs:
             INPUT_CALLBACK_GAS_LIMIT INPUT_SWAP_LIQUIDITY \
             INPUT_L1_GAS_LIMIT INPUT_L1_GENERAL_GAS_LIMIT \
             INPUT_WITHDRAWAL_MAX_BATCH_GAS INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES \
-            INPUT_ZONE_BATCH_INTERVAL_BLOCKS INPUT_WITHDRAWAL_POLL_INTERVAL_SECS \
+            INPUT_ZONE_BATCH_INTERVAL_BLOCKS INPUT_ZONE_BLOCK_TIME_MS \
+            INPUT_WITHDRAWAL_POLL_INTERVAL_SECS \
             INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS
           do
             value="${!name}"
@@ -350,6 +359,8 @@ jobs:
             || { echo "::error::withdrawal-max-in-flight-batches cannot exceed 10000"; exit 1; }
           (( 10#$INPUT_ZONE_BATCH_INTERVAL_BLOCKS <= 1000000 )) \
             || { echo "::error::zone-batch-interval-blocks cannot exceed 1000000"; exit 1; }
+          (( 10#$INPUT_ZONE_BLOCK_TIME_MS <= 60000 )) \
+            || { echo "::error::zone-block-time-ms cannot exceed 60000"; exit 1; }
           (( 10#$INPUT_WITHDRAWAL_POLL_INTERVAL_SECS <= 86400 )) \
             || { echo "::error::withdrawal-poll-interval-secs cannot exceed 86400"; exit 1; }
           (( 10#$INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS <= 86400 )) \
@@ -432,6 +443,7 @@ jobs:
             echo "withdrawal-max-batch-gas=$INPUT_WITHDRAWAL_MAX_BATCH_GAS"
             echo "withdrawal-max-in-flight-batches=$INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES"
             echo "zone-batch-interval-blocks=$INPUT_ZONE_BATCH_INTERVAL_BLOCKS"
+            echo "zone-block-time-ms=$INPUT_ZONE_BLOCK_TIME_MS"
             echo "withdrawal-poll-interval-secs=$INPUT_WITHDRAWAL_POLL_INTERVAL_SECS"
             echo "step-timeout=$INPUT_STEP_TIMEOUT"
             echo "setup-settlement-timeout-secs=$INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS"
@@ -472,6 +484,7 @@ jobs:
       ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS: ${{ needs.authorize.outputs.withdrawal-max-batch-gas }}
       ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ needs.authorize.outputs.withdrawal-max-in-flight-batches }}
       ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS: ${{ needs.authorize.outputs.zone-batch-interval-blocks }}
+      ZONES_BENCH_ZONE_BLOCK_TIME_MS: ${{ needs.authorize.outputs.zone-block-time-ms }}
       ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS: ${{ needs.authorize.outputs.withdrawal-poll-interval-secs }}
       ZONES_BENCH_STEP_TIMEOUT: ${{ needs.authorize.outputs.step-timeout }}
       ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ needs.authorize.outputs.setup-settlement-timeout-secs }}
@@ -939,6 +952,7 @@ jobs:
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
             echo "- Zone block gas limit: \`${ZONES_BENCH_ZONE_GAS_LIMIT:-unavailable}\`"
+            echo "- Zone block cadence: \`${ZONES_BENCH_ZONE_BLOCK_TIME_MS}ms\` (Tempo L1 remains at 500 ms)"
             echo "- Withdrawal scheduler (batch gas / in-flight / Zone blocks / poll): \`$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS\` / \`$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES\` / \`$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS\` / \`${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS}s\`"
           } >> "$summary"
           if [ -s "$ZONES_BENCH_SPF_SUMMARY" ]; then
@@ -1002,6 +1016,7 @@ jobs:
             --argjson withdrawalMaxBatchGas "$((10#$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS))" \
             --argjson withdrawalMaxInFlightBatches "$((10#$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES))" \
             --argjson zoneBatchIntervalBlocks "$((10#$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS))" \
+            --argjson zoneBlockTimeMs "$((10#$ZONES_BENCH_ZONE_BLOCK_TIME_MS))" \
             --argjson withdrawalPollIntervalSecs "$((10#$ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS))" \
             '{
               zonesRevision: $zonesRevision,
@@ -1059,6 +1074,7 @@ jobs:
                 maxBatchGas: $withdrawalMaxBatchGas,
                 maxInFlightBatches: $withdrawalMaxInFlightBatches,
                 zoneBatchIntervalBlocks: $zoneBatchIntervalBlocks,
+                zoneBlockTimeMs: $zoneBlockTimeMs,
                 pollIntervalSecs: $withdrawalPollIntervalSecs
               }
             }' > target/zones-benchmark/run-metadata.json

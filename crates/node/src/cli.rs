@@ -137,6 +137,10 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
         let manifest_mode = args.sequencer_manifest.is_some();
+        eyre::ensure!(
+            !manifest_mode || args.zone_block_time_ms.is_none(),
+            "--zone.block-time-ms is supported only for single-sequencer benchmark nodes"
+        );
         validate_p2p_transaction_size_limit(
             manifest_mode,
             builder.config().txpool.max_tx_input_bytes,
@@ -169,6 +173,14 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 args.redacted_rpc_max_auth_token_validity_secs,
             ),
         });
+        if let Some(block_time_ms) = args.zone_block_time_ms {
+            warn!(
+                target: "reth::cli",
+                block_time_ms,
+                "paced Zone blocks are experimental and intended for benchmark topologies"
+            );
+            node = node.with_block_time(Duration::from_millis(block_time_ms));
+        }
         if !additional_decryption_keys.is_empty() {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
@@ -473,6 +485,17 @@ pub struct ZoneArgs {
     )]
     pub zone_batch_interval_blocks: u64,
 
+    /// Experimental benchmark-only Zone block cadence in milliseconds.
+    ///
+    /// When set, the single sequencer produces regular Zone blocks between Tempo imports. Do
+    /// not use this with a multi-sequencer manifest or a production network.
+    #[arg(
+        long = "zone.block-time-ms",
+        env = "ZONE_BLOCK_TIME_MS",
+        value_parser = clap::builder::RangedU64ValueParser::<u64>::new().range(1..=60_000)
+    )]
+    pub zone_block_time_ms: Option<u64>,
+
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
         long = "withdrawal-poll-interval-secs",
@@ -720,10 +743,13 @@ mod tests {
             "7",
             "--block.interval-ms",
             "500",
+            "--zone.block-time-ms",
+            "100",
         ])
         .unwrap();
         assert_eq!(parsed.zone.zone_id, Some(7));
         assert_eq!(parsed.zone.block_interval_ms, Some(500));
+        assert_eq!(parsed.zone.zone_block_time_ms, Some(100));
     }
 
     #[test]
