@@ -180,20 +180,11 @@ where
         validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
         let final_imported = imported_headers.last().expect("validated nonempty import");
         let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
-        let follows_checkpoint_prefix = match tempo_import {
-            TempoImport::Full(prepared) => prepared.follows_checkpoint_prefix,
-            TempoImport::CheckpointOnly(_) => false,
-        };
-        let total_deposits = match tempo_import {
-            TempoImport::Full(prepared) => prepared.queued_deposits.len(),
-            TempoImport::CheckpointOnly(_) => 0,
-        };
-        let enabled_tokens = match tempo_import {
-            TempoImport::Full(prepared) => prepared.enabled_tokens.len(),
-            TempoImport::CheckpointOnly(_) => 0,
-        };
+        let follows_checkpoint_blocks = tempo_import.follows_checkpoint_blocks();
+        let total_deposits = tempo_import.total_deposits();
+        let enabled_tokens = tempo_import.enabled_tokens();
 
-        if checkpoint_only {
+        if tempo_import.is_checkpoint_only() {
             info!(
                 target: "zone::payload",
                 zone_block = parent_header.number() + 1,
@@ -310,7 +301,7 @@ where
                 &mut builder,
                 block_number,
                 self.withdrawal_batch_interval_blocks,
-                follows_checkpoint_prefix,
+                follows_checkpoint_blocks,
                 self.withdrawal_reveal_encryptor.as_deref(),
                 chain_id,
             )?;
@@ -585,7 +576,7 @@ fn finalize_withdrawal_batch_if_needed<B>(
     builder: &mut B,
     block_number: u64,
     interval_blocks: u64,
-    follows_checkpoint_prefix: bool,
+    follows_checkpoint_blocks: bool,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
     chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
@@ -598,7 +589,7 @@ where
         !pending_withdrawals.is_empty(),
         block_number,
         interval_blocks,
-        follows_checkpoint_prefix,
+        follows_checkpoint_blocks,
     ) {
         return Ok(());
     }
@@ -651,11 +642,11 @@ fn should_finalize_withdrawal_batch(
     has_pending_withdrawals: bool,
     block_number: u64,
     interval_blocks: u64,
-    follows_checkpoint_prefix: bool,
+    follows_checkpoint_blocks: bool,
 ) -> bool {
     has_pending_withdrawals
         || block_number.is_multiple_of(interval_blocks)
-        || follows_checkpoint_prefix
+        || follows_checkpoint_blocks
 }
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
@@ -1061,7 +1052,7 @@ mod tests {
                 },
             }],
             enabled_tokens: vec![],
-            follows_checkpoint_prefix: false,
+            follows_checkpoint_blocks: false,
         };
 
         let recovered_tx = super::build_advance_tempo_tx(&prepared, 1337);

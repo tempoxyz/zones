@@ -1524,7 +1524,7 @@ mod tests {
             queued_deposits: vec![],
             decryptions: vec![],
             enabled_tokens: vec![],
-            follows_checkpoint_prefix: false,
+            follows_checkpoint_blocks: false,
         };
         let tx = zone_payload::build_advance_tempo_tx(&prepared, 1337);
         let block = SealedBlock::seal_slow(Block {
@@ -1617,7 +1617,7 @@ mod tests {
             queued_deposits: vec![],
             decryptions: vec![],
             enabled_tokens: vec![],
-            follows_checkpoint_prefix: false,
+            follows_checkpoint_blocks: false,
         };
         let TempoTxEnvelope::Legacy(system_tx) =
             zone_payload::build_advance_tempo_tx(&prepared, 1337).into_inner()

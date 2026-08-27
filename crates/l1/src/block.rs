@@ -16,7 +16,7 @@ impl L1BlockDeposits {
         encryption_keys: &EncryptionKeyRing,
         portal_address: Address,
     ) -> eyre::Result<PreparedL1Block> {
-        let follows_checkpoint_prefix = blocks.len() > 1;
+        let follows_checkpoint_blocks = blocks.len() > 1;
         let mut blocks = blocks.into_iter();
         let first = blocks
             .next()
@@ -38,7 +38,7 @@ impl L1BlockDeposits {
                 <= zone_primitives::constants::MAX_UNPROCESSED_TOKEN_ENABLEMENTS,
             "outstanding token-enablement suffix exceeds protocol capacity"
         );
-        prepared.follows_checkpoint_prefix = follows_checkpoint_prefix;
+        prepared.follows_checkpoint_blocks = follows_checkpoint_blocks;
         Ok(prepared)
     }
 
@@ -177,7 +177,7 @@ impl L1BlockDeposits {
             queued_deposits,
             decryptions,
             enabled_tokens,
-            follows_checkpoint_prefix: false,
+            follows_checkpoint_blocks: false,
         })
     }
 }
@@ -200,7 +200,7 @@ pub struct PreparedL1Block {
     #[serde(skip)]
     pub enabled_tokens: Vec<abi::EnabledToken>,
     /// Whether this is the first full import following checkpoint-only Zone blocks.
-    /// Such a block closes the settlement batch containing that prefix.
+    /// Such a block closes the settlement batch containing that prefix, and signals a batch boundary.
     #[serde(skip)]
-    pub follows_checkpoint_prefix: bool,
+    pub follows_checkpoint_blocks: bool,
 }

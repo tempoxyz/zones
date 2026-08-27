@@ -26,6 +26,33 @@ pub enum TempoImport {
     CheckpointOnly(Vec<SealedHeader<TempoHeader>>),
 }
 
+impl TempoImport {
+    pub(crate) fn is_checkpoint_only(&self) -> bool {
+        matches!(self, Self::CheckpointOnly(_))
+    }
+
+    pub(crate) fn follows_checkpoint_blocks(&self) -> bool {
+        match self {
+            Self::Full(prepared) => prepared.follows_checkpoint_blocks,
+            Self::CheckpointOnly(_) => false,
+        }
+    }
+
+    pub(crate) fn total_deposits(&self) -> usize {
+        match self {
+            Self::Full(prepared) => prepared.queued_deposits.len(),
+            Self::CheckpointOnly(_) => 0,
+        }
+    }
+
+    pub(crate) fn enabled_tokens(&self) -> usize {
+        match self {
+            Self::Full(prepared) => prepared.enabled_tokens.len(),
+            Self::CheckpointOnly(_) => 0,
+        }
+    }
+}
+
 /// Zone RPC payload attributes — the type that flows through FCU.
 ///
 /// Carries standard Ethereum attributes, a millisecond timestamp portion, and
