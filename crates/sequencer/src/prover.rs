@@ -621,8 +621,7 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
 
 fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
     let header = block.header();
-    let mut tempo_header_rlp = None;
-    let mut tempo_headers_rlp = Vec::new();
+    let mut tempo_headers_rlp = None;
     let mut deposits = Vec::new();
     let mut decryptions = Vec::new();
     let mut enabled_tokens = Vec::new();
@@ -639,7 +638,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         match transaction.to() {
             Some(to) if to == ZONE_INBOX_ADDRESS => {
                 ensure!(
-                    tempo_header_rlp.is_none(),
+                    tempo_headers_rlp.is_none(),
                     "Zone block {} contains multiple advanceTempo calls",
                     header.number()
                 );
@@ -650,21 +649,20 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                 match call {
                     ZoneInbox::IZoneInboxCalls::advanceTempo(call) => {
                         decode_tempo_header(&call.header)?;
-                        tempo_header_rlp = Some(call.header);
+                        tempo_headers_rlp = Some(vec![call.header]);
                         deposits = call.deposits;
                         decryptions = call.decryptions;
                         enabled_tokens = call.enabledTokens;
                     }
                     ZoneInbox::IZoneInboxCalls::advanceTempoHeaders(call) => {
                         ensure!(
-                            !call.headers.is_empty(),
-                            "checkpoint-only Zone block has no headers"
+                            call.headers.len() > 1,
+                            "checkpoint-only Zone block must have more than one header"
                         );
                         for encoded in &call.headers {
                             decode_tempo_header(encoded)?;
                         }
-                        tempo_headers_rlp = call.headers;
-                        tempo_header_rlp = Some(Bytes::new());
+                        tempo_headers_rlp = Some(call.headers);
                     }
                     _ => {
                         return Err(eyre::eyre!(
@@ -703,7 +701,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         }
     }
 
-    let tempo_header_rlp = tempo_header_rlp.ok_or_eyre(format!(
+    let tempo_headers_rlp = tempo_headers_rlp.ok_or_eyre(format!(
         "no advanceTempo call in Zone block {}",
         header.number()
     ))?;
@@ -714,7 +712,6 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         timestamp: header.timestamp(),
         timestamp_millis_part: header.timestamp_millis_part,
         beneficiary: header.beneficiary(),
-        tempo_header_rlp,
         tempo_headers_rlp,
         deposits,
         decryptions,
@@ -729,7 +726,7 @@ fn final_tempo_header(block: &ZoneBlock) -> Result<TempoHeader> {
     let encoded = block
         .tempo_headers_rlp
         .last()
-        .unwrap_or(&block.tempo_header_rlp);
+        .ok_or_eyre("Zone block has no Tempo headers")?;
     decode_tempo_header(encoded)
 }
 
@@ -1005,7 +1002,11 @@ fn witness_size(witness: &BatchWitness) -> usize {
             .zone_blocks
             .iter()
             .map(|block| {
-                block.tempo_header_rlp.len()
+                block
+                    .tempo_headers_rlp
+                    .iter()
+                    .map(|bytes| bytes.len())
+                    .sum::<usize>()
                     + block
                         .transactions
                         .iter()
