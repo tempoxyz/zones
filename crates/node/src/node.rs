@@ -198,6 +198,79 @@ pub struct ZoneSequencerAddOnsConfig {
     pub prover_address: Option<String>,
 }
 
+/// Runtime responsible for advancing the Zone chain.
+#[derive(Debug, Clone, Default)]
+enum ZoneRuntimeConfig {
+    /// No runtime has been selected yet. Node launch rejects this state.
+    #[default]
+    Unconfigured,
+    /// Runtime launched by the Zone dev harness.
+    Dev {
+        sequencer: ZoneSequencerAddOnsConfig,
+    },
+    /// Manifest-backed runtime. RPC-only nodes intentionally omit sequencer resources.
+    Networked {
+        p2p: P2pConfig,
+        sequencer: Option<ZoneSequencerAddOnsConfig>,
+    },
+    /// A test harness outside the node drains deposits and advances the chain.
+    ExternalDepositConsumer,
+}
+
+impl ZoneRuntimeConfig {
+    fn sequencer(&self) -> Option<&ZoneSequencerAddOnsConfig> {
+        match self {
+            Self::Dev { sequencer } => Some(sequencer),
+            Self::Networked { sequencer, .. } => sequencer.as_ref(),
+            Self::Unconfigured | Self::ExternalDepositConsumer => None,
+        }
+    }
+
+    fn p2p(&self) -> Option<&P2pConfig> {
+        match self {
+            Self::Networked { p2p, .. } => Some(p2p),
+            Self::Unconfigured | Self::Dev { .. } | Self::ExternalDepositConsumer => None,
+        }
+    }
+
+    fn with_sequencer(self, sequencer: ZoneSequencerAddOnsConfig) -> Self {
+        match self {
+            Self::Unconfigured => Self::Dev { sequencer },
+            Self::Networked {
+                p2p,
+                sequencer: None,
+            } => Self::Networked {
+                p2p,
+                sequencer: Some(sequencer),
+            },
+            Self::Dev { .. }
+            | Self::Networked {
+                sequencer: Some(_), ..
+            } => panic!("sequencer runtime configured more than once"),
+            Self::ExternalDepositConsumer => {
+                panic!("external deposit consumer cannot be combined with a sequencer runtime")
+            }
+        }
+    }
+
+    fn with_p2p(self, p2p: P2pConfig) -> Self {
+        match self {
+            Self::Unconfigured => Self::Networked {
+                p2p,
+                sequencer: None,
+            },
+            Self::Dev { sequencer } => Self::Networked {
+                p2p,
+                sequencer: Some(sequencer),
+            },
+            Self::Networked { .. } => panic!("P2P runtime configured more than once"),
+            Self::ExternalDepositConsumer => {
+                panic!("external deposit consumer cannot be combined with a P2P runtime")
+            }
+        }
+    }
+}
+
 /// Configuration for the Zone redacted RPC server extension.
 #[derive(Debug, Clone, Default)]
 pub struct ZoneRedactedRpcConfig {
@@ -233,12 +306,8 @@ pub struct ZoneNode {
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
     /// Redacted RPC config.
     redacted_rpc_config: ZoneRedactedRpcConfig,
-    /// Optional sequencer config. When set, sequencer tasks are spawned.
-    sequencer_config: Option<ZoneSequencerAddOnsConfig>,
-    /// Optional static Zone P2P networking config.
-    p2p_config: Option<P2pConfig>,
-    /// Whether a consumer outside this builder drains the deposit queue.
-    external_deposit_consumer: bool,
+    /// Runtime responsible for advancing the Zone chain.
+    runtime_config: ZoneRuntimeConfig,
 }
 
 impl ZoneNode {
@@ -285,9 +354,7 @@ impl ZoneNode {
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
             redacted_rpc_config: ZoneRedactedRpcConfig::default(),
-            sequencer_config: None,
-            p2p_config: None,
-            external_deposit_consumer: false,
+            runtime_config: ZoneRuntimeConfig::default(),
         }
     }
 
@@ -312,7 +379,7 @@ impl ZoneNode {
             config.zone_id,
         )));
         self = self.with_deposit_decryption_keys([encryption_key]);
-        self.sequencer_config = Some(config);
+        self.runtime_config = self.runtime_config.with_sequencer(config);
         self
     }
 
@@ -336,13 +403,17 @@ impl ZoneNode {
     /// Callers that drive their own [`crate::ZoneEngine`] against the shared queue — such as test
     /// harnesses — must opt in so node startup knows the Zone chain can advance.
     pub fn with_external_deposit_consumer(mut self) -> Self {
-        self.external_deposit_consumer = true;
+        assert!(
+            matches!(self.runtime_config, ZoneRuntimeConfig::Unconfigured),
+            "external deposit consumer cannot be combined with another Zone runtime"
+        );
+        self.runtime_config = ZoneRuntimeConfig::ExternalDepositConsumer;
         self
     }
 
     /// Enable static Zone P2P networking for this node.
     pub fn with_p2p(mut self, config: P2pConfig) -> Self {
-        self.p2p_config = Some(config);
+        self.runtime_config = self.runtime_config.with_p2p(config);
         self
     }
 
@@ -434,12 +505,8 @@ where
     portal_address: Address,
     /// Redacted RPC configuration.
     redacted_rpc_config: ZoneRedactedRpcConfig,
-    /// Sequencer configuration.
-    sequencer_config: Option<ZoneSequencerAddOnsConfig>,
-    /// Static Zone P2P networking configuration.
-    p2p_config: Option<P2pConfig>,
-    /// Whether a consumer outside this builder drains the deposit queue.
-    external_deposit_consumer: bool,
+    /// Runtime responsible for advancing the Zone chain.
+    runtime_config: ZoneRuntimeConfig,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -457,14 +524,12 @@ where
     N: FullNodeTypes<Types = ZoneNode>,
 {
     /// Creates a new ZoneAddOns instance.
-    pub fn new(
+    fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
         portal_address: Address,
         redacted_rpc_config: ZoneRedactedRpcConfig,
-        sequencer_config: Option<ZoneSequencerAddOnsConfig>,
-        p2p_config: Option<P2pConfig>,
-        external_deposit_consumer: bool,
+        runtime_config: ZoneRuntimeConfig,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -479,9 +544,7 @@ where
             l1_config,
             portal_address,
             redacted_rpc_config,
-            sequencer_config,
-            p2p_config,
-            external_deposit_consumer,
+            runtime_config,
         }
     }
 }
@@ -525,9 +588,7 @@ where
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         eyre::ensure!(
-            self.sequencer_config.is_some()
-                || self.p2p_config.is_some()
-                || self.external_deposit_consumer,
+            !matches!(self.runtime_config, ZoneRuntimeConfig::Unconfigured),
             "no Zone chain advancement mechanism configured: enable a sequencer, configure P2P, or register an external deposit consumer"
         );
 
@@ -568,14 +629,14 @@ where
                 self.redacted_rpc_config.zone_id,
                 portal_zone_id,
             )?;
-            if let Some(config) = self.sequencer_config.as_ref() {
+            if let Some(config) = self.runtime_config.sequencer() {
                 validate_configured_zone_id(
                     "sequencer configuration",
                     config.zone_id,
                     portal_zone_id,
                 )?;
             }
-            if let Some(config) = self.p2p_config.as_ref() {
+            if let Some(config) = self.runtime_config.p2p() {
                 validate_configured_zone_id("P2P configuration", config.zone_id(), portal_zone_id)?;
             }
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
@@ -592,7 +653,7 @@ where
         // snapshot at the local Tempo anchor, and install the transition sink before
         // the subscriber starts so no block is ever consumed ahead of its
         // leadership transition.
-        if let Some(p2p) = self.p2p_config.as_ref() {
+        if let Some(p2p) = self.runtime_config.p2p() {
             let schedule = p2p.leadership();
             let snapshot_anchor = tempo_block_number;
             // Freeze the replay/live boundary before the subscriber starts. Historical identities
@@ -648,7 +709,7 @@ where
         let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
-        let p2p_runtime = if let Some(config) = self.p2p_config.take() {
+        let p2p_runtime = if let Some(config) = self.runtime_config.p2p().cloned() {
             Some(
                 Self::start_p2p(
                     config,
@@ -656,8 +717,8 @@ where
                     l1_chain_id,
                     genesis_zone_id,
                     self.portal_address,
-                    self.sequencer_config
-                        .as_ref()
+                    self.runtime_config
+                        .sequencer()
                         .map(|config| config.batch_anchor_config)
                         .unwrap_or_default(),
                     self.l1_config.l1_rpc_url.clone(),
@@ -669,7 +730,7 @@ where
                 .await?,
             )
         } else {
-            if let Some(ref config) = self.sequencer_config {
+            if let Some(config) = self.runtime_config.sequencer() {
                 // Legacy single-sequencer mode keeps the static engine.
                 let sequencer_addr = config.sequencer_signer.address();
                 self.spawn_zone_engine(&ctx, sequencer_addr)?;
@@ -723,8 +784,8 @@ where
             })
             .await?;
         let prover_config = self
-            .sequencer_config
-            .as_ref()
+            .runtime_config
+            .sequencer()
             .filter(|config| config.enable_prover)
             .map(|config| ShadowProverConfig {
                 parent_chain_id: l1_chain_id,
@@ -769,7 +830,7 @@ where
                     backfill_requests_rx,
                 ),
             );
-            let sequencer = match self.sequencer_config.take() {
+            let sequencer = match self.runtime_config.sequencer().cloned() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
                     config,
                     self.l1_config.l1_rpc_url.clone(),
@@ -815,7 +876,7 @@ where
                     }
                 },
             );
-        } else if let Some(config) = self.sequencer_config.take() {
+        } else if let Some(config) = self.runtime_config.sequencer().cloned() {
             let sequencer_addr = config.sequencer_signer.address();
 
             Self::launch_sequencer_tasks(
@@ -1595,9 +1656,7 @@ where
             self.l1_config.clone(),
             self.portal_address,
             self.redacted_rpc_config.clone(),
-            self.sequencer_config.clone(),
-            self.p2p_config.clone(),
-            self.external_deposit_consumer,
+            self.runtime_config.clone(),
         )
     }
 }
