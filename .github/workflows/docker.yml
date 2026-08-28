@@ -51,7 +51,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.reproducible_verify == true &&
-      github.repository == 'tempoxyz/zones'
+      github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,6 +61,7 @@ jobs:
       short_sha: ${{ steps.commit.outputs.short_sha }}
       source_date_epoch: ${{ steps.commit.outputs.source_date_epoch }}
       version: ${{ steps.commit.outputs.version }}
+      verifier_sha: ${{ steps.commit.outputs.verifier_sha }}
     steps:
       - name: Check out requested ref
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -78,6 +80,7 @@ jobs:
           commit_sha="$(git rev-parse HEAD)"
           short_sha="$(git rev-parse --short=7 HEAD)"
           source_date_epoch="$(git show -s --format=%ct HEAD)"
+          verifier_sha="$GITHUB_WORKFLOW_SHA"
 
           [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo "Resolved ref is not a full commit SHA: $commit_sha" >&2
@@ -87,18 +90,27 @@ jobs:
             echo "Invalid SOURCE_DATE_EPOCH: $source_date_epoch" >&2
             exit 1
           }
+          [[ "$verifier_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Invalid verifier SHA: $verifier_sha" >&2
+            exit 1
+          }
 
           {
             echo "commit_sha=$commit_sha"
             echo "short_sha=$short_sha"
             echo "source_date_epoch=$source_date_epoch"
             echo "version=sha-$short_sha"
+            echo "verifier_sha=$verifier_sha"
           } >> "$GITHUB_OUTPUT"
 
   reproducible-verify-depot-build-and-push:
     name: Build and push reproducible candidate
     needs: reproducible-verify-resolve
-    if: github.repository == 'tempoxyz/zones'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.reproducible_verify == true &&
+      github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
     runs-on: depot-ubuntu-latest-16
     permissions:
       contents: read
@@ -121,6 +133,25 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           submodules: recursive
+
+      - name: Check out trusted verification definitions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.reproducible-verify-resolve.outputs.verifier_sha }}
+          path: .reproducible-verifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use trusted reproducible build definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          verifier_dir="$GITHUB_WORKSPACE/.reproducible-verifier"
+          cp --preserve=mode "$verifier_dir/.dockerignore" .dockerignore
+          cp --preserve=mode "$verifier_dir/docker/Dockerfile.reproducible" docker/Dockerfile.reproducible
+          cp --preserve=mode "$verifier_dir/docker/docker-bake.hcl" docker/docker-bake.hcl
+          cp --preserve=mode "$verifier_dir/scripts/reproducible-build.sh" scripts/reproducible-build.sh
+          printf '\n.reproducible-verifier/\n' >> .dockerignore
 
       - uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
 
@@ -170,6 +201,11 @@ jobs:
   reproducible-verify-clean-rebuild:
     name: Rebuild reproducibly without Docker cache
     needs: reproducible-verify-resolve
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.reproducible_verify == true &&
+      github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -183,6 +219,25 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           submodules: recursive
+
+      - name: Check out trusted verification definitions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.reproducible-verify-resolve.outputs.verifier_sha }}
+          path: .reproducible-verifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use trusted reproducible build definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          verifier_dir="$GITHUB_WORKSPACE/.reproducible-verifier"
+          cp --preserve=mode "$verifier_dir/.dockerignore" .dockerignore
+          cp --preserve=mode "$verifier_dir/docker/Dockerfile.reproducible" docker/Dockerfile.reproducible
+          cp --preserve=mode "$verifier_dir/docker/docker-bake.hcl" docker/docker-bake.hcl
+          cp --preserve=mode "$verifier_dir/scripts/reproducible-build.sh" scripts/reproducible-build.sh
+          printf '\n.reproducible-verifier/\n' >> .dockerignore
 
       - name: Build reproducibly without Docker or BuildKit cache
         env:
@@ -206,12 +261,16 @@ jobs:
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
 
   reproducible-verify-extract-and-compare:
-    name: Extract and compare reproducible candidate
+    name: Compare reproducible candidate binary
     needs:
       - reproducible-verify-resolve
       - reproducible-verify-depot-build-and-push
       - reproducible-verify-clean-rebuild
-    if: github.repository == 'tempoxyz/zones'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.reproducible_verify == true &&
+      github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       packages: read
@@ -228,6 +287,7 @@ jobs:
         shell: bash
         env:
           COMMIT_SHA: ${{ needs.reproducible-verify-resolve.outputs.commit_sha }}
+          VERIFIER_SHA: ${{ needs.reproducible-verify-resolve.outputs.verifier_sha }}
           CANDIDATE_REPOSITORY: ${{ needs.reproducible-verify-depot-build-and-push.outputs.candidate_repository }}
           CANDIDATE_TAG: ${{ needs.reproducible-verify-depot-build-and-push.outputs.candidate_tag }}
           CANDIDATE_DIGEST: ${{ needs.reproducible-verify-depot-build-and-push.outputs.candidate_digest }}
@@ -246,23 +306,26 @@ jobs:
           write_manifest() {
             jq -n \
               --arg commit_sha "$COMMIT_SHA" \
+              --arg verifier_sha "$VERIFIER_SHA" \
               --arg candidate_repository "$CANDIDATE_REPOSITORY" \
               --arg candidate_tag "$CANDIDATE_TAG" \
               --arg image_digest "$image_digest" \
               --arg binary_path "$BINARY_PATH" \
               --arg depot_sha256 "$depot_sha256" \
               --arg clean_build_sha256 "$CLEAN_SHA256" \
-              --arg comparison_result "$comparison_result" \
+              --arg binary_comparison_result "$comparison_result" \
               --arg failure "$failure" \
               '{
                 commit_sha: $commit_sha,
+                verifier_sha: $verifier_sha,
                 candidate_repository: $candidate_repository,
                 candidate_tag: $candidate_tag,
                 image_digest: $image_digest,
                 binary_path: $binary_path,
                 depot_sha256: $depot_sha256,
                 clean_build_sha256: $clean_build_sha256,
-                comparison_result: $comparison_result,
+                verification_scope: "tempo-zone binary only",
+                binary_comparison_result: $binary_comparison_result,
                 failure: $failure
               }' > "$MANIFEST"
           }
@@ -321,7 +384,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reproducible-image-verification-${{ needs.reproducible-verify-resolve.outputs.short_sha }}
+          name: reproducible-candidate-binary-verification-${{ needs.reproducible-verify-resolve.outputs.short_sha }}
           path: ${{ runner.temp }}/reproducible-image-verification.json
           if-no-files-found: warn
           retention-days: 7

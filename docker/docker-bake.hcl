@@ -81,6 +81,10 @@ target "tempo-zone-reproducible" {
     GIT_SHA = "${GIT_SHA}"
     VERSION = "${VERSION}"
   }
+  labels = {
+    "org.opencontainers.image.description" = "Non-production reproducible candidate image; verification covers /usr/local/bin/tempo-zone only."
+    "org.tempoxyz.reproducible.verification-scope" = "tempo-zone-binary"
+  }
   platforms = ["linux/amd64"]
 }
 
