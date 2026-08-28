@@ -37,29 +37,18 @@ You can get started today by [deploying a Zone](#getting-started) on Tempo testn
 
 Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/getting-started/installation), [`just`](https://github.com/casey/just#packages), [`jq`](https://jqlang.github.io/jq/download/)
 
-### Local Development with Anvil
+### Local Development
 
-Use Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later,
-then run Anvil in Tempo mode:
-
-```bash
-anvil --network tempo --block-time 1
-```
-
-Provision and run a fresh zone against its WebSocket endpoint:
+Start a complete local Tempo L1 and Zone with the standard Reth dev flag:
 
 ```bash
-cargo run --release --bin tempo-zone -- dev \
-  --l1.rpc-url ws://127.0.0.1:8545
+cargo run --release --bin tempo-zone -- node --dev
 ```
 
-The default Anvil dev key is used automatically. The zone HTTP RPC listens on
-`http://127.0.0.1:9545`; generated metadata and node data are written under
-`/tmp/tempo-zone-dev`.
-
-Older Anvil builds only add Tempo fields to Ethereum headers at the RPC layer.
-The dev command rejects those builds because Zones require canonical Tempo block
-hashes and parent links.
+This launches an embedded Tempo dev node, provisions the ZoneFactory and portal, writes
+`genesis.json`, `zone.json`, and `sequencer.key` into the resolved Reth datadir, and starts the
+zone sequencer. The zone HTTP RPC uses Reth's default `http://127.0.0.1:8545`; ordinary Reth
+options such as `--datadir`, `--http.port`, `--dev.block-time`, and `--dev.mnemonic` work normally.
 
 ### Deploying a Zone
 

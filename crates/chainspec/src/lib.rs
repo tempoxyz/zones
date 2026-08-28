@@ -266,9 +266,22 @@ pub struct ZoneChainSpecParser;
 impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
     type ChainSpec = ZoneChainSpec;
 
-    const SUPPORTED_CHAINS: &'static [&'static str] = &[];
+    const SUPPORTED_CHAINS: &'static [&'static str] = &["dev"];
 
     fn parse(s: &str) -> eyre::Result<std::sync::Arc<Self::ChainSpec>> {
+        // Reth's `node --dev` selects a chain named `dev` before the node launcher runs. The
+        // launcher replaces this deterministic placeholder with the L1-anchored genesis it
+        // provisions. Both use zone ID 1, so Reth opens the correct chain datadir up front.
+        if s == "dev" {
+            let mut genesis = DEV.genesis().clone();
+            genesis.config.chain_id =
+                zone_primitives::constants::zone_chain_id(DEV.chain().id(), 1)?;
+            return Ok(Arc::new(ZoneChainSpec::from_genesis_with_l1(
+                genesis,
+                DEV.as_ref(),
+            )?));
+        }
+
         let genesis = reth_cli::chainspec::parse_genesis(s)?;
         Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
     }
@@ -475,7 +488,13 @@ mod tests {
 
     #[cfg(feature = "cli")]
     #[test]
-    fn parser_rejects_named_tempo_chain() {
-        assert!(ZoneChainSpecParser::parse("dev").is_err());
+    fn parser_accepts_dev_placeholder() {
+        let zone = ZoneChainSpecParser::parse("dev").expect("valid dev placeholder");
+
+        assert_eq!(zone.zone_id(), 1);
+        assert_eq!(
+            decode_l1_chain_id(zone.chain().id()).unwrap(),
+            DEV.chain().id()
+        );
     }
 }

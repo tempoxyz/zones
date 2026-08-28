@@ -140,6 +140,7 @@ cli = [
   "dep:url",
   "dep:zeroize",
   "dep:zone-checker",
+  "reth-node-builder/test-utils",
   "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]

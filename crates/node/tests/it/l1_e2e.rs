@@ -486,6 +486,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
         zone_gateways: vec![Address::repeat_byte(0x42)],
         allowed_accounts: vec![l1.user_signer().address()],
         rpc_url: String::new(),
+        anchor_block_number: None,
     })
     .await?;
 

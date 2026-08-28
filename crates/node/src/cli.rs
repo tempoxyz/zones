@@ -1,16 +1,25 @@
 //! Tempo Zone CLI.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use clap::{Args, CommandFactory, FromArgMatches};
+use clap::Args;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
+use reth_node_builder::{NodeBuilder, NodeConfig};
+use reth_node_core::args::RpcServerArgs;
+use reth_rpc_builder::RpcModuleSelection;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
+use tempo_node::node::TempoNode;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -19,7 +28,7 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::ProvisionedZone,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
@@ -38,64 +47,11 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "rustls::client=warn"
 );
 
-/// Tempo Zone CLI entry point.
-pub enum ZoneCli {
-    Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
-    Dev(Box<DevCommand>),
-}
-
-impl ZoneCli {
-    fn command() -> clap::Command {
-        Cli::<ZoneChainSpecParser, ZoneArgs>::command()
-            .about("Tempo Zone")
-            .subcommand(DevCommand::command())
-    }
-
-    /// Parse CLI arguments from the environment.
-    pub fn parse() -> Self {
-        Self::parse_from(std::env::args_os())
-    }
-
-    /// Parse CLI arguments from an iterator. The first item is the binary name.
-    pub fn parse_from<I, T>(args: I) -> Self
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        Self::try_parse_from(args).unwrap_or_else(|err| err.exit())
-    }
-
-    /// Try to parse CLI arguments from an iterator.
-    pub fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        let matches = Self::command().try_get_matches_from(args)?;
-        if let Some(("dev", dev_matches)) = matches.subcommand() {
-            return DevCommand::from_arg_matches(dev_matches)
-                .map(Box::new)
-                .map(Self::Dev);
-        }
-        Cli::from_arg_matches(&matches)
-            .map(Box::new)
-            .map(Self::Node)
-    }
-
-    /// Run the Tempo Zone node.
-    ///
-    /// Configures the node builder, launches the zone node with all sequencer
-    /// background tasks, and blocks until exit.
-    pub fn run(self) -> eyre::Result<()> {
-        match self {
-            Self::Node(cli) => run_node(*cli),
-            Self::Dev(command) => (*command).run(),
-        }
-    }
-}
+/// The standard Reth CLI with Tempo Zone node arguments.
+pub type ZoneCli = Cli<ZoneChainSpecParser, ZoneArgs>;
 
 /// Main entry point for the `node` command.
-fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+pub fn run(mut cli: ZoneCli) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
@@ -134,6 +90,99 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
+        let is_dev = builder.config().dev.dev;
+        eyre::ensure!(
+            !is_dev || args.sequencer_manifest.is_none(),
+            "--sequencer.manifest cannot be used with --dev"
+        );
+        let (l1_rpc_url, portal_address, sequencer_signer, _l1_handle) = if is_dev {
+            let dev_signer = crate::dev::dev_signer(&builder.config().dev.dev_mnemonic)?;
+            let l1_chain_spec = Arc::new(crate::dev::dev_l1_chain_spec(dev_signer.address()));
+            let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
+                .with_unused_ports()
+                .dev()
+                .with_rpc(
+                    RpcServerArgs::default()
+                        .with_unused_ports()
+                        .with_http()
+                        .with_http_api(RpcModuleSelection::All)
+                        .with_ws()
+                        .with_ws_api(RpcModuleSelection::All),
+                );
+            l1_config.dev = builder.config().dev.clone();
+            l1_config.dev.dev = true;
+            l1_config.dev.block_time = l1_config
+                .dev
+                .block_time
+                .or(Some(Duration::from_millis(500)));
+            l1_config.dev.finality_depth = std::num::NonZeroUsize::MIN;
+
+            let l1_handle = NodeBuilder::new(l1_config)
+                .testing_node(builder.task_executor().clone())
+                .node(TempoNode::default())
+                .launch_with_debug_capabilities()
+                .await?;
+            let l1_rpc_url = l1_handle
+                .node
+                .rpc_server_handle()
+                .ws_url()
+                .ok_or_else(|| eyre::eyre!("embedded Tempo L1 WebSocket RPC did not start"))?;
+
+            crate::dev::prefund_custom_dev_account(&l1_rpc_url, dev_signer.address()).await?;
+            let zone_rpc_url = format!(
+                "http://{}:{}",
+                builder.config().rpc.http_addr,
+                builder.config().rpc.http_port
+            );
+            let provisioned = crate::dev::provision_zone(crate::dev::ProvisionConfig {
+                l1_rpc_url: l1_rpc_url.clone(),
+                dev_key: dev_signer.clone(),
+                factory: None,
+                initial_token: args.dev_token,
+                is_access_open: !args.dev_access_mode,
+                is_gateway_enforced: args.dev_gateway_mode,
+                zone_gateways: args.dev_zone_gateways.clone(),
+                allowed_accounts: args.dev_allowed_accounts.clone(),
+                rpc_url: zone_rpc_url.clone(),
+                // Stable across restarts; the subscriber still replays createZone from block 0.
+                anchor_block_number: Some(0),
+            })
+            .await?;
+
+            builder.config_mut().chain = Arc::new(ZoneChainSpec::from_genesis_with_l1(
+                provisioned.genesis.clone(),
+                l1_chain_spec.as_ref(),
+            )?);
+            write_dev_artifacts(
+                builder.config().datadir().data_dir(),
+                &provisioned,
+                &args,
+                &dev_signer,
+                &zone_rpc_url,
+            )?;
+
+            info!(
+                target: "reth::cli",
+                zone_id = provisioned.zone_id,
+                chain_id = provisioned.chain_id,
+                portal = %provisioned.portal,
+                l1_rpc = %l1_rpc_url,
+                zone_rpc = %zone_rpc_url,
+                "Tempo Zone dev stack ready"
+            );
+            let portal = provisioned.portal;
+            (l1_rpc_url, portal, Some(dev_signer), Some(l1_handle))
+        } else {
+            let l1_rpc_url = args
+                .l1_rpc_url
+                .clone()
+                .ok_or_else(|| eyre::eyre!("--l1.rpc-url is required unless --dev is used"))?;
+            let portal_address = args.portal_address.ok_or_else(|| {
+                eyre::eyre!("--l1.portal-address is required unless --dev is used")
+            })?;
+            (l1_rpc_url, portal_address, None, None)
+        };
+
         let zone_id = builder.config().chain.zone_id();
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
 
@@ -157,8 +206,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
         let mut node = ZoneNode::new(
-            args.l1_rpc_url.clone(),
-            args.portal_address,
+            l1_rpc_url.clone(),
+            portal_address,
             args.l1_fetch_concurrency,
             Duration::from_millis(args.l1_retry_connection_interval_ms),
         )
@@ -174,23 +223,20 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
 
-        node = configure_sequencing(&args, zone_id, node).await?;
+        node = configure_sequencing(&args, zone_id, node, sequencer_signer).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
         match args.checker_mode {
             CheckerMode::Off => {
-                let handle = builder
-                    .node(node)
-                    .launch_with_debug_capabilities()
-                    .await?;
+                let handle = builder.node(node).launch().await?;
                 handle.wait_for_node_exit().await
             }
             CheckerMode::Observe => {
                 info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
                 let node = node.with_portal_evidence_retention();
                 let checker = CheckerExEx::new(CheckerConfig {
-                    l1_rpc_url: args.l1_rpc_url.clone(),
-                    portal_address: args.portal_address,
+                    l1_rpc_url: l1_rpc_url.clone(),
+                    portal_address,
                     zone_id,
                     zone_chain_id: builder.config().chain.chain().id(),
                     database_path: builder.config().datadir().data_dir().join("checker"),
@@ -199,13 +245,51 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 builder
                     .node(node)
                     .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
-                    .launch_with_debug_capabilities()
+                    .launch()
                     .await?
                     .wait_for_node_exit()
                     .await
             }
         }
     })
+}
+
+fn write_dev_artifacts(
+    datadir: &Path,
+    provisioned: &ProvisionedZone,
+    args: &ZoneArgs,
+    signer: &PrivateKeySigner,
+    rpc_url: &str,
+) -> eyre::Result<()> {
+    std::fs::create_dir_all(datadir)?;
+    std::fs::write(
+        datadir.join("genesis.json"),
+        serde_json::to_string_pretty(&provisioned.genesis)?,
+    )?;
+
+    let private_key = signer.to_bytes().to_string();
+    let zone_json = serde_json::json!({
+        "zoneId": provisioned.zone_id,
+        "chainId": provisioned.chain_id,
+        "portal": provisioned.portal.to_string(),
+        "initialToken": args.dev_token.to_string(),
+        "accessMode": args.dev_access_mode,
+        "gatewayMode": args.dev_gateway_mode,
+        "zoneGateways": args.dev_zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "allowedAccounts": args.dev_allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "admin": signer.address().to_string(),
+        "sequencer": signer.address().to_string(),
+        "sequencerKey": private_key.clone(),
+        "tempoAnchorBlock": provisioned.anchor_block_number,
+        "zoneFactory": provisioned.factory.to_string(),
+        "rpcUrl": rpc_url,
+    });
+    crate::dev::write_owner_only(
+        &datadir.join("zone.json"),
+        serde_json::to_string_pretty(&zone_json)?.as_bytes(),
+    )?;
+    crate::dev::write_owner_only(&datadir.join("sequencer.key"), private_key.as_bytes())?;
+    Ok(())
 }
 
 /// Creates the EVM config used by CLI subcommands.
@@ -232,6 +316,7 @@ async fn configure_sequencing(
     args: &ZoneArgs,
     zone_id: u32,
     mut node: ZoneNode,
+    signer: Option<PrivateKeySigner>,
 ) -> eyre::Result<ZoneNode> {
     let p2p_config =
         args.sequencer_manifest
@@ -262,7 +347,8 @@ async fn configure_sequencing(
     }
 
     let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
-    let should_sequence_blocks = args.enable_sequencer
+    let sequencing = signer.is_some()
+        || args.sequencer
         || p2p_config
             .as_ref()
             .is_some_and(|config| !config.is_rpc_only());
@@ -272,12 +358,15 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
+        !args.enable_prover || sequencing,
         "--sequencer.enable-prover requires a promotable sequencer node"
     );
 
-    if should_sequence_blocks {
-        let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
+    if sequencing {
+        let sequencer_signer = match signer {
+            Some(signer) => signer,
+            None => load_sequencer_signer(args.sequencer_key_file.as_deref()).await?,
+        };
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
@@ -303,9 +392,7 @@ async fn configure_sequencing(
     Ok(node)
 }
 
-async fn load_sequencer_signer(
-    key_file: Option<&std::path::Path>,
-) -> eyre::Result<PrivateKeySigner> {
+async fn load_sequencer_signer(key_file: Option<&Path>) -> eyre::Result<PrivateKeySigner> {
     let path = key_file.ok_or_else(|| {
         eyre::eyre!("--sequencer-key-file is required when sequencing is enabled")
     })?;
@@ -323,9 +410,7 @@ async fn load_sequencer_signer(
         .map_err(|_| eyre::eyre!("invalid sequencer key from {source}"))
 }
 
-async fn load_decryption_keys(
-    key_file: Option<&std::path::Path>,
-) -> eyre::Result<Vec<k256::SecretKey>> {
+async fn load_decryption_keys(key_file: Option<&Path>) -> eyre::Result<Vec<k256::SecretKey>> {
     let Some(path) = key_file else {
         return Ok(Vec::new());
     };
@@ -366,7 +451,7 @@ pub struct ZoneArgs {
         env = "L1_RPC_URL",
         value_parser = parse_l1_rpc_url
     )]
-    pub l1_rpc_url: String,
+    pub l1_rpc_url: Option<String>,
 
     /// ZonePortal contract address on L1.
     #[arg(
@@ -374,7 +459,27 @@ pub struct ZoneArgs {
         env = "L1_PORTAL_ADDRESS",
         value_parser = parse_portal_address
     )]
-    pub portal_address: Address,
+    pub portal_address: Option<Address>,
+
+    /// Initial TIP-20 enabled in the locally provisioned dev zone.
+    #[arg(long = "dev.token", default_value_t = tempo_contracts::precompiles::PATH_USD_ADDRESS)]
+    pub dev_token: Address,
+
+    /// Enable account allowlist enforcement in the locally provisioned dev zone.
+    #[arg(long = "dev.access-mode")]
+    pub dev_access_mode: bool,
+
+    /// Enable callback gateway enforcement in the locally provisioned dev zone.
+    #[arg(long = "dev.gateway-mode")]
+    pub dev_gateway_mode: bool,
+
+    /// Callback-only ZoneGateway implementation. Repeat to register multiple gateways.
+    #[arg(long = "dev.zone-gateway")]
+    pub dev_zone_gateways: Vec<Address>,
+
+    /// Portal allowlist member. Repeat to add multiple accounts.
+    #[arg(long = "dev.allowed-account")]
+    pub dev_allowed_accounts: Vec<Address>,
 
     /// Deprecated compatibility flag. Ignored.
     #[arg(
@@ -411,7 +516,7 @@ pub struct ZoneArgs {
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
         requires = "p2p_key",
-        conflicts_with = "enable_sequencer"
+        conflicts_with = "sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
 
@@ -547,14 +652,13 @@ pub struct ZoneArgs {
     )]
     pub redacted_rpc_max_auth_token_validity_secs: u64,
 
-    /// Enable the Zone node in sequencer mode. This advances block production and submits
-    /// withdrawal batches.
+    /// Enable legacy single-sequencer mode without a multi-sequencer manifest.
     #[arg(
         long = "sequencer",
         env = "SEQUENCER",
         conflicts_with = "sequencer_manifest"
     )]
-    pub enable_sequencer: bool,
+    pub sequencer: bool,
 
     /// Checker ExEx mode: `off` (default) or `observe`.
     #[arg(
@@ -635,7 +739,7 @@ fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::R
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write as _, process::Command, thread, time::Duration};
+    use std::{io::Write as _, path::Path, process::Command, thread, time::Duration};
 
     use clap::Parser as _;
 
@@ -696,17 +800,17 @@ mod tests {
     }
 
     #[test]
-    fn top_level_help_lists_dev_subcommand() {
-        let result = ZoneCli::try_parse_from(["tempo-zone", "--help"]);
+    fn node_help_lists_reth_dev_flag() {
+        let result = ZoneCli::try_parse_from(["tempo-zone", "node", "--help"]);
         let error = result.err().expect("--help exits through clap");
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
-        assert!(error.to_string().contains("  dev"));
+        assert!(error.to_string().contains("--dev"));
     }
 
     #[test]
-    fn dev_is_parsed_by_the_top_level_cli() {
-        let parsed = ZoneCli::try_parse_from(["tempo-zone", "dev"]).unwrap();
-        assert!(matches!(parsed, ZoneCli::Dev(_)));
+    fn node_dev_uses_the_standard_reth_flag() {
+        let mut parsed = ZoneCli::try_parse_from(["tempo-zone", "node", "--dev"]).unwrap();
+        assert!(parsed.as_node_command_mut().unwrap().dev.dev);
     }
 
     #[test]
@@ -772,7 +876,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             parsed.zone.sequencer_key_file.as_deref(),
-            Some(std::path::Path::new("/run/secrets/sequencer-key"))
+            Some(Path::new("/run/secrets/sequencer-key"))
         );
         let error =
             ZoneArgsParser::try_parse_from(common.into_iter().chain(["--sequencer-key", "0x01"]))
@@ -929,7 +1033,7 @@ mod tests {
             "--sequencer",
         ])
         .unwrap();
-        assert!(parsed.zone.enable_sequencer);
+        assert!(parsed.zone.sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
     }
 

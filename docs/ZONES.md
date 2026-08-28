@@ -53,33 +53,16 @@ just check-balance "$ADDR"
 
 See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and redacted RPC usage.
 
-For a fully local development stack, use Foundry 1.8 or newer, or a nightly
-build from July 11, 2026 or later. Run Anvil in Tempo mode and point the dev
-command at its WebSocket endpoint:
+For a fully local development stack, use the standard Reth dev flag:
 
 ```bash
-# Terminal 1
-anvil --network tempo --block-time 1
-
-# Terminal 2
-cargo run --release --bin tempo-zone -- dev \
-  --l1.rpc-url ws://127.0.0.1:8545
+cargo run --release --bin tempo-zone -- node --dev
 ```
 
-This uses the protocol-managed ZoneFactory to create a portal, writes the generated zone files to
-`/tmp/tempo-zone-dev`, and serves the zone HTTP RPC at `http://127.0.0.1:9545`.
-The configured dev key must own the native ZoneFactory. Stock owner-gated T9 chains require an
-ownership transfer before provisioning; separate factory-owner credentials are not yet supported.
-
-Older Anvil builds are rejected because they mine Ethereum header hashes and only
-add Tempo fields to the RPC response. Zones require canonical Tempo header hashes
-to verify L1 ancestry.
-
-To restart the zone later:
-
-```bash
-just zone-up my-zone false release
-```
+This starts an embedded Tempo L1, creates the portal through the protocol-managed ZoneFactory,
+writes the generated zone files into the resolved Reth datadir, and serves the Zone HTTP RPC at
+`http://127.0.0.1:8545`. Reth's usual `--datadir`, RPC, `--dev.block-time`, and
+`--dev.mnemonic` options apply directly.
 
 ## Step-by-Step Guide
 
