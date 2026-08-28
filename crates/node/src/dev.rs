@@ -241,7 +241,7 @@ mod command {
 
     use alloy_primitives::Address;
     use alloy_signer_local::PrivateKeySigner;
-    use clap::{CommandFactory as _, FromArgMatches as _};
+    use clap::Parser as _;
     use reth_ethereum::cli::Cli;
     use zone_chainspec::ZoneChainSpecParser;
 
@@ -252,16 +252,6 @@ mod command {
     /// Default dev private key (account #0 of the standard `test test ... junk` mnemonic).
     const DEFAULT_DEV_KEY: &str =
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-    const DEV_IGNORED_TOPOLOGY_ENV: [&str; 7] = [
-        "SEQUENCER_MANIFEST",
-        "P2P_KEY",
-        "SECP256K1_KEY",
-        "P2P_LISTEN",
-        "P2P_BYPASS_IP_CHECK",
-        "SEQUENCER_ROLE",
-        "SEQUENCER",
-    ];
 
     /// Provisions a fresh zone against a Tempo dev L1 and runs the zone node.
     #[derive(Debug, clap::Parser)]
@@ -467,30 +457,9 @@ mod command {
             .to_vec();
             argv.extend(self.node_args);
 
-            let cli = parse_dev_node_cli(argv)?;
+            let cli = Cli::<ZoneChainSpecParser, ZoneArgs>::parse_from(argv);
             run_dev_node(cli)
         }
-    }
-
-    fn parse_dev_node_cli(argv: Vec<String>) -> eyre::Result<Cli<ZoneChainSpecParser, ZoneArgs>> {
-        let matches = dev_node_command().try_get_matches_from(argv)?;
-        Ok(Cli::from_arg_matches(&matches)?)
-    }
-
-    fn dev_node_command() -> clap::Command {
-        Cli::<ZoneChainSpecParser, ZoneArgs>::command().mut_subcommand("node", |command| {
-            command.mut_args(|arg| {
-                if arg.get_env().is_some_and(|env| {
-                    DEV_IGNORED_TOPOLOGY_ENV
-                        .iter()
-                        .any(|ignored| env == std::ffi::OsStr::new(ignored))
-                }) {
-                    arg.env(None::<&'static str>)
-                } else {
-                    arg
-                }
-            })
-        })
     }
 
     fn default_datadir() -> PathBuf {
@@ -535,7 +504,7 @@ mod command {
     mod tests {
         use clap::Parser as _;
 
-        use super::{DEV_IGNORED_TOPOLOGY_ENV, DevCommand, dev_node_command, ensure_ws_url};
+        use super::{DevCommand, ensure_ws_url};
 
         #[test]
         fn private_rpc_port_alias_is_accepted() {
@@ -546,29 +515,6 @@ mod command {
 
             assert_eq!(redacted.redacted_rpc_port, 9544);
             assert_eq!(private.redacted_rpc_port, 9544);
-        }
-
-        #[test]
-        fn dev_node_parser_ignores_topology_environment() {
-            let command = dev_node_command();
-            let node = command.find_subcommand("node").unwrap();
-
-            for env in DEV_IGNORED_TOPOLOGY_ENV {
-                assert!(
-                    node.get_arguments()
-                        .all(|arg| arg.get_env() != Some(std::ffi::OsStr::new(env))),
-                    "dev node still reads {env}"
-                );
-            }
-
-            let checker = node
-                .get_arguments()
-                .find(|arg| arg.get_id().as_str() == "checker_mode")
-                .unwrap();
-            assert_eq!(
-                checker.get_env(),
-                Some(std::ffi::OsStr::new("CHECKER_MODE"))
-            );
         }
 
         #[test]
