@@ -1,6 +1,6 @@
 //! Local Zone provisioning against a Tempo development L1.
 
-use std::path::Path;
+use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
@@ -9,9 +9,15 @@ use alloy_primitives::{Address, B256};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
+use reth_node_builder::{NodeBuilder, NodeConfig};
+use reth_node_core::args::RpcServerArgs;
+use reth_rpc_builder::RpcModuleSelection;
+use reth_tasks::TaskExecutor;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
+use tempo_node::node::TempoNode;
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
+use zone_chainspec::ZoneChainSpec;
 use zone_primitives::constants::zone_chain_id;
 use zone_sequencer::register_encryption_key;
 
@@ -40,6 +46,115 @@ pub struct ProvisionedZone {
     pub portal: Address,
     pub anchor_block_number: u64,
     pub genesis: Genesis,
+}
+
+/// Starts an embedded Tempo L1 and provisions the local zone.
+pub async fn init(
+    config: &mut NodeConfig<ZoneChainSpec>,
+    executor: TaskExecutor,
+    initial_token: Address,
+    access_mode: bool,
+    gateway_mode: bool,
+    zone_gateways: &[Address],
+    allowed_accounts: &[Address],
+) -> eyre::Result<(String, Address, PrivateKeySigner)> {
+    let signer = dev_signer(&config.dev.dev_mnemonic)?;
+    let l1_chain_spec = Arc::new(dev_l1_chain_spec(signer.address()));
+    let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
+        .with_unused_ports()
+        .dev()
+        .with_rpc(
+            RpcServerArgs::default()
+                .with_unused_ports()
+                .with_http()
+                .with_http_api(RpcModuleSelection::All)
+                .with_ws()
+                .with_ws_api(RpcModuleSelection::All),
+        );
+    l1_config.dev = config.dev.clone();
+    l1_config.dev.dev = true;
+    l1_config.dev.block_time = l1_config
+        .dev
+        .block_time
+        .or(Some(Duration::from_millis(500)));
+    l1_config.dev.finality_depth = NonZeroUsize::MIN;
+
+    let l1 = NodeBuilder::new(l1_config)
+        .testing_node(executor.clone())
+        .node(TempoNode::default())
+        .launch_with_debug_capabilities()
+        .await?;
+    let l1_rpc_url = l1
+        .node
+        .rpc_server_handle()
+        .ws_url()
+        .ok_or_else(|| eyre::eyre!("embedded Tempo L1 WebSocket RPC did not start"))?;
+
+    prefund_custom_dev_account(&l1_rpc_url, signer.address()).await?;
+    let zone_rpc_url = format!("http://{}:{}", config.rpc.http_addr, config.rpc.http_port);
+    let provisioned = provision_zone(ProvisionConfig {
+        l1_rpc_url: l1_rpc_url.clone(),
+        dev_key: signer.clone(),
+        factory: None,
+        initial_token,
+        is_access_open: !access_mode,
+        is_gateway_enforced: gateway_mode,
+        zone_gateways: zone_gateways.to_vec(),
+        allowed_accounts: allowed_accounts.to_vec(),
+        rpc_url: zone_rpc_url.clone(),
+        // Stable across restarts; the subscriber still replays createZone from block 0.
+        anchor_block_number: Some(0),
+    })
+    .await?;
+
+    config.chain = Arc::new(ZoneChainSpec::from_genesis_with_l1(
+        provisioned.genesis.clone(),
+        l1_chain_spec.as_ref(),
+    )?);
+    let datadir = config.datadir().data_dir().to_path_buf();
+    std::fs::create_dir_all(&datadir)?;
+    std::fs::write(
+        datadir.join("genesis.json"),
+        serde_json::to_string_pretty(&provisioned.genesis)?,
+    )?;
+
+    let private_key = signer.to_bytes().to_string();
+    let zone_json = serde_json::json!({
+        "zoneId": provisioned.zone_id,
+        "chainId": provisioned.chain_id,
+        "portal": provisioned.portal.to_string(),
+        "initialToken": initial_token.to_string(),
+        "accessMode": access_mode,
+        "gatewayMode": gateway_mode,
+        "zoneGateways": zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "admin": signer.address().to_string(),
+        "sequencer": signer.address().to_string(),
+        "sequencerKey": private_key.clone(),
+        "tempoAnchorBlock": provisioned.anchor_block_number,
+        "zoneFactory": provisioned.factory.to_string(),
+        "rpcUrl": &zone_rpc_url,
+    });
+    write_owner_only(
+        &datadir.join("zone.json"),
+        serde_json::to_string_pretty(&zone_json)?.as_bytes(),
+    )?;
+    write_owner_only(&datadir.join("sequencer.key"), private_key.as_bytes())?;
+
+    tracing::info!(
+        target: "reth::cli",
+        zone_id = provisioned.zone_id,
+        chain_id = provisioned.chain_id,
+        portal = %provisioned.portal,
+        l1_rpc = %l1_rpc_url,
+        zone_rpc = %zone_rpc_url,
+        "Tempo Zone dev stack ready"
+    );
+    executor.spawn_task(async move {
+        let _ = l1.wait_for_node_exit().await;
+    });
+
+    Ok((l1_rpc_url, provisioned.portal, signer))
 }
 
 /// Creates a zone through the protocol-managed ZoneFactory and constructs its genesis.
@@ -198,14 +313,14 @@ pub async fn native_zone_factory(
     Ok(ZONE_FACTORY_ADDRESS)
 }
 
-pub(crate) fn dev_signer(mnemonic: &str) -> eyre::Result<PrivateKeySigner> {
+fn dev_signer(mnemonic: &str) -> eyre::Result<PrivateKeySigner> {
     use alloy_signer_local::MnemonicBuilder;
 
     MnemonicBuilder::try_from_phrase_first(mnemonic)
         .map_err(|error| eyre::eyre!("failed to derive dev account from --dev.mnemonic: {error}"))
 }
 
-pub(crate) fn dev_l1_chain_spec(owner: Address) -> tempo_chainspec::TempoChainSpec {
+fn dev_l1_chain_spec(owner: Address) -> tempo_chainspec::TempoChainSpec {
     use alloy_genesis::GenesisAccount;
     use alloy_primitives::{U256, keccak256};
     use alloy_sol_types::SolValue as _;
@@ -256,10 +371,7 @@ pub(crate) fn dev_l1_chain_spec(owner: Address) -> tempo_chainspec::TempoChainSp
     TempoChainSpec::from_genesis(genesis)
 }
 
-pub(crate) async fn prefund_custom_dev_account(
-    l1_rpc_url: &str,
-    recipient: Address,
-) -> eyre::Result<()> {
+async fn prefund_custom_dev_account(l1_rpc_url: &str, recipient: Address) -> eyre::Result<()> {
     use alloy_primitives::U256;
 
     const DEFAULT_DEV_KEY: &str =
@@ -283,7 +395,7 @@ pub(crate) async fn prefund_custom_dev_account(
     Ok(())
 }
 
-pub(crate) fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::{

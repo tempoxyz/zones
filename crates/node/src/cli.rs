@@ -2,7 +2,6 @@
 
 use std::{
     net::SocketAddr,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -14,14 +13,9 @@ use alloy_signer_local::PrivateKeySigner;
 use clap::Args;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
-use reth_node_builder::{NodeBuilder, NodeConfig};
-use reth_node_core::args::RpcServerArgs;
-use reth_rpc_builder::RpcModuleSelection;
-use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
-use tempo_node::node::TempoNode;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
@@ -31,7 +25,6 @@ use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
     ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
-    dev::{ProvisionConfig, ProvisionedZone},
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
@@ -99,8 +92,17 @@ pub fn run(mut cli: ZoneCli) -> eyre::Result<()> {
                 "--sequencer.manifest cannot be used with --dev"
             );
             let executor = builder.task_executor().clone();
-            let dev = init_dev(builder.config_mut(), &args, executor).await?;
-            (dev.l1_rpc_url, dev.portal, Some(dev.signer))
+            let (l1_rpc_url, portal, signer) = crate::dev::init(
+                builder.config_mut(),
+                executor,
+                args.dev_token,
+                args.dev_access_mode,
+                args.dev_gateway_mode,
+                &args.dev_zone_gateways,
+                &args.dev_allowed_accounts,
+            )
+            .await?;
+            (l1_rpc_url, portal, Some(signer))
         } else {
             (
                 args.l1_rpc_url.clone().expect("required without --dev"),
@@ -178,136 +180,6 @@ pub fn run(mut cli: ZoneCli) -> eyre::Result<()> {
             }
         }
     })
-}
-
-struct Dev {
-    l1_rpc_url: String,
-    portal: Address,
-    signer: PrivateKeySigner,
-}
-
-async fn init_dev(
-    config: &mut NodeConfig<ZoneChainSpec>,
-    args: &ZoneArgs,
-    executor: TaskExecutor,
-) -> eyre::Result<Dev> {
-    let signer = crate::dev::dev_signer(&config.dev.dev_mnemonic)?;
-    let l1_chain_spec = Arc::new(crate::dev::dev_l1_chain_spec(signer.address()));
-    let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
-        .with_unused_ports()
-        .dev()
-        .with_rpc(
-            RpcServerArgs::default()
-                .with_unused_ports()
-                .with_http()
-                .with_http_api(RpcModuleSelection::All)
-                .with_ws()
-                .with_ws_api(RpcModuleSelection::All),
-        );
-    l1_config.dev = config.dev.clone();
-    l1_config.dev.dev = true;
-    l1_config.dev.block_time = l1_config
-        .dev
-        .block_time
-        .or(Some(Duration::from_millis(500)));
-    l1_config.dev.finality_depth = NonZeroUsize::MIN;
-
-    let l1 = NodeBuilder::new(l1_config)
-        .testing_node(executor.clone())
-        .node(TempoNode::default())
-        .launch_with_debug_capabilities()
-        .await?;
-    let l1_rpc_url = l1
-        .node
-        .rpc_server_handle()
-        .ws_url()
-        .ok_or_else(|| eyre::eyre!("embedded Tempo L1 WebSocket RPC did not start"))?;
-
-    crate::dev::prefund_custom_dev_account(&l1_rpc_url, signer.address()).await?;
-    let zone_rpc_url = format!("http://{}:{}", config.rpc.http_addr, config.rpc.http_port);
-    let provisioned = crate::dev::provision_zone(ProvisionConfig {
-        l1_rpc_url: l1_rpc_url.clone(),
-        dev_key: signer.clone(),
-        factory: None,
-        initial_token: args.dev_token,
-        is_access_open: !args.dev_access_mode,
-        is_gateway_enforced: args.dev_gateway_mode,
-        zone_gateways: args.dev_zone_gateways.clone(),
-        allowed_accounts: args.dev_allowed_accounts.clone(),
-        rpc_url: zone_rpc_url.clone(),
-        // Stable across restarts; the subscriber still replays createZone from block 0.
-        anchor_block_number: Some(0),
-    })
-    .await?;
-
-    config.chain = Arc::new(ZoneChainSpec::from_genesis_with_l1(
-        provisioned.genesis.clone(),
-        l1_chain_spec.as_ref(),
-    )?);
-    write_dev_artifacts(
-        config.datadir().data_dir(),
-        &provisioned,
-        args,
-        &signer,
-        &zone_rpc_url,
-    )?;
-
-    info!(
-        target: "reth::cli",
-        zone_id = provisioned.zone_id,
-        chain_id = provisioned.chain_id,
-        portal = %provisioned.portal,
-        l1_rpc = %l1_rpc_url,
-        zone_rpc = %zone_rpc_url,
-        "Tempo Zone dev stack ready"
-    );
-    executor.spawn_task(async move {
-        let _ = l1.wait_for_node_exit().await;
-    });
-
-    Ok(Dev {
-        l1_rpc_url,
-        portal: provisioned.portal,
-        signer,
-    })
-}
-
-fn write_dev_artifacts(
-    datadir: &Path,
-    provisioned: &ProvisionedZone,
-    args: &ZoneArgs,
-    signer: &PrivateKeySigner,
-    rpc_url: &str,
-) -> eyre::Result<()> {
-    std::fs::create_dir_all(datadir)?;
-    std::fs::write(
-        datadir.join("genesis.json"),
-        serde_json::to_string_pretty(&provisioned.genesis)?,
-    )?;
-
-    let private_key = signer.to_bytes().to_string();
-    let zone_json = serde_json::json!({
-        "zoneId": provisioned.zone_id,
-        "chainId": provisioned.chain_id,
-        "portal": provisioned.portal.to_string(),
-        "initialToken": args.dev_token.to_string(),
-        "accessMode": args.dev_access_mode,
-        "gatewayMode": args.dev_gateway_mode,
-        "zoneGateways": args.dev_zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "allowedAccounts": args.dev_allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "admin": signer.address().to_string(),
-        "sequencer": signer.address().to_string(),
-        "sequencerKey": private_key.clone(),
-        "tempoAnchorBlock": provisioned.anchor_block_number,
-        "zoneFactory": provisioned.factory.to_string(),
-        "rpcUrl": rpc_url,
-    });
-    crate::dev::write_owner_only(
-        &datadir.join("zone.json"),
-        serde_json::to_string_pretty(&zone_json)?.as_bytes(),
-    )?;
-    crate::dev::write_owner_only(&datadir.join("sequencer.key"), private_key.as_bytes())?;
-    Ok(())
 }
 
 /// Creates the EVM config used by CLI subcommands.

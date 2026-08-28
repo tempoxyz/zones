@@ -42,7 +42,7 @@ reth-ethereum = { workspace = true, features = [
 ], optional = true }
 reth-evm.workspace = true
 reth-node-api.workspace = true
-reth-node-builder.workspace = true
+reth-node-builder = { workspace = true, features = ["test-utils"] }
 reth-node-core.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
@@ -140,7 +140,6 @@ cli = [
   "dep:url",
   "dep:zeroize",
   "dep:zone-checker",
-  "reth-node-builder/test-utils",
   "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]
@@ -148,7 +147,6 @@ keccak-cache-global = ["alloy-primitives/keccak-cache-global"]
 test-utils = [
   "reth-chainspec/test-utils",
   "reth-ethereum?/test-utils",
-  "reth-node-builder/test-utils",
   "reth-payload-builder/test-utils",
   "reth-primitives-traits/test-utils",
   "reth-provider/test-utils",
