@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
+    EncryptionKeyRing, L1StateCache, abi::ZonePortal, metrics::L1SubscriberMetrics,
+    state::EnabledTokenRegistry,
 };
 use eyre::{OptionExt as _, WrapErr as _};
 use std::collections::HashSet;
@@ -37,6 +38,19 @@ pub struct AuthenticatedPortalLogs {
     pub parent_hash: B256,
     /// Portal logs in canonical receipt and log order.
     pub logs: Vec<alloy_primitives::Log>,
+}
+
+/// One `BatchSubmitted` event from a receipt-verified finalized Tempo block.
+#[derive(Debug, Clone)]
+pub struct FinalizedBatchSubmission {
+    /// Finalized Tempo block number containing the accepted submission.
+    pub block_number: u64,
+    /// Transaction whose calldata contains the accepted quorum certificate.
+    pub transaction_hash: B256,
+    /// Canonical log index used to distinguish multiple submissions in one transaction.
+    pub log_index: u64,
+    /// Event emitted after the Portal accepted the submission.
+    pub event: ZonePortal::BatchSubmitted,
 }
 
 /// Number of consumed Tempo blocks whose authenticated Portal logs remain available to
@@ -335,6 +349,7 @@ type L1ProcessedEvents = (
     L1PortalEvents,
     HashSet<Address>,
     Option<Vec<alloy_primitives::Log>>,
+    Vec<FinalizedBatchSubmission>,
 );
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
@@ -358,6 +373,14 @@ fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Addr
 pub trait LeadershipSink: Send + Sync + std::fmt::Debug {
     /// Apply one decoded leadership transition.
     fn apply_leader_transition(&self, transition: &crate::LeaderTransition) -> eyre::Result<()>;
+}
+
+/// Observes accepted batch submissions decoded from verified finalized receipts.
+///
+/// Unlike consensus-critical sinks, this is observational and cannot fence L1 ingestion.
+pub trait FinalizedBatchSubmissionSink: Send + Sync + std::fmt::Debug {
+    /// Observe one finalized Portal submission.
+    fn observe_finalized_batch(&self, submission: FinalizedBatchSubmission);
 }
 
 /// Configuration for the L1 subscriber.
@@ -391,6 +414,8 @@ pub struct L1Subscriber<P> {
     pub(crate) block_tracker: L1BlockTracker,
     /// Optional sink for leadership transitions.
     pub(crate) leadership_sink: Option<Arc<dyn LeadershipSink>>,
+    /// Optional observational sink for finalized accepted batch submissions.
+    pub(crate) finalized_batch_submission_sink: Option<Arc<dyn FinalizedBatchSubmissionSink>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub(crate) encryption_keys: Option<EncryptionKeyRing>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -442,6 +467,7 @@ where
         l1_state_cache: L1StateCache,
         block_tracker: L1BlockTracker,
         leadership_sink: Option<Arc<dyn LeadershipSink>>,
+        finalized_batch_submission_sink: Option<Arc<dyn FinalizedBatchSubmissionSink>>,
         encryption_keys: Option<EncryptionKeyRing>,
     ) -> Self {
         Self {
@@ -452,6 +478,7 @@ where
             l1_state_cache,
             block_tracker,
             leadership_sink,
+            finalized_batch_submission_sink,
             encryption_keys,
             subscriber_metrics: Default::default(),
         }
@@ -707,7 +734,7 @@ where
                     block_number,
                     "portal event decoding",
                 ))?;
-            let (events, invalidated, portal_logs) = processed_events;
+            let (events, invalidated, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
@@ -761,6 +788,11 @@ where
             } else {
                 self.block_tracker
                     .record_with_portal_events(anchor, events.clone())?;
+            }
+            if let Some(sink) = &self.finalized_batch_submission_sink {
+                for submission in finalized_batches {
+                    sink.observe_finalized_batch(submission);
+                }
             }
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
@@ -848,6 +880,7 @@ where
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
         let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
+        let mut finalized_batches = Vec::new();
 
         for receipt in receipts {
             let retain_receipt_logs = portal_logs.is_some() && receipt.status();
@@ -857,6 +890,27 @@ where
                 if address == portal_address {
                     if retain_receipt_logs && let Some(logs) = &mut portal_logs {
                         logs.push(log.inner.clone());
+                    }
+                    if self.finalized_batch_submission_sink.is_some()
+                        && log.topic0() == Some(&ZonePortal::BatchSubmitted::SIGNATURE_HASH)
+                    {
+                        let event = ZonePortal::BatchSubmitted::decode_log(&log.inner)
+                            .wrap_err_with(|| {
+                                format!(
+                                    "failed to decode BatchSubmitted in L1 block {block_number}"
+                                )
+                            })?
+                            .data;
+                        finalized_batches.push(FinalizedBatchSubmission {
+                            block_number,
+                            transaction_hash: receipt.transaction_hash(),
+                            log_index: log.log_index.ok_or_else(|| {
+                                eyre::eyre!(
+                                    "BatchSubmitted in L1 block {block_number} has no log index"
+                                )
+                            })?,
+                            event,
+                        });
                     }
                     invalidated.insert(address);
                     if let Some(address) =
@@ -880,7 +934,7 @@ where
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs))
+        Ok((portal_events, invalidated, portal_logs, finalized_batches))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {

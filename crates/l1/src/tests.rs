@@ -158,6 +158,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
         l1_state_cache: crate::L1StateCache::new(),
         block_tracker: L1BlockTracker::default(),
         leadership_sink: None,
+        finalized_batch_submission_sink: None,
         encryption_keys: None,
         subscriber_metrics: Default::default(),
     }
@@ -1636,6 +1637,47 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
     }
 }
 
+#[derive(Debug)]
+struct NoopFinalizedBatchSink;
+
+impl FinalizedBatchSubmissionSink for NoopFinalizedBatchSink {
+    fn observe_finalized_batch(&self, _: FinalizedBatchSubmission) {}
+}
+
+#[test]
+fn extracts_finalized_batch_submission_for_observer() {
+    use alloy_sol_types::SolEvent as _;
+
+    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    subscriber.finalized_batch_submission_sink = Some(Arc::new(NoopFinalizedBatchSink));
+    let portal = subscriber.config.portal_address;
+    let event = crate::abi::ZonePortal::BatchSubmitted {
+        withdrawalBatchIndex: 7,
+        withdrawalQueueIndex: U256::from(3),
+        nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+        nextBlockHash: B256::repeat_byte(0x22),
+        withdrawalQueueHash: B256::repeat_byte(0x33),
+        lastProcessedDepositNumber: 9,
+    };
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        log_index: Some(4),
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
+
+    let (_, _, _, submissions) = subscriber.extract_events(10, &[receipt]).unwrap();
+
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].block_number, 10);
+    assert_eq!(submissions[0].transaction_hash, B256::with_last_byte(0xaa));
+    assert_eq!(submissions[0].log_index, 4);
+    assert_eq!(submissions[0].event.nextBlockHash, B256::repeat_byte(0x22));
+}
+
 #[test]
 fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     let mut subscriber = test_subscriber(9);
@@ -1664,7 +1706,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let (events, _, portal_logs, _) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
     assert_eq!(portal_logs.unwrap().len(), 1);
@@ -1702,7 +1744,7 @@ fn pause_events_invalidate_cached_portal_storage() {
     ];
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
-    let (_, invalidated, _) = subscriber.extract_events(1, &[receipt]).unwrap();
+    let (_, invalidated, _, _) = subscriber.extract_events(1, &[receipt]).unwrap();
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(
