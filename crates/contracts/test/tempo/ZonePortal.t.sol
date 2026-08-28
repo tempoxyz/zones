@@ -14,6 +14,7 @@ import {
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptionKeyEntry,
+    ForcedExit,
     IVerifier,
     IWithdrawalReceiver,
     IZoneMessenger,
@@ -2314,6 +2315,65 @@ contract ZonePortalTest is BaseTest {
 
         // Verify total escrow
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
+    }
+
+    function test_requestForcedExit_escrowsCompensationAndAppendsQueueEntry() public {
+        uint128 compensation = portal.FORCED_EXIT_COMPENSATION();
+        uint256 nonce = 7;
+        bytes memory signature = hex"010203";
+        ForcedExit memory request = ForcedExit({
+            account: alice,
+            token: address(pathUSD),
+            sequencerCompensation: compensation,
+            recipient: bob,
+            nonce: nonce,
+            signature: signature
+        });
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.ForcedExit, request, bytes32(0)));
+        uint256 aliceBalanceBefore = pathUSD.balanceOf(alice);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), compensation);
+        vm.expectEmit(true, true, true, true);
+        emit IZonePortal.ForcedExitRequested(
+            expectedHash, alice, alice, address(pathUSD), bob, compensation, nonce, signature, 1
+        );
+        bytes32 actualHash =
+            portal.requestForcedExit(alice, address(pathUSD), bob, nonce, signature);
+        vm.stopPrank();
+
+        assertEq(actualHash, expectedHash);
+        assertEq(portal.currentDepositQueueHash(), expectedHash);
+        assertEq(portal.depositCount(), 1);
+        assertEq(pathUSD.balanceOf(alice), aliceBalanceBefore - compensation);
+        assertEq(pathUSD.balanceOf(address(portal)), compensation);
+    }
+
+    function test_requestForcedExit_remainsAvailableWhileDepositsAndPortalArePaused() public {
+        uint128 compensation = portal.FORCED_EXIT_COMPENSATION();
+        vm.prank(admin);
+        portal.pauseDeposits(address(pathUSD));
+        vm.prank(admin);
+        portal.pause();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), compensation);
+        bytes32 queueHash = portal.requestForcedExit(alice, address(pathUSD), alice, 0, hex"01");
+        vm.stopPrank();
+
+        assertEq(portal.currentDepositQueueHash(), queueHash);
+        assertEq(portal.depositCount(), 1);
+    }
+
+    function test_requestForcedExit_revertsForInvalidRequest() public {
+        vm.expectRevert(IZonePortal.InvalidForcedExit.selector);
+        portal.requestForcedExit(address(0), address(pathUSD), alice, 0, hex"01");
+
+        vm.expectRevert(IZonePortal.InvalidForcedExit.selector);
+        portal.requestForcedExit(alice, address(pathUSD), address(0), 0, hex"01");
+
+        vm.expectRevert(IZonePortal.InvalidForcedExit.selector);
+        portal.requestForcedExit(alice, address(pathUSD), alice, 0, bytes(""));
     }
 
     function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
