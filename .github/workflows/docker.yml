@@ -225,21 +225,30 @@ jobs:
           path: target/tempo-zone-prover-eif/measurements.json
           if-no-files-found: error
 
-      - name: Publish Zones CI event
+      - name: Publish Zones image event
         if: >-
           github.repository == 'tempoxyz/zones' &&
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main'
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+           github.event_name == 'schedule' ||
+           (github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.nightly == 'true'))
         shell: bash
         env:
           EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
           EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
           EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
           SHORT_SHA: ${{ steps.shortsha.outputs.shortsha }}
+          EVENT_NAME: ${{ github.event_name }}
+          NIGHTLY: ${{ github.event.inputs.nightly || 'false' }}
         run: |
           set -euo pipefail
 
-          image="${REGISTRY}/tempo-zone:sha-${SHORT_SHA}"
+          tag="sha-${SHORT_SHA}"
+          if [ "$EVENT_NAME" = "schedule" ] || [ "$NIGHTLY" = "true" ]; then
+            tag="nightly"
+          fi
+
+          image="${REGISTRY}/tempo-zone:${tag}"
           digest=""
           for attempt in {1..12}; do
             digest=$(docker buildx imagetools inspect "$image" \
@@ -259,7 +268,7 @@ jobs:
           printf '%s' "$EVENTS_KEY" > "$RUNNER_TEMP/events/key.pem"
           printf '%s' "$EVENTS_CERT" > "$RUNNER_TEMP/events/cert.pem"
           payload=$(jq -cn \
-            --arg tag "sha-${SHORT_SHA}" \
+            --arg tag "$tag" \
             --arg sha "$GITHUB_SHA" \
             --arg branch "$GITHUB_REF_NAME" \
             --arg digest "$digest" \
