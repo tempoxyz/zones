@@ -18,7 +18,7 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
-    shadow_prover::run_finalized_batch_observer,
+    shadow_prover::{finalized_batch_submission_channel, run_finalized_batch_observer},
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
@@ -277,6 +277,7 @@ impl ZoneNode {
             l1_fetch_concurrency,
             retry_connection_interval,
             leadership_sink: None,
+            finalized_batch_submission_sink: None,
             encryption_keys: None,
             retain_portal_evidence: false,
         };
@@ -620,6 +621,14 @@ where
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
 
+        let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+        let mut finalized_batch_submissions = None;
+        if rpc_only && self.shadow_prover_config.is_some() {
+            let (sink, receiver) = finalized_batch_submission_channel();
+            self.l1_config.finalized_batch_submission_sink = Some(sink);
+            finalized_batch_submissions = Some(receiver);
+        }
+
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
         if let Some(keys) = self.l1_config.encryption_keys.clone() {
@@ -685,7 +694,6 @@ where
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
         let task_executor = ctx.node.task_executor().clone();
-        let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
@@ -778,10 +786,11 @@ where
                 prover_address: config.prover_address.clone(),
             });
 
-        if rpc_only
-            && let (Some(config), Some(runtime_config)) =
-                (self.shadow_prover_config.as_ref(), prover_config.clone())
-        {
+        if let (Some(config), Some(runtime_config), Some(submissions)) = (
+            self.shadow_prover_config.as_ref(),
+            prover_config.clone(),
+            finalized_batch_submissions,
+        ) {
             let prover = spawn_shadow_prover(
                 runtime_config,
                 self.portal_address,
@@ -795,6 +804,7 @@ where
                 provider.clone(),
                 l1_provider.clone(),
                 prover,
+                submissions,
             ));
         }
 
