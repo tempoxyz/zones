@@ -1369,11 +1369,6 @@ impl ZoneTestNode {
         // Multi-sequencer nodes run the real role controller, which owns the engine; the
         // harness must not drive a second head writer against the same queue.
         let spawn_engine = spawn_engine && !p2p_enabled;
-        if spawn_engine {
-            // The harness drives its own ZoneEngine against the shared queue below, so the
-            // node must keep enqueueing deposits even without a sequencer or P2P config.
-            zone_node = zone_node.with_external_deposit_consumer();
-        }
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
         // The ZoneEngine is the sole block producer; it advances the chain when L1
