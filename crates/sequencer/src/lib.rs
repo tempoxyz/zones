@@ -38,8 +38,8 @@ pub use encryption_key::{
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
-    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, SettlementAbi,
-    resolve_portal_zone_anchor,
+    BatchAnchor, BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatch,
+    SettlementAbi, resolve_portal_zone_anchor,
 };
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
@@ -161,7 +161,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         prover::spawn_shadow_prover(
             prover_config,
             config.portal_address,
-            config.batch_anchor_config,
             zone_provider.clone(),
             l1_provider.clone(),
         )

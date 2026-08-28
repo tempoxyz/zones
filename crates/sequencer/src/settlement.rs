@@ -4,7 +4,7 @@
 //! [`ZonePortal`](crate::abi::ZonePortal) contract deployed on L1. The sequencer
 //! signing key is used for every L1 transaction.
 //!
-//! [`BatchData`] is produced by the zone monitor and passed to the submitter.
+//! [`PreparedBatch`] is produced by the zone monitor and passed to the submitter.
 //!
 //! # POC limitations
 //!
@@ -19,7 +19,7 @@
 //! | < configured effective window | Direct | Portal reads hash from EIP-2935. |
 //! | ≥ configured effective window | Ancestry | Use a recent anchor and collect ancestry headers for the batch. |
 //!
-//! [`AnchorMode`] handles submissions whose `tempoBlockNumber` is outside the
+//! [`BatchAnchor`] handles submissions whose `tempoBlockNumber` is outside the
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
@@ -63,6 +63,7 @@ use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 pub enum BatchSubmitError {
     Cancelled,
     PortalAdvanced,
+    PreparedAnchorInvalid(eyre::Report),
     Other(eyre::Report),
 }
 
@@ -79,6 +80,7 @@ impl fmt::Display for BatchSubmitError {
             Self::PortalAdvanced => {
                 formatter.write_str("portal advanced while waiting for settlement quorum")
             }
+            Self::PreparedAnchorInvalid(error) => error.fmt(formatter),
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -314,9 +316,15 @@ impl BatchSubmitter {
         self.attestation_store = store;
     }
 
+    /// Resolve the single immutable anchor shared by proving, quorum, and submission.
+    pub async fn prepare_batch(&self, batch: BatchData) -> Result<PreparedBatch> {
+        let anchor = self.resolve_batch_anchor(batch.tempo_block_number).await?;
+        Ok(PreparedBatch { batch, anchor })
+    }
+
     /// Submit a batch to the ZonePortal on Tempo L1.
     ///
-    /// Resolves the anchor mode based on how old `tempo_block_number` is:
+    /// Uses the anchor already selected by the zone monitor:
     ///
     /// - **Direct** — `tempo_block_number` is within the configured effective window,
     ///   the portal reads its hash directly from EIP-2935.
@@ -332,18 +340,20 @@ impl BatchSubmitter {
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
-        tempo_block = batch.tempo_block_number,
-        prev_block_hash = %batch.prev_block_hash,
-        next_block_hash = %batch.next_block_hash,
-        withdrawal_queue_hash = %batch.withdrawal_queue_hash,
-        withdrawal_batch_index = batch.withdrawal_batch_index,
+        tempo_block = prepared.batch.tempo_block_number,
+        anchor_block = prepared.anchor_block_number(),
+        prev_block_hash = %prepared.batch.prev_block_hash,
+        next_block_hash = %prepared.batch.next_block_hash,
+        withdrawal_queue_hash = %prepared.batch.withdrawal_queue_hash,
+        withdrawal_batch_index = prepared.batch.withdrawal_batch_index,
     ))]
     pub async fn submit_batch(
         &self,
-        batch: &BatchData,
+        prepared: &PreparedBatch,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
+        let batch = &prepared.batch;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -366,68 +376,51 @@ impl BatchSubmitter {
             .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
             .await?;
         self.validate_submission_metadata(batch, metadata)?;
-        let (certificate, anchor_mode, current_l1_block) =
-            if let Some(store) = &self.attestation_store {
-                let threshold = metadata.sequencer_threshold as usize;
-                info!(
-                    zone_height = batch.zone_height,
-                    threshold, "Waiting for settlement quorum"
-                );
-                let certificate = self
-                    .wait_for_settlement_or_portal_progress(
-                        store,
-                        batch.zone_height,
-                        threshold,
-                        batch.prev_block_hash,
-                        shutdown,
-                    )
-                    .await?;
-                let anchor_mode = match self
-                    .validate_certificate(
-                        batch,
-                        settlement_abi,
-                        batch.zone_height,
-                        metadata,
-                        &certificate,
-                    )
-                    .await
-                {
-                    Ok(anchor_mode) => anchor_mode,
-                    Err(err) => {
-                        store.remove_settlement(batch.zone_height, certificate.digest);
-                        return Err(err.into());
-                    }
-                };
-                let current_l1_block = self
-                    .l1_provider
-                    .get_block_number()
-                    .await
-                    .map_err(|error| BatchSubmitError::Other(error.into()))?;
-                (Some(certificate), anchor_mode, current_l1_block)
-            } else {
-                let (anchor_mode, current_l1_block) =
-                    self.resolve_anchor_mode(batch.tempo_block_number).await?;
-                (None, anchor_mode, current_l1_block)
-            };
-        let recent_tempo_block_number = anchor_mode.recent_block_number();
+        let certificate = if let Some(store) = &self.attestation_store {
+            let threshold = metadata.sequencer_threshold as usize;
+            info!(
+                zone_height = batch.zone_height,
+                threshold, "Waiting for settlement quorum"
+            );
+            let certificate = self
+                .wait_for_settlement_or_portal_progress(
+                    store,
+                    batch.zone_height,
+                    threshold,
+                    batch.prev_block_hash,
+                    prepared,
+                    shutdown,
+                )
+                .await?;
+            match self.validate_certificate(
+                prepared,
+                settlement_abi,
+                batch.zone_height,
+                metadata,
+                &certificate,
+            ) {
+                Ok(()) => {}
+                Err(err) => {
+                    store.remove_settlement(batch.zone_height, certificate.digest);
+                    return Err(err.into());
+                }
+            }
+            Some(certificate)
+        } else {
+            None
+        };
+        let current_l1_block = self.validate_prepared_anchor(prepared).await?;
+        let recent_tempo_block_number = prepared.anchor.recent_block_number();
         // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
         // cannot land before N+1, so anchoring to the current tip is valid at execution time.
-        let anchors_to_current_tip =
-            anchor_mode.anchor_block_number(batch.tempo_block_number) == current_l1_block;
+        let anchor_block_number = prepared.anchor_block_number();
+        let anchor_block_hash = prepared.anchor.block_hash();
+        let anchors_to_current_tip = anchor_block_number == current_l1_block;
 
         let signatures = if let Some(certificate) = &certificate {
             certificate.signatures.clone()
         } else {
             // Legacy mode, where the 1-of-1 sequencer will self-sign the attestation
-            let anchor_block_number = anchor_mode.anchor_block_number(batch.tempo_block_number);
-            let anchor_block_hash = self
-                .l1_provider
-                .get_block_by_number(anchor_block_number.into())
-                .await
-                .map_err(|error| BatchSubmitError::Other(error.into()))?
-                .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
-                .header
-                .hash;
             let signer = signer
                 .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
             if !metadata.signer_is_sequencer {
@@ -465,7 +458,9 @@ impl BatchSubmitter {
             .map_err(|error| BatchSubmitError::Other(error.into()))?;
 
         info!(
-            anchor_mode = %anchor_mode,
+            anchor_mode = prepared.anchor.mode_name(),
+            anchor_block_number,
+            anchor_block_hash = %anchor_block_hash,
             recent_tempo_block_number,
             current_l1_block,
             anchors_to_current_tip,
@@ -559,6 +554,7 @@ impl BatchSubmitter {
         height: u64,
         threshold: usize,
         expected_portal_hash: B256,
+        prepared: &PreparedBatch,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<SettlementCertificate, BatchSubmitError> {
         loop {
@@ -583,6 +579,7 @@ impl BatchSubmitter {
             if portal_hash != expected_portal_hash {
                 return Err(BatchSubmitError::PortalAdvanced);
             }
+            self.validate_prepared_anchor(prepared).await?;
         }
     }
 
@@ -762,14 +759,15 @@ impl BatchSubmitter {
 
     /// Validate that a collected certificate commits to the exact calldata this submitter will
     /// send, and derive the anchor mode from the signed statement instead of recomputing it.
-    async fn validate_certificate(
+    fn validate_certificate(
         &self,
-        batch: &BatchData,
+        prepared: &PreparedBatch,
         settlement_abi: SettlementAbi,
         zone_height: u64,
         metadata: PortalSubmissionMetadata,
         certificate: &SettlementCertificate,
-    ) -> Result<AnchorMode> {
+    ) -> Result<()> {
+        let batch = &prepared.batch;
         if certificate.height != zone_height {
             return Err(eyre::eyre!(
                 "settlement certificate height {} does not match batch height {zone_height}",
@@ -841,42 +839,16 @@ impl BatchSubmitter {
             attestation.verifierConfigHash == alloy_primitives::keccak256(Bytes::new()),
             "certificate verifier config changed"
         );
-
-        let current_l1_block = self.l1_provider.get_block_number().await?;
-        validate_certificate_anchor(
-            attestation.anchorBlockNumber,
-            current_l1_block,
-            self.anchor_config.history_window(),
-        )?;
-
-        let anchor = self
-            .l1_provider
-            .get_block_by_number(attestation.anchorBlockNumber.into())
-            .await?
-            .ok_or_eyre(format!(
-                "missing certified L1 anchor block {}",
-                attestation.anchorBlockNumber
-            ))?;
         eyre::ensure!(
-            anchor.header.hash == attestation.anchorBlockHash,
+            attestation.anchorBlockNumber == prepared.anchor_block_number(),
+            "certificate anchor block changed"
+        );
+        eyre::ensure!(
+            attestation.anchorBlockHash == prepared.anchor.block_hash(),
             "certificate anchor hash changed"
         );
 
-        if attestation.anchorBlockNumber == batch.tempo_block_number {
-            Ok(AnchorMode::Direct)
-        } else {
-            eyre::ensure!(
-                attestation.anchorBlockNumber > batch.tempo_block_number,
-                "certificate ancestry anchor does not follow its Tempo block"
-            );
-            let ancestry_headers = self
-                .fetch_ancestry_headers(batch.tempo_block_number, attestation.anchorBlockNumber)
-                .await?;
-            Ok(AnchorMode::Ancestry {
-                anchor_block: attestation.anchorBlockNumber,
-                ancestry_headers,
-            })
-        }
+        Ok(())
     }
 
     /// Resolve the anchor mode for the given `tempo_block_number`.
@@ -886,7 +858,7 @@ impl BatchSubmitter {
     /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
     ///   behind the configured safety margin is used as anchor. Ancestry headers
     ///   are collected and validated for future prover integration.
-    async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<(AnchorMode, u64)> {
+    async fn resolve_batch_anchor(&self, tempo_block_number: u64) -> Result<BatchAnchor> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
         if tempo_block_number > current_l1_block {
@@ -906,7 +878,14 @@ impl BatchSubmitter {
                 *self.ancestry_header_cache.write() =
                     LruMap::new(ByLength::new(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY));
             }
-            return Ok((AnchorMode::Direct, current_l1_block));
+            let block_hash = self
+                .l1_provider
+                .get_header_by_number(tempo_block_number.into())
+                .await?
+                .ok_or_eyre(format!("L1 anchor block {tempo_block_number} not found"))?
+                .inner
+                .hash;
+            return Ok(BatchAnchor::Direct { block_hash });
         }
 
         let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
@@ -924,13 +903,67 @@ impl BatchSubmitter {
             "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
         );
 
-        Ok((
-            AnchorMode::Ancestry {
-                anchor_block,
-                ancestry_headers,
-            },
-            current_l1_block,
-        ))
+        let block_hash = self
+            .l1_provider
+            .get_header_by_number(anchor_block.into())
+            .await?
+            .ok_or_eyre(format!("L1 anchor block {anchor_block} not found"))?
+            .inner
+            .hash;
+        Ok(BatchAnchor::Ancestry {
+            block_number: anchor_block,
+            block_hash,
+            ancestry_headers,
+        })
+    }
+
+    async fn validate_prepared_anchor(
+        &self,
+        prepared: &PreparedBatch,
+    ) -> std::result::Result<u64, BatchSubmitError> {
+        let anchor = &prepared.anchor;
+        let anchor_block_number = prepared.anchor_block_number();
+        if anchor_block_number < prepared.batch.tempo_block_number {
+            return Err(BatchSubmitError::PreparedAnchorInvalid(eyre::eyre!(
+                "prepared L1 anchor predates the batch Tempo block"
+            )));
+        }
+
+        let current_l1_block = self
+            .l1_provider
+            .get_block_number()
+            .await
+            .map_err(|error| BatchSubmitError::Other(error.into()))?;
+        if anchor_block_number > current_l1_block {
+            return Err(BatchSubmitError::Other(eyre::eyre!(
+                "prepared L1 anchor block is ahead of the current L1 tip"
+            )));
+        }
+        if current_l1_block.saturating_sub(anchor_block_number)
+            >= self.anchor_config.history_window()
+        {
+            return Err(BatchSubmitError::PreparedAnchorInvalid(eyre::eyre!(
+                "prepared L1 anchor block fell outside the EIP-2935 history window"
+            )));
+        }
+
+        let canonical = self
+            .l1_provider
+            .get_header_by_number(anchor_block_number.into())
+            .await
+            .map_err(|error| BatchSubmitError::Other(error.into()))?
+            .ok_or_else(|| {
+                BatchSubmitError::Other(eyre::eyre!(
+                    "prepared L1 anchor block {} not found",
+                    anchor_block_number
+                ))
+            })?;
+        if canonical.inner.hash != anchor.block_hash() {
+            return Err(BatchSubmitError::PreparedAnchorInvalid(eyre::eyre!(
+                "prepared L1 anchor hash is no longer canonical"
+            )));
+        }
+        Ok(current_l1_block)
     }
 
     /// Fetch and RLP-encode L1 block headers from `from + 1` to `to` (inclusive),
@@ -1275,7 +1308,7 @@ impl SettlementAbi {
 
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
-/// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
+/// Produced by the zone monitor and combined with one [`BatchAnchor`] in [`PreparedBatch`].
 #[derive(Debug, Clone)]
 pub struct BatchData {
     /// Zone L2 height committed by this batch.
@@ -1302,6 +1335,81 @@ pub struct BatchData {
     pub withdrawal_queue_hash: B256,
     /// L2 withdrawal batch index validated against the portal before submission.
     pub withdrawal_batch_index: u64,
+}
+
+/// Immutable Tempo anchor selected for one settlement attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchAnchor {
+    /// The batch's Tempo block remains directly available through EIP-2935.
+    Direct {
+        /// Canonical hash of `BatchData::tempo_block_number` at preparation time.
+        block_hash: B256,
+    },
+    /// A recent L1 block anchors a parent-linked header chain from the batch's Tempo block.
+    Ancestry {
+        /// Recent L1 block number whose hash the portal passes to the verifier.
+        block_number: u64,
+        /// Canonical hash of `block_number` at preparation time.
+        block_hash: B256,
+        /// Headers from `BatchData::tempo_block_number + 1` through `block_number`.
+        ancestry_headers: Vec<Bytes>,
+    },
+}
+
+impl BatchAnchor {
+    /// Returns the L1 block whose hash the portal passes to the verifier.
+    pub const fn block_number(&self, tempo_block_number: u64) -> u64 {
+        match self {
+            Self::Direct { .. } => tempo_block_number,
+            Self::Ancestry { block_number, .. } => *block_number,
+        }
+    }
+
+    /// Returns the canonical hash of the selected anchor block.
+    pub const fn block_hash(&self) -> B256 {
+        match self {
+            Self::Direct { block_hash } | Self::Ancestry { block_hash, .. } => *block_hash,
+        }
+    }
+
+    /// Returns the prepared ancestry headers, empty in direct mode.
+    pub fn ancestry_headers(&self) -> &[Bytes] {
+        match self {
+            Self::Direct { .. } => &[],
+            Self::Ancestry {
+                ancestry_headers, ..
+            } => ancestry_headers,
+        }
+    }
+
+    /// Returns the `recentTempoBlockNumber` argument for `submitBatch`.
+    pub const fn recent_block_number(&self) -> u64 {
+        match self {
+            Self::Direct { .. } => 0,
+            Self::Ancestry { block_number, .. } => *block_number,
+        }
+    }
+
+    const fn mode_name(&self) -> &'static str {
+        match self {
+            Self::Direct { .. } => "direct",
+            Self::Ancestry { .. } => "ancestry",
+        }
+    }
+}
+
+/// Batch commitments and their single authoritative Tempo anchor.
+#[derive(Debug, Clone)]
+pub struct PreparedBatch {
+    pub batch: BatchData,
+    pub anchor: BatchAnchor,
+}
+
+impl PreparedBatch {
+    /// Returns the L1 block whose hash the portal passes to the verifier.
+    pub const fn anchor_block_number(&self) -> u64 {
+        self.anchor.block_number(self.batch.tempo_block_number)
+    }
 }
 
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
@@ -1388,73 +1496,6 @@ struct CachedAncestryHeader {
 struct ResolvedAncestry {
     headers: Vec<Bytes>,
     fetched_headers: Vec<(u64, CachedAncestryHeader)>,
-}
-
-/// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
-///
-/// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
-/// `submit_batch` can use ancestry mode when the batch-final block's
-/// `tempoBlockNumber` has fallen outside the configured direct-submission
-/// window.
-#[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
-enum AnchorMode {
-    /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
-    /// reads its hash directly. No extra proof data required.
-    Direct,
-    /// `tempoBlockNumber` is outside the effective window. A recent L1 block is
-    /// used as anchor, and the collected headers prove the parent-hash chain.
-    Ancestry {
-        /// Recent L1 block number within the EIP-2935 window, used as the
-        /// on-chain anchor for hash verification.
-        anchor_block: u64,
-        /// RLP-encoded L1 block headers from `tempo_block_number + 1` to
-        /// `anchor_block`, in ascending order. Available for the prover to
-        /// consume when integrated.
-        ancestry_headers: Vec<Bytes>,
-    },
-}
-
-impl AnchorMode {
-    /// Returns the `recentTempoBlockNumber` argument for `submitBatch`:
-    /// `0` for direct mode, or the anchor block number for ancestry mode.
-    const fn recent_block_number(&self) -> u64 {
-        match self {
-            Self::Direct => 0,
-            Self::Ancestry { anchor_block, .. } => *anchor_block,
-        }
-    }
-
-    const fn anchor_block_number(&self, tempo_block_number: u64) -> u64 {
-        match self {
-            Self::Direct => tempo_block_number,
-            Self::Ancestry { anchor_block, .. } => *anchor_block,
-        }
-    }
-}
-
-fn validate_certificate_anchor(
-    anchor_block_number: u64,
-    current_l1_block: u64,
-    history_window: u64,
-) -> Result<()> {
-    eyre::ensure!(
-        anchor_block_number <= current_l1_block,
-        "certificate anchor block is ahead of the current L1 tip"
-    );
-    eyre::ensure!(
-        current_l1_block.saturating_sub(anchor_block_number) < history_window,
-        "certificate anchor block fell outside the EIP-2935 history window"
-    );
-    Ok(())
-}
-
-impl fmt::Display for AnchorMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Direct => f.write_str("direct"),
-            Self::Ancestry { .. } => f.write_str("ancestry"),
-        }
-    }
 }
 
 /// Merge cached and fetched headers into one validated ancestry range.
@@ -1950,6 +1991,28 @@ mod tests {
         assert_ne!(SettlementAbi::T12.token_transition_hash(0, 0), B256::ZERO);
     }
 
+    fn test_prepared_batch(zone_height: u64, tempo_block_number: u64) -> PreparedBatch {
+        PreparedBatch {
+            batch: BatchData {
+                zone_height,
+                tempo_block_number,
+                prev_block_hash: B256::repeat_byte(0x24),
+                next_block_hash: B256::repeat_byte(0x25),
+                prev_processed_deposit_hash: B256::ZERO,
+                next_processed_deposit_hash: B256::ZERO,
+                prev_deposit_number: 0,
+                next_deposit_number: 0,
+                prev_processed_token_count: 0,
+                next_processed_token_count: 0,
+                withdrawal_queue_hash: B256::ZERO,
+                withdrawal_batch_index: 1,
+            },
+            anchor: BatchAnchor::Direct {
+                block_hash: B256::repeat_byte(0x26),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn resolves_portal_hash_to_local_zone_height() {
         let portal_hash = B256::repeat_byte(0x42);
@@ -2009,6 +2072,7 @@ mod tests {
                 120,
                 2,
                 B256::repeat_byte(0x24),
+                &test_prepared_batch(120, 100),
                 &sync::CancellationToken::new(),
             )
             .await
@@ -2354,11 +2418,14 @@ mod tests {
             .erased();
         let submitter = BatchSubmitter::new(Address::ZERO, provider);
 
+        let (header, hash) = mock_l1_header(100, B256::ZERO);
         asserter.push_success(&100_u64);
-        let (mode, current_l1_block) = submitter.resolve_anchor_mode(100).await.unwrap();
+        asserter.push_success(&header);
+        let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
 
-        assert!(matches!(mode, AnchorMode::Direct));
-        assert_eq!(current_l1_block, 100);
+        assert_eq!(anchor.block_number(100), 100);
+        assert_eq!(anchor.block_hash(), hash);
+        assert!(anchor.ancestry_headers().is_empty());
         assert!(asserter.read_q().is_empty());
     }
 
@@ -2371,7 +2438,7 @@ mod tests {
         let submitter = BatchSubmitter::new(Address::ZERO, provider);
 
         asserter.push_success(&100_u64);
-        let err = match submitter.resolve_anchor_mode(101).await {
+        let err = match submitter.resolve_batch_anchor(101).await {
             Ok(_) => panic!("future L1 anchor was accepted"),
             Err(err) => err,
         };
@@ -2382,14 +2449,120 @@ mod tests {
         assert!(asserter.read_q().is_empty());
     }
 
-    #[test]
-    fn certificate_anchor_validation_accepts_tip_and_rejects_future() {
-        validate_certificate_anchor(100, 100, 10).unwrap();
+    #[tokio::test]
+    async fn prepared_anchor_survives_forward_head_drift() {
+        let asserter = Asserter::new();
+        let provider = mock_l1(asserter.clone());
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let (header, hash) = mock_l1_header(162_196, B256::ZERO);
+        let mut prepared = test_prepared_batch(120, 160_000);
+        prepared.anchor = BatchAnchor::Ancestry {
+            block_number: 162_196,
+            block_hash: hash,
+            ancestry_headers: vec![Bytes::from_static(&[1])],
+        };
 
-        let err = validate_certificate_anchor(101, 100, 10).unwrap_err();
+        asserter.push_success(&162_208_u64);
+        asserter.push_success(&header);
+        let observed_head = submitter.validate_prepared_anchor(&prepared).await.unwrap();
+
+        assert_eq!(observed_head, 162_208);
+        assert_eq!(prepared.anchor_block_number(), 162_196);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepared_anchor_hard_expiry_requires_a_new_attempt() {
+        let asserter = Asserter::new();
+        let provider = mock_l1(asserter.clone());
+        let submitter = BatchSubmitter::with_anchor_config(
+            Address::ZERO,
+            provider,
+            BatchAnchorConfig::new(10, 4).unwrap(),
+        );
+        let mut prepared = test_prepared_batch(120, 90);
+        prepared.anchor = BatchAnchor::Ancestry {
+            block_number: 100,
+            block_hash: B256::repeat_byte(0x26),
+            ancestry_headers: vec![Bytes::from_static(&[1])],
+        };
+
+        asserter.push_success(&110_u64);
+        let error = submitter
+            .validate_prepared_anchor(&prepared)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, BatchSubmitError::PreparedAnchorInvalid(_)));
         assert!(
-            err.to_string()
-                .contains("certificate anchor block is ahead of the current L1 tip")
+            error
+                .to_string()
+                .contains("outside the EIP-2935 history window")
+        );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[test]
+    fn certificate_must_commit_the_prepared_anchor_exactly() {
+        let submitter = BatchSubmitter::new(Address::ZERO, mock_l1(Asserter::new()));
+        let prepared = test_prepared_batch(120, 100);
+        let batch = &prepared.batch;
+        let metadata = PortalSubmissionMetadata {
+            withdrawal_batch_index: 0,
+            stable: StablePortalMetadata {
+                zone_id: 7,
+                chain_id: 1,
+            },
+            sequencer_set_version: 3,
+            sequencer_threshold: 1,
+            signer_is_sequencer: true,
+            verifier: Address::repeat_byte(2),
+        };
+        let attestation = SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: 3,
+            zoneHeight: U256::from(batch.zone_height),
+            withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
+            verifier: metadata.verifier,
+            tempoBlockNumber: batch.tempo_block_number,
+            anchorBlockNumber: prepared.anchor_block_number() + 12,
+            anchorBlockHash: B256::repeat_byte(0x99),
+            blockTransitionHash: keccak256(
+                (batch.prev_block_hash, batch.next_block_hash).abi_encode(),
+            ),
+            depositQueueTransitionHash: keccak256(
+                (
+                    batch.prev_processed_deposit_hash,
+                    batch.next_processed_deposit_hash,
+                    batch.prev_deposit_number,
+                    batch.next_deposit_number,
+                )
+                    .abi_encode(),
+            ),
+            tokenEnablementTransitionHash: B256::ZERO,
+            withdrawalQueueHash: batch.withdrawal_queue_hash,
+            verifierConfigHash: keccak256(Bytes::new()),
+        };
+        let certificate = SettlementCertificate {
+            height: batch.zone_height,
+            digest: B256::ZERO,
+            attestation,
+            signatures: Vec::new(),
+        };
+
+        let error = submitter
+            .validate_certificate(
+                &prepared,
+                SettlementAbi::Legacy,
+                batch.zone_height,
+                metadata,
+                &certificate,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("certificate anchor block changed")
         );
     }
 
@@ -2505,10 +2678,12 @@ mod tests {
                 .insert(98, cached_header)
         );
 
+        let (header, hash) = mock_l1_header(99, B256::ZERO);
         asserter.push_success(&100_u64);
-        let (mode, _) = submitter.resolve_anchor_mode(99).await.unwrap();
+        asserter.push_success(&header);
+        let anchor = submitter.resolve_batch_anchor(99).await.unwrap();
 
-        assert!(matches!(mode, AnchorMode::Direct));
+        assert_eq!(anchor.block_hash(), hash);
         assert!(submitter.ancestry_header_cache.read().is_empty());
         assert!(asserter.read_q().is_empty());
     }
