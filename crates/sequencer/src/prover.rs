@@ -264,19 +264,28 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
 
 impl ShadowProver {
     /// Queue a candidate without waiting for validation or queue capacity.
-    pub fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
-        self.try_enqueue_job(from, to, batch, None);
-    }
-
-    /// Queue a finalized candidate using the exact anchor committed on L1.
-    pub fn try_enqueue_with_anchor(
-        &self,
-        from: u64,
-        to: u64,
-        batch: BatchData,
-        anchor: ShadowProofAnchor,
-    ) {
-        self.try_enqueue_job(from, to, batch, Some(anchor));
+    pub(crate) fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+        if let Err(err) = self.sender.try_send(ProverJob {
+            from,
+            to,
+            batch: batch.clone(),
+            anchor: None,
+            enqueued_at: Instant::now(),
+        }) {
+            error!(
+                target: "zone::sequencer::prover",
+                zone_from = from,
+                zone_to = to,
+                prev_block_hash = %batch.prev_block_hash,
+                next_block_hash = %batch.next_block_hash,
+                error = %err,
+                "Shadow prover queue {}; skipping finalized batch candidate",
+                match err {
+                    TrySendError::Full(_) => "full",
+                    TrySendError::Closed(_) => "unavailable",
+                },
+            );
+        }
     }
 
     /// Queue a finalized candidate, waiting for capacity so authoritative L1 evidence is not
@@ -298,36 +307,6 @@ impl ShadowProver {
             })
             .await
             .map_err(|_| eyre::eyre!("shadow prover queue is unavailable"))
-    }
-
-    fn try_enqueue_job(
-        &self,
-        from: u64,
-        to: u64,
-        batch: BatchData,
-        anchor: Option<ShadowProofAnchor>,
-    ) {
-        if let Err(err) = self.sender.try_send(ProverJob {
-            from,
-            to,
-            batch: batch.clone(),
-            anchor,
-            enqueued_at: Instant::now(),
-        }) {
-            error!(
-                target: "zone::sequencer::prover",
-                zone_from = from,
-                zone_to = to,
-                prev_block_hash = %batch.prev_block_hash,
-                next_block_hash = %batch.next_block_hash,
-                error = %err,
-                "Shadow prover queue {}; skipping finalized batch candidate",
-                match err {
-                    TrySendError::Full(_) => "full",
-                    TrySendError::Closed(_) => "unavailable",
-                },
-            );
-        }
     }
 }
 
