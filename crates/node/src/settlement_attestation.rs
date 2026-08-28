@@ -596,7 +596,9 @@ async fn propose_settlement<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
-    let commitments = block_commitments(provider, number)?;
+    let Some(commitments) = block_commitments(provider, number)? else {
+        return Ok(false);
+    };
     if commitments.withdrawal.is_none() {
         return Ok(false);
     }

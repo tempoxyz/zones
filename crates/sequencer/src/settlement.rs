@@ -2539,6 +2539,7 @@ mod tests {
                 )
                     .abi_encode(),
             ),
+            tokenEnablementTransitionHash: B256::ZERO,
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfigHash: keccak256(Bytes::new()),
         };
@@ -2550,7 +2551,13 @@ mod tests {
         };
 
         let error = submitter
-            .validate_certificate(&prepared, batch.zone_height, metadata, &certificate)
+            .validate_certificate(
+                &prepared,
+                SettlementAbi::Legacy,
+                batch.zone_height,
+                metadata,
+                &certificate,
+            )
             .unwrap_err();
         assert!(
             error

@@ -39,8 +39,7 @@ pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
     BatchAnchor, BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatch,
-    SettlementAbi,
-    resolve_portal_zone_anchor,
+    SettlementAbi, resolve_portal_zone_anchor,
 };
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,

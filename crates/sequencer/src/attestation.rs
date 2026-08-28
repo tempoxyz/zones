@@ -673,6 +673,7 @@ mod tests {
             anchorBlockHash: B256::repeat_byte(3),
             blockTransitionHash: B256::repeat_byte(4),
             depositQueueTransitionHash: B256::repeat_byte(5),
+            tokenEnablementTransitionHash: B256::ZERO,
             withdrawalQueueHash: B256::repeat_byte(6),
             verifierConfigHash: B256::repeat_byte(7),
         };
