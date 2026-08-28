@@ -414,7 +414,6 @@ where
         Identity,
     >,
 
-    // TODO: KIT: also clean this up, use channels
     /// Queue of L1 deposit messages to be included in the next zone block.
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
@@ -426,7 +425,6 @@ where
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Static Zone P2P networking configuration.
-    // NOTE: we always need this? why is this option?
     p2p_config: P2pConfig,
 }
 
@@ -510,7 +508,6 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        // TODO: KIT: this all seems so windy why do we need all this?
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -614,9 +611,6 @@ where
             manifest: self.p2p_config.manifest().clone(),
             historical_replay_through,
         }));
-
-        // TODO: clean this up, basically want to start P2P better here, muuuuuch more contained.
-        // not sure why this is separate from the above
 
         let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
