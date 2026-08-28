@@ -60,6 +60,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io/tempoxyz
+  STAGING_REPOSITORY: ghcr.io/tempoxyz/tempo-zone-staging
   TEMPO_DEVNET_GENESIS_URL: ${{ inputs.tempo_genesis_url || 'https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json' }}
 
 jobs:
@@ -73,6 +74,7 @@ jobs:
       (github.event_name != 'schedule' && github.event_name != 'push'))
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
     outputs:
       commit_sha: ${{ steps.commit.outputs.commit_sha }}
@@ -81,8 +83,11 @@ jobs:
       staging_tag: ${{ steps.commit.outputs.staging_tag }}
       version: ${{ steps.commit.outputs.version }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Check out workflow commit
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -116,8 +121,8 @@ jobs:
             echo "version=sha-$short_sha"
           } >> "$GITHUB_OUTPUT"
 
-  reproducible-verify-resolve:
-    name: Resolve reproducible verification commit
+  reproducible-verify:
+    name: Verify reproducible candidate
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.reproducible_verify == true &&
@@ -150,7 +155,6 @@ jobs:
     # Private copies retain PR image builds, but must not publish shared images
     # or run the upstream's scheduled refreshes.
     if: >-
-      needs.resolve-production-build-inputs.result == 'success' &&
       (github.event_name != 'workflow_dispatch' || inputs.reproducible_verify != true) &&
       (github.repository == 'tempoxyz/zones' ||
       (github.event_name != 'schedule' && github.event_name != 'push'))
@@ -163,13 +167,12 @@ jobs:
       GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
       SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
       VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
-      VERGEN_GIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
-      VERGEN_GIT_SHA_SHORT: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
-    outputs:
-      tempo_zone_tags: ${{ steps.meta-tempo-zone.outputs.tags }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Check out resolved commit
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
           persist-credentials: false
@@ -265,8 +268,41 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download Tempo devnet genesis
-        shell: bash
+      - name: Log in to Docker Hub
+        if: github.repository == 'tempoxyz/zones'
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - id: shortsha
+        run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure persistent intermediate layer cache
+        env:
+          WRITE_BUILD_CACHE: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          targets = ["chef", "prover-chef", "tempo-zone", "tempo-zone-xtask",
+                     "tempo-zone-prover-utils", "tempo-zone-prover-enclave",
+                     "tempo-zone-prover", "tempo-zone-prover-eif-builder",
+                     "tempo-zone-prover-compiled"]
+          cache = {"target": {}}
+          for target in targets:
+              ref = f"{os.environ['REGISTRY']}/tempo-zone-buildcache:{target}"
+              entry = {"cache-from": [f"type=registry,ref={ref}"]}
+              if os.environ["WRITE_BUILD_CACHE"] == "true":
+                  entry["cache-to"] = [f"type=registry,ref={ref},mode=max"]
+              cache["target"][target] = entry
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "zones-buildcache.json"), "w") as f:
+              json.dump(cache, f)
+          PYTHON
+
+      - name: Resolve cached EIF builder
+        id: eif_builder
+        env:
+          REFRESH_BUILDER: ${{ github.event_name == 'schedule' }}
         run: |
           set -euo pipefail
           # Include the pinned kernel source and CLI recipe in the cache identity.
@@ -284,41 +320,8 @@ jobs:
             echo "hit=false" >> "$GITHUB_OUTPUT"
           fi
 
-          mkdir -p .tempo-genesis
-          curl --proto '=https' --tlsv1.2 \
-            --fail-with-body --location \
-            --output .tempo-genesis/genesis.json \
-            "$TEMPO_DEVNET_GENESIS_URL"
-          jq -e '.config.chainId | type == "number"' \
-            .tempo-genesis/genesis.json >/dev/null
-
-          genesis_sha=$(sha256sum .tempo-genesis/genesis.json | cut -d' ' -f1)
-          echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
-
-      # Main and release-tag production tags are attached only after the staged
-      # image passes binary reproducibility verification.
-      - name: Build and stage production tempo-zone
-        if: >-
-          github.repository == 'tempoxyz/zones' &&
-          github.event_name == 'push' &&
-          (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
-        with:
-          files: |
-            docker/docker-bake.hcl
-            ${{ steps.meta-tempo-zone.outputs.bake-file }}
-          targets: tempo-zone
-          project: 0c6tg19qsp
-          push: true
-          set: |
-            tempo-zone.tags=${{ env.REGISTRY }}/tempo-zone:${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
-
-      - name: Build and push non-production Docker images
-        if: >-
-          !(github.repository == 'tempoxyz/zones' &&
-            github.event_name == 'push' &&
-            (github.ref == 'refs/heads/main' || github.ref_type == 'tag'))
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+      - name: Compile all binaries and publish images
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           files: |
             docker/docker-bake.hcl
@@ -330,23 +333,22 @@ jobs:
             default
             tempo-zone-prover-compiled
           project: 0c6tg19qsp
-          push: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+          # Export only the executable for the later genesis packaging step.
+          set: |
+            tempo-zone-prover-compiled.target=compiled
+            tempo-zone-prover-compiled.output=type=local,dest=target/prover-compiled
+            tempo-zone.tags=${{ env.STAGING_REPOSITORY }}:${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
+            tempo-zone.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag') }}
+            tempo-zone-xtask.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+            tempo-zone-prover-utils.output=type=image,push=${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
+          # Scheduled builds refresh moving external tools and base images. All
+          # commit/tag/manual builds can safely reuse Depot's content-addressed
+          # layer cache and will still invalidate layers when inputs change.
           no-cache: ${{ github.event_name == 'schedule' }}
           pull: ${{ github.event_name == 'schedule' }}
-
-      - name: Build and push production tempo-zone-xtask
-        if: >-
-          github.repository == 'tempoxyz/zones' &&
-          github.event_name == 'push' &&
-          (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
-        with:
-          files: |
-            docker/docker-bake.hcl
-            ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
-          targets: tempo-zone-xtask
-          project: 0c6tg19qsp
-          push: true
+        env:
+          VERGEN_GIT_SHA: ${{ github.sha }}
+          VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
 
       - name: Mark compilation complete
         id: compiled
@@ -500,13 +502,6 @@ jobs:
           no-cache: ${{ github.event_name == 'schedule' }}
           pull: ${{ github.event_name == 'schedule' }}
 
-      - name: Upload tempo-zone-prover PCR measurements
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: tempo-zone-prover-measurements-${{ needs.resolve-production-build-inputs.outputs.short_sha }}
-          path: target/tempo-zone-prover-eif/measurements.json
-          if-no-files-found: error
-
   production-reproducible-clean-rebuild:
     name: Rebuild production contract without Docker cache
     needs: resolve-production-build-inputs
@@ -516,12 +511,18 @@ jobs:
       (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
     outputs:
       clean_sha256: ${{ steps.hash.outputs.sha256 }}
+      clean_runtime_config_sha256: ${{ steps.hash.outputs.runtime_config_sha256 }}
+      clean_ca_bundle_sha256: ${{ steps.hash.outputs.ca_bundle_sha256 }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Check out resolved commit
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
           fetch-depth: 1
@@ -534,6 +535,7 @@ jobs:
           SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
           VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
           NO_CACHE: "1"
+          RUNTIME_IMAGE: tempo-zone-clean:${{ github.run_id }}
         run: |
           set -euo pipefail
           docker builder prune --all --force
@@ -542,17 +544,42 @@ jobs:
       - name: Hash clean rebuild
         id: hash
         shell: bash
+        env:
+          RUNTIME_IMAGE: tempo-zone-clean:${{ github.run_id }}
         run: |
           set -euo pipefail
+
           sha256="$(sha256sum out/tempo-zone | awk '{print $1}')"
           [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || {
             echo "Invalid clean-build SHA-256: $sha256" >&2
             exit 1
           }
-          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+          runtime_config="$(docker image inspect "$RUNTIME_IMAGE" --format '{{json .Config}}' | \
+            jq -cS '{Entrypoint, Cmd, Env, WorkingDir, User, ExposedPorts, Volumes, Healthcheck, StopSignal}')"
+          runtime_config_sha256="$(printf '%s' "$runtime_config" | sha256sum | awk '{print $1}')"
+          [[ "$runtime_config_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Invalid clean runtime-config SHA-256: $runtime_config_sha256" >&2
+            exit 1
+          }
+
+          container_id="$(docker create "$RUNTIME_IMAGE")"
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/etc/ssl/certs/ca-certificates.crt" "$RUNNER_TEMP/ca-certificates.crt"
+          ca_bundle_sha256="$(sha256sum "$RUNNER_TEMP/ca-certificates.crt" | awk '{print $1}')"
+          [[ "$ca_bundle_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Invalid clean CA-bundle SHA-256: $ca_bundle_sha256" >&2
+            exit 1
+          }
+
+          {
+            echo "sha256=$sha256"
+            echo "runtime_config_sha256=$runtime_config_sha256"
+            echo "ca_bundle_sha256=$ca_bundle_sha256"
+          } >> "$GITHUB_OUTPUT"
 
   production-reproducible-verify:
-    name: Verify staged production tempo-zone binary
+    name: Verify staged tempo-zone binary and runtime inputs
     needs:
       - resolve-production-build-inputs
       - build-and-push
@@ -563,28 +590,34 @@ jobs:
       (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       packages: read
     outputs:
       image_digest: ${{ steps.compare.outputs.image_digest }}
       image_sha256: ${{ steps.compare.outputs.image_sha256 }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Log in to Container Registry
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the staged digest, extract the binary, and compare
+      - name: Resolve the staged digest and compare runtime inputs
         id: compare
         shell: bash
         env:
           COMMIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
           SOURCE_DATE_EPOCH: ${{ needs.resolve-production-build-inputs.outputs.source_date_epoch }}
           VERSION: ${{ needs.resolve-production-build-inputs.outputs.version }}
-          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/tempo-zone
+          IMAGE_REPOSITORY: ${{ env.STAGING_REPOSITORY }}
           IMAGE_TAG: ${{ needs.resolve-production-build-inputs.outputs.staging_tag }}
           CLEAN_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_sha256 }}
+          CLEAN_RUNTIME_CONFIG_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_runtime_config_sha256 }}
+          CLEAN_CA_BUNDLE_SHA256: ${{ needs.production-reproducible-clean-rebuild.outputs.clean_ca_bundle_sha256 }}
           BINARY_PATH: /usr/local/bin/tempo-zone
           CONTRACT_NAME: tempo-zone-linux-x86_64-reproducible
           CONTRACT_VERSION: "1"
@@ -594,6 +627,8 @@ jobs:
 
           image_digest=""
           image_sha256=""
+          image_runtime_config_sha256=""
+          image_ca_bundle_sha256=""
           comparison_result="failed"
           failure=""
           container_id=""
@@ -609,8 +644,12 @@ jobs:
               --arg image_digest "$image_digest" \
               --arg binary_path "$BINARY_PATH" \
               --arg image_sha256 "$image_sha256" \
+              --arg image_runtime_config_sha256 "$image_runtime_config_sha256" \
+              --arg image_ca_bundle_sha256 "$image_ca_bundle_sha256" \
               --arg clean_build_sha256 "$CLEAN_SHA256" \
-              --arg comparison_result "$comparison_result" \
+              --arg clean_runtime_config_sha256 "$CLEAN_RUNTIME_CONFIG_SHA256" \
+              --arg clean_ca_bundle_sha256 "$CLEAN_CA_BUNDLE_SHA256" \
+              --arg binary_comparison_result "$comparison_result" \
               --arg failure "$failure" \
               '{
                 commit_sha: $commit_sha,
@@ -622,14 +661,19 @@ jobs:
                   cargo_profile: "reproducible",
                   cargo_features: ["jemalloc"]
                 },
-                image: {
+                verification_scope: "tempo-zone binary, runtime execution config, and CA bundle",
+                candidate_image: {
                   repository: $image_repository,
                   digest: $image_digest,
                   binary_path: $binary_path,
-                  binary_sha256: $image_sha256
+                  binary_sha256: $image_sha256,
+                  runtime_config_sha256: $image_runtime_config_sha256,
+                  ca_bundle_sha256: $image_ca_bundle_sha256
                 },
                 clean_build_sha256: $clean_build_sha256,
-                comparison_result: $comparison_result,
+                clean_runtime_config_sha256: $clean_runtime_config_sha256,
+                clean_ca_bundle_sha256: $clean_ca_bundle_sha256,
+                binary_comparison_result: $binary_comparison_result,
                 failure: $failure
               }' > "$MANIFEST"
           }
@@ -671,12 +715,31 @@ jobs:
             exit 1
           }
 
-          if [[ "$image_sha256" == "$CLEAN_SHA256" ]]; then
+          image_runtime_config="$(docker image inspect "$immutable_image" --format '{{json .Config}}' | \
+            jq -cS '{Entrypoint, Cmd, Env, WorkingDir, User, ExposedPorts, Volumes, Healthcheck, StopSignal}')"
+          image_runtime_config_sha256="$(printf '%s' "$image_runtime_config" | sha256sum | awk '{print $1}')"
+          docker cp "$container_id:/etc/ssl/certs/ca-certificates.crt" "$RUNNER_TEMP/ca-certificates.crt"
+          image_ca_bundle_sha256="$(sha256sum "$RUNNER_TEMP/ca-certificates.crt" | awk '{print $1}')"
+
+          [[ "$image_runtime_config_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            failure="invalid image runtime-config SHA-256"
+            echo "Invalid image runtime-config SHA-256: $image_runtime_config_sha256" >&2
+            exit 1
+          }
+          [[ "$image_ca_bundle_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            failure="invalid image CA-bundle SHA-256"
+            echo "Invalid image CA-bundle SHA-256: $image_ca_bundle_sha256" >&2
+            exit 1
+          }
+
+          if [[ "$image_sha256" == "$CLEAN_SHA256" && \
+              "$image_runtime_config_sha256" == "$CLEAN_RUNTIME_CONFIG_SHA256" && \
+              "$image_ca_bundle_sha256" == "$CLEAN_CA_BUNDLE_SHA256" ]]; then
             comparison_result="success"
-            echo "Staged production tempo-zone binary checksum matches clean rebuild"
+            echo "Staged tempo-zone binary and runtime inputs match the clean rebuild"
           else
-            failure="staged production image binary checksum does not match clean rebuild"
-            echo "::error::Staged production reproducible binary verification mismatch"
+            failure="staged binary or runtime input does not match clean rebuild"
+            echo "::error::Staged production reproducibility verification mismatch"
             exit 1
           fi
 
@@ -707,23 +770,55 @@ jobs:
       (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       packages: write
+    outputs:
+      image_digest: ${{ steps.promote.outputs.image_digest }}
+      binary_sha256: ${{ steps.promote.outputs.binary_sha256 }}
+      image_sha_tag: ${{ steps.promote.outputs.image_sha_tag }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+
       - name: Log in to Container Registry
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Docker metadata for promoted tempo-zone
+        id: meta-tempo-zone
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        with:
+          images: |
+            ${{ env.REGISTRY }}/tempo-zone
+            docker.io/tempoxyz/tempo-zone
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
 
       - name: Promote the verified manifest and recheck its binary
         id: promote
         shell: bash
         env:
           IMAGE_REPOSITORY: ${{ env.REGISTRY }}/tempo-zone
+          DOCKER_HUB_REPOSITORY: docker.io/tempoxyz/tempo-zone
+          STAGING_REPOSITORY: ${{ env.STAGING_REPOSITORY }}
           STAGING_DIGEST: ${{ needs.production-reproducible-verify.outputs.image_digest }}
           VERIFIED_BINARY_SHA256: ${{ needs.production-reproducible-verify.outputs.image_sha256 }}
-          METADATA_TAGS: ${{ needs.build-and-push.outputs.tempo_zone_tags }}
+          METADATA_TAGS: ${{ steps.meta-tempo-zone.outputs.tags }}
           BINARY_PATH: /usr/local/bin/tempo-zone
         run: |
           set -Eeuo pipefail
@@ -740,22 +835,34 @@ jobs:
           mapfile -t metadata_tags <<< "$METADATA_TAGS"
           tag_args=()
           tags=()
+          image_sha_tag=""
           for tag in "${metadata_tags[@]}"; do
             tag="${tag%$'\r'}"
             [[ -z "$tag" ]] && continue
-            [[ "$tag" == "$IMAGE_REPOSITORY:"* ]] || {
+            [[ "$tag" == "$IMAGE_REPOSITORY:"* || "$tag" == "$DOCKER_HUB_REPOSITORY:"* ]] || {
               echo "Unexpected tempo-zone tag: $tag" >&2
               exit 1
             }
             tag_args+=(--tag "$tag")
             tags+=("$tag")
+            if [[ "$tag" == "$IMAGE_REPOSITORY:"* && "$tag" =~ :sha-[0-9a-f]{7}$ ]]; then
+              [[ -z "$image_sha_tag" ]] || {
+                echo "Multiple Docker SHA tags were generated" >&2
+                exit 1
+              }
+              image_sha_tag="$tag"
+            fi
           done
           (( ${#tags[@]} > 0 )) || {
             echo "No production tempo-zone tags were generated" >&2
             exit 1
           }
+          [[ -n "$image_sha_tag" ]] || {
+            echo "No Docker SHA tag was generated" >&2
+            exit 1
+          }
 
-          source_image="$IMAGE_REPOSITORY@$STAGING_DIGEST"
+          source_image="$STAGING_REPOSITORY@$STAGING_DIGEST"
           docker buildx imagetools create --prefer-index=false \
             "${tag_args[@]}" "$source_image"
 
@@ -796,6 +903,7 @@ jobs:
           {
             echo "image_digest=$STAGING_DIGEST"
             echo "binary_sha256=$promoted_sha256"
+            echo "image_sha_tag=$image_sha_tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish Zones CI event
@@ -806,16 +914,22 @@ jobs:
           EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
           EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
           COMMIT_SHA: ${{ needs.resolve-production-build-inputs.outputs.commit_sha }}
-          SHORT_SHA: ${{ needs.resolve-production-build-inputs.outputs.short_sha }}
           IMAGE_DIGEST: ${{ steps.promote.outputs.image_digest }}
+          IMAGE_SHA_TAG: ${{ steps.promote.outputs.image_sha_tag }}
         run: |
           set -euo pipefail
+
+          tag="${IMAGE_SHA_TAG##*:}"
+          [[ "$tag" =~ ^sha-[0-9a-f]{7}$ ]] || {
+            echo "Invalid promoted Docker SHA tag: $IMAGE_SHA_TAG" >&2
+            exit 1
+          }
 
           install -m 0700 -d "$RUNNER_TEMP/events"
           printf '%s' "$EVENTS_KEY" > "$RUNNER_TEMP/events/key.pem"
           printf '%s' "$EVENTS_CERT" > "$RUNNER_TEMP/events/cert.pem"
           payload=$(jq -cn \
-            --arg tag "sha-${SHORT_SHA}" \
+            --arg tag "$tag" \
             --arg sha "$COMMIT_SHA" \
             --arg branch "$GITHUB_REF_NAME" \
             --arg digest "$IMAGE_DIGEST" \
