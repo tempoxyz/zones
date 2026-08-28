@@ -2,6 +2,7 @@
 
 use std::{
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -16,6 +17,7 @@ use reth_ethereum::cli::Cli;
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
+use reth_tasks::TaskExecutor;
 use reth_tracing::tracing::{info, warn};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
@@ -28,7 +30,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::ProvisionedZone,
+    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    dev::{ProvisionConfig, ProvisionedZone},
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
@@ -90,97 +93,20 @@ pub fn run(mut cli: ZoneCli) -> eyre::Result<()> {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        let is_dev = builder.config().dev.dev;
-        eyre::ensure!(
-            !is_dev || args.sequencer_manifest.is_none(),
-            "--sequencer.manifest cannot be used with --dev"
-        );
-        let (l1_rpc_url, portal_address, sequencer_signer, _l1_handle) = if is_dev {
-            let dev_signer = crate::dev::dev_signer(&builder.config().dev.dev_mnemonic)?;
-            let l1_chain_spec = Arc::new(crate::dev::dev_l1_chain_spec(dev_signer.address()));
-            let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
-                .with_unused_ports()
-                .dev()
-                .with_rpc(
-                    RpcServerArgs::default()
-                        .with_unused_ports()
-                        .with_http()
-                        .with_http_api(RpcModuleSelection::All)
-                        .with_ws()
-                        .with_ws_api(RpcModuleSelection::All),
-                );
-            l1_config.dev = builder.config().dev.clone();
-            l1_config.dev.dev = true;
-            l1_config.dev.block_time = l1_config
-                .dev
-                .block_time
-                .or(Some(Duration::from_millis(500)));
-            l1_config.dev.finality_depth = std::num::NonZeroUsize::MIN;
-
-            let l1_handle = NodeBuilder::new(l1_config)
-                .testing_node(builder.task_executor().clone())
-                .node(TempoNode::default())
-                .launch_with_debug_capabilities()
-                .await?;
-            let l1_rpc_url = l1_handle
-                .node
-                .rpc_server_handle()
-                .ws_url()
-                .ok_or_else(|| eyre::eyre!("embedded Tempo L1 WebSocket RPC did not start"))?;
-
-            crate::dev::prefund_custom_dev_account(&l1_rpc_url, dev_signer.address()).await?;
-            let zone_rpc_url = format!(
-                "http://{}:{}",
-                builder.config().rpc.http_addr,
-                builder.config().rpc.http_port
+        let (l1_rpc_url, portal_address, sequencer_signer) = if builder.config().dev.dev {
+            eyre::ensure!(
+                args.sequencer_manifest.is_none(),
+                "--sequencer.manifest cannot be used with --dev"
             );
-            let provisioned = crate::dev::provision_zone(crate::dev::ProvisionConfig {
-                l1_rpc_url: l1_rpc_url.clone(),
-                dev_key: dev_signer.clone(),
-                factory: None,
-                initial_token: args.dev_token,
-                is_access_open: !args.dev_access_mode,
-                is_gateway_enforced: args.dev_gateway_mode,
-                zone_gateways: args.dev_zone_gateways.clone(),
-                allowed_accounts: args.dev_allowed_accounts.clone(),
-                rpc_url: zone_rpc_url.clone(),
-                // Stable across restarts; the subscriber still replays createZone from block 0.
-                anchor_block_number: Some(0),
-            })
-            .await?;
-
-            builder.config_mut().chain = Arc::new(ZoneChainSpec::from_genesis_with_l1(
-                provisioned.genesis.clone(),
-                l1_chain_spec.as_ref(),
-            )?);
-            write_dev_artifacts(
-                builder.config().datadir().data_dir(),
-                &provisioned,
-                &args,
-                &dev_signer,
-                &zone_rpc_url,
-            )?;
-
-            info!(
-                target: "reth::cli",
-                zone_id = provisioned.zone_id,
-                chain_id = provisioned.chain_id,
-                portal = %provisioned.portal,
-                l1_rpc = %l1_rpc_url,
-                zone_rpc = %zone_rpc_url,
-                "Tempo Zone dev stack ready"
-            );
-            let portal = provisioned.portal;
-            (l1_rpc_url, portal, Some(dev_signer), Some(l1_handle))
+            let executor = builder.task_executor().clone();
+            let dev = init_dev(builder.config_mut(), &args, executor).await?;
+            (dev.l1_rpc_url, dev.portal, Some(dev.signer))
         } else {
-            let l1_rpc_url = args
-                .l1_rpc_url
-                .clone()
-                .ok_or_else(|| eyre::eyre!("--l1.rpc-url is required unless --dev is used"))?;
-            let portal_address = args.portal_address.ok_or_else(|| {
-                eyre::eyre!("--l1.portal-address is required unless --dev is used")
-            })?;
-            (l1_rpc_url, portal_address, None, None)
+            (
+                args.l1_rpc_url.clone().expect("required without --dev"),
+                args.portal_address.expect("required without --dev"),
+                None,
+            )
         };
 
         let zone_id = builder.config().chain.zone_id();
@@ -251,6 +177,98 @@ pub fn run(mut cli: ZoneCli) -> eyre::Result<()> {
                     .await
             }
         }
+    })
+}
+
+struct Dev {
+    l1_rpc_url: String,
+    portal: Address,
+    signer: PrivateKeySigner,
+}
+
+async fn init_dev(
+    config: &mut NodeConfig<ZoneChainSpec>,
+    args: &ZoneArgs,
+    executor: TaskExecutor,
+) -> eyre::Result<Dev> {
+    let signer = crate::dev::dev_signer(&config.dev.dev_mnemonic)?;
+    let l1_chain_spec = Arc::new(crate::dev::dev_l1_chain_spec(signer.address()));
+    let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
+        .with_unused_ports()
+        .dev()
+        .with_rpc(
+            RpcServerArgs::default()
+                .with_unused_ports()
+                .with_http()
+                .with_http_api(RpcModuleSelection::All)
+                .with_ws()
+                .with_ws_api(RpcModuleSelection::All),
+        );
+    l1_config.dev = config.dev.clone();
+    l1_config.dev.dev = true;
+    l1_config.dev.block_time = l1_config
+        .dev
+        .block_time
+        .or(Some(Duration::from_millis(500)));
+    l1_config.dev.finality_depth = NonZeroUsize::MIN;
+
+    let l1 = NodeBuilder::new(l1_config)
+        .testing_node(executor.clone())
+        .node(TempoNode::default())
+        .launch_with_debug_capabilities()
+        .await?;
+    let l1_rpc_url = l1
+        .node
+        .rpc_server_handle()
+        .ws_url()
+        .ok_or_else(|| eyre::eyre!("embedded Tempo L1 WebSocket RPC did not start"))?;
+
+    crate::dev::prefund_custom_dev_account(&l1_rpc_url, signer.address()).await?;
+    let zone_rpc_url = format!("http://{}:{}", config.rpc.http_addr, config.rpc.http_port);
+    let provisioned = crate::dev::provision_zone(ProvisionConfig {
+        l1_rpc_url: l1_rpc_url.clone(),
+        dev_key: signer.clone(),
+        factory: None,
+        initial_token: args.dev_token,
+        is_access_open: !args.dev_access_mode,
+        is_gateway_enforced: args.dev_gateway_mode,
+        zone_gateways: args.dev_zone_gateways.clone(),
+        allowed_accounts: args.dev_allowed_accounts.clone(),
+        rpc_url: zone_rpc_url.clone(),
+        // Stable across restarts; the subscriber still replays createZone from block 0.
+        anchor_block_number: Some(0),
+    })
+    .await?;
+
+    config.chain = Arc::new(ZoneChainSpec::from_genesis_with_l1(
+        provisioned.genesis.clone(),
+        l1_chain_spec.as_ref(),
+    )?);
+    write_dev_artifacts(
+        config.datadir().data_dir(),
+        &provisioned,
+        args,
+        &signer,
+        &zone_rpc_url,
+    )?;
+
+    info!(
+        target: "reth::cli",
+        zone_id = provisioned.zone_id,
+        chain_id = provisioned.chain_id,
+        portal = %provisioned.portal,
+        l1_rpc = %l1_rpc_url,
+        zone_rpc = %zone_rpc_url,
+        "Tempo Zone dev stack ready"
+    );
+    executor.spawn_task(async move {
+        let _ = l1.wait_for_node_exit().await;
+    });
+
+    Ok(Dev {
+        l1_rpc_url,
+        portal: provisioned.portal,
+        signer,
     })
 }
 
@@ -449,6 +467,7 @@ pub struct ZoneArgs {
     #[arg(
         long = "l1.rpc-url",
         env = "L1_RPC_URL",
+        required_unless_present = "dev",
         value_parser = parse_l1_rpc_url
     )]
     pub l1_rpc_url: Option<String>,
@@ -457,6 +476,7 @@ pub struct ZoneArgs {
     #[arg(
         long = "l1.portal-address",
         env = "L1_PORTAL_ADDRESS",
+        required_unless_present = "dev",
         value_parser = parse_portal_address
     )]
     pub portal_address: Option<Address>,

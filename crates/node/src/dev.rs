@@ -1,6 +1,5 @@
 //! Local Zone provisioning against a Tempo development L1.
 
-#[cfg(feature = "cli")]
 use std::path::Path;
 
 use alloy_consensus::Sealable;
@@ -199,7 +198,6 @@ pub async fn native_zone_factory(
     Ok(ZONE_FACTORY_ADDRESS)
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn dev_signer(mnemonic: &str) -> eyre::Result<PrivateKeySigner> {
     use alloy_signer_local::MnemonicBuilder;
 
@@ -207,7 +205,6 @@ pub(crate) fn dev_signer(mnemonic: &str) -> eyre::Result<PrivateKeySigner> {
         .map_err(|error| eyre::eyre!("failed to derive dev account from --dev.mnemonic: {error}"))
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn dev_l1_chain_spec(owner: Address) -> tempo_chainspec::TempoChainSpec {
     use alloy_genesis::GenesisAccount;
     use alloy_primitives::{U256, keccak256};
@@ -259,7 +256,6 @@ pub(crate) fn dev_l1_chain_spec(owner: Address) -> tempo_chainspec::TempoChainSp
     TempoChainSpec::from_genesis(genesis)
 }
 
-#[cfg(feature = "cli")]
 pub(crate) async fn prefund_custom_dev_account(
     l1_rpc_url: &str,
     recipient: Address,
@@ -287,7 +283,6 @@ pub(crate) async fn prefund_custom_dev_account(
     Ok(())
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
