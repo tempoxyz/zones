@@ -376,7 +376,7 @@ impl BatchSubmitter {
             .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
             .await?;
         self.validate_submission_metadata(batch, metadata)?;
-        let (certificate, current_l1_block) = if let Some(store) = &self.attestation_store {
+        let certificate = if let Some(store) = &self.attestation_store {
             let threshold = metadata.sequencer_threshold as usize;
             info!(
                 zone_height = batch.zone_height,
@@ -405,12 +405,11 @@ impl BatchSubmitter {
                     return Err(err.into());
                 }
             }
-            let current_l1_block = self.validate_prepared_anchor(prepared).await?;
-            (Some(certificate), current_l1_block)
+            Some(certificate)
         } else {
-            let current_l1_block = self.validate_prepared_anchor(prepared).await?;
-            (None, current_l1_block)
+            None
         };
+        let current_l1_block = self.validate_prepared_anchor(prepared).await?;
         let recent_tempo_block_number = prepared.anchor.recent_block_number();
         // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
         // cannot land before N+1, so anchoring to the current tip is valid at execution time.
