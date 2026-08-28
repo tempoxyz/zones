@@ -86,8 +86,17 @@ impl fmt::Debug for ShadowProverConfig {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ShadowProver {
+pub struct ShadowProver {
     sender: mpsc::Sender<ProverJob>,
+}
+
+/// Exact Tempo anchor committed by a finalized batch submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowProofAnchor {
+    /// Tempo block number used as the EIP-2935 anchor.
+    pub number: u64,
+    /// Canonical hash of the Tempo anchor block.
+    pub hash: B256,
 }
 
 #[derive(Debug)]
@@ -95,6 +104,7 @@ struct ProverJob {
     from: u64,
     to: u64,
     batch: BatchData,
+    anchor: Option<ShadowProofAnchor>,
     enqueued_at: Instant,
 }
 
@@ -171,7 +181,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
     }
 }
 
-pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
+pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
     portal: Address,
     anchor_config: BatchAnchorConfig,
@@ -290,11 +300,54 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
 
 impl ShadowProver {
     /// Queue a candidate without waiting for validation or queue capacity.
-    pub(crate) fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+    pub fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+        self.try_enqueue_job(from, to, batch, None);
+    }
+
+    /// Queue a finalized candidate using the exact anchor committed on L1.
+    pub fn try_enqueue_with_anchor(
+        &self,
+        from: u64,
+        to: u64,
+        batch: BatchData,
+        anchor: ShadowProofAnchor,
+    ) {
+        self.try_enqueue_job(from, to, batch, Some(anchor));
+    }
+
+    /// Queue a finalized candidate, waiting for capacity so authoritative L1 evidence is not
+    /// dropped while another proof is running.
+    pub async fn enqueue_with_anchor(
+        &self,
+        from: u64,
+        to: u64,
+        batch: BatchData,
+        anchor: ShadowProofAnchor,
+    ) -> Result<()> {
+        self.sender
+            .send(ProverJob {
+                from,
+                to,
+                batch,
+                anchor: Some(anchor),
+                enqueued_at: Instant::now(),
+            })
+            .await
+            .map_err(|_| eyre::eyre!("shadow prover queue is unavailable"))
+    }
+
+    fn try_enqueue_job(
+        &self,
+        from: u64,
+        to: u64,
+        batch: BatchData,
+        anchor: Option<ShadowProofAnchor>,
+    ) {
         if let Err(err) = self.sender.try_send(ProverJob {
             from,
             to,
             batch: batch.clone(),
+            anchor,
             enqueued_at: Instant::now(),
         }) {
             error!(
@@ -387,13 +440,23 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             final_tempo_header.number()
         );
 
-        let anchor = resolve_anchor(
-            &context.l1_provider,
-            final_tempo_header.number(),
-            final_tempo_header.hash_slow(),
-            context.anchor_config,
-        )
-        .await?;
+        let anchor = if let Some(anchor) = job.anchor {
+            resolve_exact_anchor(
+                &context.l1_provider,
+                final_tempo_header.number(),
+                final_tempo_header.hash_slow(),
+                anchor,
+            )
+            .await?
+        } else {
+            resolve_anchor(
+                &context.l1_provider,
+                final_tempo_header.number(),
+                final_tempo_header.hash_slow(),
+                context.anchor_config,
+            )
+            .await?
+        };
         Ok::<_, eyre::Report>((initial_tempo_header, final_tempo_header, anchor))
     }
     .await?;
@@ -918,6 +981,57 @@ async fn resolve_anchor(
         anchor_number > checkpoint_number,
         "Tempo ancestry anchor {anchor_number} does not follow checkpoint {checkpoint_number}"
     );
+    resolve_ancestry_anchor(
+        provider,
+        checkpoint_number,
+        checkpoint_hash,
+        anchor_number,
+        None,
+    )
+    .await
+}
+
+async fn resolve_exact_anchor(
+    provider: &DynProvider<TempoNetwork>,
+    checkpoint_number: u64,
+    checkpoint_hash: B256,
+    anchor: ShadowProofAnchor,
+) -> Result<Anchor> {
+    ensure!(
+        anchor.number >= checkpoint_number,
+        "submitted Tempo anchor {} precedes checkpoint {checkpoint_number}",
+        anchor.number
+    );
+    if anchor.number == checkpoint_number {
+        ensure!(
+            anchor.hash == checkpoint_hash,
+            "submitted direct Tempo anchor hash {} does not match checkpoint hash {checkpoint_hash}",
+            anchor.hash
+        );
+        return Ok(Anchor {
+            number: anchor.number,
+            hash: anchor.hash,
+            ancestry_headers: Vec::new(),
+        });
+    }
+
+    resolve_ancestry_anchor(
+        provider,
+        checkpoint_number,
+        checkpoint_hash,
+        anchor.number,
+        Some(anchor.hash),
+    )
+    .await
+}
+
+async fn resolve_ancestry_anchor(
+    provider: &DynProvider<TempoNetwork>,
+    checkpoint_number: u64,
+    checkpoint_hash: B256,
+    anchor_number: u64,
+    expected_anchor_hash: Option<B256>,
+) -> Result<Anchor> {
     let mut expected_parent = checkpoint_hash;
     let mut ancestry_headers = Vec::with_capacity((anchor_number - checkpoint_number) as usize);
     for number in checkpoint_number + 1..=anchor_number {
@@ -929,6 +1043,13 @@ async fn resolve_anchor(
         );
         expected_parent = header.hash_slow();
         ancestry_headers.push(Bytes::from(alloy_rlp::encode(&header)));
+    }
+    if let Some(expected_anchor_hash) = expected_anchor_hash {
+        ensure!(
+            expected_parent == expected_anchor_hash,
+            "submitted Tempo anchor {} hash {expected_anchor_hash} does not match canonical hash {expected_parent}",
+            anchor_number
+        );
     }
     Ok(Anchor {
         number: anchor_number,
@@ -1012,4 +1133,66 @@ fn witness_size(witness: &BatchWitness) -> usize {
                         .sum::<usize>()
             })
             .sum::<usize>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_provider::ProviderBuilder;
+    use alloy_transport::mock::Asserter;
+
+    fn mocked_l1_provider() -> DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(Asserter::new())
+            .erased()
+    }
+
+    #[tokio::test]
+    async fn exact_direct_anchor_uses_committed_hash_without_tip_lookup() {
+        let hash = B256::repeat_byte(0x42);
+        let anchor = resolve_exact_anchor(
+            &mocked_l1_provider(),
+            10,
+            hash,
+            ShadowProofAnchor { number: 10, hash },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(anchor.number, 10);
+        assert_eq!(anchor.hash, hash);
+        assert!(anchor.ancestry_headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_direct_anchor_rejects_different_committed_hash() {
+        let result = resolve_exact_anchor(
+            &mocked_l1_provider(),
+            10,
+            B256::repeat_byte(0x42),
+            ShadowProofAnchor {
+                number: 10,
+                hash: B256::repeat_byte(0x43),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn exact_anchor_rejects_number_before_checkpoint() {
+        let result = resolve_exact_anchor(
+            &mocked_l1_provider(),
+            10,
+            B256::repeat_byte(0x42),
+            ShadowProofAnchor {
+                number: 9,
+                hash: B256::repeat_byte(0x41),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
 }

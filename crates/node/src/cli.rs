@@ -19,8 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, ZoneShadowProverAddOnsConfig,
+    dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -277,8 +277,8 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
-        "--sequencer.enable-prover requires a promotable sequencer node"
+        !args.enable_prover || should_sequence_blocks || rpc_only,
+        "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
     );
 
     if should_sequence_blocks {
@@ -299,6 +299,12 @@ async fn configure_sequencing(
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
             enable_prover: args.enable_prover,
+            prover_address: args.prover_address.clone(),
+        });
+    } else if args.enable_prover {
+        node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
+            zone_id,
+            batch_anchor_config: BatchAnchorConfig::default(),
             prover_address: args.prover_address.clone(),
         });
     }
@@ -570,7 +576,8 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Validate finalized batch candidates with the SPF without changing settlement.
+    /// Validate finalized batch candidates with the SPF without changing settlement. On an
+    /// rpc_only follower, candidates are recovered from finalized L1 submissions.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 

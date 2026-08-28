@@ -18,6 +18,7 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
+    shadow_prover::run_finalized_batch_observer,
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
@@ -99,7 +100,7 @@ use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
+    ZoneSequencerConfig, attestation::AttestationDomain, spawn_shadow_prover, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -198,6 +199,17 @@ pub struct ZoneSequencerAddOnsConfig {
     pub prover_address: Option<String>,
 }
 
+/// Configuration for detached shadow proving that does not require sequencer keys.
+#[derive(Debug, Clone)]
+pub struct ZoneShadowProverAddOnsConfig {
+    /// Zone ID bound into SPF public inputs.
+    pub zone_id: u32,
+    /// EIP-2935 history settings used to recover recently finalized submissions.
+    pub batch_anchor_config: BatchAnchorConfig,
+    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    pub prover_address: Option<String>,
+}
+
 /// Configuration for the Zone redacted RPC server extension.
 #[derive(Debug, Clone, Default)]
 pub struct ZoneRedactedRpcConfig {
@@ -237,6 +249,8 @@ pub struct ZoneNode {
     redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Optional detached shadow prover config.
+    shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
@@ -284,6 +298,7 @@ impl ZoneNode {
             withdrawal_reveal_encryptor: None,
             redacted_rpc_config: ZoneRedactedRpcConfig::default(),
             sequencer_config: None,
+            shadow_prover_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
         }
@@ -304,6 +319,13 @@ impl ZoneNode {
     /// Set the sequencer configuration. When set, batch submission and
     /// withdrawal processing tasks are spawned during node launch.
     pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
+        if config.enable_prover {
+            self.shadow_prover_config = Some(ZoneShadowProverAddOnsConfig {
+                zone_id: config.zone_id,
+                batch_anchor_config: config.batch_anchor_config,
+                prover_address: config.prover_address.clone(),
+            });
+        }
         let encryption_key = SecretKey::from(config.sequencer_signer.credential());
         self.withdrawal_reveal_encryptor = Some(Arc::new(SequencerWithdrawalRevealEncryptor::new(
             encryption_key.clone(),
@@ -311,6 +333,12 @@ impl ZoneNode {
         )));
         self = self.with_deposit_decryption_keys([encryption_key]);
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Enable detached shadow proving without configuring block production or settlement keys.
+    pub fn with_shadow_prover(mut self, config: ZoneShadowProverAddOnsConfig) -> Self {
+        self.shadow_prover_config = Some(config);
         self
     }
 
@@ -441,6 +469,8 @@ where
     redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Detached shadow prover configuration.
+    shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
@@ -472,6 +502,7 @@ where
         portal_address: Address,
         redacted_rpc_config: ZoneRedactedRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+        shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
     ) -> Self {
@@ -493,6 +524,7 @@ where
             portal_address,
             redacted_rpc_config,
             sequencer_config,
+            shadow_prover_config,
             p2p_config,
             external_deposit_consumer,
         }
@@ -588,6 +620,13 @@ where
                     portal_zone_id,
                 )?;
             }
+            if let Some(config) = self.shadow_prover_config.as_ref() {
+                validate_configured_zone_id(
+                    "shadow prover configuration",
+                    config.zone_id,
+                    portal_zone_id,
+                )?;
+            }
             if let Some(config) = self.p2p_config.as_ref() {
                 validate_configured_zone_id("P2P configuration", config.zone_id(), portal_zone_id)?;
             }
@@ -667,6 +706,7 @@ where
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
+        let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
@@ -680,6 +720,11 @@ where
                     self.sequencer_config
                         .as_ref()
                         .map(|config| config.batch_anchor_config)
+                        .or_else(|| {
+                            self.shadow_prover_config
+                                .as_ref()
+                                .map(|config| config.batch_anchor_config)
+                        })
                         .unwrap_or_default(),
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
@@ -744,9 +789,8 @@ where
             })
             .await?;
         let prover_config = self
-            .sequencer_config
+            .shadow_prover_config
             .as_ref()
-            .filter(|config| config.enable_prover)
             .map(|config| ShadowProverConfig {
                 parent_chain_id: l1_chain_id,
                 zone_id: config.zone_id,
@@ -754,6 +798,26 @@ where
                 debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
                 prover_address: config.prover_address.clone(),
             });
+
+        if rpc_only
+            && let (Some(config), Some(runtime_config)) =
+                (self.shadow_prover_config.as_ref(), prover_config.clone())
+        {
+            let prover = spawn_shadow_prover(
+                runtime_config,
+                self.portal_address,
+                config.batch_anchor_config,
+                provider.clone(),
+                l1_provider.clone(),
+            );
+            tokio::spawn(run_finalized_batch_observer(
+                self.portal_address,
+                config.batch_anchor_config,
+                provider.clone(),
+                l1_provider.clone(),
+                prover,
+            ));
+        }
 
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
@@ -1618,6 +1682,7 @@ where
             self.portal_address,
             self.redacted_rpc_config.clone(),
             self.sequencer_config.clone(),
+            self.shadow_prover_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
         )
