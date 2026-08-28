@@ -371,7 +371,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             zone_id: context.config.zone_id,
             portal: context.portal,
             tempo_block_number: final_tempo_header.number(),
-            anchor_block_number: job.prepared.anchor.block_number(batch.tempo_block_number),
+            anchor_block_number: job.prepared.anchor_block_number(),
             anchor_block_hash: job.prepared.anchor.block_hash(),
             expected_withdrawal_batch_index: batch.withdrawal_batch_index,
         },

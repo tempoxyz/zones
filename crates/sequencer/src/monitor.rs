@@ -530,7 +530,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     warn!(
                         zone_from = from,
                         zone_to = to,
-                        anchor_block_number = prepared.anchor.block_number(batch_data.tempo_block_number),
+                        anchor_block_number = prepared.anchor_block_number(),
                         anchor_block_hash = %prepared.anchor.block_hash(),
                         error = %error,
                         "Prepared batch anchor expired or changed; rebuilding the settlement attempt"

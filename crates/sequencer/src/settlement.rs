@@ -341,7 +341,7 @@ impl BatchSubmitter {
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = prepared.batch.tempo_block_number,
-        anchor_block = prepared.anchor.block_number(prepared.batch.tempo_block_number),
+        anchor_block = prepared.anchor_block_number(),
         prev_block_hash = %prepared.batch.prev_block_hash,
         next_block_hash = %prepared.batch.next_block_hash,
         withdrawal_queue_hash = %prepared.batch.withdrawal_queue_hash,
@@ -413,7 +413,7 @@ impl BatchSubmitter {
         let recent_tempo_block_number = prepared.anchor.recent_block_number();
         // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
         // cannot land before N+1, so anchoring to the current tip is valid at execution time.
-        let anchor_block_number = prepared.anchor.block_number(batch.tempo_block_number);
+        let anchor_block_number = prepared.anchor_block_number();
         let anchor_block_hash = prepared.anchor.block_hash();
         let anchors_to_current_tip = anchor_block_number == current_l1_block;
 
@@ -840,7 +840,7 @@ impl BatchSubmitter {
             "certificate verifier config changed"
         );
         eyre::ensure!(
-            attestation.anchorBlockNumber == prepared.anchor.block_number(batch.tempo_block_number),
+            attestation.anchorBlockNumber == prepared.anchor_block_number(),
             "certificate anchor block changed"
         );
         eyre::ensure!(
@@ -922,7 +922,7 @@ impl BatchSubmitter {
         prepared: &PreparedBatch,
     ) -> std::result::Result<u64, BatchSubmitError> {
         let anchor = &prepared.anchor;
-        let anchor_block_number = anchor.block_number(prepared.batch.tempo_block_number);
+        let anchor_block_number = prepared.anchor_block_number();
         if anchor_block_number < prepared.batch.tempo_block_number {
             return Err(BatchSubmitError::PreparedAnchorInvalid(eyre::eyre!(
                 "prepared L1 anchor predates the batch Tempo block"
@@ -1403,6 +1403,13 @@ impl BatchAnchor {
 pub struct PreparedBatch {
     pub batch: BatchData,
     pub anchor: BatchAnchor,
+}
+
+impl PreparedBatch {
+    /// Returns the L1 block whose hash the portal passes to the verifier.
+    pub const fn anchor_block_number(&self) -> u64 {
+        self.anchor.block_number(self.batch.tempo_block_number)
+    }
 }
 
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
@@ -2460,7 +2467,7 @@ mod tests {
         let observed_head = submitter.validate_prepared_anchor(&prepared).await.unwrap();
 
         assert_eq!(observed_head, 162_208);
-        assert_eq!(prepared.anchor.block_number(160_000), 162_196);
+        assert_eq!(prepared.anchor_block_number(), 162_196);
         assert!(asserter.read_q().is_empty());
     }
 
@@ -2518,7 +2525,7 @@ mod tests {
             withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
             verifier: metadata.verifier,
             tempoBlockNumber: batch.tempo_block_number,
-            anchorBlockNumber: prepared.anchor.block_number(batch.tempo_block_number) + 12,
+            anchorBlockNumber: prepared.anchor_block_number() + 12,
             anchorBlockHash: B256::repeat_byte(0x99),
             blockTransitionHash: keccak256(
                 (batch.prev_block_hash, batch.next_block_hash).abi_encode(),
