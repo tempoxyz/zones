@@ -130,7 +130,7 @@ pub async fn init(
         "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "admin": signer.address().to_string(),
         "sequencer": signer.address().to_string(),
-        "sequencerKey": private_key.clone(),
+        "sequencerKey": private_key,
         "tempoAnchorBlock": provisioned.anchor_block_number,
         "zoneFactory": provisioned.factory.to_string(),
         "rpcUrl": &zone_rpc_url,

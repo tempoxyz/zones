@@ -634,6 +634,7 @@ mod tests {
     use std::{io::Write as _, path::Path, process::Command, thread, time::Duration};
 
     use clap::Parser as _;
+    use reth_node_core::args::DevArgs;
 
     use super::{
         Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
@@ -643,6 +644,9 @@ mod tests {
 
     #[derive(Debug, clap::Parser)]
     struct ZoneArgsParser {
+        #[command(flatten)]
+        _dev: DevArgs,
+
         #[command(flatten)]
         zone: ZoneArgs,
     }
