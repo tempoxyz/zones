@@ -158,7 +158,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
         l1_state_cache: crate::L1StateCache::new(),
         block_tracker: L1BlockTracker::default(),
         leadership_sink: None,
-        finalized_batch_submission_sink: None,
+        finalized_batch_submissions: None,
         encryption_keys: None,
         subscriber_metrics: Default::default(),
     }
@@ -1637,19 +1637,13 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
     }
 }
 
-#[derive(Debug)]
-struct NoopFinalizedBatchSink;
-
-impl FinalizedBatchSubmissionSink for NoopFinalizedBatchSink {
-    fn observe_finalized_batch(&self, _: FinalizedBatchSubmission) {}
-}
-
 #[test]
 fn extracts_finalized_batch_submission_for_observer() {
     use alloy_sol_types::SolEvent as _;
 
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
-    subscriber.finalized_batch_submission_sink = Some(Arc::new(NoopFinalizedBatchSink));
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    subscriber.finalized_batch_submissions = Some(sender);
     let portal = subscriber.config.portal_address;
     let event = crate::abi::ZonePortal::BatchSubmitted {
         withdrawalBatchIndex: 7,
@@ -1676,6 +1670,52 @@ fn extracts_finalized_batch_submission_for_observer() {
     assert_eq!(submissions[0].transaction_hash, B256::with_last_byte(0xaa));
     assert_eq!(submissions[0].log_index, 4);
     assert_eq!(submissions[0].event.nextBlockHash, B256::repeat_byte(0x22));
+}
+
+#[test]
+fn finalized_batch_observer_errors_do_not_fence_ingestion() {
+    use alloy_sol_types::SolEvent as _;
+
+    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    subscriber.finalized_batch_submissions = Some(sender);
+    let portal = subscriber.config.portal_address;
+    let malformed = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: alloy_primitives::LogData::new_unchecked(
+                vec![crate::abi::ZonePortal::BatchSubmitted::SIGNATURE_HASH],
+                Bytes::from_static(b"garbage"),
+            ),
+        },
+        log_index: Some(4),
+        ..Default::default()
+    };
+    let missing_index = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: crate::abi::ZonePortal::BatchSubmitted {
+                withdrawalBatchIndex: 7,
+                withdrawalQueueIndex: U256::from(3),
+                nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+                nextBlockHash: B256::repeat_byte(0x22),
+                withdrawalQueueHash: B256::repeat_byte(0x33),
+                lastProcessedDepositNumber: 9,
+            }
+            .encode_log_data(),
+        },
+        log_index: None,
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(
+        10,
+        B256::with_last_byte(0x10),
+        vec![malformed, missing_index],
+    );
+
+    let (_, _, _, submissions) = subscriber.extract_events(10, &[receipt]).unwrap();
+
+    assert!(submissions.is_empty());
 }
 
 #[test]

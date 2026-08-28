@@ -1,6 +1,6 @@
 //! Finalized L1 batch observation for RPC-only shadow provers.
 
-use std::{collections::HashSet, str::FromStr as _, sync::Arc, time::Duration};
+use std::{collections::HashSet, str::FromStr as _, time::Duration};
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_eips::BlockNumberOrTag;
@@ -11,32 +11,14 @@ use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{error, info, warn};
-use zone_l1::{FinalizedBatchSubmission, FinalizedBatchSubmissionSink};
+use tracing::{info, warn};
+use zone_l1::FinalizedBatchSubmission;
 use zone_sequencer::{
     BatchAnchorConfig, BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-#[derive(Debug)]
-struct ShadowProverSubmissionSink {
-    sender: UnboundedSender<FinalizedBatchSubmission>,
-}
-
-impl FinalizedBatchSubmissionSink for ShadowProverSubmissionSink {
-    fn observe_finalized_batch(&self, submission: FinalizedBatchSubmission) {
-        let _ = self.sender.send(submission);
-    }
-}
-
-pub(crate) fn finalized_batch_submission_channel() -> (
-    Arc<dyn FinalizedBatchSubmissionSink>,
-    UnboundedReceiver<FinalizedBatchSubmission>,
-) {
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    (Arc::new(ShadowProverSubmissionSink { sender }), receiver)
-}
+const RECOVERY_LOG_QUERY_BLOCKS: u64 = 1_000;
 
 /// Observe finalized `submitBatch` calls and feed their exact settlement inputs to the detached
 /// prover. The Portal has already verified the included quorum certificate before emitting the
@@ -48,60 +30,47 @@ pub(crate) async fn run_finalized_batch_observer<P: ZoneSequencerProvider>(
     l1_provider: DynProvider<TempoNetwork>,
     prover: ShadowProver,
     mut submissions: UnboundedReceiver<FinalizedBatchSubmission>,
+    recovery_sender: UnboundedSender<FinalizedBatchSubmission>,
 ) {
-    let mut observed = HashSet::new();
-
-    loop {
-        match recover_recent_submissions(portal_address, anchor_config, &l1_provider).await {
-            Ok(recovered) => {
-                for submission in recovered {
-                    if let Err(err) = queue_submission(
-                        portal_address,
-                        &zone_provider,
-                        &l1_provider,
-                        &prover,
-                        submission,
-                        &mut observed,
-                    )
-                    .await
-                    {
-                        warn!(
-                            target: "zone::node::shadow_prover",
-                            error = ?err,
-                            "Failed to recover finalized batch submission"
-                        );
-                    }
-                }
-                break;
+    let recovery_provider = l1_provider.clone();
+    tokio::spawn(async move {
+        loop {
+            if recovery_sender.is_closed() {
+                return;
             }
-            Err(err) => {
-                warn!(
-                    target: "zone::node::shadow_prover",
-                    error = ?err,
-                    "Failed to recover recent finalized batch submissions; retrying"
-                );
-                tokio::time::sleep(POLL_INTERVAL).await;
+            match recover_recent_submissions(portal_address, anchor_config, &recovery_provider)
+                .await
+            {
+                Ok(recovered) => {
+                    for submission in recovered {
+                        if recovery_sender.send(submission).is_err() {
+                            return;
+                        }
+                    }
+                    return;
+                }
+                Err(err) => {
+                    warn!(
+                        target: "zone::node::shadow_prover",
+                        error = ?err,
+                        "Failed to recover recent finalized batch submissions; retrying"
+                    );
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
             }
         }
-    }
+    });
 
+    let mut observed = HashSet::new();
     while let Some(submission) = submissions.recv().await {
-        if let Err(err) = queue_submission(
+        spawn_submission_retry(
             portal_address,
             &zone_provider,
             &l1_provider,
             &prover,
             submission,
             &mut observed,
-        )
-        .await
-        {
-            warn!(
-                target: "zone::node::shadow_prover",
-                error = ?err,
-                "Failed to process finalized batch submission"
-            );
-        }
+        );
     }
 }
 
@@ -118,50 +87,95 @@ async fn recover_recent_submissions(
     let from = finalized.saturating_sub(anchor_config.history_window().saturating_sub(1));
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    let events = portal
-        .BatchSubmitted_filter()
-        .from_block(from)
-        .to_block(finalized)
-        .query()
-        .await
-        .wrap_err_with(|| {
-            format!("query BatchSubmitted logs in finalized range {from}..={finalized}")
-        })?;
+    let mut recovered = Vec::new();
+    let mut page_from = from;
+    while page_from <= finalized {
+        let page_to = page_from
+            .saturating_add(RECOVERY_LOG_QUERY_BLOCKS - 1)
+            .min(finalized);
+        let events = portal
+            .BatchSubmitted_filter()
+            .from_block(page_from)
+            .to_block(page_to)
+            .query()
+            .await
+            .wrap_err_with(|| {
+                format!("query BatchSubmitted logs in finalized range {page_from}..={page_to}")
+            })?;
 
-    events
-        .into_iter()
-        .map(|(event, log)| {
+        for (event, log) in events {
             let tx_hash = log
                 .transaction_hash
                 .ok_or_eyre("finalized BatchSubmitted log has no transaction hash")?;
             let log_index = log
                 .log_index
                 .ok_or_eyre("finalized BatchSubmitted log has no log index")?;
-            Ok(FinalizedBatchSubmission {
+            recovered.push(FinalizedBatchSubmission {
                 block_number: log
                     .block_number
                     .ok_or_eyre("finalized BatchSubmitted log has no block number")?,
                 transaction_hash: tx_hash,
                 log_index,
                 event,
-            })
-        })
-        .collect()
+            });
+        }
+        if page_to == finalized {
+            break;
+        }
+        page_from = page_to + 1;
+    }
+    Ok(recovered)
 }
 
-async fn queue_submission<P: ZoneSequencerProvider>(
+fn spawn_submission_retry<P: ZoneSequencerProvider>(
     portal_address: Address,
     zone_provider: &P,
     l1_provider: &DynProvider<TempoNetwork>,
     prover: &ShadowProver,
     submission: FinalizedBatchSubmission,
     observed: &mut HashSet<(B256, u64)>,
-) -> Result<()> {
+) {
     let observation_id = (submission.transaction_hash, submission.log_index);
-    if observed.contains(&observation_id) {
-        return Ok(());
+    if !observed.insert(observation_id) {
+        return;
     }
 
+    let zone_provider = zone_provider.clone();
+    let l1_provider = l1_provider.clone();
+    let prover = prover.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Err(err) = process_submission(
+                portal_address,
+                &zone_provider,
+                &l1_provider,
+                &prover,
+                &submission,
+            )
+            .await
+            {
+                warn!(
+                    target: "zone::node::shadow_prover",
+                    transaction_hash = %submission.transaction_hash,
+                    log_index = submission.log_index,
+                    error = ?err,
+                    "Failed to process finalized batch submission; retrying"
+                );
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+            return;
+        }
+    });
+}
+
+async fn process_submission<P: ZoneSequencerProvider>(
+    portal_address: Address,
+    zone_provider: &P,
+    l1_provider: &DynProvider<TempoNetwork>,
+    prover: &ShadowProver,
+    submission: &FinalizedBatchSubmission,
+) -> Result<()> {
     let call = fetch_submit_batch_calls(l1_provider, portal_address, submission.transaction_hash)
         .await?
         .into_iter()
@@ -184,20 +198,7 @@ async fn queue_submission<P: ZoneSequencerProvider>(
         )
     })?;
 
-    observed.insert(observation_id);
-    let zone_provider = zone_provider.clone();
-    let prover = prover.clone();
-    tokio::spawn(async move {
-        if let Err(err) = wait_and_enqueue(zone_provider, prover, to, batch, anchor).await {
-            error!(
-                target: "zone::node::shadow_prover",
-                transaction_hash = %submission.transaction_hash,
-                error = ?err,
-                "Could not enqueue finalized batch for shadow proving"
-            );
-        }
-    });
-    Ok(())
+    wait_and_enqueue(zone_provider.clone(), prover.clone(), to, batch, anchor).await
 }
 
 async fn fetch_submit_batch_calls(
@@ -267,35 +268,18 @@ async fn submission_target(
     l1_provider: &DynProvider<TempoNetwork>,
     call: &ZonePortal::submitBatchCall,
     event: &ZonePortal::BatchSubmitted,
-    finalized: u64,
+    submission_block_number: u64,
 ) -> Result<(u64, BatchData, ShadowProofAnchor)> {
     ensure!(
         !call.signatures.is_empty(),
         "accepted submitBatch call has an empty quorum certificate"
     );
     let to = u64::try_from(call.nextZoneHeight).wrap_err("submitted Zone height overflows u64")?;
-    ensure!(
-        event.nextBlockHash == call.blockTransition.nextBlockHash,
-        "BatchSubmitted next block hash does not match calldata"
-    );
-    ensure!(
-        event.nextProcessedDepositQueueHash == call.depositQueueTransition.nextProcessedHash,
-        "BatchSubmitted deposit hash does not match calldata"
-    );
-    ensure!(
-        event.lastProcessedDepositNumber == call.depositQueueTransition.nextDepositNumber,
-        "BatchSubmitted deposit number does not match calldata"
-    );
-    ensure!(
-        event.withdrawalQueueHash == call.withdrawalQueueHash,
-        "BatchSubmitted withdrawal hash does not match calldata"
-    );
-
     let anchor_number =
         submitted_anchor_number(call.tempoBlockNumber, call.recentTempoBlockNumber)?;
     ensure!(
-        anchor_number <= finalized,
-        "submitted anchor {anchor_number} is above finalized L1 height {finalized}"
+        anchor_number <= submission_block_number,
+        "submitted anchor {anchor_number} is above submission block {submission_block_number}"
     );
     let anchor_hash = l1_provider
         .get_header_by_number(anchor_number.into())

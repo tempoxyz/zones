@@ -375,14 +375,6 @@ pub trait LeadershipSink: Send + Sync + std::fmt::Debug {
     fn apply_leader_transition(&self, transition: &crate::LeaderTransition) -> eyre::Result<()>;
 }
 
-/// Observes accepted batch submissions decoded from verified finalized receipts.
-///
-/// Unlike consensus-critical sinks, this is observational and cannot fence L1 ingestion.
-pub trait FinalizedBatchSubmissionSink: Send + Sync + std::fmt::Debug {
-    /// Observe one finalized Portal submission.
-    fn observe_finalized_batch(&self, submission: FinalizedBatchSubmission);
-}
-
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
@@ -414,8 +406,9 @@ pub struct L1Subscriber<P> {
     pub(crate) block_tracker: L1BlockTracker,
     /// Optional sink for leadership transitions.
     pub(crate) leadership_sink: Option<Arc<dyn LeadershipSink>>,
-    /// Optional observational sink for finalized accepted batch submissions.
-    pub(crate) finalized_batch_submission_sink: Option<Arc<dyn FinalizedBatchSubmissionSink>>,
+    /// Optional observational channel for finalized accepted batch submissions.
+    pub(crate) finalized_batch_submissions:
+        Option<tokio::sync::mpsc::UnboundedSender<FinalizedBatchSubmission>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub(crate) encryption_keys: Option<EncryptionKeyRing>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -467,7 +460,9 @@ where
         l1_state_cache: L1StateCache,
         block_tracker: L1BlockTracker,
         leadership_sink: Option<Arc<dyn LeadershipSink>>,
-        finalized_batch_submission_sink: Option<Arc<dyn FinalizedBatchSubmissionSink>>,
+        finalized_batch_submissions: Option<
+            tokio::sync::mpsc::UnboundedSender<FinalizedBatchSubmission>,
+        >,
         encryption_keys: Option<EncryptionKeyRing>,
     ) -> Self {
         Self {
@@ -478,7 +473,7 @@ where
             l1_state_cache,
             block_tracker,
             leadership_sink,
-            finalized_batch_submission_sink,
+            finalized_batch_submissions,
             encryption_keys,
             subscriber_metrics: Default::default(),
         }
@@ -789,9 +784,15 @@ where
                 self.block_tracker
                     .record_with_portal_events(anchor, events.clone())?;
             }
-            if let Some(sink) = &self.finalized_batch_submission_sink {
+            if let Some(sender) = &self.finalized_batch_submissions {
                 for submission in finalized_batches {
-                    sink.observe_finalized_batch(submission);
+                    if sender.send(submission).is_err() {
+                        warn!(
+                            target: "zone::l1::subscriber",
+                            "Finalized batch submission observer is unavailable"
+                        );
+                        break;
+                    }
                 }
             }
             // Publish derived L1 state only after the header has been admitted to every
@@ -891,26 +892,33 @@ where
                     if retain_receipt_logs && let Some(logs) = &mut portal_logs {
                         logs.push(log.inner.clone());
                     }
-                    if self.finalized_batch_submission_sink.is_some()
+                    if self.finalized_batch_submissions.is_some()
                         && log.topic0() == Some(&ZonePortal::BatchSubmitted::SIGNATURE_HASH)
                     {
-                        let event = ZonePortal::BatchSubmitted::decode_log(&log.inner)
-                            .wrap_err_with(|| {
-                                format!(
-                                    "failed to decode BatchSubmitted in L1 block {block_number}"
-                                )
-                            })?
-                            .data;
-                        finalized_batches.push(FinalizedBatchSubmission {
-                            block_number,
-                            transaction_hash: receipt.transaction_hash(),
-                            log_index: log.log_index.ok_or_else(|| {
-                                eyre::eyre!(
-                                    "BatchSubmitted in L1 block {block_number} has no log index"
-                                )
-                            })?,
-                            event,
-                        });
+                        match (
+                            ZonePortal::BatchSubmitted::decode_log(&log.inner),
+                            log.log_index,
+                        ) {
+                            (Ok(event), Some(log_index)) => {
+                                finalized_batches.push(FinalizedBatchSubmission {
+                                    block_number,
+                                    transaction_hash: receipt.transaction_hash(),
+                                    log_index,
+                                    event: event.data,
+                                });
+                            }
+                            (Err(err), _) => warn!(
+                                target: "zone::l1::subscriber",
+                                block_number,
+                                error = ?err,
+                                "Could not decode finalized batch submission for observer"
+                            ),
+                            (_, None) => warn!(
+                                target: "zone::l1::subscriber",
+                                block_number,
+                                "Finalized batch submission has no log index"
+                            ),
+                        }
                     }
                     invalidated.insert(address);
                     if let Some(address) =

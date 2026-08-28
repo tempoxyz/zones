@@ -18,7 +18,7 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
-    shadow_prover::{finalized_batch_submission_channel, run_finalized_batch_observer},
+    shadow_prover::run_finalized_batch_observer,
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
@@ -319,13 +319,6 @@ impl ZoneNode {
     /// Set the sequencer configuration. When set, batch submission and
     /// withdrawal processing tasks are spawned during node launch.
     pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
-        if config.enable_prover {
-            self.shadow_prover_config = Some(ZoneShadowProverAddOnsConfig {
-                zone_id: config.zone_id,
-                batch_anchor_config: config.batch_anchor_config,
-                prover_address: config.prover_address.clone(),
-            });
-        }
         let encryption_key = SecretKey::from(config.sequencer_signer.credential());
         self.withdrawal_reveal_encryptor = Some(Arc::new(SequencerWithdrawalRevealEncryptor::new(
             encryption_key.clone(),
@@ -633,12 +626,23 @@ where
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
 
+        let effective_shadow_prover_config = self.shadow_prover_config.clone().or_else(|| {
+            self.sequencer_config
+                .as_ref()
+                .filter(|config| config.enable_prover)
+                .map(|config| ZoneShadowProverAddOnsConfig {
+                    zone_id: config.zone_id,
+                    batch_anchor_config: config.batch_anchor_config,
+                    prover_address: config.prover_address.clone(),
+                })
+        });
         let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+        let mut finalized_batch_submission_sender = None;
         let mut finalized_batch_submissions = None;
-        if rpc_only && self.shadow_prover_config.is_some() {
-            let (sink, receiver) = finalized_batch_submission_channel();
-            finalized_batch_submission_sink = Some(sink);
-            finalized_batch_submissions = Some(receiver);
+        if rpc_only && effective_shadow_prover_config.is_some() {
+            let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+            finalized_batch_submission_sender = Some(sender.clone());
+            finalized_batch_submissions = Some((sender, receiver));
         }
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
@@ -708,7 +712,7 @@ where
             self.l1_state_cache.clone(),
             self.l1_block_tracker.clone(),
             leadership_sink,
-            finalized_batch_submission_sink,
+            finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
         let task_executor = ctx.node.task_executor().clone();
@@ -730,7 +734,7 @@ where
                         .as_ref()
                         .map(|config| config.batch_anchor_config)
                         .or_else(|| {
-                            self.shadow_prover_config
+                            effective_shadow_prover_config
                                 .as_ref()
                                 .map(|config| config.batch_anchor_config)
                         })
@@ -797,19 +801,19 @@ where
                 Ok(())
             })
             .await?;
-        let prover_config = self
-            .shadow_prover_config
-            .as_ref()
-            .map(|config| ShadowProverConfig {
-                parent_chain_id: l1_chain_id,
-                zone_id: config.zone_id,
-                chain_spec: evm_chain_spec,
-                debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
-                prover_address: config.prover_address.clone(),
-            });
+        let prover_config =
+            effective_shadow_prover_config
+                .as_ref()
+                .map(|config| ShadowProverConfig {
+                    parent_chain_id: l1_chain_id,
+                    zone_id: config.zone_id,
+                    chain_spec: evm_chain_spec,
+                    debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+                    prover_address: config.prover_address.clone(),
+                });
 
-        if let (Some(config), Some(runtime_config), Some(submissions)) = (
-            self.shadow_prover_config.as_ref(),
+        if let (Some(config), Some(runtime_config), Some((recovery_sender, submissions))) = (
+            effective_shadow_prover_config.as_ref(),
             prover_config.clone(),
             finalized_batch_submissions,
         ) {
@@ -827,6 +831,7 @@ where
                 l1_provider.clone(),
                 prover,
                 submissions,
+                recovery_sender,
             ));
         }
 
