@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn node_help_lists_reth_dev_flag() {
         let result = ZoneCli::try_parse_from(["tempo-zone", "node", "--help"]);
-        let error = result.err().expect("--help exits through clap");
+        let error = result.expect_err("--help exits through clap");
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("--dev"));
     }
