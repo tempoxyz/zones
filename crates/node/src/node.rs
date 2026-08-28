@@ -18,7 +18,7 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
-    shadow_prover::run_finalized_batch_observer,
+    shadow_prover::RpcFollowerShadowProver,
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
@@ -824,15 +824,16 @@ where
                 provider.clone(),
                 l1_provider.clone(),
             );
-            tokio::spawn(run_finalized_batch_observer(
-                self.portal_address,
-                config.batch_anchor_config,
-                provider.clone(),
-                l1_provider.clone(),
-                prover,
-                submissions,
-                recovery_sender,
-            ));
+            tokio::spawn(
+                RpcFollowerShadowProver::new(
+                    self.portal_address,
+                    config.batch_anchor_config,
+                    provider.clone(),
+                    l1_provider.clone(),
+                    prover,
+                )
+                .run(submissions, recovery_sender),
+            );
         }
 
         Self::launch_redacted_rpc(
