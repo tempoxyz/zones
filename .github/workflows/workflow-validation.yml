@@ -1,14 +1,16 @@
-name: Scan GitHub Actions
+name: Workflow Validation
 
 on:
   pull_request:
     paths:
       - ".github/**"
+      - ".pinact.yaml"
   push:
     branches:
       - main
     paths:
       - ".github/**"
+      - ".pinact.yaml"
   workflow_dispatch:
   schedule:
     - cron: "19 7 * * 1"
@@ -16,11 +18,13 @@ on:
 permissions: {}
 
 jobs:
-  scan:
-    name: Scan GitHub Actions
+  workflow-validation:
+    name: Workflow Validation
     # Only the upstream repository runs the recurring organization-wide scan.
     if: github.event_name != 'schedule' || github.repository == 'tempoxyz/zones'
-    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@98b1081dcf34361b576aca2ab3041772708582ef
+    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@483bda4a2a4b5e04a51edff03768c1590d271f80 # zizmor: ignore[ref-version-mismatch] no stable release tag
     permissions:
       actions: read
       contents: read
+    with:
+      pinact: true

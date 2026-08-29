@@ -510,7 +510,7 @@ jobs:
 
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # zizmor: ignore[ref-version-mismatch] no stable release tag
         with:
           scope: tempoxyz/earn
           policy: zones-read
@@ -585,7 +585,7 @@ jobs:
           echo "ZONES_BENCH_EARN_REVISION=$earn_sha" >> "$GITHUB_ENV"
 
       - name: Restore Solidity artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             earn/cache
