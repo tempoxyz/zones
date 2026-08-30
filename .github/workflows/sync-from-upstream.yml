@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Fetch GitHub token via STS
         id: github-sts
-        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@430cf154170ed12b8c74af63038aee7d31a121d0 # main
         with:
           policy: sync-from-upstream
 
