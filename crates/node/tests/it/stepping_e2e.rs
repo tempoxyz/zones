@@ -113,8 +113,10 @@ async fn test_current_tip_batch_submission_lands_in_successor_block() -> eyre::R
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
 
     let genesis_anchor = l1.provider().get_block_number().await?;
-    for _ in 0..CURRENT_TIP_BATCH_INTERVAL {
+    for offset in 1..=CURRENT_TIP_BATCH_INTERVAL {
         l1.fund_user(l1.admin_address(), 1).await?;
+        zone.wait_for_tempo_block_number(genesis_anchor + offset, SHORT_STEPPING_TIMEOUT)
+            .await?;
     }
     let current_tip = l1.provider().get_block_number().await?;
     eyre::ensure!(
@@ -682,7 +684,7 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
         "ancestry submission should use a recent anchor greater than tempoBlockNumber"
     );
     eyre::ensure!(
-        inclusion_block.saturating_sub(call.tempoBlockNumber) > SHORT_EIP2935_HISTORY_WINDOW,
+        inclusion_block.saturating_sub(call.tempoBlockNumber) > SHORT_EIP2935_EFFECTIVE_WINDOW,
         "test did not submit an out-of-config-window tempo block: tempo={}, included_at={inclusion_block}",
         call.tempoBlockNumber,
     );

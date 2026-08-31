@@ -562,12 +562,12 @@ async fn test_zone_engine_stops_cleanly_between_blocks() -> eyre::Result<()> {
     fixture.inject_empty_blocks(zone.deposit_queue(), 10);
     let head = zone.stop_engine().await?;
 
-    // Every L1 block the engine consumed produced exactly one zone block, and nothing was
-    // half-consumed: the queue front is the next unbuilt anchor.
+    // One Zone block may checkpoint several L1 headers, but cancellation must leave the imported
+    // Tempo cursor and queue front at the same atomic boundary.
     let tempo_block_number = zone.tempo_block_number().await?;
-    assert_eq!(
-        tempo_block_number, head,
-        "each zone block imports exactly one L1 block, so the head and the Tempo cursor must agree"
+    assert!(
+        tempo_block_number >= head,
+        "the Tempo cursor cannot trail the Zone head: tempo={tempo_block_number}, zone={head}"
     );
     let next_anchor = zone
         .deposit_queue()
@@ -841,25 +841,9 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     // Local test nodes finalize empty batches every eight zone blocks.
     const BATCH_INTERVAL_BLOCKS: u64 = 8;
 
-    fixture.inject_empty_blocks(zone.deposit_queue(), BATCH_INTERVAL_BLOCKS - 1);
-
-    let before_first_boundary = poll_until(
-        DEFAULT_TIMEOUT,
-        DEFAULT_POLL,
-        "blocks before first empty withdrawal batch boundary",
-        || {
-            let provider = zone.provider();
-            async move {
-                let number = provider.get_block_number().await?;
-                if number >= BATCH_INTERVAL_BLOCKS - 1 {
-                    Ok(Some(number))
-                } else {
-                    Ok(None)
-                }
-            }
-        },
-    )
-    .await?;
+    let before_first_boundary = fixture
+        .produce_empty_zone_blocks(&zone, BATCH_INTERVAL_BLOCKS - 1)
+        .await?;
     assert_eq!(before_first_boundary, BATCH_INTERVAL_BLOCKS - 1);
     assert_eq!(
         zone_outbox.lastBatch().call().await?.withdrawalBatchIndex,
@@ -867,7 +851,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         "withdrawalBatchIndex should not advance before a block-number boundary"
     );
 
-    fixture.inject_empty_block(zone.deposit_queue());
+    fixture.produce_empty_zone_blocks(&zone, 1).await?;
     poll_until(
         DEFAULT_TIMEOUT,
         DEFAULT_POLL,
@@ -886,24 +870,10 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     )
     .await?;
 
-    fixture.inject_empty_blocks(zone.deposit_queue(), BATCH_INTERVAL_BLOCKS - 1);
-    poll_until(
-        DEFAULT_TIMEOUT,
-        DEFAULT_POLL,
-        "intermediate empty zone blocks produced",
-        || {
-            let provider = zone.provider();
-            async move {
-                let number = provider.get_block_number().await?;
-                if number >= (2 * BATCH_INTERVAL_BLOCKS) - 1 {
-                    Ok(Some(number))
-                } else {
-                    Ok(None)
-                }
-            }
-        },
-    )
-    .await?;
+    let intermediate_height = fixture
+        .produce_empty_zone_blocks(&zone, BATCH_INTERVAL_BLOCKS - 1)
+        .await?;
+    assert_eq!(intermediate_height, (2 * BATCH_INTERVAL_BLOCKS) - 1);
 
     let intermediate_batch_index = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
     assert_eq!(
@@ -912,7 +882,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         "withdrawalBatchIndex should not advance before the next block-number boundary"
     );
 
-    fixture.inject_empty_blocks(zone.deposit_queue(), 1);
+    fixture.produce_empty_zone_blocks(&zone, 1).await?;
 
     let final_batch_index = poll_until(
         DEFAULT_TIMEOUT,

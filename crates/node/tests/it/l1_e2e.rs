@@ -222,8 +222,8 @@ async fn test_three_node_quorum_settles_real_batch_boundary() -> eyre::Result<()
     .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
 
     eyre::ensure!(
-        submitted_height >= 4,
-        "settled before the configured batch boundary"
+        submitted_height > 0,
+        "batch submission did not advance the settled zone height"
     );
     eyre::ensure!(
         portal.withdrawalBatchIndex().call().await? >= 1,
@@ -297,8 +297,8 @@ async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::
         "submitted certificate contains duplicate signature bytes"
     );
     eyre::ensure!(
-        submitted_height >= 4,
-        "settled before the configured batch boundary"
+        submitted_height > 0,
+        "batch submission did not advance the settled zone height"
     );
     cluster.wait_all_at(submitted_height, L1_TIMEOUT).await?;
     cluster.assert_same_block(submitted_height).await?;
@@ -355,23 +355,16 @@ async fn fetch_submit_batch_call(l1: &L1TestNode, tx_hash: B256) -> eyre::Result
 /// A follower signs only after it can independently reconstruct the leader's batch statement.
 /// Give follower B a conflicting exact-height Portal queue hash before the boundary. The other
 /// follower is independently prevented from replacing B's share, so A remains below the 2-of-3
-/// threshold and the Portal cannot advance.
+/// threshold at the configured boundary. Earlier catch-up boundaries may settle normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    // Leave enough real L1 blocks to install the divergent state before the first batch boundary.
-    let cluster = start_real_p2p_cluster(20).await?;
-    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
-    let before = (
-        portal.blockHash().call().await?,
-        portal.zoneHeight().call().await?,
-        portal.withdrawalBatchIndex().call().await?,
-        portal.withdrawalQueueHead().call().await?,
-        portal.withdrawalQueueTail().call().await?,
-        portal.lastProcessedDepositNumber().call().await?,
-    );
+    const DIVERGENT_BOUNDARY: u64 = 20;
 
+    // Leave enough Zone blocks to install the divergent state before the configured boundary.
+    let cluster = start_real_p2p_cluster(DIVERGENT_BOUNDARY).await?;
+    let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     // A newly started subscriber initializes its cache from the zone's L1 genesis anchor, not
     // from block zero. Its first non-contiguous coverage update resets the cache, which used to
     // race with the forged entry below and silently erase it. Wait for every member to complete
@@ -410,33 +403,19 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     );
 
     cluster.nodes[0]
-        .wait_for_block_number(20, L1_TIMEOUT)
+        .wait_for_block_number(DIVERGENT_BOUNDARY, L1_TIMEOUT)
         .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let follower_height = cluster.nodes[1].provider().get_block_number().await?;
     eyre::ensure!(
-        follower_height < 20,
+        follower_height < DIVERGENT_BOUNDARY,
         "divergent follower unexpectedly imported the leader boundary"
     );
-    let events = portal
-        .BatchSubmitted_1_filter()
-        .from_block(0)
-        .query()
-        .await?;
     eyre::ensure!(
-        events.is_empty(),
-        "leader settled despite only its own usable signature"
+        portal.zoneHeight().call().await? < U256::from(DIVERGENT_BOUNDARY),
+        "leader settled the divergent boundary despite only its own usable signature"
     );
-    let after = (
-        portal.blockHash().call().await?,
-        portal.zoneHeight().call().await?,
-        portal.withdrawalBatchIndex().call().await?,
-        portal.withdrawalQueueHead().call().await?,
-        portal.withdrawalQueueTail().call().await?,
-        portal.lastProcessedDepositNumber().call().await?,
-    );
-    eyre::ensure!(after == before, "Portal changed despite rejected quorum");
 
     Ok(())
 }

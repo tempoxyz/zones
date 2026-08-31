@@ -3800,8 +3800,8 @@ impl RealP2pCluster {
 }
 
 /// Start a three-member P2P quorum against a real Tempo L1 and a Portal registered with the
-/// exact per-node attestation keys. The short interval keeps tests focused on the first real
-/// batch boundary instead of ordinary long-running block production.
+/// exact per-node attestation keys. The short interval bounds how long the tests wait for an
+/// empty batch boundary. A full import following checkpoint-only blocks may close a batch sooner.
 pub(crate) async fn start_real_p2p_cluster(
     withdrawal_batch_interval_blocks: u64,
 ) -> eyre::Result<RealP2pCluster> {
@@ -5276,6 +5276,22 @@ impl L1Fixture {
         for _ in 0..n {
             self.inject_empty_block(queue);
         }
+    }
+
+    /// Produce empty Zone blocks one at a time so each injected Tempo block is the current
+    /// operational import rather than part of a checkpoint-only catch-up range.
+    pub(crate) async fn produce_empty_zone_blocks(
+        &mut self,
+        zone: &ZoneTestNode,
+        count: u64,
+    ) -> eyre::Result<u64> {
+        let mut height = zone.provider().get_block_number().await?;
+        for _ in 0..count {
+            self.inject_empty_block(zone.deposit_queue());
+            height += 1;
+            zone.wait_for_block_number(height, DEFAULT_TIMEOUT).await?;
+        }
+        Ok(height)
     }
 
     /// Inject an L1 block with the given deposits into the queue.
