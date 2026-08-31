@@ -393,7 +393,7 @@ fn decode_canonical<T>(encoded: &[u8]) -> alloy_sol_types::Result<T>
 where
     T: SolValue + From<<T::SolType as SolType>::RustType>,
 {
-    let value = T::abi_decode(encoded)?;
+    let value = T::abi_decode_with_config(encoded, crate::dispatch::abi_decoder_config())?;
     (value.abi_encode().as_slice() == encoded)
         .then_some(value)
         .ok_or(alloy_sol_types::Error::ReserMismatch)

@@ -15,7 +15,10 @@ pub(crate) struct AccountKeychainRules;
 
 impl CallRules for AccountKeychainRules {
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode(data) else {
+        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode_with_config(
+            data,
+            crate::dispatch::abi_decoder_config(),
+        ) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
         };
