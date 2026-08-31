@@ -193,35 +193,6 @@ pub struct ZoneEngine {
     production_permit: Option<ProductionPermit>,
 }
 
-#[derive(Debug)]
-struct AvailableTempoImport {
-    l1_block: L1BlockDeposits,
-    checkpoint_headers: Vec<SealedHeader<TempoHeader>>,
-    wall_clock_timestamp_millis: u64,
-}
-
-impl AvailableTempoImport {
-    /// Historical Tempo anchor whose leader must produce this Zone block.
-    fn leader_anchor(&self) -> u64 {
-        self.checkpoint_headers
-            .last()
-            .unwrap_or(&self.l1_block.header)
-            .number()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TempoImportDecision {
-    /// Wait until the queued L1 tip activates the hardfork required by the next Zone block.
-    WaitForHardforkMatch,
-    /// Wait until the subscriber confirms the queued finalized target did not advance.
-    WaitForFinalizedTarget,
-    /// Import the full block with `advanceTempo`.
-    ImportFull,
-    /// Import specified number of checkpoint headers with `advanceTempoHeaders`.
-    ImportCheckpoints(usize),
-}
-
 impl ZoneEngine {
     pub fn new(
         chain_spec: Arc<ZoneChainSpec>,
@@ -457,6 +428,88 @@ impl ZoneEngine {
     }
 }
 
+impl AvailableBlockDrain for ZoneEngine {
+    type Block = AvailableTempoImport;
+
+    fn next_available(&self) -> eyre::Result<Option<Self::Block>> {
+        let Some(l1_block) = self.deposit_queue.peek() else {
+            return Ok(None);
+        };
+        let mut queued_headers = self
+            .deposit_queue
+            .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
+        let latest_l1_header = self
+            .deposit_queue
+            .latest_header()
+            .ok_or_eyre("L1 deposit queue lost its latest header")?;
+        let wall_clock_timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let decision = tempo_import_decision(
+            &self.chain_spec,
+            &queued_headers,
+            &latest_l1_header,
+            self.l1_block_tracker.finalized_target(),
+            self.last_header.timestamp_millis(),
+            wall_clock_timestamp_millis,
+        );
+        let checkpoint_headers = match decision {
+            TempoImportDecision::WaitForHardforkMatch
+            | TempoImportDecision::WaitForFinalizedTarget => return Ok(None),
+            TempoImportDecision::ImportFull => Vec::new(),
+            TempoImportDecision::ImportCheckpoints(count) => {
+                queued_headers.truncate(count);
+                queued_headers
+            }
+        };
+        Ok(Some(AvailableTempoImport {
+            l1_block,
+            checkpoint_headers,
+            wall_clock_timestamp_millis,
+        }))
+    }
+
+    fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+        self.production_permit
+            .as_ref()
+            .and_then(|permit| permit.check(block.leader_anchor()))
+    }
+
+    async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
+        self.advance(block).await
+    }
+}
+
+#[derive(Debug)]
+struct AvailableTempoImport {
+    l1_block: L1BlockDeposits,
+    checkpoint_headers: Vec<SealedHeader<TempoHeader>>,
+    wall_clock_timestamp_millis: u64,
+}
+
+impl AvailableTempoImport {
+    /// Historical Tempo anchor whose leader must produce this Zone block.
+    fn leader_anchor(&self) -> u64 {
+        self.checkpoint_headers
+            .last()
+            .unwrap_or(&self.l1_block.header)
+            .number()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempoImportDecision {
+    /// Wait until the queued L1 tip activates the hardfork required by the next Zone block.
+    WaitForHardforkMatch,
+    /// Wait until the subscriber confirms the queued finalized target did not advance.
+    WaitForFinalizedTarget,
+    /// Import the full block with `advanceTempo`.
+    ImportFull,
+    /// Import specified number of checkpoint headers with `advanceTempoHeaders`.
+    ImportCheckpoints(usize),
+}
+
 fn tempo_import_decision(
     chain_spec: &ZoneChainSpec,
     queued_headers: &[SealedHeader<TempoHeader>],
@@ -514,59 +567,6 @@ fn tempo_import_decision(
         }
     } else {
         TempoImportDecision::ImportCheckpoints(checkpoint_count)
-    }
-}
-
-impl AvailableBlockDrain for ZoneEngine {
-    type Block = AvailableTempoImport;
-
-    fn next_available(&self) -> eyre::Result<Option<Self::Block>> {
-        let Some(l1_block) = self.deposit_queue.peek() else {
-            return Ok(None);
-        };
-        let mut queued_headers = self
-            .deposit_queue
-            .peek_headers(zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK + 1);
-        let latest_l1_header = self
-            .deposit_queue
-            .latest_header()
-            .ok_or_eyre("L1 deposit queue lost its latest header")?;
-        let wall_clock_timestamp_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        let decision = tempo_import_decision(
-            &self.chain_spec,
-            &queued_headers,
-            &latest_l1_header,
-            self.l1_block_tracker.finalized_target(),
-            self.last_header.timestamp_millis(),
-            wall_clock_timestamp_millis,
-        );
-        let checkpoint_headers = match decision {
-            TempoImportDecision::WaitForHardforkMatch
-            | TempoImportDecision::WaitForFinalizedTarget => return Ok(None),
-            TempoImportDecision::ImportFull => Vec::new(),
-            TempoImportDecision::ImportCheckpoints(count) => {
-                queued_headers.truncate(count);
-                queued_headers
-            }
-        };
-        Ok(Some(AvailableTempoImport {
-            l1_block,
-            checkpoint_headers,
-            wall_clock_timestamp_millis,
-        }))
-    }
-
-    fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
-        self.production_permit
-            .as_ref()
-            .and_then(|permit| permit.check(block.leader_anchor()))
-    }
-
-    async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
-        self.advance(block).await
     }
 }
 
