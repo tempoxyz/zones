@@ -1122,6 +1122,9 @@ where
             eyre::eyre!("missing local canonical header at height {block_number}")
         })?;
         if existing.hash() == hash {
+            // This path bypasses `new_payload`, so verify the peer-supplied body against the
+            // canonical header before deriving queue mutations from it.
+            block.ensure_transaction_root_valid()?;
             reconcile_canonical_import(deposit_queue, &tempo_import).wrap_err_with(|| {
                 format!("cannot reconcile duplicate canonical peer block {block_number}")
             })?;
@@ -1153,8 +1156,8 @@ where
         );
     }
 
-    // 3. Require the block to advance the local Tempo checkpoint by exactly
-    // one independently observed L1 block.
+    // 3. Require the block to import a non-empty contiguous L1 header range
+    // beginning immediately after the local Tempo checkpoint.
     let local = provider
         .state_by_block_hash(parent.hash())?
         .tempo_num_hash()?;
