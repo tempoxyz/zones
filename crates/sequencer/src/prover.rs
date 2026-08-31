@@ -814,7 +814,7 @@ async fn tempo_state_witness(
                 .client()
                 .request::<_, Vec<EIP1186AccountProofResponse>>(
                     "eth_getMultiProof",
-                    (targets, BlockId::number(block)),
+                    (targets, BlockId::number(block), true),
                 )
                 .await
                 .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))
