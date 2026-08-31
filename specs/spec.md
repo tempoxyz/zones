@@ -134,7 +134,7 @@ On the Tempo side, an onchain **verifier** contract validates that each batch wa
 
 On Tempo, each zone has a **portal** that locks deposited tokens. All user deposits encrypt the zone recipient and memo to a registered sequencer encryption key. In closed access mode, only allowed accounts may initiate deposits and refund recipients must also be allowed; open access mode skips both membership checks. Decrypted zone recipients need not be allowed Tempo accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
-Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer nodes that execute or replicate the chain. The zone does not post transaction data, and data availability is entrusted to the sequencer fleet. Sequencers have full visibility into zone activity. Privacy protects against public observers on Tempo, not against sequencers.
+Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer nodes. The zone does not post transaction data, and data availability is entrusted to the sequencer fleet. Sequencers have full visibility into zone activity. Privacy protects against public observers on Tempo, not against sequencers.
 
 Zones rely on the following trust assumptions: the verifier must be sound for state transition integrity, the sequencers are trusted for liveness and data availability, and there is no forced inclusion or permissionless exit mechanism.
 
