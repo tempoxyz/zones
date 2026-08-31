@@ -10,6 +10,7 @@ import {
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptionKeyEntry,
+    ForcedExit,
     IVerifier,
     IZoneMessenger,
     IZonePortal,
@@ -51,6 +52,9 @@ contract ZonePortal is IZonePortal {
     ///      This provides a stable pricing basis for deposits while allowing the admin
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
+
+    /// @notice Fixed 0.1 TIP-20 compensation escrowed for forced-exit processing.
+    uint128 public constant FORCED_EXIT_COMPENSATION = 100_000;
 
     /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
@@ -1070,6 +1074,65 @@ contract ZonePortal is IZonePortal {
             encrypted.nonce,
             encrypted.tag,
             tempoRefundRecipient,
+            thisDeposit
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function requestForcedExit(
+        address account,
+        address _token,
+        address recipient,
+        uint256 nonce,
+        bytes calldata signature
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash)
+    {
+        if (account == address(0) || recipient == address(0) || signature.length == 0) {
+            revert InvalidForcedExit();
+        }
+        if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
+
+        _requireAllowed(recipient);
+        if (_isGatewayEnforced && hasRole(recipient, Role.CallbackGateway)) {
+            revert InvalidCallbackTarget();
+        }
+
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, recipient)) {
+            revert ITIP20.PolicyForbids();
+        }
+
+        // The compensation remains in portal escrow and is minted to the sequencer when the
+        // forced exit is processed on the zone.
+        if (!ITIP20(_token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION)) {
+            revert TransferFailed();
+        }
+
+        ForcedExit memory request = ForcedExit({
+            account: account,
+            token: _token,
+            sequencerCompensation: FORCED_EXIT_COMPENSATION,
+            recipient: recipient,
+            nonce: nonce,
+            signature: signature
+        });
+        newCurrentDepositQueueHash =
+            DepositQueueLib.enqueueForcedExit(currentDepositQueueHash, request);
+        uint64 thisDeposit = _recordDeposit(
+            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+        );
+
+        emit ForcedExitRequested(
+            newCurrentDepositQueueHash,
+            account,
+            msg.sender,
+            _token,
+            recipient,
+            FORCED_EXIT_COMPENSATION,
+            nonce,
+            signature,
             thisDeposit
         );
     }

@@ -90,13 +90,27 @@ struct DepositQueueTransition {
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
     WithdrawalBounceBack, // Internal withdrawal bounce-back entry
-    Deposit // User deposit with hidden recipient and memo
+    Deposit, // User deposit with hidden recipient and memo
+    ForcedExit // L1-authorized full-balance withdrawal request
 }
 
 struct WithdrawalBounceBackDeposit {
     address token; // TIP-20 token being deposited
     address to;
     uint128 amount;
+}
+
+/// @notice L1 request to withdraw an account's complete balance for one token from the zone.
+/// @dev The zone verifies `signature` against the account (including authorized access keys),
+///      consumes `nonce`, credits `sequencerCompensation` to the block beneficiary, and enqueues
+///      a withdrawal for the account's remaining token balance to `recipient`.
+struct ForcedExit {
+    address account;
+    address token;
+    uint128 sequencerCompensation;
+    address recipient;
+    uint256 nonce;
+    bytes signature;
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -150,10 +164,10 @@ uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
 
 /// @notice A deposit entry in the unified queue (for zone-side processing)
 /// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
-///      The depositData is ABI-encoded WithdrawalBounceBackDeposit or Deposit depending on type.
+///      The depositData is ABI-encoded WithdrawalBounceBackDeposit, Deposit, or ForcedExit.
 struct QueuedDeposit {
     DepositType depositType;
-    bytes depositData; // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
+    bytes depositData; // ABI encoding selected by depositType
     bool rejected;
 }
 
@@ -466,6 +480,19 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
+    /// @notice Emitted when an authenticated full-balance exit is appended to the deposit queue.
+    event ForcedExitRequested(
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed account,
+        address indexed requester,
+        address token,
+        address recipient,
+        uint128 sequencerCompensation,
+        uint256 nonce,
+        bytes signature,
+        uint64 depositNumber
+    );
+
     event DepositBounceBack(
         address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
     );
@@ -554,6 +581,7 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
+    error InvalidForcedExit();
     error DepositBlockCapacityExceeded(uint64 maximum);
     error TokenEnablementBlockCapacityExceeded(uint64 maximum);
     error TokenMetadataTooLong();
@@ -610,6 +638,9 @@ interface IZonePortal {
 
     /// @notice Maximum allowed gas fee rate (1e18)
     function MAX_GAS_FEE_RATE() external view returns (uint128);
+
+    /// @notice Fixed 0.1 TIP-20 paid by a forced-exit requester for zone-side processing.
+    function FORCED_EXIT_COMPENSATION() external view returns (uint128);
 
     function zoneId() external view returns (uint32);
 
@@ -882,6 +913,18 @@ interface IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
+    /// @notice Append an account-authorized request to withdraw its complete token balance.
+    /// @dev The signature is checked and its nonce consumed on the zone, not by this portal.
+    function requestForcedExit(
+        address account,
+        address token,
+        address recipient,
+        uint256 nonce,
+        bytes calldata signature
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash);
+
     function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
     function deliverWithdrawal(
@@ -1046,6 +1089,19 @@ interface IZoneInbox {
         address tempoRefundRecipient
     );
 
+    event ForcedExitProcessed(
+        bytes32 indexed requestHash,
+        address indexed account,
+        address indexed recipient,
+        address token,
+        uint128 amount,
+        uint256 nonce
+    );
+
+    event ForcedExitRejected(
+        bytes32 indexed requestHash, address indexed account, address token, uint256 nonce
+    );
+
     event WithdrawalBounceBackProcessed(
         address indexed zoneFallbackRecipient, address token, uint128 amount
     );
@@ -1082,6 +1138,10 @@ interface IZoneInbox {
     /// @notice Append-only commitment already applied by the zone
     function processedTokenEnablementHash() external view returns (bytes32);
 
+    /// @notice Next nonce accepted for an account's forced-exit authorization.
+    /// @dev Only the account or an active sequencer may query this account-indexed state.
+    function forcedExitNonce(address account) external view returns (uint256);
+
     function refunds(address token, address owner) external view returns (uint128);
 
     function claimRefund(address token) external returns (uint128 amount);
@@ -1089,7 +1149,7 @@ interface IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system-only call.
     /// @dev This is the main entry point for the block executor at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes user deposits and internal withdrawal bounce-backs
+    ///      2. Processes user deposits, forced exits, and internal withdrawal bounce-backs
     ///      3. Requires the resulting hash chain to equal Tempo's currentDepositQueueHash
     ///
     ///      For user deposits, the sequencer provides DecryptionData with the
@@ -1208,6 +1268,17 @@ interface IZoneOutbox {
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
+
+    /// @notice Burn an account's complete token balance and enqueue a plain withdrawal.
+    /// @dev Only callable by ZoneInbox while processing a valid forced exit. No withdrawal
+    ///      fee is charged; the zone fallback recipient is the source `account`.
+    function enqueueForcedWithdrawal(
+        address account,
+        address token,
+        address recipient
+    )
+        external
+        returns (uint128 amount);
 
     /// @notice Request a withdrawal from the zone back to Tempo
     /// @dev Caller must approve outbox to spend amount + fee of the specified token.

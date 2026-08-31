@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, DepositType, WithdrawalBounceBackDeposit } from "../interfaces/IZone.sol";
+import {
+    Deposit,
+    DepositType,
+    ForcedExit,
+    WithdrawalBounceBackDeposit
+} from "../interfaces/IZone.sol";
 
 /// @title DepositQueueLib
 /// @notice Library for managing the deposit queue hash chain
@@ -9,10 +14,11 @@ import { Deposit, DepositType, WithdrawalBounceBackDeposit } from "../interfaces
 ///      The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof
 ///      validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 ///
-///      The queue supports user deposits and internal withdrawal bounce-backs. The hash
+///      The queue supports user deposits, forced exits, and internal withdrawal bounce-backs. The hash
 ///      chain includes a type discriminator to distinguish between them:
 ///      - WithdrawalBounceBack: keccak256(abi.encode(DepositType.WithdrawalBounceBack, bounceBack, prevHash))
 ///      - Deposit:              keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
+///      - ForcedExit:           keccak256(abi.encode(DepositType.ForcedExit, request, prevHash))
 library DepositQueueLib {
 
     /// @notice Enqueue an internal withdrawal bounce-back into the queue
@@ -45,6 +51,18 @@ library DepositQueueLib {
         returns (bytes32 newHash)
     {
         newHash = keccak256(abi.encode(DepositType.Deposit, depositData, currentHash));
+    }
+
+    /// @notice Enqueue an authenticated full-balance exit request.
+    function enqueueForcedExit(
+        bytes32 currentHash,
+        ForcedExit memory request
+    )
+        internal
+        pure
+        returns (bytes32 newHash)
+    {
+        newHash = keccak256(abi.encode(DepositType.ForcedExit, request, currentHash));
     }
 
 }
