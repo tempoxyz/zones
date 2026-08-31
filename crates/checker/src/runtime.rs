@@ -148,6 +148,7 @@ where
         metrics.recovery_rebuilds_total.increment(1);
     }
     metrics.update(&snapshot);
+    let mut portal_balance_cache = PortalBalanceCache::default();
 
     ctx.catch_up_notifications_with_head(ExExHead::new(snapshot.metadata.verified_zone.into()))?;
     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
@@ -155,6 +156,7 @@ where
     while let Some(notification) = ctx.notifications.try_next().await? {
         if !matches!(&notification, ExExNotification::ChainCommitted { .. }) {
             snapshot = store.reset(&checkpoint)?;
+            portal_balance_cache.clear();
             metrics.recovery_rebuilds_total.increment(1);
             metrics.update(&snapshot);
             ctx.catch_up_notifications_with_head(ExExHead::new(bootstrap.zone().into()))?;
@@ -173,14 +175,18 @@ where
         metrics.update(&snapshot);
 
         let previous_verified = snapshot.metadata.verified_zone.number;
+        let verification = VerificationContext {
+            config: &config,
+            metrics,
+            l1: &l1,
+            store: &store,
+        };
         match process_notification(
             &notification,
             ctx.provider(),
-            &l1,
-            &store,
             snapshot,
-            &config,
-            metrics,
+            &mut portal_balance_cache,
+            &verification,
         )
         .await
         {
@@ -296,6 +302,75 @@ enum BlockError {
 struct VerificationContext<'a> {
     config: &'a CheckerConfig,
     metrics: &'a CheckerMetrics,
+    l1: &'a DynProvider<TempoNetwork>,
+    store: &'a Store,
+}
+
+/// Last Portal balances tied to a durably verified Tempo coordinate.
+#[derive(Default)]
+struct PortalBalanceCache {
+    verified: Option<VerifiedPortalBalances>,
+}
+
+struct VerifiedPortalBalances {
+    tempo: BlockNumHash,
+    balances: BTreeMap<alloy_primitives::Address, alloy_primitives::U256>,
+}
+
+impl PortalBalanceCache {
+    /// Return balances only for the exact verified Tempo coordinate.
+    fn balances_at(
+        &self,
+        tempo: BlockNumHash,
+    ) -> Option<&BTreeMap<alloy_primitives::Address, alloy_primitives::U256>> {
+        self.verified
+            .as_ref()
+            .filter(|verified| verified.tempo == tempo)
+            .map(|verified| &verified.balances)
+    }
+
+    /// Return tokens not covered by the exact cached coordinate.
+    fn missing_tokens(
+        &self,
+        tempo: BlockNumHash,
+        tokens: &BTreeSet<alloy_primitives::Address>,
+    ) -> BTreeSet<alloy_primitives::Address> {
+        let cached = self.balances_at(tempo);
+        tokens
+            .iter()
+            .filter(|token| cached.is_none_or(|balances| !balances.contains_key(*token)))
+            .copied()
+            .collect()
+    }
+
+    /// Replace the cache after durable block verification.
+    fn promote(
+        &mut self,
+        tempo: BlockNumHash,
+        balances: BTreeMap<alloy_primitives::Address, alloy_primitives::U256>,
+    ) {
+        self.verified = Some(VerifiedPortalBalances { tempo, balances });
+    }
+
+    /// Discard balances when rebuilding verified state.
+    fn clear(&mut self) {
+        self.verified = None;
+    }
+}
+
+/// Cached and newly fetched parent balances for one verification.
+struct ParentPortalBalances<'a> {
+    cached: Option<&'a BTreeMap<alloy_primitives::Address, alloy_primitives::U256>>,
+    fetched: BTreeMap<alloy_primitives::Address, alloy_primitives::U256>,
+}
+
+impl ParentPortalBalances<'_> {
+    fn get(&self, token: &alloy_primitives::Address) -> Option<alloy_primitives::U256> {
+        self.fetched
+            .get(token)
+            .or_else(|| self.cached.and_then(|balances| balances.get(token)))
+            .copied()
+    }
 }
 
 fn record_retry_attempt(
@@ -343,11 +418,9 @@ impl Backoff {
 async fn process_notification<N, P>(
     notification: &ExExNotification<N>,
     provider: &P,
-    l1: &DynProvider<TempoNetwork>,
-    store: &Store,
     snapshot: Snapshot,
-    config: &CheckerConfig,
-    metrics: &CheckerMetrics,
+    portal_balance_cache: &mut PortalBalanceCache,
+    context: &VerificationContext<'_>,
 ) -> Result<Box<Snapshot>, BlockError>
 where
     N: CheckedPrimitives,
@@ -363,13 +436,19 @@ where
             )));
         }
     };
-    let context = VerificationContext { config, metrics };
     for (block, receipts) in new.blocks_and_receipts() {
         if already_applied(&current, block.header().number(), block.hash())? {
             continue;
         }
-        current =
-            verify_block::<N, _>(provider, l1, store, current, &context, block, receipts).await?;
+        current = verify_block::<N, _>(
+            provider,
+            current,
+            portal_balance_cache,
+            context,
+            block,
+            receipts,
+        )
+        .await?;
     }
     Ok(Box::new(current))
 }
@@ -395,9 +474,8 @@ fn already_applied(
 /// collateral, persisting the result on success.
 async fn verify_block<N, P>(
     provider: &P,
-    l1: &DynProvider<TempoNetwork>,
-    store: &Store,
     prior: Snapshot,
+    portal_balance_cache: &mut PortalBalanceCache,
     context: &VerificationContext<'_>,
     block: &RecoveredBlock<N::Block>,
     receipts: &[N::Receipt],
@@ -421,8 +499,7 @@ where
     validate_tempo_advance(tempo_parent.number, tempo.number).map_err(fail)?;
     let mut l1_backoff = Backoff::new();
     let tempo_block =
-        collect_l1_block_with_retry(l1, tempo_parent, tempo, zone, context, &mut l1_backoff)
-            .await?;
+        collect_l1_block_with_retry(tempo_parent, tempo, zone, context, &mut l1_backoff).await?;
     let mut block_effects = effects::from_tempo(&tempo_block);
     block_effects.extend(effects::from_zone(&l2));
     let candidate = CandidateTransition::derive(
@@ -481,18 +558,7 @@ where
         )
         .map_err(|error| fail(error.into()))?;
 
-    let parent_balances = collect_portal_balances_with_retry(
-        l1,
-        &tokens,
-        tempo_parent.hash,
-        zone,
-        context,
-        &mut l1_backoff,
-        "parent Portal balance acquisition",
-    )
-    .await?;
     let balances = collect_portal_balances_with_retry(
-        l1,
         &tokens,
         tempo.hash,
         zone,
@@ -501,44 +567,85 @@ where
         "Portal balance acquisition",
     )
     .await?;
-    let balance_changes = tokens
-        .iter()
-        .map(|token| {
-            let movement = tempo_block.custody(*token);
-            let parent_balance = parent_balances.get(token).copied().ok_or_else(|| {
-                BlockError::Disable(eyre::eyre!(
-                    "parent Portal balance result omitted token {token}"
-                ))
-            })?;
-            let actual = balances.get(token).copied().ok_or_else(|| {
-                BlockError::Disable(eyre::eyre!("Portal balance result omitted token {token}"))
-            })?;
-            Ok(crate::accounting::PortalBalanceChange {
-                token: *token,
-                parent_balance,
-                actual,
-                inflow: movement.inflow,
-                outflow: movement.outflow,
+    {
+        let parent_balances = resolve_parent_portal_balances(
+            &tokens,
+            tempo_parent,
+            zone,
+            context,
+            &mut l1_backoff,
+            portal_balance_cache,
+        )
+        .await?;
+        let balance_changes = tokens
+            .iter()
+            .map(|token| {
+                let movement = tempo_block.custody(*token);
+                let parent_balance = parent_balances.get(token).ok_or_else(|| {
+                    BlockError::Disable(eyre::eyre!(
+                        "parent Portal balance result omitted token {token}"
+                    ))
+                })?;
+                let actual = balances.get(token).copied().ok_or_else(|| {
+                    BlockError::Disable(eyre::eyre!("Portal balance result omitted token {token}"))
+                })?;
+                Ok(crate::accounting::PortalBalanceChange {
+                    token: *token,
+                    parent_balance,
+                    actual,
+                    inflow: movement.inflow,
+                    outflow: movement.outflow,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, BlockError>>()?;
-    state
-        .verify_portal_balance_changes(balance_changes)
-        .map_err(|error| fail(error.into()))?;
+            .collect::<Result<Vec<_>, BlockError>>()?;
+        state
+            .verify_portal_balance_changes(balance_changes)
+            .map_err(|error| fail(error.into()))?;
+    }
     state
         .verify_portal_balances(balances.iter().map(|(&token, &balance)| (token, balance)))
         .map_err(|error| fail(error.into()))?;
 
-    let next = store
+    let next = context
+        .store
         .apply(candidate)
         .map_err(|error| BlockError::Disable(error.into()))?;
+    portal_balance_cache.promote(tempo, balances);
     telemetry::log_verified_activity(&tempo_block, &l2, zone);
     Ok(next)
 }
 
+/// Resolve parent balances from the verified cache, querying only missing tokens.
+async fn resolve_parent_portal_balances<'a>(
+    tokens: &BTreeSet<alloy_primitives::Address>,
+    tempo: BlockNumHash,
+    zone: BlockRef,
+    context: &VerificationContext<'_>,
+    backoff: &mut Backoff,
+    cache: &'a PortalBalanceCache,
+) -> Result<ParentPortalBalances<'a>, BlockError> {
+    let missing = cache.missing_tokens(tempo, tokens);
+    let fetched = if missing.is_empty() {
+        BTreeMap::new()
+    } else {
+        collect_portal_balances_with_retry(
+            &missing,
+            tempo.hash,
+            zone,
+            context,
+            backoff,
+            "parent Portal balance acquisition",
+        )
+        .await?
+    };
+    Ok(ParentPortalBalances {
+        cached: cache.balances_at(tempo),
+        fetched,
+    })
+}
+
 /// Read exact Portal balances using the block retry policy.
 async fn collect_portal_balances_with_retry(
-    l1: &DynProvider<TempoNetwork>,
     tokens: &BTreeSet<alloy_primitives::Address>,
     block: alloy_primitives::B256,
     zone: BlockRef,
@@ -546,7 +653,12 @@ async fn collect_portal_balances_with_retry(
     backoff: &mut Backoff,
     operation: &str,
 ) -> Result<BTreeMap<alloy_primitives::Address, alloy_primitives::U256>, BlockError> {
-    let VerificationContext { config, metrics } = context;
+    let VerificationContext {
+        config,
+        metrics,
+        l1,
+        ..
+    } = context;
     loop {
         match portal_balances(l1, config.portal_address, tokens.iter().copied(), block).await {
             Ok(balances) => return Ok(balances.into_iter().collect()),
@@ -568,14 +680,18 @@ fn classify_block_l1_error(error: L1ReadError, zone: BlockRef) -> BlockError {
 }
 
 async fn collect_l1_block_with_retry(
-    l1: &DynProvider<TempoNetwork>,
     parent: BlockNumHash,
     expected: BlockNumHash,
     zone: BlockRef,
     context: &VerificationContext<'_>,
     backoff: &mut Backoff,
 ) -> Result<crate::l1::L1BlockEvidence, BlockError> {
-    let VerificationContext { config, metrics } = context;
+    let VerificationContext {
+        config,
+        metrics,
+        l1,
+        ..
+    } = context;
     loop {
         match collect_l1_block_at(
             l1,
@@ -715,5 +831,43 @@ mod tests {
         .expect_err("the final attempt must disable the checker");
         assert_eq!(attempts, MAX_STATE_ATTEMPTS);
         assert!(error.to_string().contains("retry budget exhausted"));
+    }
+
+    #[test]
+    fn portal_balance_cache_requires_exact_coordinate_and_reports_missing_tokens() {
+        let tempo = BlockNumHash::new(20, alloy_primitives::B256::repeat_byte(1));
+        let cached = alloy_primitives::Address::repeat_byte(2);
+        let missing = alloy_primitives::Address::repeat_byte(3);
+        let tokens = BTreeSet::from([cached, missing]);
+        let mut cache = PortalBalanceCache::default();
+        cache.promote(
+            tempo,
+            BTreeMap::from([(cached, alloy_primitives::U256::from(10))]),
+        );
+
+        assert_eq!(
+            cache
+                .balances_at(tempo)
+                .and_then(|balances| balances.get(&cached)),
+            Some(&alloy_primitives::U256::from(10))
+        );
+        assert_eq!(
+            cache.missing_tokens(tempo, &tokens),
+            BTreeSet::from([missing])
+        );
+
+        let parent = ParentPortalBalances {
+            cached: cache.balances_at(tempo),
+            fetched: BTreeMap::from([(missing, alloy_primitives::U256::from(20))]),
+        };
+        assert_eq!(parent.get(&cached), Some(alloy_primitives::U256::from(10)));
+        assert_eq!(parent.get(&missing), Some(alloy_primitives::U256::from(20)));
+
+        let other = BlockNumHash::new(20, alloy_primitives::B256::repeat_byte(4));
+        assert!(cache.balances_at(other).is_none());
+        assert_eq!(cache.missing_tokens(other, &tokens), tokens);
+
+        cache.clear();
+        assert_eq!(cache.missing_tokens(tempo, &tokens), tokens);
     }
 }

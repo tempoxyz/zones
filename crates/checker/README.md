@@ -38,8 +38,10 @@ affect the aggregate solvency model are retained. Genesis bridge cursors are
 checked only to establish the empty bootstrap baseline.
 
 It then reads affected balances and every enabled token's supply from the exact
-Zone post-state. Portal custody is read at both the imported Tempo block and its
-parent. The required invariants are:
+Zone post-state. Portal custody is verified at both the imported Tempo block and
+its parent. The tip read is retained after durable verification and reused as
+the next block's parent; startup, coordinate mismatches, and newly enabled
+tokens fall back to exact parent reads. The required invariants are:
 
 ```text
 Zone balance(account, token) == derived entitlement(account, token)
