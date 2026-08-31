@@ -1,6 +1,10 @@
 //! Durable notification processing and observe-only failure isolation.
 
-use std::{collections::BTreeSet, future::Future, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    time::Duration,
+};
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumHash;
@@ -403,7 +407,7 @@ where
     P: BlockNumReader + ChainSpecProvider + StateProviderFactory,
     P::ChainSpec: TempoHardforks,
 {
-    let VerificationContext { config, metrics } = context;
+    let VerificationContext { metrics, .. } = context;
     let number = block.number();
     let hash = block.hash();
     let parent_hash = block.parent_hash();
@@ -477,30 +481,52 @@ where
         )
         .map_err(|error| fail(error.into()))?;
 
-    let balances = loop {
-        match portal_balances(
-            l1,
-            config.portal_address,
-            tokens.iter().copied(),
-            tempo.hash,
-        )
-        .await
-        {
-            Ok(balances) => break balances,
-            Err(L1ReadError::Unavailable(error)) => {
-                record_l1_retry(
-                    metrics,
-                    &mut l1_backoff,
-                    &error,
-                    "Portal balance acquisition",
-                )?;
-                l1_backoff.wait().await;
-            }
-            Err(error) => return Err(classify_block_l1_error(error, zone)),
-        }
-    };
+    let parent_balances = collect_portal_balances_with_retry(
+        l1,
+        &tokens,
+        tempo_parent.hash,
+        zone,
+        context,
+        &mut l1_backoff,
+        "parent Portal balance acquisition",
+    )
+    .await?;
+    let balances = collect_portal_balances_with_retry(
+        l1,
+        &tokens,
+        tempo.hash,
+        zone,
+        context,
+        &mut l1_backoff,
+        "Portal balance acquisition",
+    )
+    .await?;
+    let balance_changes = tokens
+        .iter()
+        .map(|token| {
+            let movement = tempo_block.custody(*token);
+            let parent_balance = parent_balances.get(token).copied().ok_or_else(|| {
+                BlockError::Disable(eyre::eyre!(
+                    "parent Portal balance result omitted token {token}"
+                ))
+            })?;
+            let actual = balances.get(token).copied().ok_or_else(|| {
+                BlockError::Disable(eyre::eyre!("Portal balance result omitted token {token}"))
+            })?;
+            Ok(crate::accounting::PortalBalanceChange {
+                token: *token,
+                parent_balance,
+                actual,
+                inflow: movement.inflow,
+                outflow: movement.outflow,
+            })
+        })
+        .collect::<Result<Vec<_>, BlockError>>()?;
     state
-        .verify_portal_balances(balances)
+        .verify_portal_balance_changes(balance_changes)
+        .map_err(|error| fail(error.into()))?;
+    state
+        .verify_portal_balances(balances.iter().map(|(&token, &balance)| (token, balance)))
         .map_err(|error| fail(error.into()))?;
 
     let next = store
@@ -508,6 +534,29 @@ where
         .map_err(|error| BlockError::Disable(error.into()))?;
     telemetry::log_verified_activity(&tempo_block, &l2, zone);
     Ok(next)
+}
+
+/// Read exact Portal balances using the block retry policy.
+async fn collect_portal_balances_with_retry(
+    l1: &DynProvider<TempoNetwork>,
+    tokens: &BTreeSet<alloy_primitives::Address>,
+    block: alloy_primitives::B256,
+    zone: BlockRef,
+    context: &VerificationContext<'_>,
+    backoff: &mut Backoff,
+    operation: &str,
+) -> Result<BTreeMap<alloy_primitives::Address, alloy_primitives::U256>, BlockError> {
+    let VerificationContext { config, metrics } = context;
+    loop {
+        match portal_balances(l1, config.portal_address, tokens.iter().copied(), block).await {
+            Ok(balances) => return Ok(balances.into_iter().collect()),
+            Err(L1ReadError::Unavailable(error)) => {
+                record_l1_retry(metrics, backoff, &error, operation)?;
+                backoff.wait().await;
+            }
+            Err(error) => return Err(classify_block_l1_error(error, zone)),
+        }
+    }
 }
 
 fn classify_block_l1_error(error: L1ReadError, zone: BlockRef) -> BlockError {

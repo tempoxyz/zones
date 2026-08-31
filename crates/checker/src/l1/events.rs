@@ -1,9 +1,7 @@
 //! Decoded L1 Portal events with their canonical receipt provenance.
 
-use alloy_network::ReceiptResponse as _;
-use alloy_primitives::{Address, Log};
+use alloy_primitives::{Address, Log, U256};
 use alloy_sol_types::SolEvent;
-use tempo_alloy::rpc::TempoTransactionReceipt;
 use tempo_zone_contracts::ZonePortal;
 
 use crate::decode_event;
@@ -15,6 +13,7 @@ pub(crate) enum L1PortalEvent {
     DepositMade {
         token: Address,
         net_amount: u128,
+        fee: u128,
         deposit_number: u64,
     },
     /// A TIP-20 token newly enabled for bridging.
@@ -47,6 +46,70 @@ pub(crate) enum L1PortalEvent {
     },
 }
 
+pub(super) struct CustodyEffect {
+    pub(super) token: Address,
+    pub(super) inflow: U256,
+    pub(super) outflow: U256,
+}
+
+impl L1PortalEvent {
+    /// Return the Portal custody movement required by this event.
+    pub(super) fn custody_effect(&self) -> CustodyEffect {
+        match *self {
+            Self::DepositMade {
+                token,
+                net_amount,
+                fee,
+                ..
+            } => CustodyEffect {
+                token,
+                inflow: U256::from(net_amount) + U256::from(fee),
+                outflow: U256::from(fee),
+            },
+            Self::WithdrawalProcessed {
+                token,
+                amount,
+                callback_success: true,
+                ..
+            } => CustodyEffect {
+                token,
+                inflow: U256::ZERO,
+                outflow: U256::from(amount),
+            },
+            Self::DepositBounceBack {
+                token,
+                amount,
+                bounceback_fee,
+            } => CustodyEffect {
+                token,
+                inflow: U256::ZERO,
+                outflow: U256::from(amount) + U256::from(bounceback_fee),
+            },
+            Self::DepositBounceBackPending {
+                token,
+                bounceback_fee,
+                ..
+            } => CustodyEffect {
+                token,
+                inflow: U256::ZERO,
+                outflow: U256::from(bounceback_fee),
+            },
+            Self::RefundClaimed { token, amount, .. } => CustodyEffect {
+                token,
+                inflow: U256::ZERO,
+                outflow: U256::from(amount),
+            },
+            Self::TokenEnabled { token }
+            | Self::WithdrawalProcessed { token, .. }
+            | Self::WithdrawalBounceBack { token, .. } => CustodyEffect {
+                token,
+                inflow: U256::ZERO,
+                outflow: U256::ZERO,
+            },
+        }
+    }
+}
+
 /// Builds ordered event evidence while receipts are visited once.
 #[derive(Default)]
 pub(super) struct EventCollector {
@@ -61,26 +124,6 @@ impl EventCollector {
             portal,
             ..Default::default()
         }
-    }
-
-    /// Decode recognized Portal logs from one canonical receipt.
-    ///
-    /// Failed receipts are skipped entirely. Only logs from `portal` are
-    /// decoded. Recognized-but-irrelevant topics (pausing, admin, gas-rate
-    /// updates, etc.) are ignored; a truly unrecognized topic fails closed. A
-    /// known event that fails ABI decoding returns a contextual error.
-    pub(super) fn extract_receipt(
-        &mut self,
-        receipt: &TempoTransactionReceipt,
-        block: u64,
-    ) -> eyre::Result<()> {
-        if !receipt.status() {
-            return Ok(());
-        }
-        for log in receipt.logs() {
-            self.extract_log(&log.inner, block)?;
-        }
-        Ok(())
     }
 
     /// Decode one receipt-authenticated log when it was emitted by the configured Portal.
@@ -119,6 +162,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             L1PortalEvent::DepositMade {
                 token: e.token,
                 net_amount: e.netAmount,
+                fee: e.fee,
                 deposit_number: e.depositNumber,
             }
         }
@@ -234,6 +278,7 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
 mod tests {
     use super::*;
     use alloy_consensus::ReceiptWithBloom;
+    use alloy_network::ReceiptResponse as _;
     use alloy_primitives::{B256, Bloom, U256, address};
     use alloy_rpc_types_eth::TransactionReceipt;
     use tempo_alloy::rpc::TempoTransactionReceipt;
@@ -372,7 +417,11 @@ mod tests {
     fn collect(receipts: &[TempoTransactionReceipt]) -> eyre::Result<Vec<L1PortalEvent>> {
         let mut collector = EventCollector::new(PORTAL);
         for receipt in receipts {
-            collector.extract_receipt(receipt, BLOCK)?;
+            if receipt.status() {
+                for log in receipt.logs() {
+                    collector.extract_log(&log.inner, BLOCK)?;
+                }
+            }
         }
         Ok(collector.finish())
     }
@@ -486,11 +535,7 @@ mod tests {
                 vec![noise, withdrawal(), token()],
             ),
         ];
-        let mut collector = EventCollector::new(PORTAL);
-        for receipt in &receipts {
-            collector.extract_receipt(receipt, BLOCK).unwrap();
-        }
-        let events = collector.finish();
+        let events = collect(&receipts).unwrap();
 
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0], L1PortalEvent::DepositMade { .. }));

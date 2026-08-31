@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
-use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+use tempo_contracts::precompiles::{ITIP20, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::{TempoReceipt, TempoTxType};
 
 #[derive(Deserialize)]
@@ -210,7 +210,7 @@ async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
 }
 
 #[test]
-fn l1_block_tracker_retains_authenticated_portal_logs_after_consumption() {
+fn l1_block_tracker_retains_authenticated_portal_evidence_after_consumption() {
     let tracker = L1BlockTracker::default();
     let anchor = NumHash::new(10, B256::with_last_byte(0x10));
     let parent_hash = B256::with_last_byte(0x09);
@@ -225,21 +225,28 @@ fn l1_block_tracker_retains_authenticated_portal_logs_after_consumption() {
             anchor,
             parent_hash,
             L1PortalEvents::default(),
-            vec![log.clone()],
+            vec![AuthenticatedPortalReceipt {
+                receipt_index: 0,
+                logs: vec![log.clone()],
+            }],
         )
         .unwrap();
 
-    let observed = tracker.authenticated_portal_logs(anchor).unwrap().unwrap();
+    let observed = tracker
+        .authenticated_portal_evidence(anchor)
+        .unwrap()
+        .unwrap();
     assert_eq!(observed.parent_hash, parent_hash);
-    assert_eq!(observed.logs, vec![log.clone()]);
+    assert_eq!(observed.receipts[0].logs, vec![log.clone()]);
 
     tracker.prune_through(anchor.number);
     assert_eq!(tracker.observed_hash(anchor.number), None);
     assert_eq!(
         tracker
-            .authenticated_portal_logs(anchor)
+            .authenticated_portal_evidence(anchor)
             .unwrap()
             .unwrap()
+            .receipts[0]
             .logs,
         vec![log]
     );
@@ -1679,11 +1686,24 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         },
         ..Default::default()
     };
-    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let token = address!("0x20c0000000000000000000000000000000000001");
+    let transfer = Log {
+        inner: alloy_primitives::Log {
+            address: token,
+            data: ITIP20::Transfer {
+                from: Address::repeat_byte(1),
+                to: portal,
+                amount: U256::ONE,
+            }
+            .encode_log_data(),
+        },
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown, transfer]);
+    let (events, _, portal_receipts) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
-    assert_eq!(portal_logs.unwrap().len(), 1);
+    assert_eq!(portal_receipts.unwrap()[0].logs.len(), 2);
 }
 
 #[test]

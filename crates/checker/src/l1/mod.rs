@@ -1,10 +1,13 @@
 //! Collection of all temporary evidence for one anchored Tempo/L1 block.
 
+mod custody;
 mod events;
+
+use std::collections::BTreeMap;
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockId, BlockNumHash};
-use alloy_network::{BlockResponse as _, primitives::HeaderResponse as _};
+use alloy_network::{BlockResponse as _, ReceiptResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, Bloom, Sealable as _, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_transport::{RpcError, TransportError, TransportErrorKind};
@@ -18,6 +21,8 @@ use zone_l1::L1BlockTracker;
 
 use crate::AttemptError;
 
+pub(crate) use custody::CustodyMovement;
+use custody::reconcile_receipt;
 use events::EventCollector;
 pub(crate) use events::L1PortalEvent;
 
@@ -58,6 +63,7 @@ impl From<L1ReadError> for AttemptError {
 pub(crate) struct L1BlockEvidence {
     block: BlockNumHash,
     events: Vec<L1PortalEvent>,
+    custody: BTreeMap<Address, CustodyMovement>,
 }
 
 /// Header fields bound to the hash reported by the Tempo RPC.
@@ -97,6 +103,18 @@ impl L1BlockEvidence {
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
         self.events.iter()
     }
+
+    pub(crate) fn custody(&self, token: Address) -> CustodyMovement {
+        self.custody.get(&token).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn custody_movements(
+        &self,
+    ) -> impl Iterator<Item = (Address, CustodyMovement)> + '_ {
+        self.custody
+            .iter()
+            .map(|(&token, &movement)| (token, movement))
+    }
 }
 
 /// Fetch the exact anchored Tempo block that extends `parent`.
@@ -108,7 +126,7 @@ pub(crate) async fn collect_l1_block_at(
     expected: BlockNumHash,
 ) -> Result<L1BlockEvidence, L1ReadError> {
     if let Some(evidence) = tracker
-        .authenticated_portal_logs(expected)
+        .authenticated_portal_evidence(expected)
         .map_err(finding)?
     {
         return collect_tracked_l1_block_evidence(portal, parent, evidence);
@@ -119,7 +137,7 @@ pub(crate) async fn collect_l1_block_at(
 fn collect_tracked_l1_block_evidence(
     portal: Address,
     parent: BlockNumHash,
-    evidence: zone_l1::AuthenticatedPortalLogs,
+    evidence: zone_l1::AuthenticatedPortalEvidence,
 ) -> Result<L1BlockEvidence, L1ReadError> {
     let expected_number = parent.number.checked_add(1).ok_or_else(|| {
         disable(eyre::eyre!(
@@ -133,15 +151,22 @@ fn collect_tracked_l1_block_evidence(
             evidence.block.number
         )));
     }
-    let mut collector = EventCollector::new(portal);
-    for log in &evidence.logs {
-        collector
-            .extract_log(log, evidence.block.number)
-            .map_err(finding)?;
+    let mut events = Vec::new();
+    let mut custody = BTreeMap::new();
+    for receipt in &evidence.receipts {
+        collect_receipt_evidence(
+            portal,
+            evidence.block.number,
+            receipt.receipt_index,
+            receipt.logs.iter(),
+            &mut events,
+            &mut custody,
+        )?;
     }
     Ok(L1BlockEvidence {
         block: evidence.block,
-        events: collector.finish(),
+        events,
+        custody,
     })
 }
 
@@ -240,14 +265,53 @@ fn collect_l1_block_evidence(
     receipts: &[TempoTransactionReceipt],
 ) -> Result<L1BlockEvidence, L1ReadError> {
     let number = block.number;
-    let mut event_collector = EventCollector::new(portal);
-    for receipt in receipts {
-        event_collector
-            .extract_receipt(receipt, number)
+    let mut events = Vec::new();
+    let mut custody = BTreeMap::new();
+    for (receipt_index, receipt) in receipts.iter().enumerate() {
+        if !receipt.status() {
+            continue;
+        }
+        collect_receipt_evidence(
+            portal,
+            number,
+            receipt_index as u64,
+            receipt.logs().iter().map(|log| &log.inner),
+            &mut events,
+            &mut custody,
+        )?;
+    }
+    Ok(L1BlockEvidence {
+        block,
+        events,
+        custody,
+    })
+}
+
+/// Collect Portal events and custody movements from one receipt.
+fn collect_receipt_evidence<'a>(
+    portal: Address,
+    block: u64,
+    receipt: u64,
+    logs: impl Clone + IntoIterator<Item = &'a alloy_primitives::Log>,
+    events: &mut Vec<L1PortalEvent>,
+    custody: &mut BTreeMap<Address, CustodyMovement>,
+) -> Result<(), L1ReadError> {
+    let mut collector = EventCollector::new(portal);
+    for log in logs.clone() {
+        collector.extract_log(log, block).map_err(finding)?;
+    }
+    let receipt_events = collector.finish();
+    let movement =
+        reconcile_receipt(portal, &receipt_events, logs, block, receipt).map_err(finding)?;
+    for (token, movement) in movement {
+        custody
+            .entry(token)
+            .or_default()
+            .merge(movement)
             .map_err(finding)?;
     }
-    let events = event_collector.finish();
-    Ok(L1BlockEvidence { block, events })
+    events.extend(receipt_events);
+    Ok(())
 }
 
 fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
@@ -354,10 +418,13 @@ mod tests {
             }
             .encode_log_data(),
         };
-        let tracked = zone_l1::AuthenticatedPortalLogs {
+        let tracked = zone_l1::AuthenticatedPortalEvidence {
             block: NumHash::new(BLOCK, HASH),
             parent_hash: parent.hash,
-            logs: vec![log],
+            receipts: vec![zone_l1::AuthenticatedPortalReceipt {
+                receipt_index: 0,
+                logs: vec![log],
+            }],
         };
 
         let evidence = collect_tracked_l1_block_evidence(portal, parent, tracked).unwrap();
@@ -370,10 +437,10 @@ mod tests {
 
     #[test]
     fn tracked_evidence_rejects_non_contiguous_parent() {
-        let tracked = zone_l1::AuthenticatedPortalLogs {
+        let tracked = zone_l1::AuthenticatedPortalEvidence {
             block: NumHash::new(BLOCK, HASH),
             parent_hash: B256::repeat_byte(0xff),
-            logs: vec![],
+            receipts: vec![],
         };
         let result = collect_tracked_l1_block_evidence(
             Address::ZERO,

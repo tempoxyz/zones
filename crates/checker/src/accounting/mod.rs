@@ -14,6 +14,26 @@ pub(crate) struct AccountKey {
     pub(crate) account: Address,
 }
 
+/// One observed Portal balance transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PortalBalanceChange {
+    pub(crate) token: Address,
+    pub(crate) parent_balance: U256,
+    pub(crate) actual: U256,
+    pub(crate) inflow: U256,
+    pub(crate) outflow: U256,
+}
+
+impl PortalBalanceChange {
+    fn expected(&self) -> Result<U256, AccountingError> {
+        self.parent_balance
+            .checked_add(self.inflow)
+            .ok_or(AccountingError::Overflow)?
+            .checked_sub(self.outflow)
+            .ok_or(AccountingError::Underflow)
+    }
+}
+
 impl AccountKey {
     pub(crate) const fn new(token: Address, account: Address) -> Self {
         Self { token, account }
@@ -237,6 +257,24 @@ impl State {
         Ok(())
     }
 
+    /// Verify exact Portal balance changes across one imported Tempo block.
+    pub(crate) fn verify_portal_balance_changes(
+        &self,
+        balances: impl IntoIterator<Item = PortalBalanceChange>,
+    ) -> Result<(), AccountingError> {
+        for balance in balances {
+            let expected = balance.expected()?;
+            if balance.actual != expected {
+                return Err(AccountingError::CustodyMismatch {
+                    token: balance.token,
+                    expected,
+                    actual: balance.actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn apply_effect(
         &mut self,
         effect: Effect,
@@ -443,6 +481,12 @@ pub(crate) enum AccountingError {
         token: Address,
         required: U256,
         available: U256,
+    },
+    #[error("token {token} custody mismatch: expected {expected}, observed {actual}")]
+    CustodyMismatch {
+        token: Address,
+        expected: U256,
+        actual: U256,
     },
 }
 

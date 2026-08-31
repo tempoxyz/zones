@@ -1,10 +1,11 @@
 use super::*;
 use eyre::WrapErr as _;
-use std::collections::HashSet;
-use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
+use std::collections::{BTreeMap, HashSet};
+use tempo_contracts::precompiles::{
+    ITIP20::{Transfer, TransferPolicyUpdate},
+    TIP403_REGISTRY_ADDRESS,
+};
 use tempo_primitives::is_tip20_prefix;
-
-use std::collections::BTreeMap;
 
 /// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
 /// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
@@ -13,7 +14,7 @@ pub const MAX_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
 #[derive(Debug, Default)]
 struct L1BlockTrackerState {
     observed: BTreeMap<u64, L1BlockObservation>,
-    recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
+    recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalEvidence>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
 }
@@ -22,18 +23,27 @@ struct L1BlockTrackerState {
 struct L1BlockObservation {
     hash: B256,
     portal_events: L1PortalEvents,
-    portal_evidence: Option<AuthenticatedPortalLogs>,
+    portal_evidence: Option<AuthenticatedPortalEvidence>,
 }
 
-/// Receipt-root-authenticated Portal logs for one finalized Tempo block.
+/// Relevant logs from one successful receipt.
 #[derive(Debug, Clone)]
-pub struct AuthenticatedPortalLogs {
+pub struct AuthenticatedPortalReceipt {
+    /// Receipt position in the block.
+    pub receipt_index: u64,
+    /// Portal events and TIP-20 transfers involving the Portal.
+    pub logs: Vec<alloy_primitives::Log>,
+}
+
+/// Receipt-root-authenticated Portal evidence for one finalized Tempo block.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedPortalEvidence {
     /// Exact finalized Tempo block containing the logs.
     pub block: NumHash,
     /// Parent hash from the authenticated Tempo header.
     pub parent_hash: B256,
-    /// Portal logs in canonical receipt and log order.
-    pub logs: Vec<alloy_primitives::Log>,
+    /// Relevant successful receipts in canonical order.
+    pub receipts: Vec<AuthenticatedPortalReceipt>,
 }
 
 /// Number of consumed Tempo blocks whose authenticated Portal logs remain available to
@@ -175,14 +185,14 @@ impl L1BlockTracker {
         }
     }
 
-    /// Return retained receipt-authenticated Portal logs for an exact Tempo block.
+    /// Return retained receipt-authenticated Portal evidence for an exact Tempo block.
     ///
     /// This is intentionally non-blocking. Callers replaying older history can fall back to an
     /// archival provider when the bounded recent cache no longer contains the block.
-    pub fn authenticated_portal_logs(
+    pub fn authenticated_portal_evidence(
         &self,
         block: NumHash,
-    ) -> eyre::Result<Option<AuthenticatedPortalLogs>> {
+    ) -> eyre::Result<Option<AuthenticatedPortalEvidence>> {
         let state = self.state.read();
         if let Some(observation) = state.observed.get(&block.number) {
             eyre::ensure!(
@@ -221,18 +231,18 @@ impl L1BlockTracker {
         self.record_observation(block, portal_events, None)
     }
 
-    /// Record an L1 anchor together with decoded events and authenticated raw Portal logs.
+    /// Record an L1 anchor with decoded events and authenticated Portal transfer evidence.
     pub fn record_with_portal_evidence(
         &self,
         block: NumHash,
         parent_hash: B256,
         portal_events: L1PortalEvents,
-        logs: Vec<alloy_primitives::Log>,
+        receipts: Vec<AuthenticatedPortalReceipt>,
     ) -> eyre::Result<()> {
-        let evidence = AuthenticatedPortalLogs {
+        let evidence = AuthenticatedPortalEvidence {
             block,
             parent_hash,
-            logs,
+            receipts,
         };
         self.record_observation(block, portal_events, Some(evidence))
     }
@@ -241,7 +251,7 @@ impl L1BlockTracker {
         &self,
         block: NumHash,
         portal_events: L1PortalEvents,
-        portal_evidence: Option<AuthenticatedPortalLogs>,
+        portal_evidence: Option<AuthenticatedPortalEvidence>,
     ) -> eyre::Result<()> {
         let mut state = self.state.write();
         if let Some(observation) = state.observed.get(&block.number) {
@@ -331,8 +341,18 @@ const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 type L1ProcessedEvents = (
     L1PortalEvents,
     HashSet<Address>,
-    Option<Vec<alloy_primitives::Log>>,
+    Option<Vec<AuthenticatedPortalReceipt>>,
 );
+
+/// Return whether a TIP-20 transfer moves value into or out of `portal`.
+pub fn is_portal_transfer(log: &alloy_primitives::Log, portal: Address) -> bool {
+    if !is_tip20_prefix(log.address) || log.topics().first() != Some(&Transfer::SIGNATURE_HASH) {
+        return false;
+    }
+    let portal = portal.into_word();
+    let topics = log.topics();
+    topics.get(1) == Some(&portal) || topics.get(2) == Some(&portal)
+}
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
     (address == TIP403_REGISTRY_ADDRESS
@@ -771,12 +791,12 @@ impl L1Subscriber {
                     self.subscriber_metrics.decode_fence_failures.increment(1);
                     FencedIngestionError::new(block_number, "portal event decoding", err)
                 })?;
-            let (events, invalidated, portal_logs) = processed_events;
+            let (events, invalidated, portal_receipts) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
-            let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
+            let portal_evidence = portal_receipts.map(|receipts| (sealed.parent_hash(), receipts));
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.config.leadership_sink {
@@ -816,12 +836,12 @@ impl L1Subscriber {
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
-            if let Some((parent_hash, logs)) = portal_evidence {
+            if let Some((parent_hash, receipts)) = portal_evidence {
                 self.config.block_tracker.record_with_portal_evidence(
                     anchor,
                     parent_hash,
                     events.clone(),
-                    logs,
+                    receipts,
                 )?;
             } else {
                 self.config
@@ -892,17 +912,21 @@ impl L1Subscriber {
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
-        let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
+        let mut portal_receipts = self.config.retain_portal_evidence.then(Vec::new);
 
-        for receipt in receipts {
-            let retain_receipt_logs = portal_logs.is_some() && receipt.status();
+        for (receipt_index, receipt) in receipts.iter().enumerate() {
+            let mut retained = Vec::new();
+            let retain_receipt_logs = portal_receipts.is_some() && receipt.status();
             for log in receipt.logs() {
                 let address = log.address();
 
+                if retain_receipt_logs
+                    && (address == portal_address || is_portal_transfer(&log.inner, portal_address))
+                {
+                    retained.push(log.inner.clone());
+                }
+
                 if address == portal_address {
-                    if retain_receipt_logs && let Some(logs) = &mut portal_logs {
-                        logs.push(log.inner.clone());
-                    }
                     invalidated.insert(address);
                     if let Some(address) =
                         portal_event_cache_invalidation_address(log.topics().first())
@@ -918,6 +942,14 @@ impl L1Subscriber {
                     invalidated.extend([address, log.address()]);
                 }
             }
+            if !retained.is_empty()
+                && let Some(receipts) = &mut portal_receipts
+            {
+                receipts.push(AuthenticatedPortalReceipt {
+                    receipt_index: receipt_index as u64,
+                    logs: retained,
+                });
+            }
         }
 
         // Enabling may migrate token-local policy storage into TIP-403.
@@ -925,7 +957,7 @@ impl L1Subscriber {
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs))
+        Ok((portal_events, invalidated, portal_receipts))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {

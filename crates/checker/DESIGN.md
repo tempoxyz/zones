@@ -81,7 +81,25 @@ ghost account_total(token) == sum of ghost account balances(token)
 
 ### Portal collateral
 
-For every enabled token at the exact imported Tempo block:
+For every successful Tempo receipt, Portal-affecting TIP-20 transfers must
+satisfy:
+
+```text
+observed outflow == protocol-authorized outflow
+observed inflow  >= protocol-required inflow
+```
+
+The excess inbound amount is unattributed surplus. At every imported Tempo
+block, custody must also conserve exactly:
+
+```text
+Portal custody(tip) == Portal custody(parent)
+                     + observed inflow
+                     - observed outflow
+```
+
+This prevents existing or newly donated surplus from masking an unauthorized
+loss. The checker then separately enforces solvency for every enabled token:
 
 ```text
 Portal custody >= account_total
@@ -90,6 +108,10 @@ Portal custody >= account_total
                 + pending_tempo_refunds
                 + pending_zone_refunds
 ```
+
+Protocol fees are included in the receipt movements. The checker derives them
+from authenticated Portal events and verifies the matching TIP-20 transfers;
+the persisted ghost-state schema is unchanged.
 
 ## Event authentication
 
