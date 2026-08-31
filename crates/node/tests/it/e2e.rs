@@ -1415,11 +1415,9 @@ async fn test_chain_tempo_state_ext_from_canon_notification() -> eyre::Result<()
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
     let mut canon_rx = zone.subscribe_to_canonical_state();
 
-    // Inject 3 empty L1 blocks — each produces a zone block.
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
-
-    // Wait for tempoBlockNumber to reach 3 via RPC (ensures blocks are mined).
-    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+    // Pace the imports so each empty Tempo block produces a distinct Zone block and canonical
+    // notification instead of being compressed into a checkpoint-only catch-up range.
+    fixture.produce_empty_zone_blocks(&zone, 3).await?;
 
     // Drain canon notifications and collect the L1 NumHash from each committed chain.
     let mut num_hashes: Vec<NumHash> = Vec::new();
