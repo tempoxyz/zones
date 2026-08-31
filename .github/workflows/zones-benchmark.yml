@@ -510,7 +510,7 @@ jobs:
 
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@430cf154170ed12b8c74af63038aee7d31a121d0 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@8819cf80bdcb39c36c34700e3f2ecc08bde54f23 # main
         with:
           scope: tempoxyz/earn
           policy: zones-read
