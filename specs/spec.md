@@ -96,7 +96,7 @@
 
 # Abstract
 
-A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a sequencer set with one active leader and one or more followers. The leader is the sole block producer, while followers replicate and validate its blocks and attest to batch-boundary settlement commitments. Threshold-certified batches settle back to Tempo through a proof-agnostic verification system.
+A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a sequencer set with one active leader and zero or more followers. The leader is the sole block producer, while followers replicate and validate its blocks and attest to batch-boundary settlement commitments. Threshold-certified batches settle back to Tempo through a proof-agnostic verification system.
 
 Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Each portal has two independent, admin-mutable boolean flags: `accessMode` controls account allowlist enforcement for deposits, refunds, and plain withdrawals, while `gatewayMode` controls callback target registration. Disabling either flag disables only its corresponding checks without deleting the stored mapping.
 
@@ -346,17 +346,19 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 
 ### Multi-Sequencer Topology
 
-The sequencer nodes share a TOML manifest supplied with `--sequencer.manifest`. It lists
-each node's name, network address, Commonware Ed25519 public key, individual secp256k1 settlement
-address, and optional `rpc_only` status. The Ed25519 key authenticates P2P traffic; the secp256k1
-key signs EIP-712 settlement attestations and its address must be registered in the portal's active
-sequencer set. These keys are independent.
+Zones do not publish transaction data to Tempo, so a single-sequencer deployment would make one node the only durable copy of the zone chain. If this node crashed or its disk became corrupted, the zone could become unrecoverable. Followers independently execute and persist every block, providing redundant copies from which the zone can recover if the leader or its storage is lost. Operators SHOULD place sequencers in separate failure domains so a single machine, network, or storage failure does not eliminate that redundancy.
 
-At startup, each node checks that its local keys identify the same manifest member, every quorum
-member is an active portal sequencer, and `sequencerThreshold` is nonzero and reachable by the
-manifest quorum. An `rpc_only` node replicates the chain and forwards transactions but has no
-settlement key, is not a portal sequencer, never signs an attestation, and does not count toward
-the threshold.
+When the settlement threshold is greater than one, a compromised sequencer's individual settlement key alone cannot certify a batch. Follower sequencers reconstruct the commitment from their own validated state and sign only an exact match.
+
+The sequencer nodes share a TOML manifest supplied with `--sequencer.manifest`. It lists each node's name, network address, Commonware Ed25519 public key, individual secp256k1 settlement address, and optional `rpc_only` status. The Ed25519 key authenticates P2P traffic; the secp256k1 key signs EIP-712 settlement attestations and its address must be registered in the portal's active sequencer set. These keys are independent.
+
+At startup, each node checks that its local keys identify the same manifest member, every quorum member is an active portal sequencer, and `sequencerThreshold` is nonzero and reachable by the manifest quorum. An `rpc_only` node replicates the chain and forwards transactions but has no settlement key, is not a portal sequencer, never signs an attestation, and does not count toward the threshold.
+
+#### RPC-Only Followers
+
+An RPC-only follower is a non-quorum replica intended to be the client-facing RPC endpoint. It imports, validates, and persists the same canonical blocks as the sequencers, applies the same RPC authorization and response-redaction rules, and serves reads from its local state. Transactions submitted to it are admitted to its local pool and forwarded over authenticated P2P to every quorum member, so clients do not need direct network access to the leader or quorum followers.
+
+The manifest marks this role with `rpc_only = true`. The node has a P2P Ed25519 key, but it has no individual secp256k1 settlement key and is not registered in the portal's sequencer set. It also MUST NOT hold the shared sequencer key used for block production and deposit decryption. Consequently, an RPC-only follower cannot produce blocks, become leader, sign a settlement attestation, submit sequencer-authorized portal transactions, or count toward the settlement threshold. Promoting it requires provisioning an individual settlement key, registering that address with the portal, removing `rpc_only` from the manifest, and restarting the node with the quorum-member configuration.
 
 The manifest's `leader_ed25519_public_key` is a bootstrap value. Live leadership comes from the
 finalized `ZonePortal.leader`, `leaderEpoch`, and `leaderActivationTempoBlock` state and
@@ -386,8 +388,9 @@ At a batch boundary, settlement proceeds as follows:
 
 Followers therefore attest to settlement after validating leader-built blocks; they do not
 participate in transaction ordering or block production. A threshold of one remains valid, but a
-multi-sequencer deployment normally uses at least two so every settled batch includes a follower
-signature and remains recoverable from a follower after loss of the leader's disk.
+multi-sequencer deployment normally uses a threshold of at least two with three or more quorum
+members, so every settled batch includes a follower signature and remains recoverable from a
+follower after loss of the leader's disk.
 
 ### Token Management
 
@@ -460,21 +463,11 @@ When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_
 
 ### Leadership and Sequencer Set Rotation
 
-The admin atomically replaces the active sequencer set and threshold with
-`ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero,
-unique, and no more than eight; their order has no protocol meaning. The active leader cannot be
-removed from the set. To replace it, the admin first adds the replacement, transfers leadership,
-and then removes the previous leader. A replacement
-increments `sequencerSetVersion`, including a threshold-only change, so certificates collected
-under the previous configuration cannot be replayed. The initial configuration uses nonce `0`.
+The admin atomically replaces the active sequencer set and threshold with `ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero, unique, and no more than eight; their order has no protocol meaning. The active leader cannot be removed from the set. To replace it, the admin first adds the replacement, transfers leadership, and then removes the previous leader. A replacement increments `sequencerSetVersion`, including a threshold-only change, so certificates collected under the previous configuration cannot be replayed.
 
-Leadership is transferred with `ZonePortal.setLeader(newLeader, expectedEpoch)`. The new leader
-must be an active sequencer. `expectedEpoch` provides compare-and-set fencing against stale
-handoff transactions, and only one distinct leader change is allowed per Tempo block. A real
-change increments `leaderEpoch`, records the current Tempo block in
-`leaderActivationTempoBlock`, and emits `LeaderUpdated`; setting the current leader is idempotent.
-Zone nodes consume this state only after Tempo finalization and authorize block production for the
-leader scheduled at each block's embedded Tempo anchor.
+The initial configuration uses nonce `0`.
+
+Leadership is transferred with `ZonePortal.setLeader(newLeader, expectedEpoch)`. The new leader must be an active sequencer. `expectedEpoch` provides compare-and-set fencing against stale handoff transactions, and only one distinct leader change is allowed per Tempo block. A real change increments `leaderEpoch`, records the current Tempo block in `leaderActivationTempoBlock`, and emits `LeaderUpdated`; setting the current leader is idempotent. Zone nodes consume this state only after Tempo finalization and authorize block production for the leader scheduled at each block's embedded Tempo anchor.
 
 ### Admin Transfer
 
