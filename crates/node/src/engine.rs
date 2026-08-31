@@ -60,11 +60,11 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, FinalizedTarget, L1BlockDeposits,
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Full-block production permit backed by the effective leadership schedule.
+/// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// Full blocks require the leader assigned to their imported Tempo header. Checkpoint-only blocks
-/// are leader-neutral and bypass this permit. An optimistic override is open-ended until the next
-/// finalized portal transition supplies the ordinary-authority boundary.
+/// Every Zone block requires the leader assigned to its final imported Tempo header. An optimistic
+/// override is open-ended until the next finalized portal transition supplies the
+/// ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -80,7 +80,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the full zone block embedding `tempo_anchor`.
+    /// Decide whether this node may produce the Zone block embedding `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -198,6 +198,16 @@ struct AvailableTempoImport {
     l1_block: L1BlockDeposits,
     checkpoint_headers: Vec<SealedHeader<TempoHeader>>,
     wall_clock_timestamp_millis: u64,
+}
+
+impl AvailableTempoImport {
+    /// Historical Tempo anchor whose leader must produce this Zone block.
+    fn leader_anchor(&self) -> u64 {
+        self.checkpoint_headers
+            .last()
+            .unwrap_or(&self.l1_block.header)
+            .number()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,14 +558,9 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
-        if !block.checkpoint_headers.is_empty() {
-            // TIP-1096 assigns no leader to checkpoint-only blocks. Leader authority resumes at
-            // the final full block, whose single imported Tempo header is checked below.
-            return None;
-        }
         self.production_permit
             .as_ref()
-            .and_then(|permit| permit.check(block.l1_block.header.number()))
+            .and_then(|permit| permit.check(block.leader_anchor()))
     }
 
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -622,6 +627,20 @@ mod tests {
 
     fn finalized_target(number: u64, ready: bool) -> Option<FinalizedTarget> {
         Some(FinalizedTarget { number, ready })
+    }
+
+    #[test]
+    fn checkpoint_import_uses_final_header_as_leader_anchor() {
+        let available = AvailableTempoImport {
+            l1_block: L1BlockDeposits {
+                header: header(90, 90),
+                events: Default::default(),
+            },
+            checkpoint_headers: vec![header(90, 90), header(110, 110)],
+            wall_clock_timestamp_millis: 110_000,
+        };
+
+        assert_eq!(available.leader_anchor(), 110);
     }
 
     #[test]
