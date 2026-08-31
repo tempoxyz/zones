@@ -44,7 +44,7 @@ jobs:
           toolchain: stable
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
         with:
           version: nightly
 
@@ -68,7 +68,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
         with:
           version: nightly
 
@@ -103,7 +103,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
         with:
           version: nightly
 

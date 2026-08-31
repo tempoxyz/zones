@@ -335,15 +335,11 @@ impl ZoneEngine {
         // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
         // fork cannot predate it. Use wall-clock time to avoid backdating transactions during
         // catch-up, and advance by at least one millisecond to keep consecutive blocks monotonic.
-        let wall_clock_timestamp_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        let timestamp_millis = zone_timestamp_millis(
+        let timestamp_millis = paced_zone_timestamp_millis(
             l1_block.header.timestamp_millis(),
             self.last_header.timestamp_millis(),
-            wall_clock_timestamp_millis,
-        );
+        )
+        .await?;
         let timestamp_secs = timestamp_millis / 1000;
         let timestamp_millis_part = timestamp_millis % 1000;
 
@@ -450,6 +446,46 @@ fn zone_timestamp_millis(
         .max(parent_timestamp_millis.saturating_add(1))
 }
 
+/// Wait until the next valid Zone timestamp is not in the future, then return it.
+async fn paced_zone_timestamp_millis(
+    l1_timestamp_millis: u64,
+    parent_timestamp_millis: u64,
+) -> eyre::Result<u64> {
+    let mut wall_clock_timestamp_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    let timestamp_millis = zone_timestamp_millis(
+        l1_timestamp_millis,
+        parent_timestamp_millis,
+        wall_clock_timestamp_millis,
+    );
+
+    // If the next Zone timestamp is ahead of wall-clock time, wait until wall-clock catches up
+    // since validation doesn't allow future timestamps.
+    if timestamp_millis > wall_clock_timestamp_millis {
+        // We'll sleep for a max of 1 second. If the delay is > 1 second, something more serious is wrong
+        // (eg. clock skew, system time jump, etc.). In this case, we'll return the timestamp anyway, and
+        // the engine will fail to produce a block (the validation will fail), which is the correct behavior.
+        tokio::time::sleep(
+            Duration::from_millis(timestamp_millis - wall_clock_timestamp_millis)
+                .min(Duration::from_secs(1)),
+        )
+        .await;
+
+        wall_clock_timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+    }
+
+    Ok(zone_timestamp_millis(
+        l1_timestamp_millis,
+        parent_timestamp_millis,
+        wall_clock_timestamp_millis,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +505,29 @@ mod tests {
     #[test]
     fn zone_timestamp_advances_past_parent_when_catching_up_in_same_millisecond() {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_001);
+    }
+
+    #[tokio::test]
+    async fn paced_zone_timestamp_is_not_in_the_future() {
+        let wall_clock_timestamp_millis: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+
+        let timestamp_millis = paced_zone_timestamp_millis(0, wall_clock_timestamp_millis)
+            .await
+            .unwrap();
+
+        assert!(timestamp_millis > wall_clock_timestamp_millis);
+        let current_timestamp_millis: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+        assert!(timestamp_millis <= current_timestamp_millis);
     }
 
     struct PausedDrain {

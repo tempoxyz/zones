@@ -81,6 +81,16 @@ docker buildx bake \
 The EIF and PCR measurements are written under `target/tempo-zone-prover-eif/`. CI embeds the EIF
 in the published image and uploads the measurements as a commit-specific workflow artifact.
 
+The EIF uses Linux 6.6.79 and its matching NSM driver, built from a pinned AWS Nitro bootstrap
+commit. Changing either one changes the EIF PCR measurements, so the expected measurements must
+also be updated.
+
+Verifying a batch does not use local randomness or wall-clock time. If we add key or nonce
+generation or KMS/HTTPS calls, configure `random.trust_bootloader=off random.trust_cpu=off` and
+require `rng_current` to be `nsm-hwrng`. If we add KMS/HTTPS calls, expiring credentials, protocol
+timestamps, or time-based replay checks, use `kvm-clock`. Operational timeouts affect only liveness
+and can use a monotonic clock.
+
 The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
 `PROVER_EIF_PATH`, `ENCLAVE_NAME`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_CID`,
 `PROVER_TCP_PORT`, `PROVER_VSOCK_PORT`, and `MONITOR_INTERVAL_SECONDS` as runtime configuration.
