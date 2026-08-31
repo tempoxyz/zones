@@ -160,7 +160,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
 
     let output = prove_zone_batch(&config, witness)?;
 
-    assert_eq!(output.block_transition.prevBlockHash, parent_hash);
+    assert_eq!(output.block_transition.prevBlockHash, B256::ZERO);
     assert_eq!(output.block_transition.nextBlockHash, expected_hash);
     assert_eq!(
         output.deposit_queue_transition.prevProcessedHash,

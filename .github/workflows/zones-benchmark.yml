@@ -85,7 +85,7 @@ on:
         description: L1 callback gas requested by composable withdrawals (maximum 10000000).
         type: string
         required: true
-        default: "10000000"
+        default: "5000000"
       swap-liquidity:
         description: Untimed liquidity seeded into the selected swap mechanism.
         type: string
@@ -189,6 +189,7 @@ jobs:
       swap-liquidity: ${{ steps.config.outputs.swap-liquidity }}
       l1-gas-limit: ${{ steps.config.outputs.l1-gas-limit }}
       l1-general-gas-limit: ${{ steps.config.outputs.l1-general-gas-limit }}
+      zone-gas-limit: ${{ steps.config.outputs.zone-gas-limit }}
       withdrawal-max-batch-gas: ${{ steps.config.outputs.withdrawal-max-batch-gas }}
       withdrawal-max-in-flight-batches: ${{ steps.config.outputs.withdrawal-max-in-flight-batches }}
       zone-batch-interval-blocks: ${{ steps.config.outputs.zone-batch-interval-blocks }}
@@ -221,7 +222,7 @@ jobs:
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_SWAP_MECHANISM: direct-swap
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
-          INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '10000000' }}
+          INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '5000000' }}
           INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
           INPUT_L1_GAS_LIMIT: ${{ inputs.l1-gas-limit || '30000000' }}
           INPUT_L1_GENERAL_GAS_LIMIT: ${{ inputs.l1-general-gas-limit || '30000000' }}
@@ -329,10 +330,6 @@ jobs:
           done
           (( 10#$INPUT_CALLBACK_GAS_LIMIT <= 10000000 )) \
             || { echo "::error::callback-gas-limit cannot exceed the 10000000 protocol cap"; exit 1; }
-          (( 10#$INPUT_L1_GAS_LIMIT <= 30000000 )) \
-            || { echo "::error::l1-gas-limit cannot exceed 30000000"; exit 1; }
-          (( 10#$INPUT_L1_GENERAL_GAS_LIMIT <= 30000000 )) \
-            || { echo "::error::l1-general-gas-limit cannot exceed 30000000"; exit 1; }
           (( 10#$INPUT_L1_GENERAL_GAS_LIMIT <= 10#$INPUT_L1_GAS_LIMIT )) \
             || { echo "::error::l1-general-gas-limit cannot exceed l1-gas-limit"; exit 1; }
           (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 20000000 )) \
@@ -342,7 +339,9 @@ jobs:
           planned_singleton_withdrawal_gas=0
           case "$neobank_preset" in
             encrypted-deposit) ;;
-            *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT)) ;;
+            # Startup creates and retains an Earn warmup position with the full
+            # callback allowance before measured steady-state withdrawals.
+            *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10000000)) ;;
           esac
           (( planned_singleton_withdrawal_gas == 0 ||
              planned_singleton_withdrawal_gas <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
@@ -429,6 +428,7 @@ jobs:
             echo "swap-liquidity=$INPUT_SWAP_LIQUIDITY"
             echo "l1-gas-limit=$INPUT_L1_GAS_LIMIT"
             echo "l1-general-gas-limit=$INPUT_L1_GENERAL_GAS_LIMIT"
+            echo "zone-gas-limit=$INPUT_L1_GAS_LIMIT"
             echo "withdrawal-max-batch-gas=$INPUT_WITHDRAWAL_MAX_BATCH_GAS"
             echo "withdrawal-max-in-flight-batches=$INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES"
             echo "zone-batch-interval-blocks=$INPUT_ZONE_BATCH_INTERVAL_BLOCKS"
@@ -468,6 +468,7 @@ jobs:
       ZONES_BENCH_SWAP_LIQUIDITY: ${{ needs.authorize.outputs.swap-liquidity }}
       ZONES_BENCH_L1_GAS_LIMIT: ${{ needs.authorize.outputs.l1-gas-limit }}
       ZONES_BENCH_L1_GENERAL_GAS_LIMIT: ${{ needs.authorize.outputs.l1-general-gas-limit }}
+      ZONES_BENCH_ZONE_GAS_LIMIT: ${{ needs.authorize.outputs.zone-gas-limit }}
       ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS: ${{ needs.authorize.outputs.withdrawal-max-batch-gas }}
       ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ needs.authorize.outputs.withdrawal-max-in-flight-batches }}
       ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS: ${{ needs.authorize.outputs.zone-batch-interval-blocks }}
@@ -509,7 +510,7 @@ jobs:
 
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@8819cf80bdcb39c36c34700e3f2ecc08bde54f23 # main
         with:
           scope: tempoxyz/earn
           policy: zones-read
@@ -567,7 +568,7 @@ jobs:
         with:
           toolchain: stable
 
-      - uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
         with:
           version: nightly
 
@@ -798,7 +799,7 @@ jobs:
             L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
             ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
             ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
-            ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
+            ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT ZONES_BENCH_ZONE_GAS_LIMIT \
             ZONES_BENCH_L1_METRICS_URL ZONES_BENCH_ZONE_METRICS_URL \
             ZONES_BENCH_TOPOLOGY_DIR
           do
@@ -937,6 +938,7 @@ jobs:
             echo "- Earn revision: \`${ZONES_BENCH_EARN_REVISION:-unavailable}\`"
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
+            echo "- Zone block gas limit: \`${ZONES_BENCH_ZONE_GAS_LIMIT:-unavailable}\`"
             echo "- Withdrawal scheduler (batch gas / in-flight / Zone blocks / poll): \`$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS\` / \`$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES\` / \`$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS\` / \`${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS}s\`"
           } >> "$summary"
           if [ -s "$ZONES_BENCH_SPF_SUMMARY" ]; then
@@ -996,6 +998,7 @@ jobs:
             --argjson l1StateBloatMiB "$((10#$ZONES_BENCH_BLOAT_GIB * 1000))" \
             --argjson l1BlockGasLimit "${ZONES_BENCH_L1_GAS_LIMIT:-0}" \
             --argjson l1GeneralGasLimit "${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-0}" \
+            --argjson zoneBlockGasLimit "${ZONES_BENCH_ZONE_GAS_LIMIT:-0}" \
             --argjson withdrawalMaxBatchGas "$((10#$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS))" \
             --argjson withdrawalMaxInFlightBatches "$((10#$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES))" \
             --argjson zoneBatchIntervalBlocks "$((10#$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS))" \
@@ -1051,6 +1054,7 @@ jobs:
               zoneStateBloatMiB: 0,
               l1BlockGasLimit: $l1BlockGasLimit,
               l1GeneralGasLimit: $l1GeneralGasLimit,
+              zoneBlockGasLimit: $zoneBlockGasLimit,
               withdrawalScheduler: {
                 maxBatchGas: $withdrawalMaxBatchGas,
                 maxInFlightBatches: $withdrawalMaxInFlightBatches,

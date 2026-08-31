@@ -407,7 +407,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
+    compare_output(&output, &job.batch, job.batch.prev_block_hash)?;
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
