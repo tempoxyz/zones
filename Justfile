@@ -961,7 +961,8 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     cargo build --bin tempo-zone --release
     DATADIR="/tmp/tempo-zone-{{name}}"
     rm -rf "$DATADIR" || true
-    exec cargo run --release --bin tempo-zone -- \
+    exec env -u SEQUENCER_MANIFEST -u P2P_KEY -u SECP256K1_KEY \
+        cargo run --release --bin tempo-zone -- \
                       node \
                       --chain "$OUTPUT/genesis.json" \
                       --l1.rpc-url "$L1_RPC" \
