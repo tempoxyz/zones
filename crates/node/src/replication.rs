@@ -31,6 +31,7 @@ use zone_payload::{
     ZonePayloadTypes,
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
 };
+use zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK;
 use zone_sequencer::{
     BatchAnchorConfig,
     attestation::{
@@ -1533,23 +1534,30 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
     let TempoTxEnvelope::Legacy(signed) = first_tx else {
         eyre::bail!("first transaction in peer block is not a legacy system transaction")
     };
-    if !first_tx.is_system_tx() {
-        eyre::bail!("first transaction in peer block is not a Tempo system transaction")
-    }
+    eyre::ensure!(
+        first_tx.is_system_tx(),
+        "first transaction in peer block is not a Tempo system transaction"
+    );
 
     // 2. Address is correct
-    if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
-        eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
-    }
+    eyre::ensure!(
+        signed.tx().to == ZONE_INBOX_ADDRESS.into(),
+        "first Tempo system transaction is not sent to IZoneInbox"
+    );
     if signed
         .tx()
         .input
         .starts_with(&IZoneInbox::advanceTempoHeadersCall::SELECTOR)
     {
-        if block.body().transactions.len() != 1 {
-            eyre::bail!("advanceTempoHeaders must be the only transaction in its block");
-        }
+        eyre::ensure!(
+            block.body().transactions.len() == 1,
+            "advanceTempoHeaders must be the only transaction in its block"
+        );
         let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(signed.tx().input.as_ref())?;
+        eyre::ensure!(
+            call.headers.len() <= MAX_TEMPO_HEADERS_PER_ZONE_BLOCK,
+            "advanceTempoHeaders has too many headers"
+        );
         let mut headers = Vec::with_capacity(call.headers.len());
         for encoded in call.headers {
             let mut input = encoded.as_ref();
@@ -1568,12 +1576,11 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
     let mut header_rlp = call.header.as_ref();
     let header = TempoHeader::decode(&mut header_rlp)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded L1 header in advanceTempo: {err}"))?;
-    if !header_rlp.is_empty() {
-        eyre::bail!(
-            "advanceTempo L1 header has {} trailing bytes",
-            header_rlp.len()
-        )
-    }
+    eyre::ensure!(
+        header_rlp.is_empty(),
+        "advanceTempo L1 header has {} trailing bytes",
+        header_rlp.len()
+    );
     Ok(DecodedTempoImport::Full {
         header: Box::new(SealedHeader::seal_slow(header)),
         deposits: call.deposits,
