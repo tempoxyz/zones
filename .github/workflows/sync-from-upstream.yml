@@ -12,14 +12,14 @@ permissions: {}
 
 jobs:
   sync:
-    if: ${{ github.repository != 'tempoxyz/zones' }}
+    if: ${{ github.repository_owner == 'tempoxyz' && github.repository != 'tempoxyz/zones' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
     steps:
       - name: Fetch GitHub token via STS
         id: github-sts
-        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@8819cf80bdcb39c36c34700e3f2ecc08bde54f23 # main
         with:
           policy: sync-from-upstream
 
