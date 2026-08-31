@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
+use tempo_precompiles::dispatch::abi_decoder_config;
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
@@ -1375,8 +1376,11 @@ fn decode_advance_tempo(
     if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
         eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
     }
-    let call = IZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref())
-        .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
+    let call = IZoneInbox::advanceTempoCall::abi_decode_with_config(
+        signed.tx().input.as_ref(),
+        abi_decoder_config(),
+    )
+    .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
 
     // 3. the system tx is valid.
     let mut header_rlp = call.header.as_ref();

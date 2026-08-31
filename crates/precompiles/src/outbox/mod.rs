@@ -10,6 +10,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use tempo_precompiles::{
     Result as TempoResult,
+    dispatch::abi_decoder_config,
     error::TempoPrecompileError,
     storage::{ContractStorage, Handler, Mapping},
     tip20::{ITIP20, TIP20Error, TIP20Token},
@@ -34,7 +35,10 @@ const WITHDRAWAL_BASE_GAS: u64 = 50_000;
 
 /// Returns whether `calldata` is a canonical `finalizeWithdrawalBatch` call.
 pub fn is_finalize_withdrawal_batch_calldata(calldata: &[u8]) -> bool {
-    let Ok(call) = IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(calldata) else {
+    let Ok(call) = IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode_with_config(
+        calldata,
+        abi_decoder_config(),
+    ) else {
         return false;
     };
     call.abi_encode() == calldata

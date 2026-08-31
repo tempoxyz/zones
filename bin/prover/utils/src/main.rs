@@ -26,7 +26,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
-use zone_precompiles::{outbox, tempo_state};
+use zone_precompiles::{dispatch::abi_decoder_config, outbox, tempo_state};
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
@@ -854,10 +854,13 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                         header.number()
                     );
                 }
-                let call = ZoneInbox::advanceTempoCall::abi_decode(envelope.input())
-                    .wrap_err_with(|| {
-                        format!("decode advanceTempo in Zone block {}", header.number())
-                    })?;
+                let call = ZoneInbox::advanceTempoCall::abi_decode_with_config(
+                    envelope.input(),
+                    abi_decoder_config(),
+                )
+                .wrap_err_with(|| {
+                    format!("decode advanceTempo in Zone block {}", header.number())
+                })?;
                 checkpoint_number = Some(decode_tempo_header(&call.header)?.number());
                 tempo_header_rlp = Some(call.header);
                 deposits = call.deposits;
@@ -871,13 +874,16 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                         header.number()
                     );
                 }
-                let call = ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(envelope.input())
-                    .wrap_err_with(|| {
-                        format!(
-                            "decode finalizeWithdrawalBatch in Zone block {}",
-                            header.number()
-                        )
-                    })?;
+                let call = ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode_with_config(
+                    envelope.input(),
+                    abi_decoder_config(),
+                )
+                .wrap_err_with(|| {
+                    format!(
+                        "decode finalizeWithdrawalBatch in Zone block {}",
+                        header.number()
+                    )
+                })?;
                 if call.blockNumber != header.number() {
                     bail!(
                         "finalization in Zone block {} declares block {}",

@@ -59,7 +59,10 @@ pub mod outbox;
 /// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
 pub mod dispatch {
     pub use tempo_precompiles::{
-        dispatch::typed::{mutate, mutate_void, view},
+        dispatch::{
+            abi_decoder_config,
+            typed::{mutate, mutate_void, view},
+        },
         metadata,
     };
 }

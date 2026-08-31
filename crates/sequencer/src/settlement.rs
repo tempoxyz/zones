@@ -45,6 +45,7 @@ use parking_lot::RwLock;
 use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
+use tempo_precompiles::dispatch::abi_decoder_config;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
@@ -1628,15 +1629,17 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
                 target.block_number
             )
         })?;
-    let encrypted_senders =
-        abi::IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
-            .map_err(|err| {
-                eyre::eyre!(
-                    "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
-                    target.tx_hash
-                )
-            })?
-            .encryptedSenders;
+    let encrypted_senders = abi::IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode_with_config(
+        finalize_tx.input().as_ref(),
+        abi_decoder_config(),
+    )
+    .map_err(|err| {
+        eyre::eyre!(
+            "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
+            target.tx_hash
+        )
+    })?
+    .encryptedSenders;
 
     if encrypted_senders.len() != requests.len() {
         return Err(eyre::eyre!(

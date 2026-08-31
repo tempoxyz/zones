@@ -101,26 +101,26 @@ incremental = false
 
 [workspace.dependencies]
 # tempo (from upstream)
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
-tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false, features = [
+tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74" }
+tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false, features = [
   "serde",
 ] }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
-tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1" }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false, features = [
+tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74" }
+tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74" }
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false, features = [
   "reth",
   "serde",
   "serde-bincode-compat",
   "reth-codec",
 ] }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
-tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1", default-features = false }
+tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
+tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "b8359703665bd5f230068ecd68b0420b25a84e74", default-features = false }
 
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
@@ -197,9 +197,9 @@ alloy-contract = { version = "2.3.0", default-features = false }
 alloy-eips = { version = "2.3.0", default-features = false }
 alloy-evm = { version = "0.38.0", default-features = false }
 alloy-genesis = { version = "2.3.0", default-features = false }
-alloy-json-abi = "1.6.1"
+alloy-json-abi = "1.7.1"
 alloy-network = { version = "2.3.0", default-features = false }
-alloy-primitives = { version = "1.6.1", default-features = false }
+alloy-primitives = { version = "1.7.1", default-features = false }
 alloy-provider = { version = "2.3.0", default-features = false }
 alloy-rlp = { version = "0.3.16", default-features = false }
 alloy-rpc-client = "2.3.0"
@@ -208,7 +208,7 @@ alloy-rpc-types-engine = "2.3.0"
 alloy-rpc-types-eth = { version = "2.3.0" }
 alloy-signer = "2.3.0"
 alloy-signer-local = "2.3.0"
-alloy-sol-types = { version = "1.6.1", default-features = false }
+alloy-sol-types = { version = "1.7.1", default-features = false }
 alloy-transport = "2.3.0"
 
 # commonware
