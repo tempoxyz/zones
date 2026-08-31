@@ -1517,10 +1517,9 @@ impl DecodedTempoImport {
 
     /// Tempo anchor whose leader must produce this Zone block.
     ///
-    /// Checkpoint-only blocks use their final imported header because that is the historical L1
-    /// block the resulting Zone block anchors to. A full block imports exactly one header.
+    /// Checkpoint-only blocks use their first imported header. A full block imports exactly one header.
     fn leader_anchor(&self) -> Option<u64> {
-        self.headers().last().map(|header| header.number())
+        self.headers().first().map(|header| header.number())
     }
 }
 
@@ -1994,7 +1993,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_live_producer_is_leader_at_final_imported_anchor() {
+    fn checkpoint_live_producer_is_leader_at_first_imported_anchor() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use reth_primitives_traits::SealedHeader;
         use tempo_primitives::TempoHeader;
@@ -2024,15 +2023,15 @@ mod tests {
         let tempo_import = super::DecodedTempoImport::CheckpointOnly { headers };
 
         let leader_anchor = tempo_import.leader_anchor();
-        assert_eq!(leader_anchor, Some(110));
-        super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 7).unwrap();
+        assert_eq!(leader_anchor, Some(90));
+        super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 7).unwrap();
         let error =
-            super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 7)
-                .expect_err("the checkpoint producer must lead at its final imported anchor");
-        assert!(error.to_string().contains(&incoming.to_string()));
+            super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 7)
+                .expect_err("the checkpoint producer must lead at its first imported anchor");
+        assert!(error.to_string().contains(&outgoing.to_string()));
         let error = super::validate_live_import_sender(&schedule, Some(&current), leader_anchor, 7)
             .expect_err("the current leader must not own an earlier historical anchor");
-        assert!(error.to_string().contains(&incoming.to_string()));
+        assert!(error.to_string().contains(&outgoing.to_string()));
 
         let full_import = super::DecodedTempoImport::Full {
             header: Box::new(SealedHeader::seal_slow(TempoHeader {
