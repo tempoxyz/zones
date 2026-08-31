@@ -1,10 +1,10 @@
 //! Finalized L1 batch observation for RPC-only shadow provers.
 
-use std::{collections::HashSet, str::FromStr as _, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, TxKind};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_sol_types::SolCall as _;
 use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
@@ -74,15 +74,8 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                 if recovery_sender.is_closed() {
                     return;
                 }
-                match this.recover_recent_submissions().await {
-                    Ok(recovered) => {
-                        for submission in recovered {
-                            if recovery_sender.send(submission).is_err() {
-                                return;
-                            }
-                        }
-                        return;
-                    }
+                match this.recover_recent_submissions(&recovery_sender).await {
+                    Ok(()) => return,
                     Err(err) => {
                         warn!(
                             target: "zone::node::shadow_prover",
@@ -96,7 +89,10 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         });
     }
 
-    async fn recover_recent_submissions(&self) -> Result<Vec<FinalizedBatchSubmission>> {
+    async fn recover_recent_submissions(
+        &self,
+        recovery_sender: &UnboundedSender<FinalizedBatchSubmission>,
+    ) -> Result<()> {
         let finalized = self
             .l1_provider
             .get_header_by_number(BlockNumberOrTag::Finalized)
@@ -106,7 +102,6 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         let from = finalized.saturating_sub(self.anchor_config.history_window().saturating_sub(1));
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
-        let mut recovered = Vec::new();
         let mut page_from = from;
         while page_from <= finalized {
             let page_to = page_from
@@ -129,21 +124,24 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                 let log_index = log
                     .log_index
                     .ok_or_eyre("finalized BatchSubmitted log has no log index")?;
-                recovered.push(FinalizedBatchSubmission {
+                let submission = FinalizedBatchSubmission {
                     block_number: log
                         .block_number
                         .ok_or_eyre("finalized BatchSubmitted log has no block number")?,
                     transaction_hash: tx_hash,
                     log_index,
                     event,
-                });
+                };
+                if recovery_sender.send(submission).is_err() {
+                    return Ok(());
+                }
             }
             if page_to == finalized {
                 break;
             }
             page_from = page_to + 1;
         }
-        Ok(recovered)
+        Ok(())
     }
 
     fn spawn_submission_retry(&self, submission: FinalizedBatchSubmission) {
@@ -195,45 +193,21 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     ) -> Result<Vec<ZonePortal::submitBatchCall>> {
         let tx = self
             .l1_provider
-            .client()
-            .request::<_, serde_json::Value>("eth_getTransactionByHash", (tx_hash,))
+            .get_transaction_by_hash(tx_hash)
             .await?
-            .as_object()
-            .cloned()
             .ok_or_eyre(format!("submitBatch transaction {tx_hash} was not found"))?;
 
-        let mut candidates = Vec::new();
-        candidates.push(serde_json::Value::Object(tx.clone()));
-        if let Some(calls) = tx.get("calls").and_then(serde_json::Value::as_array) {
-            candidates.extend(calls.iter().cloned());
-        }
-
-        let mut calls = Vec::new();
-        for candidate in candidates {
-            let Some(to) = candidate
-                .get("to")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| Address::from_str(value).ok())
-            else {
-                continue;
-            };
-            if to != self.portal_address {
-                continue;
-            }
-            let Some(input) = candidate
-                .get("input")
-                .and_then(serde_json::Value::as_str)
-                .filter(|input| *input != "0x")
-            else {
-                continue;
-            };
-            let Ok(calldata) = Bytes::from_str(input) else {
-                continue;
-            };
-            if let Ok(call) = ZonePortal::submitBatchCall::abi_decode(&calldata) {
-                calls.push(call);
-            }
-        }
+        let calls = tx
+            .inner
+            .inner()
+            .calls()
+            .filter_map(|(kind, input)| {
+                if kind != TxKind::Call(self.portal_address) {
+                    return None;
+                }
+                ZonePortal::submitBatchCall::abi_decode(input).ok()
+            })
+            .collect::<Vec<_>>();
 
         ensure!(
             !calls.is_empty(),
