@@ -70,7 +70,9 @@ use zone_rpc::{
     },
 };
 
-use crate::{replication::PeerTipRegistry, role::SharedRoleStatus};
+use crate::{
+    replication::PeerTipRegistry, role::SharedRoleStatus, token_balance::has_enabled_token_balance,
+};
 
 /// Multi-sequencer handles for the sequencer RPC methods.
 ///
@@ -629,6 +631,8 @@ async fn prune_filter_owners<Api: EthApiTypes + 'static>(
 /// - **`from`-enforcement** — `eth_call` / `eth_estimateGas` may only
 ///   simulate from the authenticated account (`-32004` on mismatch,
 ///   auto-set when omitted); state overrides are rejected (`-32602`).
+/// - **Enabled-token admission** — RPC methods that execute user calldata
+///   require the authenticated account to hold a nonzero enabled-token balance.
 /// - **Sender verification** — `eth_sendRawTransaction` checks that the
 ///   recovered transaction sender matches the authenticated account
 ///   (`-32003` on mismatch).
@@ -739,6 +743,22 @@ impl<Api> ZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
 {
+    fn enforce_enabled_token_balance(&self, account: Address) -> Result<(), JsonRpcError> {
+        let has_balance =
+            has_enabled_token_balance(self.eth.api.provider(), self.zone_tokens(), account)
+                .map_err(|error| {
+                    tracing::warn!(%error, %account, "Failed to verify Zone RPC token balance");
+                    JsonRpcError::internal("could not verify balance of an enabled zone token")
+                })?;
+
+        if !has_balance {
+            return Err(JsonRpcError::internal(
+                "sender must hold a nonzero balance of an enabled zone token",
+            ));
+        }
+        Ok(())
+    }
+
     fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
         Box::pin(async move {
             let block = EthBlocks::rpc_block(&self.eth.api, id, false)
@@ -958,6 +978,7 @@ where
             }
 
             self.enforce_authorized(&mut request, &auth)?;
+            self.enforce_enabled_token_balance(auth.caller)?;
 
             let result = EthCall::call(
                 &self.eth.api,
@@ -984,6 +1005,7 @@ where
             }
 
             self.enforce_authorized(&mut request, &auth)?;
+            self.enforce_enabled_token_balance(auth.caller)?;
 
             let result = EthCall::estimate_gas_at(
                 &self.eth.api,
@@ -1029,6 +1051,7 @@ where
     ) -> BoxFut<'_> {
         Box::pin(async move {
             self.enforce_authorized(&mut request, &auth)?;
+            self.enforce_enabled_token_balance(auth.caller)?;
 
             // Prefill the users request so the `fill_transaction` doesnt leak dynamic fee estimates via
             // missing fee fields.

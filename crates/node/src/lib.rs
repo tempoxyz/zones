@@ -16,6 +16,7 @@ mod replication;
 pub mod role;
 pub mod rpc;
 mod settlement_attestation;
+mod token_balance;
 mod tx_forwarding;
 pub mod version;
 

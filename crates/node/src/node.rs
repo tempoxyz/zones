@@ -18,6 +18,7 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
+    token_balance::has_enabled_token_balance,
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
@@ -48,9 +49,7 @@ use reth_provider::ChainSpecProvider;
 use reth_rpc_api::Web3ApiServer as _;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{
-    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
-};
+use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{
     Pool, PoolTransaction, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
@@ -61,7 +60,6 @@ use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
-use tempo_precompiles::tip20::TIP20Token;
 use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
@@ -1707,28 +1705,18 @@ fn validate_has_enabled_token_balance(
     enabled_tokens: &EnabledTokenRegistry,
     sender: Address,
 ) -> Result<(), InvalidPoolTransactionError> {
-    let state = provider.latest().map_err(|err| {
-        warn!(%err, "Failed to read latest state for zone token-balance admission check");
-        InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-            TempoInvalidTransaction::EthInvalidTransaction(
-                "could not verify balance of an enabled zone token".into(),
-            ),
-        ))
-    })?;
-
-    for token in enabled_tokens.read().iter().copied() {
-        let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
-        let balance = state.storage(token, slot.into()).map_err(|err| {
-            warn!(%err, %sender, "Failed to read zone token balance during pool admission");
-            InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-                TempoInvalidTransaction::EthInvalidTransaction(
-                    "could not verify balance of an enabled zone token".into(),
-                ),
-            ))
-        })?;
-        if balance.is_some_and(|balance| !balance.is_zero()) {
-            return Ok(());
-        }
+    let has_balance =
+        has_enabled_token_balance(provider, enabled_tokens.read().iter().copied(), sender)
+            .map_err(|err| {
+                warn!(%err, %sender, "Failed to verify zone token balance during pool admission");
+                InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
+                    TempoInvalidTransaction::EthInvalidTransaction(
+                        "could not verify balance of an enabled zone token".into(),
+                    ),
+                ))
+            })?;
+    if has_balance {
+        return Ok(());
     }
 
     Err(InvalidPoolTransactionError::other(

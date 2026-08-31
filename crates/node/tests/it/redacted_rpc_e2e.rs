@@ -8,8 +8,9 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, now_secs, start_zone_with_redacted_rpc,
-    start_zone_with_redacted_rpc_l1, start_zone_with_redacted_rpc_l1_with_encryption,
+    DEFAULT_TIMEOUT, RedactedRpcL1TestCtx, TEST_MNEMONIC, TIP20_TX_GAS, ZoneAccount, now_secs,
+    start_zone_with_redacted_rpc, start_zone_with_redacted_rpc_l1,
+    start_zone_with_redacted_rpc_l1_with_encryption,
 };
 use alloy::{
     primitives::{Address, B256, TxKind, U256, address, hex},
@@ -71,6 +72,24 @@ fn corrupt_token_hex(token: &str) -> String {
 
 fn address_topic(address: Address) -> String {
     format!("{:#x}", B256::left_padding_from(address.as_slice()))
+}
+
+async fn fund_l1_rpc_accounts(
+    ctx: &RedactedRpcL1TestCtx,
+    signers: &[&PrivateKeySigner],
+) -> eyre::Result<()> {
+    let depositor_signer = ctx.l1().user_signer();
+    ctx.l1()
+        .fund_user(depositor_signer.address(), 5_000_000)
+        .await?;
+    let mut depositor =
+        ZoneAccount::with_signer(depositor_signer, ctx.l1(), &ctx.zone, ctx.portal_address());
+    for signer in signers {
+        depositor
+            .deposit_to(signer.address(), 1_000_000, DEFAULT_TIMEOUT, &ctx.zone)
+            .await?;
+    }
+    Ok(())
 }
 
 fn signed_sponsored_raw_transaction(
@@ -327,6 +346,51 @@ async fn test_send_raw_transaction_requires_enabled_token_balance() -> eyre::Res
         response["result"].as_str().is_some(),
         "funded sender transaction should be accepted: {response}",
     );
+
+    Ok(())
+}
+
+/// RPC methods that execute user calldata require the caller to hold an enabled zone token.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_simulation_methods_require_enabled_token_balance() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_redacted_rpc().await?;
+    let user_signer = PrivateKeySigner::random();
+    let request = json!({
+        "to": format!("{:#x}", user_signer.address()),
+        "data": "0x",
+    });
+
+    for (method, params) in [
+        ("eth_call", json!([request.clone(), "latest"])),
+        ("eth_estimateGas", json!([request.clone(), "latest"])),
+        ("eth_fillTransaction", json!([request.clone()])),
+    ] {
+        let response = ctx.call_as_user(method, params, &user_signer).await?;
+        assert_eq!(
+            response["error"]["code"].as_i64(),
+            Some(-32603),
+            "{method} should reject an unfunded caller: {response}",
+        );
+        assert_eq!(
+            response["error"]["message"].as_str(),
+            Some("sender must hold a nonzero balance of an enabled zone token"),
+            "{method} should explain why the call was rejected: {response}",
+        );
+    }
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        user_signer.address(),
+        user_signer.address(),
+        1_000_000,
+    )
+    .await?;
+    let response = ctx
+        .call_as_user("eth_call", json!([request, "latest"]), &user_signer)
+        .await?;
+    assert_eq!(response["result"].as_str(), Some("0x"));
 
     Ok(())
 }
@@ -680,8 +744,10 @@ async fn test_balance_privacy() -> eyre::Result<()> {
 async fn test_tip403_zero_caller_is_operator_only() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let ctx = start_zone_with_redacted_rpc().await?;
+    let mut ctx = start_zone_with_redacted_rpc().await?;
     let user = PrivateKeySigner::random();
+    ctx.inject_deposit(PATH_USD_ADDRESS, user.address(), user.address(), 1_000_000)
+        .await?;
     let call = ITIP403Registry::isAuthorizedCall {
         policyId: ALLOW_ALL_POLICY_ID,
         user: user.address(),
@@ -862,6 +928,7 @@ async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
     let owner_signer = PrivateKeySigner::random();
     let owner = owner_signer.address();
     let outsider_signer = PrivateKeySigner::random();
+    fund_l1_rpc_accounts(&ctx, &[&owner_signer, &outsider_signer]).await?;
     let nonce_call = PrecompileTip20::noncesCall { owner };
     let calldata = nonce_call.abi_encode();
 
@@ -937,6 +1004,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let owner_signer = PrivateKeySigner::random();
     let owner = owner_signer.address();
     let outsider_signer = PrivateKeySigner::random();
+    fund_l1_rpc_accounts(&ctx, &[&owner_signer, &outsider_signer]).await?;
 
     let refunds_call = IZoneInbox::refundsCall {
         token: ZONE_TOKEN_ADDRESS,
@@ -1028,6 +1096,7 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
     let owner_signer = PrivateKeySigner::random();
     let owner = owner_signer.address();
     let outsider_signer = PrivateKeySigner::random();
+    fund_l1_rpc_accounts(&ctx, &[&owner_signer, &outsider_signer]).await?;
     let key_id = Address::repeat_byte(0x55);
 
     let calls = [
