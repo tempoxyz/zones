@@ -18,6 +18,7 @@ jobs:
       contents: read
     uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@98b1081dcf34361b576aca2ab3041772708582ef
     with:
+      clippy-runner: depot-ubuntu-latest-32
       rust-toolchain: nightly-2026-02-21
 
   lint-success:
