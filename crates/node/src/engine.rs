@@ -212,7 +212,9 @@ impl AvailableTempoImport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TempoImportDecision {
+    /// Wait until the queued L1 tip activates the hardfork required by the next Zone block.
     WaitForHardforkMatch,
+    /// Wait until the subscriber confirms the queued finalized target did not advance.
     WaitForFinalizedTarget,
     /// Import the full block with `advanceTempo`.
     ImportFull,
