@@ -80,7 +80,8 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{
-    LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+    LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal::{self},
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
@@ -1378,9 +1379,17 @@ where
                 .call()
                 .await?;
             eyre::ensure!(
-                !validity.valid,
-                "missing private decryption key for grace-valid Portal key index {key_index} at \
-                 L1 block {block_number}"
+                !validity.valid
+                // A key that has expired at the persisted checkpoint may still be needed by a deposit in the
+                // deferred Portal-work range.
+                    && self
+                        .l1_config
+                        .deferred_work_start.is_none_or(|from| validity.expiresAtBlock <= from),
+                "missing private decryption key for Portal key index {key_index} required at L1 \
+                 checkpoint {block_number} or by deferred work starting at {:?} (expires at L1 \
+                 block {})",
+                self.l1_config.deferred_work_start,
+                validity.expiresAtBlock,
             );
         }
 

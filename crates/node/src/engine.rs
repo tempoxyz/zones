@@ -62,9 +62,10 @@ use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// Every Zone block requires the leader assigned to its final imported Tempo header. An optimistic
-/// override is open-ended until the next finalized portal transition supplies the
-/// ordinary-authority boundary.
+/// The permit is a single schedule lookup: produce a Zone block only if the portal schedule or a
+/// forced-recovery override assigns this node as leader for the block's first imported Tempo
+/// header. An optimistic override is open-ended until the next finalized portal transition
+/// supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -80,7 +81,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the Zone block embedding `tempo_anchor`.
+    /// Decide whether this node may produce the zone block embedding `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -492,7 +493,7 @@ impl AvailableTempoImport {
     /// Historical Tempo anchor whose leader must produce this Zone block.
     fn leader_anchor(&self) -> u64 {
         self.checkpoint_headers
-            .last()
+            .first()
             .unwrap_or(&self.l1_block.header)
             .number()
     }
@@ -632,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_import_uses_final_header_as_leader_anchor() {
+    fn checkpoint_import_uses_first_header_as_leader_anchor() {
         let available = AvailableTempoImport {
             l1_block: L1BlockDeposits {
                 header: header(90, 90),
@@ -642,7 +643,7 @@ mod tests {
             wall_clock_timestamp_millis: 110_000,
         };
 
-        assert_eq!(available.leader_anchor(), 110);
+        assert_eq!(available.leader_anchor(), 90);
     }
 
     #[test]

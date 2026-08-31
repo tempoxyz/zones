@@ -703,7 +703,7 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 
 /// Import live/backfilled blocks in canonical order on a follower.
 ///
-/// Live blocks are only imported when the sender equals the leader at their final imported Tempo
+/// Live blocks are only imported when the sender equals the leader at their first imported Tempo
 /// header. For checkpoint-only blocks this is the historical L1 block they anchor to. This check
 /// resolves accidental split brain using the finalized schedule.
 ///
