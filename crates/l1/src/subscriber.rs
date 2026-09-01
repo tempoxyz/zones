@@ -435,8 +435,6 @@ impl L1SubscriberError {
     }
 }
 
-type L1SubscriberResult<T> = Result<T, L1SubscriberError>;
-
 impl L1Subscriber {
     /// Create an L1 subscriber.
     pub fn new<P>(
@@ -461,7 +459,7 @@ impl L1Subscriber {
     ///
     /// The transport (HTTP or WebSocket) is auto-detected from the URL scheme.
     #[instrument(skip(self), fields(l1_rpc_url = %self.config.l1_rpc_url))]
-    async fn connect(&self) -> L1SubscriberResult<DynProvider<TempoNetwork>> {
+    async fn connect(&self) -> Result<DynProvider<TempoNetwork>, L1SubscriberError> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let url: url::Url = self.config.l1_rpc_url.parse().map_err(eyre::Report::from)?;
@@ -484,20 +482,20 @@ impl L1Subscriber {
         Ok(provider)
     }
 
-    /// Return transport-appropriate L1 head notifications as unit triggers.
+    /// Subscribe to transport-appropriate L1 head notifications.
     ///
     /// WebSocket connections use `newHeads`. When pubsub is unavailable, HTTP
     /// connections fall back to `eth_newBlockFilter` / `eth_getFilterChanges`.
-    /// Trigger payloads are ignored because block selection always comes from
+    /// Header payloads are ignored because block selection always comes from
     /// the L1 `finalized` tag.
-    pub(crate) async fn head_triggers<'a>(
+    pub(crate) async fn subscribe_block_headers<'a>(
         &self,
         provider: &'a DynProvider<TempoNetwork>,
-    ) -> L1SubscriberResult<Pin<Box<dyn Stream<Item = eyre::Result<()>> + Send + 'a>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = ()> + Send + 'a>>, L1SubscriberError> {
         match provider.subscribe_blocks().await {
             Ok(subscription) => {
                 info!("Using WebSocket newHeads notifications");
-                Ok(Box::pin(subscription.into_stream().map(|_| Ok(()))))
+                Ok(Box::pin(subscription.into_stream().map(|_| ())))
             }
             Err(err)
                 if err
@@ -507,11 +505,9 @@ impl L1Subscriber {
                 info!("Pubsub unavailable, using HTTP block filter polling");
                 let mut watcher = provider.watch_blocks().await?;
                 watcher.set_poll_interval(HTTP_POLL_INTERVAL);
-                Ok(Box::pin(
-                    watcher.into_stream().filter_map(|hashes| async move {
-                        (!hashes.is_empty()).then_some(Ok::<(), eyre::Report>(()))
-                    }),
-                ))
+                Ok(Box::pin(watcher.into_stream().filter_map(
+                    |hashes| async move { (!hashes.is_empty()).then_some(()) },
+                )))
             }
             Err(err) => Err(err.into()),
         }
@@ -522,7 +518,7 @@ impl L1Subscriber {
     /// The zone's persisted Tempo checkpoint is the authoritative source for
     /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
     /// block-zero genesis from the unanchored template.
-    pub(crate) fn resolve_start_block(&self) -> L1SubscriberResult<u64> {
+    pub(crate) fn resolve_start_block(&self) -> Result<u64, L1SubscriberError> {
         let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
         if local_checkpoint.hash == B256::ZERO {
             return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
@@ -533,7 +529,7 @@ impl L1Subscriber {
     }
 
     /// Resolve the first L1 block that has not already been ingested.
-    pub(crate) fn next_block_to_sync(&self) -> L1SubscriberResult<u64> {
+    pub(crate) fn next_block_to_sync(&self) -> Result<u64, L1SubscriberError> {
         let resolved = self.resolve_start_block()?;
         let queued = self
             .deposit_queue
@@ -563,7 +559,7 @@ impl L1Subscriber {
     async fn finalized_block_number(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-    ) -> L1SubscriberResult<u64> {
+    ) -> Result<u64, L1SubscriberError> {
         l1_provider
             .get_header_by_number(BlockNumberOrTag::Finalized)
             .await
@@ -580,7 +576,7 @@ impl L1Subscriber {
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
         next_block: u64,
-    ) -> L1SubscriberResult<u64> {
+    ) -> Result<u64, L1SubscriberError> {
         let finalized = self.finalized_block_number(l1_provider).await?;
         if next_block > finalized {
             self.record_seen_block(finalized, 0);
@@ -612,20 +608,19 @@ impl L1Subscriber {
     pub(crate) async fn follow_finalized<S>(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        triggers: S,
-    ) -> L1SubscriberResult<()>
+        header_stream: S,
+    ) -> Result<(), L1SubscriberError>
     where
-        S: Stream<Item = eyre::Result<()>> + Send,
+        S: Stream<Item = ()> + Send,
     {
-        let mut triggers = Box::pin(triggers);
+        let mut header_stream = Box::pin(header_stream);
         let mut next_block = self.next_block_to_sync()?;
 
         // Subscribe before the initial sync so a head published while catching
-        // up remains queued as another trigger.
+        // up remains queued in the header stream.
         next_block = self.sync_finalized_once(l1_provider, next_block).await?;
 
-        while let Some(trigger) = triggers.next().await {
-            trigger?;
+        while header_stream.next().await.is_some() {
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 
@@ -644,7 +639,7 @@ impl L1Subscriber {
         l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
-    ) -> L1SubscriberResult<()> {
+    ) -> Result<(), L1SubscriberError> {
         use futures::stream;
 
         let concurrency = self.config.l1_fetch_concurrency.max(1);
@@ -820,16 +815,17 @@ impl L1Subscriber {
         loop {
             let result = async {
                 let provider = self.connect().await?;
-                let triggers = self.head_triggers(&provider).await?;
+                let header_stream = self.subscribe_block_headers(&provider).await?;
                 info!(
                     portal = %self.config.portal_address,
                     "Following finalized L1 blocks"
                 );
-                self.follow_finalized(&provider, triggers).await
+                self.follow_finalized(&provider, header_stream).await
             }
             .await;
 
             if let Err(error) = result {
+                // Retry ordinary errors; finalized event decoding and application errors are fatal.
                 if error.should_retry() {
                     let retry_interval = self.config.retry_connection_interval;
                     self.subscriber_metrics.reconnects.increment(1);
@@ -966,7 +962,7 @@ async fn fetch_and_verify_receipts_for_header(
     block: NumHash,
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
-) -> L1SubscriberResult<Vec<tempo_alloy::rpc::TempoTransactionReceipt>> {
+) -> Result<Vec<tempo_alloy::rpc::TempoTransactionReceipt>, L1SubscriberError> {
     let block_number = block.number;
     let block_hash = block.hash;
     let receipts = provider
