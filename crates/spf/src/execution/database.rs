@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use revm::{
     Database,
@@ -16,7 +16,8 @@ use tempo_primitives::TempoHeader;
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use crate::{
-    Error, StatelessSparseTrieError, TempoStateWitness, ZoneStateWitness, mpt::StatelessSparseTrie,
+    Error, StatelessSparseTrieError, TempoStateWitness, ZoneStateWitness,
+    mpt::{StatelessSparseTrie, StatelessTrieReader},
 };
 
 /// Errors emitted while resolving an execution read against a witness.
@@ -171,15 +172,15 @@ impl Database for WitnessDatabase {
 
 /// Tempo state reader for the checkpoint header supplied in the witness.
 ///
-/// When the shared node pool includes that checkpoint's root, it owns a fully
-/// revealed immutable sparse trie. Otherwise it remains inactive and rejects
-/// any Tempo storage read as an incomplete witness.
+/// When the shared node pool includes that checkpoint's root, reads are authenticated by walking
+/// the standard MPT proof nodes directly. Otherwise it remains inactive and rejects any Tempo
+/// storage read as an incomplete witness.
 #[derive(Clone, Debug)]
 pub struct TempoWitnessDatabase {
-    state: Option<Arc<StatelessSparseTrie>>,
+    state_root: Option<B256>,
     tempo_block_hash: B256,
     tempo_block_number: u64,
-    node_pool: Arc<Vec<Bytes>>,
+    node_pool: Arc<StatelessTrieReader>,
     missing_read: Arc<Mutex<Option<MissingTempoStorageRead>>>,
 }
 
@@ -193,12 +194,12 @@ pub(crate) struct MissingTempoStorageRead {
 impl TempoWitnessDatabase {
     /// Construct the reader for the initial Tempo checkpoint.
     pub fn from_tempo_state_witness(witness: TempoStateWitness) -> Result<Self, Error> {
-        let node_pool = Arc::new(witness.node_pool);
-        let (state, tempo_block_hash, tempo_block_number) =
+        let node_pool = Arc::new(StatelessTrieReader::new(&witness.node_pool)?);
+        let (state_root, tempo_block_hash, tempo_block_number) =
             checkpoint_state(&witness.initial_tempo_header_rlp, node_pool.as_ref())?;
 
         Ok(Self {
-            state,
+            state_root,
             tempo_block_hash,
             tempo_block_number,
             node_pool,
@@ -213,11 +214,11 @@ impl TempoWitnessDatabase {
         self,
         header_rlp: &alloy_primitives::Bytes,
     ) -> Result<Self, Error> {
-        let (state, tempo_block_hash, tempo_block_number) =
+        let (state_root, tempo_block_hash, tempo_block_number) =
             checkpoint_state(header_rlp, self.node_pool.as_ref())?;
 
         Ok(Self {
-            state,
+            state_root,
             tempo_block_hash,
             tempo_block_number,
             node_pool: self.node_pool,
@@ -252,8 +253,8 @@ impl TempoWitnessDatabase {
 
 fn checkpoint_state(
     header_rlp: &[u8],
-    node_pool: &[Bytes],
-) -> Result<(Option<Arc<StatelessSparseTrie>>, B256, u64), Error> {
+    node_pool: &StatelessTrieReader,
+) -> Result<(Option<B256>, B256, u64), Error> {
     let mut encoded_header = header_rlp;
     let header = TempoHeader::decode(&mut encoded_header)
         .map_err(|_| WitnessDatabaseError::InvalidTempoHeader)?;
@@ -262,13 +263,9 @@ fn checkpoint_state(
     }
 
     let state_root = header.state_root();
-    let state = match StatelessSparseTrie::new(state_root, node_pool) {
-        Ok(state) => Some(Arc::new(state)),
-        Err(StatelessSparseTrieError::MissingStateRootNode { .. }) => None,
-        Err(error) => return Err(error.into()),
-    };
+    let state_root = node_pool.contains_root(state_root).then_some(state_root);
 
-    Ok((state, keccak256(header_rlp), header.number()))
+    Ok((state_root, keccak256(header_rlp), header.number()))
 }
 
 impl L1StorageReader for TempoWitnessDatabase {
@@ -287,7 +284,7 @@ impl L1StorageReader for TempoWitnessDatabase {
             ));
         }
 
-        let state = self.state.as_ref().ok_or_else(|| {
+        let state_root = self.state_root.ok_or_else(|| {
             self.record_missing_read(account, slot, tempo_block_number);
             storage_unavailable(
                 account,
@@ -296,7 +293,10 @@ impl L1StorageReader for TempoWitnessDatabase {
                 "witness does not include the checkpoint state root",
             )
         })?;
-        let value = match state.storage(account, U256::from_be_bytes(slot.0)) {
+        let value = match self
+            .node_pool
+            .storage(state_root, account, U256::from_be_bytes(slot.0))
+        {
             Ok(value) => value,
             Err(
                 error @ (StatelessSparseTrieError::IncompleteAccountProof { .. }

@@ -598,7 +598,10 @@ mod tests {
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
     use reth_evm::ConfigureEvm;
-    use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
+    use reth_trie_common::{
+        BranchNode, EMPTY_ROOT_HASH, ExtensionNode, LeafNode, Nibbles, RlpNode, TrieAccount,
+        TrieMask, TrieNode,
+    };
     use revm::{
         DatabaseCommit as _,
         database::{State, states::bundle_state::BundleRetention},
@@ -994,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn fully_reveals_the_active_tempo_checkpoint() {
+    fn reads_the_active_tempo_checkpoint() {
         let account = Address::repeat_byte(0x34);
         let slot = U256::from(7);
         let value = U256::from(11);
@@ -1017,6 +1020,107 @@ mod tests {
         let database = TempoWitnessDatabase::from_tempo_state_witness(TempoStateWitness {
             initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(header)),
             node_pool: zone_witness.node_pool,
+        })
+        .unwrap();
+
+        assert_eq!(
+            database
+                .read_l1_storage(account, B256::from(slot.to_be_bytes::<32>()), 9)
+                .unwrap(),
+            B256::from(value.to_be_bytes::<32>())
+        );
+    }
+
+    #[test]
+    fn accepts_a_tempo_exclusion_proof_ending_at_an_extension() {
+        let account = Address::repeat_byte(0x35);
+        let slot = U256::from(7);
+        let slot_path = Nibbles::unpack(keccak256(slot.to_be_bytes::<32>()));
+        let extension_key = Nibbles::from_nibbles([
+            (slot_path.get_unchecked(0) + 1) % 16,
+            slot_path.get_unchecked(1),
+        ]);
+        let extension = TrieNode::Extension(ExtensionNode::new(
+            extension_key,
+            RlpNode::word_rlp(&B256::repeat_byte(0x42)),
+        ));
+        let encoded_extension = Bytes::from(alloy_rlp::encode(extension));
+        let storage_root = keccak256(&encoded_extension);
+
+        let trie_account = TrieAccount {
+            storage_root,
+            ..Default::default()
+        };
+        let account_leaf = TrieNode::Leaf(LeafNode::new(
+            Nibbles::unpack(keccak256(account)),
+            alloy_rlp::encode(trie_account),
+        ));
+        let encoded_account = Bytes::from(alloy_rlp::encode(account_leaf));
+        let state_root = keccak256(&encoded_account);
+        let header = TempoHeader {
+            inner: Header {
+                number: 9,
+                state_root,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let database = TempoWitnessDatabase::from_tempo_state_witness(TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(header)),
+            // A normal exclusion proof stops at the extension. Its hashed child branch is not
+            // needed to prove that the requested path diverges from the extension key.
+            node_pool: vec![encoded_account, encoded_extension],
+        })
+        .unwrap();
+
+        assert_eq!(
+            database
+                .read_l1_storage(account, B256::from(slot.to_be_bytes::<32>()), 9)
+                .unwrap(),
+            B256::ZERO
+        );
+    }
+
+    #[test]
+    fn resolves_a_tempo_inclusion_proof_through_a_branch() {
+        let account = Address::repeat_byte(0x36);
+        let slot = U256::from(8);
+        let value = U256::from(12);
+
+        let storage_leaf = TrieNode::Leaf(LeafNode::new(
+            Nibbles::unpack(keccak256(slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(value),
+        ));
+        let encoded_storage = Bytes::from(alloy_rlp::encode(storage_leaf));
+        let storage_root = keccak256(&encoded_storage);
+
+        let account_path = Nibbles::unpack(keccak256(account));
+        let account_leaf = TrieNode::Leaf(LeafNode::new(
+            account_path.slice(1..),
+            alloy_rlp::encode(TrieAccount {
+                storage_root,
+                ..Default::default()
+            }),
+        ));
+        let encoded_account = Bytes::from(alloy_rlp::encode(account_leaf));
+        let account_nibble = account_path.get_unchecked(0);
+        let account_branch = TrieNode::Branch(BranchNode::new(
+            vec![RlpNode::from_rlp(&encoded_account)],
+            TrieMask::new(1 << account_nibble),
+        ));
+        let encoded_branch = Bytes::from(alloy_rlp::encode(account_branch));
+        let state_root = keccak256(&encoded_branch);
+        let header = TempoHeader {
+            inner: Header {
+                number: 9,
+                state_root,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let database = TempoWitnessDatabase::from_tempo_state_witness(TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(header)),
+            node_pool: vec![encoded_branch, encoded_account, encoded_storage],
         })
         .unwrap();
 

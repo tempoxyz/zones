@@ -2,14 +2,156 @@
 //!
 //! The construction and read pattern is adapted from
 //! [`paradigmxyz/stateless`'s `StatelessSparseTrie`](https://github.com/paradigmxyz/stateless/blob/3d2fc174df31f5b0d5d4d831dc7e1607ea541531/crates/tries/src/default.rs).
-//! A flat witness is indexed by node hash, revealed into Reth's
-//! [`reth_trie_sparse::SparseStateTrie`], and checked against the committed
-//! pre-state root before it can serve reads.
+//! Zone state witnesses are revealed into Reth's [`reth_trie_sparse::SparseStateTrie`] so they can
+//! be updated during execution. Tempo state witnesses use a read-only hash-indexed trie, which can
+//! consume standard MPT proofs without imposing the sparse trie's internal node representation.
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::B256Map};
 use alloy_rlp::Decodable;
-use reth_trie_common::{DecodedMultiProofV2, EMPTY_ROOT_HASH, HashedPostState, TrieAccount};
+use reth_trie_common::{
+    DecodedMultiProofV2, EMPTY_ROOT_HASH, HashedPostState, Nibbles, RlpNode, TrieAccount, TrieNode,
+};
 use reth_trie_sparse::{LeafUpdate, RevealableSparseTrie, SparseStateTrie, TrieNodeEpoch};
+
+/// Read-only MPT node pool used to authenticate Tempo state reads.
+#[derive(Debug)]
+pub(crate) struct StatelessTrieReader {
+    nodes: B256Map<Bytes>,
+}
+
+impl StatelessTrieReader {
+    /// Index a flat witness by node hash.
+    pub(crate) fn new(node_pool: &[Bytes]) -> Result<Self, StatelessSparseTrieError> {
+        let mut nodes = B256Map::default();
+        for node in node_pool {
+            let node_hash = keccak256(node);
+            if nodes.insert(node_hash, node.clone()).is_some() {
+                return Err(StatelessSparseTrieError::DuplicateNodeHash { node_hash });
+            }
+        }
+        Ok(Self { nodes })
+    }
+
+    /// Returns whether this witness can start a proof at `root`.
+    pub(crate) fn contains_root(&self, root: B256) -> bool {
+        root == EMPTY_ROOT_HASH || self.nodes.contains_key(&root)
+    }
+
+    /// Return a proven storage value, or zero for a valid account or storage exclusion proof.
+    pub(crate) fn storage(
+        &self,
+        state_root: B256,
+        address: Address,
+        slot: U256,
+    ) -> Result<U256, StatelessSparseTrieError> {
+        let account = self
+            .value(state_root, keccak256(address))
+            .map_err(|error| map_lookup_error(error, address, None))?
+            .map(|value| decode_account(&value, address))
+            .transpose()?;
+        let Some(account) = account else {
+            return Ok(U256::ZERO);
+        };
+        if account.storage_root == EMPTY_ROOT_HASH {
+            return Ok(U256::ZERO);
+        }
+
+        self.value(account.storage_root, keccak256(slot.to_be_bytes::<32>()))
+            .map_err(|error| map_lookup_error(error, address, Some(slot)))?
+            .map(|value| decode_storage_value(&value, address, slot))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    /// Walk a single MPT path. A mismatching leaf or extension and an empty branch child are valid
+    /// exclusion proofs; a missing hashed child means the supplied witness is incomplete.
+    fn value(&self, root: B256, key: B256) -> Result<Option<Vec<u8>>, TrieLookupError> {
+        if root == EMPTY_ROOT_HASH {
+            return Ok(None);
+        }
+
+        let key = Nibbles::unpack(key);
+        let mut offset = 0;
+        let mut encoded = self
+            .nodes
+            .get(&root)
+            .cloned()
+            .ok_or(TrieLookupError::Incomplete)?;
+
+        // A canonical path consumes at least one nibble at every branch or extension, so a
+        // 64-nibble key cannot contain more than 65 nodes.
+        for _ in 0..=key.len() {
+            let mut input = encoded.as_ref();
+            let node = TrieNode::decode(&mut input).map_err(|_| TrieLookupError::Invalid)?;
+            if !input.is_empty() {
+                return Err(TrieLookupError::Invalid);
+            }
+
+            match node {
+                TrieNode::EmptyRoot => return Ok(None),
+                TrieNode::Leaf(leaf) => {
+                    return Ok((key.slice(offset..) == leaf.key).then_some(leaf.value));
+                }
+                TrieNode::Extension(extension) => {
+                    if extension.key.is_empty() || !key.slice(offset..).starts_with(&extension.key)
+                    {
+                        return Ok(None);
+                    }
+                    offset += extension.key.len();
+                    encoded = self.resolve_child(&extension.child)?;
+                }
+                TrieNode::Branch(branch) => {
+                    if offset == key.len() {
+                        return Ok(None);
+                    }
+                    let nibble = key.get_unchecked(offset);
+                    let branch = branch.as_ref();
+                    let child = branch
+                        .children()
+                        .find_map(|(index, child)| (index == nibble).then_some(child).flatten());
+                    let Some(child) = child else { return Ok(None) };
+                    offset += 1;
+                    encoded = self.resolve_child(child)?;
+                }
+            }
+        }
+
+        Err(TrieLookupError::Invalid)
+    }
+
+    fn resolve_child(&self, child: &RlpNode) -> Result<Bytes, TrieLookupError> {
+        if let Some(hash) = child.as_hash() {
+            self.nodes
+                .get(&hash)
+                .cloned()
+                .ok_or(TrieLookupError::Incomplete)
+        } else {
+            Ok(Bytes::copy_from_slice(child.as_ref()))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrieLookupError {
+    Incomplete,
+    Invalid,
+}
+
+fn map_lookup_error(
+    error: TrieLookupError,
+    account: Address,
+    slot: Option<U256>,
+) -> StatelessSparseTrieError {
+    match (error, slot) {
+        (TrieLookupError::Invalid, _) => StatelessSparseTrieError::InvalidNodeEncoding,
+        (TrieLookupError::Incomplete, Some(slot)) => {
+            StatelessSparseTrieError::IncompleteStorageProof { account, slot }
+        }
+        (TrieLookupError::Incomplete, None) => {
+            StatelessSparseTrieError::IncompleteAccountProof { account }
+        }
+    }
+}
 
 /// Fully revealed, root-bound stateless trie.
 #[derive(Debug)]
