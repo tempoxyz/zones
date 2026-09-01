@@ -3,7 +3,7 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use alloy_consensus::{
-    Signed, Transaction as _, TxLegacy,
+    Signed, TxLegacy,
     transaction::{Recovered, SignerRecoverable as _},
 };
 use alloy_eips::{eip2718::Decodable2718 as _, eip4895::Withdrawals};
@@ -32,7 +32,7 @@ use tempo_zone_contracts::{
 use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
 
 use crate::{
-    Error, ZoneBlock,
+    Error, TempoImport, ZoneBlock,
     execution::database::{TempoWitnessDatabase, WitnessDatabase},
 };
 
@@ -70,19 +70,7 @@ pub(crate) fn execute_zone_block(
         parent,
         block_index: zone_block_index,
     } = replay;
-    let (tempo_advance_transaction, user_transactions) =
-        block
-            .transactions
-            .split_first()
-            .ok_or(Error::MissingTempoAdvanceTransaction {
-                block_index: zone_block_index,
-            })?;
-    let tempo_advance_transaction = TempoTxEnvelope::decode_2718_exact(tempo_advance_transaction)
-        .map_err(|_| Error::TempoAdvanceTransactionDecoding {
-        block_index: zone_block_index,
-    })?;
-    let tempo_advance_calldata = tempo_advance_transaction.input().clone();
-    let user_transactions = decode_user_transactions(zone_block_index, user_transactions)?;
+    let user_transactions = decode_user_transactions(zone_block_index, &block.transactions)?;
     let mut transactions = Vec::with_capacity(
         1 // advanceTempo system transaction
             + user_transactions.len()
@@ -129,12 +117,25 @@ pub(crate) fn execute_zone_block(
         )
     })?;
 
-    transactions.push(execute_advance_tempo(
-        &mut executor,
-        &tempo_advance_calldata,
-        zone_block_index,
-        chain_id,
-    )?);
+    match &block.tempo_import {
+        TempoImport::Full {
+            header_rlp,
+            deposits,
+            decryptions,
+            enabled_tokens,
+        } => transactions.push(execute_advance_tempo(
+            &mut executor,
+            header_rlp,
+            deposits,
+            decryptions,
+            enabled_tokens,
+            zone_block_index,
+            chain_id,
+        )?),
+        TempoImport::CheckpointOnly { headers_rlp } => transactions.push(
+            execute_advance_tempo_headers(&mut executor, headers_rlp, zone_block_index, chain_id)?,
+        ),
+    }
     transactions.extend(execute_user_transactions(
         &mut executor,
         zone_block_index,
@@ -229,13 +230,23 @@ pub(crate) fn next_block_execution_context(
 
 fn execute_advance_tempo<'a, 'db, I>(
     executor: &mut WitnessExecutor<'a, 'db, I>,
-    calldata: &Bytes,
+    header: &Bytes,
+    deposits: &[tempo_zone_contracts::QueuedDeposit],
+    decryptions: &[tempo_zone_contracts::DecryptionData],
+    enabled_tokens: &[tempo_zone_contracts::EnabledToken],
     block_index: usize,
     chain_id: u64,
 ) -> Result<TempoTxEnvelope, Error>
 where
     I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
 {
+    let calldata = IZoneInbox::advanceTempoCall {
+        header: header.clone(),
+        deposits: deposits.to_vec(),
+        decryptions: decryptions.to_vec(),
+        enabledTokens: enabled_tokens.to_vec(),
+    }
+    .abi_encode();
     let transaction = TxLegacy {
         chain_id: Some(chain_id),
         nonce: 0,
@@ -243,12 +254,46 @@ where
         gas_limit: 0,
         to: ZONE_INBOX_ADDRESS.into(),
         value: U256::ZERO,
-        input: calldata.clone(),
+        input: calldata.into(),
     };
     let transaction =
         TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
     let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
 
+    execute_recovered_transaction(
+        executor,
+        recovered,
+        Error::AdvanceTempoExecution { block_index },
+        true,
+    )?;
+    Ok(transaction)
+}
+
+fn execute_advance_tempo_headers<'a, 'db, I>(
+    executor: &mut WitnessExecutor<'a, 'db, I>,
+    headers: &[Bytes],
+    block_index: usize,
+    chain_id: u64,
+) -> Result<TempoTxEnvelope, Error>
+where
+    I: alloy_evm::revm::Inspector<WitnessContext<'db>>,
+{
+    let calldata = IZoneInbox::advanceTempoHeadersCall {
+        headers: headers.to_vec(),
+    }
+    .abi_encode();
+    let transaction = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_INBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+    let transaction =
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE));
+    let recovered = Recovered::new_unchecked(transaction.clone(), TEMPO_SYSTEM_TX_SENDER);
     execute_recovered_transaction(
         executor,
         recovered,

@@ -4,11 +4,9 @@
 //! execution. It is presently a normal Rust verifier rather than a `no_std`
 //! proving guest.
 
-use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
-use alloy_eips::eip2718::Decodable2718 as _;
+use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::{B256, U256, keccak256};
 use alloy_rlp::Decodable as _;
-use alloy_sol_types::SolInterface as _;
 use reth_chainspec::EthChainSpec as _;
 use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
@@ -16,8 +14,7 @@ use reth_storage_api::noop::NoopProvider;
 use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
 use tempo_chainspec::spec::TempoHardforks as _;
 use tempo_evm::{TempoBlockAssembler, TempoEvmConfig};
-use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope};
-use tempo_zone_contracts::IZoneInbox;
+use tempo_primitives::{TempoHeader, TempoPrimitives};
 use zone_precompiles::{inbox, outbox, tempo_state};
 use zone_primitives::constants::{
     MAX_UNPROCESSED_DEPOSITS, MAX_UNPROCESSED_TOKEN_ENABLEMENTS, TEMPO_STATE_ADDRESS,
@@ -163,21 +160,22 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             });
         }
 
-        let tempo_import_kind = validate_system_inputs(block, block_index)?;
+        validate_system_inputs(block, block_index)?;
         if config
             .chain_spec()
             .tempo_hardfork_at(block.timestamp)
             .is_t12()
         {
             let is_last = block_index + 1 == witness.zone_blocks.len();
-            validate_t12_block_shape(block, is_last, tempo_import_kind)?;
+            validate_t12_block_shape(block, is_last)?;
         }
 
         // The EVM environment uses the verifier-selected fork schedule at this
         // block's timestamp. An imported Tempo header changes the L1 reader
         // used by the subsequent system and user execution in this block.
         let final_imported_header = block
-            .tempo_headers_rlp
+            .tempo_import
+            .headers_rlp()
             .last()
             .expect("validated nonempty Tempo headers");
         tempo_database = tempo_database.with_imported_checkpoint(final_imported_header)?;
@@ -430,20 +428,10 @@ fn validate_tempo_anchor(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TempoImportKind {
-    Full,
-    CheckpointOnly,
-}
-
-fn validate_t12_block_shape(
-    block: &ZoneBlock,
-    is_last: bool,
-    tempo_import_kind: TempoImportKind,
-) -> Result<(), Error> {
-    let valid = match tempo_import_kind {
-        TempoImportKind::CheckpointOnly => !is_last,
-        TempoImportKind::Full => is_last && block.finalize_withdrawal_batch_count.is_some(),
+fn validate_t12_block_shape(block: &ZoneBlock, is_last: bool) -> Result<(), Error> {
+    let valid = match &block.tempo_import {
+        TempoImport::CheckpointOnly { .. } => !is_last,
+        TempoImport::Full { .. } => is_last && block.finalize_withdrawal_batch_count.is_some(),
     };
     if !valid {
         return Err(Error::InvalidT12BatchShape);
@@ -451,58 +439,30 @@ fn validate_t12_block_shape(
     Ok(())
 }
 
-fn decode_tempo_advance_call(block: &ZoneBlock, index: usize) -> Result<TempoImportKind, Error> {
-    let encoded = block
-        .transactions
-        .first()
-        .ok_or(Error::MissingTempoAdvanceTransaction { block_index: index })?;
-    let transaction = TempoTxEnvelope::decode_2718_exact(encoded)
-        .map_err(|_| Error::TempoAdvanceTransactionDecoding { block_index: index })?;
-    if !transaction.is_system_tx() || transaction.to() != Some(ZONE_INBOX_ADDRESS) {
-        return Err(Error::InvalidTempoAdvanceTransaction { block_index: index });
-    }
-    let call = IZoneInbox::IZoneInboxCalls::abi_decode(transaction.input())
-        .map_err(|_| Error::TempoAdvanceCalldataDecoding { block_index: index })?;
-    match call {
-        IZoneInbox::IZoneInboxCalls::advanceTempo(call) => {
-            if block.tempo_headers_rlp.as_slice() != core::slice::from_ref(&call.header)
-                || block.deposits != call.deposits
-                || block.decryptions != call.decryptions
-                || block.enabled_tokens != call.enabledTokens
-            {
-                return Err(Error::TempoAdvanceCalldataMismatch { block_index: index });
-            }
-            Ok(TempoImportKind::Full)
-        }
-        IZoneInbox::IZoneInboxCalls::advanceTempoHeaders(call) => {
-            if block.tempo_headers_rlp != call.headers {
-                return Err(Error::TempoAdvanceCalldataMismatch { block_index: index });
-            }
-            Ok(TempoImportKind::CheckpointOnly)
-        }
-        _ => Err(Error::UnexpectedZoneInboxCall { block_index: index }),
-    }
-}
-
-fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<TempoImportKind, Error> {
-    if block.tempo_headers_rlp.is_empty() {
+fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
+    if block.tempo_import.headers_rlp().is_empty() {
         return Err(Error::MissingTempoHeaders { block_index: index });
     }
-    let tempo_import_kind = decode_tempo_advance_call(block, index)?;
-    if block.deposits.len() > MAX_UNPROCESSED_DEPOSITS
-        || block.enabled_tokens.len() > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
-    {
-        return Err(Error::PortalWorkCapacityExceeded { block_index: index });
-    }
-    if tempo_import_kind == TempoImportKind::CheckpointOnly
-        && (!block.deposits.is_empty()
-            || !block.decryptions.is_empty()
-            || !block.enabled_tokens.is_empty()
-            || block.transactions.len() > 1
-            || block.finalize_withdrawal_batch_count.is_some()
-            || !block.finalize_withdrawal_batch_encrypted_senders.is_empty())
-    {
-        return Err(Error::InvalidCheckpointOnlyBlock { block_index: index });
+    match &block.tempo_import {
+        TempoImport::Full {
+            deposits,
+            enabled_tokens,
+            ..
+        } => {
+            if deposits.len() > MAX_UNPROCESSED_DEPOSITS
+                || enabled_tokens.len() > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+            {
+                return Err(Error::PortalWorkCapacityExceeded { block_index: index });
+            }
+        }
+        TempoImport::CheckpointOnly { .. } => {
+            if !block.transactions.is_empty()
+                || block.finalize_withdrawal_batch_count.is_some()
+                || !block.finalize_withdrawal_batch_encrypted_senders.is_empty()
+            {
+                return Err(Error::InvalidCheckpointOnlyBlock { block_index: index });
+            }
+        }
     }
     match block.finalize_withdrawal_batch_count {
         Some(count)
@@ -520,7 +480,7 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<TempoImport
         _ => {}
     }
 
-    Ok(tempo_import_kind)
+    Ok(())
 }
 
 /// Errors emitted by the stateless state transition function.
@@ -548,24 +508,6 @@ pub enum Error {
     /// A checkpoint-only block carried operational inputs or transactions.
     #[error("checkpoint-only zone block {block_index} contains operational inputs")]
     InvalidCheckpointOnlyBlock { block_index: usize },
-    /// A Zone block omitted its opening ZoneInbox system transaction.
-    #[error("zone block {block_index} has no opening ZoneInbox transaction")]
-    MissingTempoAdvanceTransaction { block_index: usize },
-    /// A Zone block's opening transaction envelope could not be decoded.
-    #[error("failed to decode opening transaction in zone block {block_index}")]
-    TempoAdvanceTransactionDecoding { block_index: usize },
-    /// A Zone block's opening transaction was not a ZoneInbox system transaction.
-    #[error("invalid opening ZoneInbox transaction in zone block {block_index}")]
-    InvalidTempoAdvanceTransaction { block_index: usize },
-    /// A Zone block's opening system calldata could not be decoded.
-    #[error("failed to decode ZoneInbox calldata in zone block {block_index}")]
-    TempoAdvanceCalldataDecoding { block_index: usize },
-    /// Decoded ZoneInbox calldata did not match the supplied execution inputs.
-    #[error("ZoneInbox calldata does not match inputs in zone block {block_index}")]
-    TempoAdvanceCalldataMismatch { block_index: usize },
-    /// A Zone block's opening system transaction called an unsupported ZoneInbox method.
-    #[error("unexpected ZoneInbox call in zone block {block_index}")]
-    UnexpectedZoneInboxCall { block_index: usize },
     /// A block did not import any Tempo headers.
     #[error("zone block {block_index} contains no Tempo headers")]
     MissingTempoHeaders { block_index: usize },
@@ -737,13 +679,9 @@ mod tests {
     use crate::execution::evm::next_block_env_attributes;
 
     use super::*;
-    use alloy_consensus::{Header, Signed, TxLegacy};
-    use alloy_eips::{
-        eip2718::Encodable2718 as _,
-        eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS},
-    };
+    use alloy_consensus::Header;
+    use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-    use alloy_sol_types::SolCall as _;
     use reth_evm::ConfigureEvm;
     use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
     use revm::{
@@ -753,9 +691,7 @@ mod tests {
     use std::sync::Arc;
     use tempo_chainspec::TempoHardfork;
     use tempo_evm::TempoBlockEnv;
-    use tempo_primitives::{
-        TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
-    };
+    use tempo_primitives::TempoHeader;
     use zone_evm::ZoneEvmConfig;
     use zone_precompiles::L1StorageReader as _;
     use zone_primitives::constants::zone_chain_id;
@@ -817,41 +753,17 @@ mod tests {
         }
     }
 
-    fn system_transaction(calldata: Bytes) -> Bytes {
-        let transaction = TxLegacy {
-            chain_id: Some(1),
-            nonce: 0,
-            gas_price: 0,
-            gas_limit: 0,
-            to: ZONE_INBOX_ADDRESS.into(),
-            value: U256::ZERO,
-            input: calldata,
-        };
-        Bytes::from(
-            TempoTxEnvelope::Legacy(Signed::new_unhashed(transaction, TEMPO_SYSTEM_TX_SIGNATURE))
-                .encoded_2718(),
-        )
+    fn full_import(header_rlp: Bytes) -> TempoImport {
+        TempoImport::Full {
+            header_rlp,
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+        }
     }
 
-    fn advance_tempo_transaction(header: Bytes) -> Bytes {
-        system_transaction(
-            IZoneInbox::advanceTempoCall {
-                header,
-                deposits: Vec::new(),
-                decryptions: Vec::new(),
-                enabledTokens: Vec::new(),
-            }
-            .abi_encode()
-            .into(),
-        )
-    }
-
-    fn advance_tempo_headers_transaction(headers: Vec<Bytes>) -> Bytes {
-        system_transaction(
-            IZoneInbox::advanceTempoHeadersCall { headers }
-                .abi_encode()
-                .into(),
-        )
+    fn checkpoint_import(headers_rlp: Vec<Bytes>) -> TempoImport {
+        TempoImport::CheckpointOnly { headers_rlp }
     }
 
     fn witnessed_account_state(
@@ -927,18 +839,15 @@ mod tests {
                 timestamp: 100,
                 timestamp_millis_part: 0,
                 beneficiary: Address::ZERO,
-                tempo_headers_rlp: vec![Bytes::from([0x01])],
-                deposits: Vec::new(),
-                decryptions: Vec::new(),
-                enabled_tokens: Vec::new(),
+                tempo_import: full_import(Bytes::from([0x01])),
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-                transactions: vec![advance_tempo_transaction(Bytes::from([0x01]))],
+                transactions: Vec::new(),
             });
         }
-        let kind = validate_system_inputs(&witness.zone_blocks[0], 0).unwrap();
+        validate_system_inputs(&witness.zone_blocks[0], 0).unwrap();
         assert_eq!(
-            validate_t12_block_shape(&witness.zone_blocks[0], false, kind),
+            validate_t12_block_shape(&witness.zone_blocks[0], false),
             Err(Error::InvalidT12BatchShape)
         );
     }
@@ -952,20 +861,14 @@ mod tests {
             timestamp: 100,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: vec![Bytes::from([0x01]), Bytes::from([0x02])],
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: checkpoint_import(vec![Bytes::from([0x01]), Bytes::from([0x02])]),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: vec![advance_tempo_headers_transaction(vec![
-                Bytes::from([0x01]),
-                Bytes::from([0x02]),
-            ])],
+            transactions: Vec::new(),
         });
-        let kind = validate_system_inputs(&witness.zone_blocks[0], 0).unwrap();
+        validate_system_inputs(&witness.zone_blocks[0], 0).unwrap();
         assert_eq!(
-            validate_t12_block_shape(&witness.zone_blocks[0], true, kind),
+            validate_t12_block_shape(&witness.zone_blocks[0], true),
             Err(Error::InvalidT12BatchShape)
         );
     }
@@ -980,10 +883,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: Vec::new(),
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: checkpoint_import(Vec::new()),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
             transactions: Vec::new(),
@@ -1009,10 +909,7 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: Vec::new(),
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: checkpoint_import(Vec::new()),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
             transactions: Vec::new(),
@@ -1276,15 +1173,10 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 321,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: vec![witness.tempo_state_witness.initial_tempo_header_rlp.clone()],
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: full_import(witness.tempo_state_witness.initial_tempo_header_rlp.clone()),
             finalize_withdrawal_batch_count: Some(U256::ZERO),
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: vec![advance_tempo_transaction(
-                witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
-            )],
+            transactions: Vec::new(),
         };
 
         let config = test_config();
@@ -1320,17 +1212,14 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: vec![Bytes::from([0x01])],
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: vec![advance_tempo_transaction(Bytes::from([0x01]))],
+            transactions: Vec::new(),
         };
 
-        assert_eq!(validate_system_inputs(&block, 0), Ok(TempoImportKind::Full));
-        block.tempo_headers_rlp.clear();
+        assert_eq!(validate_system_inputs(&block, 0), Ok(()));
+        block.tempo_import = checkpoint_import(Vec::new());
         assert_eq!(
             validate_system_inputs(&block, 0),
             Err(Error::MissingTempoHeaders { block_index: 0 })
@@ -1346,19 +1235,13 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: vec![Bytes::from([0x01])],
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: checkpoint_import(vec![Bytes::from([0x01])]),
             finalize_withdrawal_batch_count: None,
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: vec![advance_tempo_headers_transaction(vec![Bytes::from([0x01])])],
+            transactions: Vec::new(),
         };
 
-        assert_eq!(
-            validate_system_inputs(&block, 0),
-            Ok(TempoImportKind::CheckpointOnly)
-        );
+        assert_eq!(validate_system_inputs(&block, 0), Ok(()));
     }
 
     #[test]
@@ -1370,16 +1253,10 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: vec![Bytes::from([0x01])],
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: Some(U256::ZERO),
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: vec![
-                advance_tempo_transaction(Bytes::from([0x01])),
-                Bytes::from([0x01]),
-            ],
+            transactions: vec![Bytes::from([0x01])],
         });
 
         assert!(matches!(
@@ -1402,16 +1279,10 @@ mod tests {
             timestamp: 0,
             timestamp_millis_part: 0,
             beneficiary: Address::ZERO,
-            tempo_headers_rlp: vec![Bytes::from([0x01])],
-            deposits: Vec::new(),
-            decryptions: Vec::new(),
-            enabled_tokens: Vec::new(),
+            tempo_import: full_import(Bytes::from([0x01])),
             finalize_withdrawal_batch_count: Some(U256::ZERO),
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: vec![
-                advance_tempo_transaction(Bytes::from([0x01])),
-                Bytes::from([0x01]),
-            ],
+            transactions: vec![Bytes::from([0x01])],
         });
 
         assert!(matches!(
