@@ -13882,6 +13882,7 @@ dependencies = [
  "reqwest",
  "reth-chain-state",
  "reth-chainspec",
+ "reth-consensus-common",
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",

@@ -1104,13 +1104,19 @@ where
 {
     // Check the received block
     let mut input = peer_block.encoded.as_slice();
-    let block = Block::decode(&mut input)
+    let block = SealedBlock::<Block>::decode_sealed(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
     if !input.is_empty() {
         eyre::bail!("encoded zone block has {} trailing bytes", input.len());
     }
 
-    let block = SealedBlock::seal_slow(block);
+    reth_consensus_common::validation::validate_body_against_header(block.body(), block.header())
+        .map_err(|err| {
+        eyre::eyre!(
+            "zone block body does not match hashed header {}: {err}",
+            block.hash()
+        )
+    })?;
     let block_number = block.number();
     let hash = block.hash();
     let best_block = provider.best_block_number()?;
@@ -1503,6 +1509,45 @@ mod tests {
                 encoded: vec![number as u8],
             })
         }
+    }
+
+    #[test]
+    fn rejects_same_hash_peer_block_with_missing_withdrawals() {
+        use reth_primitives_traits::{BlockBody as _, SealedBlock};
+        use tempo_primitives::{Block, TempoHeader};
+
+        let body = alloy_consensus::BlockBody {
+            transactions: vec![],
+            ommers: vec![],
+            withdrawals: Some(Default::default()),
+        };
+        let header = TempoHeader {
+            inner: alloy_consensus::Header {
+                transactions_root: body.calculate_tx_root(),
+                ommers_hash: body.calculate_ommers_root(),
+                withdrawals_root: body.calculate_withdrawals_root(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let valid = SealedBlock::seal_slow(Block { header, body });
+        let valid_hash = valid.hash();
+        reth_consensus_common::validation::validate_body_against_header(
+            valid.body(),
+            valid.header(),
+        )
+        .unwrap();
+
+        let mut mismatched = valid.into_block();
+        mismatched.body.withdrawals = None;
+        let mismatched = SealedBlock::seal_slow(mismatched);
+
+        assert_eq!(mismatched.hash(), valid_hash);
+        reth_consensus_common::validation::validate_body_against_header(
+            mismatched.body(),
+            mismatched.header(),
+        )
+        .unwrap_err();
     }
 
     #[test]
