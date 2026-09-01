@@ -38,6 +38,7 @@ use zone_sequencer::{
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
 const MAX_BLOCKS_PER_FILTER: u64 = 1_000_000;
+const DEFAULT_REDACTED_RPC_PORT: u16 = 8544;
 
 const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "tungstenite=warn,",
@@ -51,12 +52,10 @@ pub fn run() -> eyre::Result<()> {
     let mut cli = Cli::<ZoneChainSpecParser, ZoneArgs>::parse();
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
+    validate_node_options(&mut cli)?;
 
     let (dev, external_l1) = match cli.as_node_command_mut() {
-        Some(command) if command.dev.dev => {
-            validate_dev_options(&command.chain, command.with_unused_ports)?;
-            (true, None)
-        }
+        Some(command) if command.dev.dev => (true, None),
         Some(command) => (false, Some(external_l1_config(&command.ext)?)),
         None => (false, None),
     };
@@ -192,14 +191,46 @@ async fn wait_for_exit(
     }
 }
 
-fn validate_dev_options(chain: &ZoneChainSpec, with_unused_ports: bool) -> eyre::Result<()> {
+fn validate_node_options(cli: &mut Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+    let Some(command) = cli.as_node_command_mut() else {
+        return Ok(());
+    };
+
     eyre::ensure!(
-        chain == ZoneChainSpecParser::dev_chain_spec()?.as_ref(),
+        command.debug.rpc_consensus_url.is_none() && command.debug.etherscan.is_none(),
+        "--debug.rpc-consensus-url and --debug.etherscan are not supported"
+    );
+    if !command.dev.dev {
+        return Ok(());
+    }
+
+    eyre::ensure!(
+        command.chain.as_ref() == ZoneChainSpecParser::dev_chain_spec()?.as_ref(),
         "--chain must be `dev` when --dev is enabled"
     );
     eyre::ensure!(
-        !with_unused_ports,
+        !command.with_unused_ports,
         "--with-unused-ports cannot be used with --dev because provisioning requires a stable RPC port"
+    );
+    eyre::ensure!(
+        command.dev.block_max_transactions.is_none(),
+        "--dev.block-max-transactions is not supported"
+    );
+
+    let instance_offset = command.instance.unwrap_or(1) - 1;
+    eyre::ensure!(
+        command.rpc.http_port > instance_offset,
+        "--http.port must remain nonzero after --instance adjustment"
+    );
+    let http_port = command.rpc.http_port - instance_offset;
+    eyre::ensure!(
+        !command.instance.is_some_and(|instance| instance > 1)
+            || command.ext.redacted_rpc_port != DEFAULT_REDACTED_RPC_PORT,
+        "--redacted-rpc.port must be set to a non-default port when --instance is greater than 1"
+    );
+    eyre::ensure!(
+        command.ext.redacted_rpc_port == 0 || command.ext.redacted_rpc_port != http_port,
+        "operator and redacted RPC ports must be different"
     );
     Ok(())
 }
@@ -598,7 +629,7 @@ pub struct ZoneArgs {
         long = "redacted-rpc.port",
         alias = "private-rpc.port",
         env = "REDACTED_RPC_PORT",
-        default_value_t = 8544
+        default_value_t = DEFAULT_REDACTED_RPC_PORT
     )]
     pub redacted_rpc_port: u16,
 
@@ -707,7 +738,7 @@ mod tests {
 
     use super::{
         Role, ZoneArgs, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
-        parse_portal_address, validate_deprecated_zone_id, validate_dev_options,
+        parse_portal_address, validate_deprecated_zone_id, validate_node_options,
         validate_p2p_transaction_size_limit, wait_for_exit,
     };
     use reth_ethereum::cli::Cli;
@@ -821,9 +852,7 @@ mod tests {
             &chain,
         ])
         .unwrap();
-        let command = parsed.as_node_command_mut().unwrap();
-
-        let error = validate_dev_options(&command.chain, command.with_unused_ports).unwrap_err();
+        let error = validate_node_options(&mut parsed).unwrap_err();
         assert!(error.to_string().contains("--chain must be `dev`"));
     }
 
@@ -836,10 +865,108 @@ mod tests {
             "--with-unused-ports",
         ])
         .unwrap();
-        let command = parsed.as_node_command_mut().unwrap();
-
-        let error = validate_dev_options(&command.chain, command.with_unused_ports).unwrap_err();
+        let error = validate_node_options(&mut parsed).unwrap_err();
         assert!(error.to_string().contains("--with-unused-ports"));
+    }
+
+    #[test]
+    fn node_dev_rejects_http_port_zero() {
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--http.port",
+            "0",
+        ])
+        .unwrap();
+
+        let error = validate_node_options(&mut parsed).unwrap_err();
+        assert!(error.to_string().contains("--http.port"));
+    }
+
+    #[test]
+    fn node_dev_instance_requires_a_redacted_rpc_port() {
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--instance",
+            "2",
+        ])
+        .unwrap();
+
+        let error = validate_node_options(&mut parsed).unwrap_err();
+        assert!(error.to_string().contains("--redacted-rpc.port"));
+    }
+
+    #[test]
+    fn node_dev_instance_accepts_an_explicit_redacted_rpc_port() {
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--instance",
+            "2",
+            "--redacted-rpc.port",
+            "0",
+        ])
+        .unwrap();
+
+        validate_node_options(&mut parsed).unwrap();
+    }
+
+    #[test]
+    fn node_dev_rejects_an_rpc_port_collision() {
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--http.port",
+            "9544",
+            "--redacted-rpc.port",
+            "9544",
+        ])
+        .unwrap();
+
+        let error = validate_node_options(&mut parsed).unwrap_err();
+        assert!(error.to_string().contains("must be different"));
+    }
+
+    #[test]
+    fn node_dev_rejects_block_max_transactions() {
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--dev.block-max-transactions",
+            "2",
+        ])
+        .unwrap();
+
+        let error = validate_node_options(&mut parsed).unwrap_err();
+        assert!(error.to_string().contains("--dev.block-max-transactions"));
+    }
+
+    #[test]
+    fn node_rejects_debug_consensus_options() {
+        let cases: &[&[&str]] = &[
+            &[
+                "tempo-zone",
+                "node",
+                "--chain",
+                "dev",
+                "--debug.rpc-consensus-url",
+                "ws://localhost:8546",
+            ],
+            &["tempo-zone", "node", "--chain", "dev", "--debug.etherscan"],
+        ];
+
+        for args in cases {
+            let mut parsed =
+                Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(args.iter().copied()).unwrap();
+            let error = validate_node_options(&mut parsed).unwrap_err();
+            assert!(error.to_string().contains("not supported"));
+        }
     }
 
     #[tokio::test]

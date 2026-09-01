@@ -1,6 +1,6 @@
 //! Local Zone provisioning against a Tempo development L1.
 
-use std::{num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
+use std::{net::SocketAddr, num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
 use alloy_consensus::Sealable;
 use alloy_genesis::{Genesis, GenesisAccount};
@@ -173,7 +173,7 @@ pub(crate) async fn init(
 fn zone_rpc_url(rpc: &RpcServerArgs, instance: Option<u16>) -> String {
     let mut rpc = rpc.clone();
     rpc.adjust_instance_ports(instance);
-    format!("http://{}:{}", rpc.http_addr, rpc.http_port)
+    format!("http://{}", SocketAddr::new(rpc.http_addr, rpc.http_port))
 }
 
 /// Creates a zone through the protocol-managed ZoneFactory and constructs its genesis.
@@ -383,21 +383,6 @@ fn dev_l1_chain_spec(owner: Address) -> TempoChainSpec {
     TempoChainSpec::from_genesis(genesis)
 }
 
-#[cfg(test)]
-mod tests {
-    use reth_node_core::args::RpcServerArgs;
-
-    use super::zone_rpc_url;
-
-    #[test]
-    fn zone_rpc_url_applies_instance_port_adjustment() {
-        assert_eq!(
-            zone_rpc_url(&RpcServerArgs::default(), Some(3)),
-            "http://127.0.0.1:8543"
-        );
-    }
-}
-
 async fn prefund_custom_dev_account(l1_rpc_url: &str, recipient: Address) -> eyre::Result<()> {
     const DEFAULT_DEV_KEY: &str =
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -440,5 +425,32 @@ fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         std::fs::write(path, contents)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv6Addr};
+
+    use reth_node_core::args::RpcServerArgs;
+
+    use super::zone_rpc_url;
+
+    #[test]
+    fn zone_rpc_url_applies_instance_port_adjustment() {
+        assert_eq!(
+            zone_rpc_url(&RpcServerArgs::default(), Some(3)),
+            "http://127.0.0.1:8543"
+        );
+    }
+
+    #[test]
+    fn zone_rpc_url_formats_ipv6_addresses() {
+        let rpc = RpcServerArgs {
+            http_addr: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ..Default::default()
+        };
+
+        assert_eq!(zone_rpc_url(&rpc, None), "http://[::1]:8545");
     }
 }
