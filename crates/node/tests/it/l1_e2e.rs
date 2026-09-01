@@ -353,14 +353,16 @@ async fn fetch_submit_batch_call(l1: &L1TestNode, tx_hash: B256) -> eyre::Result
 }
 
 /// A follower signs only after it can independently reconstruct the leader's batch statement.
-/// Give follower B a conflicting exact-height Portal queue hash before the boundary. The other
-/// follower is independently prevented from replacing B's share, so A remains below the 2-of-3
-/// threshold at the configured boundary. Earlier catch-up boundaries may settle normally.
+/// Give both followers conflicting Portal queue hashes over the candidate operational-anchor
+/// window before the boundary. The other followers are independently prevented from replacing
+/// each other's share, so A remains below the 2-of-3 threshold at the configured boundary.
+/// Earlier catch-up boundaries may settle normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     const DIVERGENT_BOUNDARY: u64 = 20;
+    const DIVERGENT_ANCHOR_WINDOW: u64 = 64;
 
     // Leave enough Zone blocks to install the divergent state before the configured boundary.
     let cluster = start_real_p2p_cluster(DIVERGENT_BOUNDARY).await?;
@@ -388,19 +390,25 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
         .await?;
     }
 
-    let divergent_anchor = cluster.l1.provider().get_block_number().await? + 2;
-    cluster.nodes[1].l1_state_cache().lock().set(
-        cluster.portal_address,
-        portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into(),
-        divergent_anchor,
-        B256::repeat_byte(0xD1),
-    );
-    cluster.nodes[2].l1_state_cache().lock().set(
-        cluster.portal_address,
-        portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into(),
-        divergent_anchor,
-        B256::repeat_byte(0xD2),
-    );
+    // Checkpoint-only blocks defer portal work, so a single corrupt height may be skipped before
+    // the next full import selects its operational anchor. Corrupt a bounded future window to
+    // guarantee that whichever finalized anchor closes the deferred range remains divergent.
+    let first_divergent_anchor = cluster.l1.provider().get_block_number().await? + 2;
+    let last_divergent_anchor = first_divergent_anchor + DIVERGENT_ANCHOR_WINDOW;
+    for (node, queue_hash) in [
+        (&cluster.nodes[1], B256::repeat_byte(0xD1)),
+        (&cluster.nodes[2], B256::repeat_byte(0xD2)),
+    ] {
+        let mut cache = node.l1_state_cache().lock();
+        for anchor in first_divergent_anchor..=last_divergent_anchor {
+            cache.set(
+                cluster.portal_address,
+                portal::slots::CURRENT_DEPOSIT_QUEUE_HASH.into(),
+                anchor,
+                queue_hash,
+            );
+        }
+    }
 
     cluster.nodes[0]
         .wait_for_block_number(DIVERGENT_BOUNDARY, L1_TIMEOUT)
