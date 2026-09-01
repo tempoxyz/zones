@@ -42,7 +42,7 @@ Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/
 Start a complete local Tempo L1 and Zone with the standard Reth dev flag:
 
 ```bash
-cargo run --release --bin tempo-zone -- node --dev
+cargo run --bin tempo-zone -- node --dev
 ```
 
 This launches an embedded Tempo dev node, provisions the ZoneFactory and portal, writes

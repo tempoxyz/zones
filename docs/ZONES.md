@@ -56,7 +56,7 @@ See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and reda
 For a fully local development stack, use the standard Reth dev flag:
 
 ```bash
-cargo run --release --bin tempo-zone -- node --dev
+cargo run --bin tempo-zone -- node --dev
 ```
 
 This starts an embedded Tempo L1, creates the portal through the protocol-managed ZoneFactory,
