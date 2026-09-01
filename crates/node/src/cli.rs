@@ -224,7 +224,7 @@ fn validate_node_options(cli: &mut Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::
     );
     let http_port = command.rpc.http_port - instance_offset;
     eyre::ensure!(
-        !command.instance.is_some_and(|instance| instance > 1)
+        command.instance.is_none_or(|instance| instance <= 1)
             || command.ext.redacted_rpc_port != DEFAULT_REDACTED_RPC_PORT,
         "--redacted-rpc.port must be set to a non-default port when --instance is greater than 1"
     );
