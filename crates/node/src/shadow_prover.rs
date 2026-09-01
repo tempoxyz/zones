@@ -18,7 +18,7 @@ use zone_sequencer::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const RECOVERY_LOG_QUERY_BLOCKS: u64 = 1_000;
+const RECOVERY_LOG_QUERY_CHUNK_BLOCKS: u64 = 1_000;
 
 /// Feeds finalized RPC-follower submissions and their exact settlement inputs to the detached
 /// shadow prover.
@@ -102,44 +102,36 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         let from = finalized.saturating_sub(self.anchor_config.history_window().saturating_sub(1));
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
-        let mut page_from = from;
-        while page_from <= finalized {
-            let page_to = page_from
-                .saturating_add(RECOVERY_LOG_QUERY_BLOCKS - 1)
-                .min(finalized);
-            let events = portal
-                .BatchSubmitted_filter()
-                .from_block(page_from)
-                .to_block(page_to)
-                .query()
-                .await
-                .wrap_err_with(|| {
-                    format!("query BatchSubmitted logs in finalized range {page_from}..={page_to}")
-                })?;
+        let events = portal
+            .BatchSubmitted_filter()
+            .from_block(from)
+            .to_block(finalized)
+            .chunked()
+            .chunk_size(RECOVERY_LOG_QUERY_CHUNK_BLOCKS)
+            .query()
+            .await
+            .wrap_err_with(|| {
+                format!("query BatchSubmitted logs in finalized range {from}..={finalized}")
+            })?;
 
-            for (event, log) in events {
-                let tx_hash = log
-                    .transaction_hash
-                    .ok_or_eyre("finalized BatchSubmitted log has no transaction hash")?;
-                let log_index = log
-                    .log_index
-                    .ok_or_eyre("finalized BatchSubmitted log has no log index")?;
-                let submission = FinalizedBatchSubmission {
-                    block_number: log
-                        .block_number
-                        .ok_or_eyre("finalized BatchSubmitted log has no block number")?,
-                    transaction_hash: tx_hash,
-                    log_index,
-                    event,
-                };
-                if recovery_sender.send(submission).is_err() {
-                    return Ok(());
-                }
+        for (event, log) in events {
+            let tx_hash = log
+                .transaction_hash
+                .ok_or_eyre("finalized BatchSubmitted log has no transaction hash")?;
+            let log_index = log
+                .log_index
+                .ok_or_eyre("finalized BatchSubmitted log has no log index")?;
+            let submission = FinalizedBatchSubmission {
+                block_number: log
+                    .block_number
+                    .ok_or_eyre("finalized BatchSubmitted log has no block number")?,
+                transaction_hash: tx_hash,
+                log_index,
+                event,
+            };
+            if recovery_sender.send(submission).is_err() {
+                return Ok(());
             }
-            if page_to == finalized {
-                break;
-            }
-            page_from = page_to + 1;
         }
         Ok(())
     }
