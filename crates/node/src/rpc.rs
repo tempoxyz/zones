@@ -49,15 +49,13 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
 use tempo_primitives::{TempoPrimitives, TempoTxEnvelope};
+use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
 use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
 };
-use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
-
-use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_evm::ZoneEvmConfig;
+use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
@@ -559,8 +557,6 @@ where
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
-
 fn filter_not_found_error() -> JsonRpcError {
     JsonRpcError::invalid_params("filter not found")
 }
@@ -1457,18 +1453,6 @@ fn redact_block(block: &mut RpcBlock) {
     redact_header(&mut block.header);
     block.transactions = BlockTransactions::Hashes(Vec::new());
     block.withdrawals = block.withdrawals.take().map(|_| Default::default());
-}
-
-pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> ConnectionConfig {
-    ConnectionConfig::new()
-        .with_max_retries(u32::MAX)
-        .with_retry_interval(retry_connection_interval)
-        .with_ws_config(
-            WebSocketConfig::default()
-                // Large blocks can exceed tungstenite's default 16 MiB frame limit.
-                .max_frame_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE))
-                .max_message_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)),
-        )
 }
 
 #[cfg(test)]

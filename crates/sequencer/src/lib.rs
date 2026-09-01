@@ -26,7 +26,6 @@ mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
 mod prover;
-mod rpc;
 pub mod settlement;
 pub mod withdrawals;
 
@@ -46,7 +45,7 @@ pub use withdrawals::{
     WithdrawalProcessorConfig, WithdrawalStore,
 };
 
-use crate::rpc::rpc_connection_config;
+use zone_l1::rpc::persistent_connection_config;
 
 /// Native Zone node provider capabilities required by sequencer components.
 ///
@@ -225,7 +224,10 @@ async fn connect_l1_provider(
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .with_nonce_key_filler()
         .wallet(wallet)
-        .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
+        .connect_with_config(
+            l1_rpc_url,
+            persistent_connection_config(retry_connection_interval),
+        )
         .await?
         .erased();
     let l1_chain = Chain::from_id(provider.get_chain_id().await?);
