@@ -53,7 +53,10 @@ pub fn run() -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
     let (dev, external_l1) = match cli.as_node_command_mut() {
-        Some(command) if command.dev.dev => (true, None),
+        Some(command) if command.dev.dev => {
+            validate_dev_options(&command.chain, command.with_unused_ports)?;
+            (true, None)
+        }
         Some(command) => (false, Some(external_l1_config(&command.ext)?)),
         None => (false, None),
     };
@@ -187,6 +190,18 @@ async fn wait_for_exit(
             Err(eyre::eyre!("embedded Tempo L1 exited unexpectedly"))
         }
     }
+}
+
+fn validate_dev_options(chain: &ZoneChainSpec, with_unused_ports: bool) -> eyre::Result<()> {
+    eyre::ensure!(
+        chain == ZoneChainSpecParser::dev_chain_spec()?.as_ref(),
+        "--chain must be `dev` when --dev is enabled"
+    );
+    eyre::ensure!(
+        !with_unused_ports,
+        "--with-unused-ports cannot be used with --dev because provisioning requires a stable RPC port"
+    );
+    Ok(())
 }
 
 fn external_l1_config(args: &ZoneArgs) -> eyre::Result<(String, Address)> {
@@ -686,15 +701,18 @@ mod tests {
 
     use clap::Parser as _;
     use futures::future::{self, BoxFuture};
+    use reth_chainspec::EthChainSpec as _;
     use reth_node_core::args::DevArgs;
+    use tempo_chainspec::spec::DEV;
 
     use super::{
         Role, ZoneArgs, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
-        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
-        wait_for_exit,
+        parse_portal_address, validate_deprecated_zone_id, validate_dev_options,
+        validate_p2p_transaction_size_limit, wait_for_exit,
     };
     use reth_ethereum::cli::Cli;
     use zone_chainspec::ZoneChainSpecParser;
+    use zone_primitives::constants::zone_chain_id;
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
@@ -788,6 +806,40 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn node_dev_rejects_a_custom_chain() {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain = serde_json::to_string(&genesis).unwrap();
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--chain",
+            &chain,
+        ])
+        .unwrap();
+        let command = parsed.as_node_command_mut().unwrap();
+
+        let error = validate_dev_options(&command.chain, command.with_unused_ports).unwrap_err();
+        assert!(error.to_string().contains("--chain must be `dev`"));
+    }
+
+    #[test]
+    fn node_dev_rejects_unused_ports() {
+        let mut parsed = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--with-unused-ports",
+        ])
+        .unwrap();
+        let command = parsed.as_node_command_mut().unwrap();
+
+        let error = validate_dev_options(&command.chain, command.with_unused_ports).unwrap_err();
+        assert!(error.to_string().contains("--with-unused-ports"));
     }
 
     #[tokio::test]

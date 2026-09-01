@@ -263,6 +263,19 @@ impl EthExecutorSpec for ZoneChainSpec {
 pub struct ZoneChainSpecParser;
 
 #[cfg(feature = "cli")]
+impl ZoneChainSpecParser {
+    /// Returns the placeholder chain spec Reth uses to select the dev datadir before provisioning.
+    pub fn dev_chain_spec() -> eyre::Result<Arc<ZoneChainSpec>> {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_primitives::constants::zone_chain_id(DEV.chain().id(), 1)?;
+        Ok(Arc::new(ZoneChainSpec::from_genesis_with_l1(
+            genesis,
+            DEV.as_ref(),
+        )?))
+    }
+}
+
+#[cfg(feature = "cli")]
 impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
     type ChainSpec = ZoneChainSpec;
 
@@ -277,13 +290,7 @@ impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
         // launcher replaces this deterministic placeholder with the L1-anchored genesis it
         // provisions. Both use zone ID 1, so Reth opens the correct chain datadir up front.
         if s == "dev" {
-            let mut genesis = DEV.genesis().clone();
-            genesis.config.chain_id =
-                zone_primitives::constants::zone_chain_id(DEV.chain().id(), 1)?;
-            Ok(Arc::new(ZoneChainSpec::from_genesis_with_l1(
-                genesis,
-                DEV.as_ref(),
-            )?))
+            Self::dev_chain_spec()
         } else {
             let genesis = reth_cli::chainspec::parse_genesis(s)?;
             Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))

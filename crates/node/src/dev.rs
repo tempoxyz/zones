@@ -103,7 +103,7 @@ pub(crate) async fn init(
         .ok_or_else(|| eyre::eyre!("embedded Tempo L1 WebSocket RPC did not start"))?;
 
     prefund_custom_dev_account(&l1_rpc_url, signer.address()).await?;
-    let zone_rpc_url = format!("http://{}:{}", config.rpc.http_addr, config.rpc.http_port);
+    let zone_rpc_url = zone_rpc_url(&config.rpc, config.instance);
     let provisioned = provision_zone(ProvisionConfig {
         l1_rpc_url: l1_rpc_url.clone(),
         dev_key: signer.clone(),
@@ -168,6 +168,12 @@ pub(crate) async fn init(
         signer,
         l1_exit: l1.wait_for_node_exit().boxed(),
     })
+}
+
+fn zone_rpc_url(rpc: &RpcServerArgs, instance: Option<u16>) -> String {
+    let mut rpc = rpc.clone();
+    rpc.adjust_instance_ports(instance);
+    format!("http://{}:{}", rpc.http_addr, rpc.http_port)
 }
 
 /// Creates a zone through the protocol-managed ZoneFactory and constructs its genesis.
@@ -375,6 +381,21 @@ fn dev_l1_chain_spec(owner: Address) -> TempoChainSpec {
         .insert(token_policy_slot, B256::from(packed_policy.to_be_bytes()));
 
     TempoChainSpec::from_genesis(genesis)
+}
+
+#[cfg(test)]
+mod tests {
+    use reth_node_core::args::RpcServerArgs;
+
+    use super::zone_rpc_url;
+
+    #[test]
+    fn zone_rpc_url_applies_instance_port_adjustment() {
+        assert_eq!(
+            zone_rpc_url(&RpcServerArgs::default(), Some(3)),
+            "http://127.0.0.1:8543"
+        );
+    }
 }
 
 async fn prefund_custom_dev_account(l1_rpc_url: &str, recipient: Address) -> eyre::Result<()> {
