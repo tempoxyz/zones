@@ -642,6 +642,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                     "Zone block {} contains multiple advanceTempo calls",
                     header.number()
                 );
+                user_transactions.push(Bytes::from(transaction.encoded_2718()));
                 let call = ZoneInbox::IZoneInboxCalls::abi_decode(transaction.input())
                     .wrap_err_with(|| {
                         format!("decode ZoneInbox call in Zone block {}", header.number())
@@ -656,8 +657,8 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                     }
                     ZoneInbox::IZoneInboxCalls::advanceTempoHeaders(call) => {
                         ensure!(
-                            call.headers.len() > 1,
-                            "checkpoint-only Zone block must have more than one header"
+                            !call.headers.is_empty(),
+                            "checkpoint-only Zone block has no headers"
                         );
                         for encoded in &call.headers {
                             decode_tempo_header(encoded)?;

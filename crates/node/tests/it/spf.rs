@@ -98,6 +98,14 @@ async fn spf_batch_execute() -> eyre::Result<()> {
         .get_raw_transaction_by_hash(second_transaction_hash)
         .await?
         .expect("second raw user transaction");
+    let first_system_transaction = provider
+        .get_raw_transaction_by_hash(first_built_block.transactions.hashes().next().unwrap())
+        .await?
+        .expect("first raw system transaction");
+    let second_system_transaction = provider
+        .get_raw_transaction_by_hash(second_built_block.transactions.hashes().next().unwrap())
+        .await?
+        .expect("second raw system transaction");
 
     let (state_root, zone_state_witness) = zone_state_witness(&genesis);
     assert_eq!(state_root, genesis_block.header.state_root());
@@ -132,7 +140,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 enabled_tokens: vec![],
                 finalize_withdrawal_batch_count: None,
                 finalize_withdrawal_batch_encrypted_senders: vec![],
-                transactions: vec![first_raw_transaction],
+                transactions: vec![first_system_transaction, first_raw_transaction],
             },
             ZoneBlock {
                 number: second_built_block.header.number(),
@@ -146,7 +154,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 enabled_tokens: vec![],
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: vec![],
-                transactions: vec![second_raw_transaction],
+                transactions: vec![second_system_transaction, second_raw_transaction],
             },
         ],
         parent_header,
@@ -260,6 +268,7 @@ struct BuiltTransactionBlock {
     zone_beneficiary: Address,
     zone_hash: B256,
     tempo_header: TempoHeader,
+    raw_system_transaction: Bytes,
     raw_user_transaction: Bytes,
     generated_witness: ZoneExecutionWitness,
 }
@@ -296,7 +305,10 @@ impl BuiltTransactionBlock {
                 enabled_tokens: vec![],
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: vec![],
-                transactions: vec![self.raw_user_transaction.clone()],
+                transactions: vec![
+                    self.raw_system_transaction.clone(),
+                    self.raw_user_transaction.clone(),
+                ],
             }],
             zone_state_witness,
             tempo_state_witness: TempoStateWitness {
@@ -356,6 +368,10 @@ async fn build_single_transaction_block(
         .get_raw_transaction_by_hash(user_transaction_hash)
         .await?
         .expect("raw user transaction");
+    let raw_system_transaction = provider
+        .get_raw_transaction_by_hash(built_block.transactions.hashes().next().unwrap())
+        .await?
+        .expect("raw system transaction");
     let generated_witness = provider
         .raw_request(
             "debug_zoneExecutionWitness".into(),
@@ -371,6 +387,7 @@ async fn build_single_transaction_block(
         zone_beneficiary: built_block.header.beneficiary(),
         zone_hash: built_block.header.hash,
         tempo_header: l1_block.header,
+        raw_system_transaction,
         raw_user_transaction,
         generated_witness,
     })

@@ -862,6 +862,7 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                         header.number()
                     );
                 }
+                user_transactions.push(Bytes::from(envelope.encoded_2718()));
                 let call = ZoneInbox::IZoneInboxCalls::abi_decode(envelope.input()).wrap_err_with(
                     || format!("decode ZoneInbox call in Zone block {}", header.number()),
                 )?;
@@ -874,12 +875,10 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                         enabled_tokens = call.enabledTokens;
                     }
                     ZoneInbox::IZoneInboxCalls::advanceTempoHeaders(call) => {
-                        if call.headers.len() <= 1 {
-                            bail!(
-                                "checkpoint-only Zone block must have more than one Tempo header",
-                            );
-                        }
-                        let final_header = call.headers.last().expect("checked header count");
+                        let final_header = call
+                            .headers
+                            .last()
+                            .ok_or_eyre("checkpoint-only Zone block has no Tempo headers")?;
                         checkpoint_number = Some(decode_tempo_header(final_header)?.number());
                         for encoded in &call.headers {
                             decode_tempo_header(encoded)?;
@@ -933,7 +932,7 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
         ))?;
 
     let has_finalization = finalize_count.is_some();
-    let user_transaction_count = user_transactions.len();
+    let user_transaction_count = user_transactions.len().saturating_sub(1);
     Ok(ExtractedBlock {
         input: ZoneBlock {
             number: header.number(),

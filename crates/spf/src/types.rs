@@ -100,8 +100,7 @@ pub struct ZoneBlock {
     pub timestamp: u64,
     pub timestamp_millis_part: u64,
     pub beneficiary: Address,
-    /// RLP-encoded consecutive Tempo headers imported by this block. A full block contains exactly
-    /// one header; a checkpoint-only block contains more than one and has no operational inputs.
+    /// RLP-encoded consecutive Tempo headers imported by this block.
     #[cfg_attr(feature = "serde", serde(default))]
     pub tempo_headers_rlp: Vec<Bytes>,
     /// Deposits processed by `ZoneInbox.advanceTempo`, in calldata order.
@@ -114,7 +113,7 @@ pub struct ZoneBlock {
     pub finalize_withdrawal_batch_count: Option<U256>,
     /// Encrypted sender payloads passed to withdrawal finalization.
     pub finalize_withdrawal_batch_encrypted_senders: Vec<Bytes>,
-    /// Raw signed user transactions in execution order.
+    /// Raw system & user transactions in execution order.
     pub transactions: Vec<Bytes>,
 }
 
