@@ -385,29 +385,11 @@ pub struct L1SubscriberConfig {
     pub retain_portal_evidence: bool,
 }
 
-pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
-    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash>;
-}
-
-struct ProviderLocalTempoCheckpointReader<P> {
-    provider: P,
-}
-
-impl<P> LocalTempoCheckpointReader for ProviderLocalTempoCheckpointReader<P>
-where
-    P: StateProviderFactory + Clone + Send + Sync + 'static,
-{
-    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
-        let state = self.provider.latest()?;
-        Ok(state.tempo_num_hash()?)
-    }
-}
-
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
-pub struct L1Subscriber {
+pub struct L1Subscriber<P> {
     pub(crate) config: L1SubscriberConfig,
-    pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
+    pub(crate) provider: P,
     /// Finalized L1 blocks retained until a Zone consumer processes them.
     pub(crate) deposit_queue: DepositQueue,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -445,21 +427,15 @@ impl L1SubscriberError {
 
 type HeaderStream = Pin<Box<dyn Stream<Item = ()> + Send>>;
 
-impl L1Subscriber {
+impl<P> L1Subscriber<P>
+where
+    P: StateProviderFactory + Sync,
+{
     /// Create an L1 subscriber.
-    pub fn new<P>(
-        config: L1SubscriberConfig,
-        local_state_provider: P,
-        deposit_queue: DepositQueue,
-    ) -> Self
-    where
-        P: StateProviderFactory + Clone + Send + Sync + 'static,
-    {
+    pub fn new(config: L1SubscriberConfig, provider: P, deposit_queue: DepositQueue) -> Self {
         Self {
             config,
-            local_state: Arc::new(ProviderLocalTempoCheckpointReader {
-                provider: local_state_provider,
-            }),
+            provider,
             deposit_queue,
             subscriber_metrics: Default::default(),
         }
@@ -529,7 +505,8 @@ impl L1Subscriber {
     /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
     /// block-zero genesis from the unanchored template.
     pub(crate) fn resolve_start_block(&self) -> Result<u64, L1SubscriberError> {
-        let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
+        let state = self.provider.latest().map_err(eyre::Report::from)?;
+        let local_checkpoint = state.tempo_num_hash().map_err(eyre::Report::from)?;
         if local_checkpoint.hash == B256::ZERO {
             return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
         }

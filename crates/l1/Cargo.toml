@@ -55,4 +55,5 @@ url = "2"
 [dev-dependencies]
 alloy-rlp.workspace = true
 const-hex.workspace = true
+reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
