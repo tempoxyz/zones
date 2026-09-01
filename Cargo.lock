@@ -13832,7 +13832,6 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
- "reth-tasks",
  "schnellru",
  "serde",
  "serde_json",

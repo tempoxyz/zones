@@ -462,55 +462,23 @@ pub(crate) fn is_fenced_ingestion_error(error: &eyre::Report) -> bool {
 }
 
 impl L1Subscriber {
-    /// Create and spawn the L1 subscriber as a critical background task.
-    ///
-    /// Transient failures reconnect after the configured retry interval. Deterministic failures
-    /// while applying a receipt-verified finalized block fail the critical task instead.
-    pub fn spawn<P>(
+    /// Create an L1 subscriber.
+    pub fn new<P>(
         config: L1SubscriberConfig,
         local_state_provider: P,
         deposit_queue: DepositQueue,
-        task_executor: reth_tasks::Runtime,
-    ) where
+    ) -> Self
+    where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        let subscriber = Self {
+        Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
             deposit_queue,
             subscriber_metrics: Default::default(),
-        };
-
-        task_executor.spawn_critical_task(
-            "l1-block-subscriber",
-            Box::pin(async move {
-                loop {
-                    if let Err(e) = subscriber.run().await {
-                        if let Some(fenced) = fenced_ingestion_error(&e) {
-                            error!(
-                                block_number = fenced.block_number,
-                                stage = fenced.stage,
-                                error = %e,
-                                "Fatal L1 ingestion fence; refusing to retry an immutable finalized block"
-                            );
-                            // This is a critical task: panicking notifies the task manager and
-                            // shuts the node down instead of leaving it alive with frozen L1 state.
-                            panic!("{fenced}");
-                        }
-                        let retry_interval = subscriber.config.retry_connection_interval;
-                        subscriber.subscriber_metrics.reconnects.increment(1);
-                        error!(
-                            error = %e,
-                            retry_secs = retry_interval.as_secs_f32(),
-                            "L1 subscriber failed, reconnecting after retry interval"
-                        );
-                        tokio::time::sleep(retry_interval).await;
-                    }
-                }
-            }),
-        );
+        }
     }
 
     /// Connect to the L1 node.
@@ -862,22 +830,47 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Run the L1 subscriber until an RPC operation fails.
+    /// Run the L1 subscriber, reconnecting after transient RPC failures.
     ///
     /// The subscriber follows only the L1 `finalized` tag. WebSocket
     /// `newHeads` or HTTP block-filter updates are used as wakeups; each
     /// notification ingests the missing finalized range in order.
     ///
-    /// [`Self::spawn`] retries transient errors and treats deterministic finalized-block
-    /// ingestion failures as fatal.
-    pub async fn run(&self) -> eyre::Result<()> {
-        let provider = self.connect().await?;
-        let triggers = self.head_triggers(&provider).await?;
-        info!(
-            portal = %self.config.portal_address,
-            "Following finalized L1 blocks"
-        );
-        self.follow_finalized(&provider, triggers).await
+    /// Transient failures reconnect after the configured retry interval. Deterministic failures
+    /// while applying a receipt-verified finalized block are fatal.
+    pub async fn run(self) {
+        loop {
+            let result = async {
+                let provider = self.connect().await?;
+                let triggers = self.head_triggers(&provider).await?;
+                info!(
+                    portal = %self.config.portal_address,
+                    "Following finalized L1 blocks"
+                );
+                self.follow_finalized(&provider, triggers).await
+            }
+            .await;
+
+            if let Err(e) = result {
+                if let Some(fenced) = fenced_ingestion_error(&e) {
+                    error!(
+                        block_number = fenced.block_number,
+                        stage = fenced.stage,
+                        error = %e,
+                        "Fatal L1 ingestion fence; refusing to retry an immutable finalized block"
+                    );
+                    panic!("{fenced}");
+                }
+                let retry_interval = self.config.retry_connection_interval;
+                self.subscriber_metrics.reconnects.increment(1);
+                error!(
+                    error = %e,
+                    retry_secs = retry_interval.as_secs_f32(),
+                    "L1 subscriber failed, reconnecting after retry interval"
+                );
+                tokio::time::sleep(retry_interval).await;
+            }
+        }
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.

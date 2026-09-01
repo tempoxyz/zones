@@ -637,15 +637,15 @@ where
             }));
         }
 
-        L1Subscriber::spawn(
+        let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
             ctx.node.provider().clone(),
             self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
         );
+        let task_executor = ctx.node.task_executor().clone();
+        task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
-        let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
