@@ -10,8 +10,9 @@ use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent, SolValue as _};
 use futures::{FutureExt as _, future::BoxFuture};
+use reth_db::init_db;
 use reth_node_builder::{NodeBuilder, NodeConfig};
-use reth_node_core::args::RpcServerArgs;
+use reth_node_core::args::{DatadirArgs, RpcServerArgs};
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::TaskExecutor;
 use tempo_alloy::TempoNetwork;
@@ -26,6 +27,9 @@ use zone_chainspec::ZoneChainSpec;
 use zone_primitives::constants::zone_chain_id;
 use zone_sequencer::register_encryption_key;
 
+const DEV_DATADIR_MARKER: &str = ".tempo-zone-dev";
+const DEV_DATADIR_MARKER_CONTENTS: &[u8] = b"tempo-zone-dev\n";
+
 /// Inputs for provisioning a fresh zone on an already-running Tempo L1.
 #[derive(Debug)]
 pub struct ProvisionConfig {
@@ -38,8 +42,6 @@ pub struct ProvisionConfig {
     pub zone_gateways: Vec<Address>,
     pub allowed_accounts: Vec<Address>,
     pub rpc_url: String,
-    /// L1 block used as the Zone genesis anchor. Defaults to the pre-createZone head.
-    pub anchor_block_number: Option<u64>,
 }
 
 /// The L1 contract addresses and L1-anchored genesis produced by provisioning.
@@ -64,15 +66,15 @@ pub(crate) struct DevStartup {
 pub(crate) async fn init(
     config: &mut NodeConfig<ZoneChainSpec>,
     executor: TaskExecutor,
-    initial_token: Address,
-    access_mode: bool,
-    gateway_mode: bool,
-    zone_gateways: &[Address],
-    allowed_accounts: &[Address],
 ) -> eyre::Result<DevStartup> {
     let signer = dev_signer(&config.dev.dev_mnemonic)?;
     let l1_chain_spec = Arc::new(dev_l1_chain_spec(signer.address()));
+    let l1_datadir = config.datadir().data_dir().join("l1");
     let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
+        .with_datadir_args(DatadirArgs {
+            datadir: l1_datadir.into(),
+            ..Default::default()
+        })
         .with_unused_ports()
         .dev()
         .with_rpc(
@@ -91,8 +93,10 @@ pub(crate) async fn init(
         .or(Some(Duration::from_millis(500)));
     l1_config.dev.finality_depth = NonZeroUsize::MIN;
 
+    let l1_database = init_db(l1_config.datadir().db(), Default::default())?;
     let l1 = NodeBuilder::new(l1_config)
-        .testing_node(executor)
+        .with_database(l1_database)
+        .with_launch_context(executor)
         .node(TempoNode::default())
         .launch_with_debug_capabilities()
         .await?;
@@ -108,14 +112,12 @@ pub(crate) async fn init(
         l1_rpc_url: l1_rpc_url.clone(),
         dev_key: signer.clone(),
         factory: None,
-        initial_token,
-        is_access_open: !access_mode,
-        is_gateway_enforced: gateway_mode,
-        zone_gateways: zone_gateways.to_vec(),
-        allowed_accounts: allowed_accounts.to_vec(),
+        initial_token: PATH_USD_ADDRESS,
+        is_access_open: true,
+        is_gateway_enforced: false,
+        zone_gateways: Vec::new(),
+        allowed_accounts: Vec::new(),
         rpc_url: zone_rpc_url.clone(),
-        // Stable across restarts; the subscriber still replays createZone from block 0.
-        anchor_block_number: Some(0),
     })
     .await?;
 
@@ -124,10 +126,9 @@ pub(crate) async fn init(
         l1_chain_spec.as_ref(),
     )?);
     let datadir = config.datadir().data_dir().to_path_buf();
-    std::fs::create_dir_all(&datadir)?;
-    std::fs::write(
-        datadir.join("genesis.json"),
-        serde_json::to_string_pretty(&provisioned.genesis)?,
+    write_owner_only(
+        &datadir.join("genesis.json"),
+        serde_json::to_string_pretty(&provisioned.genesis)?.as_bytes(),
     )?;
 
     let private_key = signer.to_bytes().to_string();
@@ -135,11 +136,11 @@ pub(crate) async fn init(
         "zoneId": provisioned.zone_id,
         "chainId": provisioned.chain_id,
         "portal": provisioned.portal.to_string(),
-        "initialToken": initial_token.to_string(),
-        "accessMode": access_mode,
-        "gatewayMode": gateway_mode,
-        "zoneGateways": zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "initialToken": PATH_USD_ADDRESS.to_string(),
+        "accessMode": false,
+        "gatewayMode": false,
+        "zoneGateways": [],
+        "allowedAccounts": [],
         "admin": signer.address().to_string(),
         "sequencer": signer.address().to_string(),
         "sequencerKey": private_key,
@@ -188,7 +189,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         zone_gateways,
         allowed_accounts,
         rpc_url,
-        anchor_block_number,
     } = config;
     let dev_address = dev_key.address();
     let wallet = EthereumWallet::from(dev_key.clone());
@@ -215,10 +215,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     );
 
     // Replay the createZone block, including its initial TokenEnabled event.
-    let anchor_block_number = match anchor_block_number {
-        Some(number) => number,
-        None => provider.get_block_number().await?,
-    };
+    let anchor_block_number = provider.get_block_number().await?;
     let anchor_header = provider
         .get_header_by_number(anchor_block_number.into())
         .await?
@@ -405,27 +402,35 @@ async fn prefund_custom_dev_account(l1_rpc_url: &str, recipient: Address) -> eyr
     Ok(())
 }
 
+/// Clears an empty or previously generated dev datadir before Reth opens its database.
+pub(crate) fn prepare_datadir(datadir: &Path) -> eyre::Result<()> {
+    if datadir.exists() {
+        let empty = std::fs::read_dir(datadir)?.next().is_none();
+        let known_dev = std::fs::read(datadir.join(DEV_DATADIR_MARKER))
+            .is_ok_and(|contents| contents == DEV_DATADIR_MARKER_CONTENTS);
+        eyre::ensure!(
+            empty || known_dev,
+            "refusing to wipe {}: not a Tempo Zone dev datadir",
+            datadir.display()
+        );
+        std::fs::remove_dir_all(datadir)?;
+    }
+    std::fs::create_dir_all(datadir)?;
+    write_owner_only(
+        &datadir.join(DEV_DATADIR_MARKER),
+        DEV_DATADIR_MARKER_CONTENTS,
+    )?;
+    Ok(())
+}
+
 fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::{fs::OpenOptions, io::Write as _};
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::{
-            fs::{OpenOptions, Permissions},
-            io::Write as _,
-            os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
-        };
-
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).mode(0o600);
-        let mut file = options.open(path)?;
-        file.set_permissions(Permissions::from_mode(0o600))?;
-        file.set_len(0)?;
-        file.write_all(contents)
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents)
-    }
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(contents)
 }
 
 #[cfg(test)]
@@ -434,7 +439,22 @@ mod tests {
 
     use reth_node_core::args::RpcServerArgs;
 
-    use super::zone_rpc_url;
+    use super::{prepare_datadir, zone_rpc_url};
+
+    #[test]
+    fn prepare_datadir_only_reuses_dev_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let other = root.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("zone.json"), []).unwrap();
+        assert!(prepare_datadir(&other).is_err());
+
+        let dev = root.path().join("dev");
+        prepare_datadir(&dev).unwrap();
+        std::fs::write(dev.join("state"), []).unwrap();
+        prepare_datadir(&dev).unwrap();
+        assert!(!dev.join("state").exists());
+    }
 
     #[test]
     fn zone_rpc_url_applies_instance_port_adjustment() {

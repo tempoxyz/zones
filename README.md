@@ -49,6 +49,7 @@ This launches an embedded Tempo dev node, provisions the ZoneFactory and portal,
 `genesis.json`, `zone.json`, and `sequencer.key` into the resolved Reth datadir, and starts the
 zone sequencer. The zone HTTP RPC uses Reth's default `http://127.0.0.1:8545`; ordinary Reth
 options such as `--datadir`, `--http.port`, `--dev.block-time`, and `--dev.mnemonic` work normally.
+On startup, the resolved datadir is cleared only if it is empty or contains a previous dev Zone.
 
 ### Deploying a Zone
 

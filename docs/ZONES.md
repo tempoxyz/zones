@@ -62,7 +62,8 @@ cargo run --bin tempo-zone -- node --dev
 This starts an embedded Tempo L1, creates the portal through the protocol-managed ZoneFactory,
 writes the generated zone files into the resolved Reth datadir, and serves the Zone HTTP RPC at
 `http://127.0.0.1:8545`. Reth's usual `--datadir`, RPC, `--dev.block-time`, and
-`--dev.mnemonic` options apply directly.
+`--dev.mnemonic` options apply directly. Startup clears an empty or previously generated dev
+datadir and refuses to reuse any other directory.
 
 ## Step-by-Step Guide
 
