@@ -1417,13 +1417,7 @@ fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_bloc
     queue.defer_through(second.num_hash()).unwrap();
     queue.defer_through(second.num_hash()).unwrap();
     assert_eq!(queue.peek().unwrap().header.num_hash(), third.num_hash());
-    assert_eq!(
-        queue
-            .operational_work(&queue.peek().unwrap())
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(queue.operational_work(third.num_hash()).unwrap().len(), 2);
 
     queue.confirm_operational_through(third.num_hash()).unwrap();
     queue.confirm_operational_through(third.num_hash()).unwrap();
@@ -1441,13 +1435,8 @@ fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_bloc
 
     // A late replay of block 3 must preserve block 4's newer deferred work.
     queue.confirm_operational_through(third.num_hash()).unwrap();
-    assert_eq!(
-        queue
-            .operational_work(&queue.peek().unwrap())
-            .unwrap()
-            .len(),
-        2
-    );
+    let fifth = queue.peek().unwrap().header.num_hash();
+    assert_eq!(queue.operational_work(fifth).unwrap().len(), 2);
 }
 
 #[test]
@@ -1467,7 +1456,7 @@ fn deferred_checkpoint_work_survives_until_operational_confirmation() {
     let second = queue.peek().unwrap();
     queue.defer_through(second.header.num_hash()).unwrap();
     let current = queue.peek().unwrap();
-    let work = queue.operational_work(&current).unwrap();
+    let work = queue.operational_work(current.header.num_hash()).unwrap();
     assert_eq!(
         work.iter()
             .map(|block| block.header.number())
@@ -1501,7 +1490,13 @@ fn restart_can_seed_deferred_checkpoint_work() {
         .try_enqueue_sealed(seal(h12), L1PortalEvents::default())
         .unwrap();
     let current = queue.peek().unwrap();
-    assert_eq!(queue.operational_work(&current).unwrap().len(), 2);
+    assert_eq!(
+        queue
+            .operational_work(current.header.num_hash())
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]

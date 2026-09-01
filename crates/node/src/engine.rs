@@ -343,7 +343,9 @@ impl ZoneEngine {
         let tempo_import = if checkpoint_only {
             TempoImport::CheckpointOnly(checkpoint_headers)
         } else {
-            let portal_work = self.deposit_queue.operational_work(&l1_block)?;
+            let portal_work = self
+                .deposit_queue
+                .operational_work(l1_block.header.num_hash())?;
             TempoImport::Full(Box::new(
                 L1BlockDeposits::prepare_many(
                     portal_work,

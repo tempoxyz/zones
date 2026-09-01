@@ -214,18 +214,16 @@ impl PendingDeposits {
         }
     }
 
-    /// Return deferred portal work followed by the provided current operational L1 block.
-    pub(crate) fn operational_work(
-        &self,
-        current: &L1BlockDeposits,
-    ) -> eyre::Result<Vec<L1BlockDeposits>> {
-        let front = self
+    /// Return deferred portal work followed by the current operational L1 block.
+    pub(crate) fn operational_work(&self, expected: NumHash) -> eyre::Result<Vec<L1BlockDeposits>> {
+        let current = self
             .pending
             .front()
             .ok_or_else(|| eyre::eyre!("cannot prepare work from an empty finalized L1 queue"))?;
         eyre::ensure!(
-            front.header.num_hash() == current.header.num_hash(),
-            "operational L1 work does not match the queue front"
+            current.header.num_hash() == expected,
+            "operational L1 work does not match the expected anchor: expected {expected:?}, front is {:?}",
+            current.header.num_hash()
         );
         let mut work = Vec::with_capacity(usize::from(self.deferred.is_some()) + 1);
         if let Some(deferred) = &self.deferred {
@@ -400,12 +398,9 @@ impl DepositQueue {
         self.inner.lock().defer_through(expected)
     }
 
-    /// Return deferred portal work followed by the provided current operational L1 block.
-    pub fn operational_work(
-        &self,
-        current: &L1BlockDeposits,
-    ) -> eyre::Result<Vec<L1BlockDeposits>> {
-        self.inner.lock().operational_work(current)
+    /// Return deferred portal work followed by the current operational L1 block.
+    pub fn operational_work(&self, expected: NumHash) -> eyre::Result<Vec<L1BlockDeposits>> {
+        self.inner.lock().operational_work(expected)
     }
 
     /// Restore portal work crossed by already-canonical checkpoint-only blocks after restart.

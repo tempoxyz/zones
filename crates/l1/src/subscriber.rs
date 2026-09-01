@@ -181,19 +181,31 @@ impl L1BlockTracker {
     }
 
     /// Wait until the exact L1 block has been validated and applied locally.
+    ///
+    /// Queue-backed subscribers enqueue each block before publishing its observation, so success
+    /// also guarantees that the deposit queue is caught up through `block`.
     pub async fn wait_for(&self, block: NumHash) -> eyre::Result<()> {
-        self.wait_for_portal_events(block).await.map(|_| ())
+        self.wait_for_observation(block, |_| ()).await
     }
 
     /// Wait for an exact L1 block and return its receipt-authenticated portal events.
     pub async fn wait_for_portal_events(&self, block: NumHash) -> eyre::Result<L1PortalEvents> {
+        self.wait_for_observation(block, |observation| observation.portal_events.clone())
+            .await
+    }
+
+    async fn wait_for_observation<T>(
+        &self,
+        block: NumHash,
+        project: impl Fn(&L1BlockObservation) -> T,
+    ) -> eyre::Result<T> {
         let mut changed = self.changed.subscribe();
         loop {
             {
                 let state = self.state.read();
                 match state.observed.get(&block.number) {
                     Some(observation) if observation.hash == block.hash => {
-                        return Ok(observation.portal_events.clone());
+                        return Ok(project(observation));
                     }
                     Some(observation) => {
                         eyre::bail!(

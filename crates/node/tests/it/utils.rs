@@ -3682,14 +3682,14 @@ impl P2pCluster {
         let block = self.fixture.next_block();
         let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
         let events = self.fixture.portal_events_from_deposits(&deposits);
+        for node in &self.nodes {
+            self.fixture
+                .enqueue(&block, node.deposit_queue(), deposits.clone());
+        }
         for index in observers {
             self.nodes[*index]
                 .l1_block_tracker()
                 .record_with_portal_events(anchor, events.clone())?;
-        }
-        for node in &self.nodes {
-            self.fixture
-                .enqueue(&block, node.deposit_queue(), deposits.clone());
         }
         Ok(anchor)
     }
@@ -5271,6 +5271,16 @@ impl L1Fixture {
         anchor
     }
 
+    /// Inject the same empty L1 block into multiple queues.
+    pub(crate) fn inject_empty_block_into(&mut self, queues: &[&DepositQueue]) -> NumHash {
+        let block = self.next_block();
+        let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
+        for queue in queues {
+            self.enqueue(&block, queue, vec![]);
+        }
+        anchor
+    }
+
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
     pub(crate) fn inject_empty_blocks(&mut self, queue: &DepositQueue, n: u64) {
         for _ in 0..n {
@@ -5305,6 +5315,20 @@ impl L1Fixture {
         let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
         let events = self.portal_events_from_deposits(&deposits);
         queue.enqueue(header, events);
+        anchor
+    }
+
+    /// Inject the same L1 block and deposits into multiple queues.
+    pub(crate) fn inject_deposits_into(
+        &mut self,
+        queues: &[&DepositQueue],
+        deposits: Vec<DepositFixture>,
+    ) -> NumHash {
+        let block = self.next_block();
+        let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
+        for queue in queues {
+            self.enqueue(&block, queue, deposits.clone());
+        }
         anchor
     }
 

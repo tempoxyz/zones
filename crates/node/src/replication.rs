@@ -22,7 +22,9 @@ use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
 use tracing::{debug, info};
-use zone_l1::{DepositQueue, L1BlockDeposits, L1BlockTracker, L1PortalEvents, TempoStateExt as _};
+#[cfg(test)]
+use zone_l1::L1PortalEvents;
+use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
 use zone_p2p::{
     BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
     P2pPeerId, PeerTip,
@@ -1167,33 +1169,32 @@ where
     let anchor = headers.last().expect("validated nonempty range").num_hash();
     let leader_anchor = tempo_import.leader_anchor();
 
-    let mut observed_headers = Vec::with_capacity(headers.len());
-    for header in headers {
-        let observed = match wait_for_peer_anchor(
-            l1_block_tracker,
-            header.num_hash(),
+    // The subscriber enqueues each L1 block before publishing its observation, and observations
+    // are contiguous. Seeing the final anchor therefore guarantees that the queue contains the
+    // complete imported range.
+    match wait_for_peer_anchor(
+        l1_block_tracker,
+        anchor,
+        block_number,
+        stop,
+        PEER_ANCHOR_WAIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(PeerAnchorWaitError::Cancelled) => {
+            return Ok(PeerBlockImportOutcome::Cancelled);
+        }
+        Err(PeerAnchorWaitError::TimedOut {
             block_number,
-            stop,
-            PEER_ANCHOR_WAIT_TIMEOUT,
-        )
-        .await
-        {
-            Ok(observed) => observed,
-            Err(PeerAnchorWaitError::Cancelled) => {
-                return Ok(PeerBlockImportOutcome::Cancelled);
-            }
-            Err(PeerAnchorWaitError::TimedOut {
+            anchor,
+        }) => {
+            return Ok(PeerBlockImportOutcome::TimedOut {
                 block_number,
                 anchor,
-            }) => {
-                return Ok(PeerBlockImportOutcome::TimedOut {
-                    block_number,
-                    anchor,
-                });
-            }
-            Err(PeerAnchorWaitError::Other(error)) => return Err(error),
-        };
-        observed_headers.push(observed);
+            });
+        }
+        Err(PeerAnchorWaitError::Other(error)) => return Err(error),
     }
 
     // Resolve live production authority only after observing the complete imported range. The
@@ -1207,31 +1208,13 @@ where
         block_number,
     )?;
 
-    // The subscriber normally enqueues immediately after recording this observation. Enqueueing
-    // here as well closes that small scheduling window and makes follower import self-contained;
-    // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
-    // gap must surface as a rejected block rather than aborting the node.
-    for (header, observed) in headers
-        .iter()
-        .cloned()
-        .zip(observed_headers.iter().cloned())
-    {
-        deposit_queue
-            .try_enqueue_sealed(header, observed)
-            .wrap_err_with(|| format!("cannot queue an imported header of block {block_number}"))?;
-    }
-
     if let DecodedTempoImport::Full {
         deposits,
         enabled_tokens,
         ..
     } = &tempo_import
     {
-        let current = L1BlockDeposits {
-            header: headers[0].clone(),
-            events: observed_headers[0].clone(),
-        };
-        validate_full_portal_inputs(deposit_queue, &current, deposits, enabled_tokens)
+        validate_full_portal_inputs(deposit_queue, anchor, deposits, enabled_tokens)
             .wrap_err_with(|| {
                 format!("peer block {block_number} does not match observed portal events")
             })?;
@@ -1327,11 +1310,11 @@ fn reconcile_canonical_import(
 
 fn validate_full_portal_inputs(
     deposit_queue: &DepositQueue,
-    current: &L1BlockDeposits,
+    anchor: NumHash,
     deposits: &[zone_payload::abi::QueuedDeposit],
     enabled_tokens: &[zone_payload::abi::EnabledToken],
 ) -> eyre::Result<()> {
-    let work = deposit_queue.operational_work(current)?;
+    let work = deposit_queue.operational_work(anchor)?;
     let mut deposit_offset = 0usize;
     let mut token_offset = 0usize;
     for block in work {
@@ -1371,13 +1354,13 @@ async fn wait_for_peer_anchor(
     block_number: u64,
     stop: &sync::CancellationToken,
     wait_timeout: Duration,
-) -> Result<L1PortalEvents, PeerAnchorWaitError> {
+) -> Result<(), PeerAnchorWaitError> {
     tokio::select! {
         biased;
         () = stop.cancelled() => Err(PeerAnchorWaitError::Cancelled),
         observed = tokio::time::timeout(
             wait_timeout,
-            l1_block_tracker.wait_for_portal_events(anchor),
+            l1_block_tracker.wait_for(anchor),
         ) => match observed {
             Ok(observed) => observed.map_err(PeerAnchorWaitError::Other),
             Err(_) => Err(PeerAnchorWaitError::TimedOut {
@@ -1399,8 +1382,11 @@ async fn wait_for_validated_peer_anchor(
     stop: &sync::CancellationToken,
     wait_timeout: Duration,
 ) -> Result<L1PortalEvents, PeerAnchorWaitError> {
-    let observed =
-        wait_for_peer_anchor(l1_block_tracker, anchor, block_number, stop, wait_timeout).await?;
+    wait_for_peer_anchor(l1_block_tracker, anchor, block_number, stop, wait_timeout).await?;
+    let observed = l1_block_tracker
+        .wait_for_portal_events(anchor)
+        .await
+        .map_err(PeerAnchorWaitError::Other)?;
     portal_inputs
         .validate(&observed)
         .map_err(PeerAnchorWaitError::Other)?;
@@ -1673,8 +1659,9 @@ mod tests {
             .unwrap();
 
         let expected = vec![alpha.to_abi(), beta.to_abi()];
-        validate_full_portal_inputs(&queue, &current, &[], &expected).unwrap();
-        let err = validate_full_portal_inputs(&queue, &current, &[], &expected[..1]).unwrap_err();
+        let anchor = current.header.num_hash();
+        validate_full_portal_inputs(&queue, anchor, &[], &expected).unwrap();
+        let err = validate_full_portal_inputs(&queue, anchor, &[], &expected[..1]).unwrap_err();
         assert!(err.to_string().contains("shorter"));
     }
 
