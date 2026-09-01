@@ -435,6 +435,8 @@ impl L1SubscriberError {
     }
 }
 
+type HeaderStream = Pin<Box<dyn Stream<Item = ()> + Send>>;
+
 impl L1Subscriber {
     /// Create an L1 subscriber.
     pub fn new<P>(
@@ -488,10 +490,10 @@ impl L1Subscriber {
     /// connections fall back to `eth_newBlockFilter` / `eth_getFilterChanges`.
     /// Header payloads are ignored because block selection always comes from
     /// the L1 `finalized` tag.
-    pub(crate) async fn subscribe_block_headers<'a>(
+    pub(crate) async fn subscribe_block_headers(
         &self,
-        provider: &'a DynProvider<TempoNetwork>,
-    ) -> Result<Pin<Box<dyn Stream<Item = ()> + Send + 'a>>, L1SubscriberError> {
+        provider: &DynProvider<TempoNetwork>,
+    ) -> Result<HeaderStream, L1SubscriberError> {
         match provider.subscribe_blocks().await {
             Ok(subscription) => {
                 info!("Using WebSocket newHeads notifications");
@@ -605,22 +607,18 @@ impl L1Subscriber {
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
     /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
-    pub(crate) async fn follow_finalized<S>(
+    pub(crate) async fn follow_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        header_stream: S,
-    ) -> Result<(), L1SubscriberError>
-    where
-        S: Stream<Item = ()> + Send,
-    {
-        let mut header_stream = Box::pin(header_stream);
+        mut stream: HeaderStream,
+    ) -> Result<(), L1SubscriberError> {
         let mut next_block = self.next_block_to_sync()?;
 
         // Subscribe before the initial sync so a head published while catching
-        // up remains queued in the header stream.
+        // up remains queued in the stream.
         next_block = self.sync_finalized_once(l1_provider, next_block).await?;
 
-        while header_stream.next().await.is_some() {
+        while stream.next().await.is_some() {
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 

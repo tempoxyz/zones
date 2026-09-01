@@ -783,7 +783,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     push_header_and_empty_receipts(&asserter, header_12);
 
     let err = subscriber
-        .follow_finalized(&l1_provider, futures::stream::iter([()]))
+        .follow_finalized(&l1_provider, Box::pin(futures::stream::iter([()])))
         .await
         .expect_err("finite header stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
