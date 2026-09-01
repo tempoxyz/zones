@@ -1,5 +1,5 @@
 use super::*;
-use crate::{abi::DepositType, subscriber::is_fenced_ingestion_error};
+use crate::{abi::DepositType, subscriber::L1SubscriberError};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
@@ -1658,7 +1658,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     subscriber.config.retain_portal_evidence = true;
     let portal = subscriber.config.portal_address;
 
-    // A recognized topic0 with garbage payload must fence the whole block, never be skipped.
+    // A recognized topic0 with garbage payload must reject the whole block, never be skipped.
     let corrupt = corrupt_recognized_portal_log(portal);
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
 
@@ -1668,7 +1668,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
             .contains("failed to decode a portal event in L1 block 10")
     );
 
-    // Unknown signatures are still skipped: a pre-upgrade contract event cannot fence us.
+    // Unknown signatures are still skipped: a pre-upgrade contract event cannot reject the block.
     let unknown = Log {
         inner: alloy_primitives::Log {
             address: portal,
@@ -1732,7 +1732,7 @@ fn pause_events_invalidate_cached_portal_storage() {
 }
 
 #[tokio::test]
-async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
+async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
@@ -1754,16 +1754,22 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
         .sync_finalized_once(&l1_provider, 10)
         .await
         .unwrap_err();
-    assert!(is_fenced_ingestion_error(&err));
+    assert!(matches!(
+        err,
+        L1SubscriberError::Fatal {
+            block_number: 10,
+            stage: "portal event decoding",
+            ..
+        }
+    ));
     assert_eq!(queue.last_enqueued(), None);
     assert_eq!(subscriber.config.block_tracker.latest(), None);
 }
 
 #[test]
 fn ordinary_subscriber_errors_remain_retryable() {
-    assert!(!is_fenced_ingestion_error(&eyre::eyre!(
-        "transient L1 RPC failure"
-    )));
+    let error = L1SubscriberError::Other(eyre::eyre!("transient L1 RPC failure"));
+    assert!(error.should_retry());
 }
 
 #[derive(Debug)]
@@ -1833,7 +1839,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
 }
 
 #[tokio::test]
-async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition() {
+async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
@@ -1861,10 +1867,16 @@ async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition()
         .sync_finalized_once(&l1_provider, 10)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("leadership transition"));
-    assert!(is_fenced_ingestion_error(&err));
+    assert!(matches!(
+        err,
+        L1SubscriberError::Fatal {
+            block_number: 10,
+            stage: "leadership transition application",
+            ..
+        }
+    ));
 
-    // Nothing was enqueued and no observation advanced: the block is fenced, not half-applied.
+    // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
     assert_eq!(subscriber.config.block_tracker.latest(), None);
 }

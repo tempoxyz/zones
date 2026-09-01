@@ -351,7 +351,7 @@ fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Addr
 /// Implemented by the node over its `LeadershipSchedule`. The subscriber applies every
 /// transition **before** enqueueing the block that recorded it — enqueueing notifies the
 /// engine internally, so append-after-enqueue could race a producer waking on that notify.
-/// An error fences ingestion of the whole L1 block.
+/// An error makes ingestion of the finalized L1 block fail.
 pub trait LeadershipSink: Send + Sync + std::fmt::Debug {
     /// Apply one decoded leadership transition.
     fn apply_leader_transition(&self, transition: &crate::LeaderTransition) -> eyre::Result<()>;
@@ -414,52 +414,28 @@ pub struct L1Subscriber {
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
 
-/// A deterministic failure while applying an already receipt-verified finalized block.
-///
-/// Reconnecting cannot change these inputs, so retrying would loop forever on the same block.
-#[derive(Debug)]
-struct FencedIngestionError {
-    block_number: u64,
-    stage: &'static str,
-    source: eyre::Report,
+#[derive(Debug, thiserror::Error)]
+pub enum L1SubscriberError {
+    #[error(transparent)]
+    TransportError(#[from] alloy_transport::TransportError),
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+    #[error("fatal L1 ingestion error at block {block_number} during {stage}: {source}")]
+    Fatal {
+        block_number: u64,
+        stage: &'static str,
+        #[source]
+        source: eyre::Report,
+    },
 }
 
-impl FencedIngestionError {
-    const fn new(block_number: u64, stage: &'static str, source: eyre::Report) -> Self {
-        Self {
-            block_number,
-            stage,
-            source,
-        }
+impl L1SubscriberError {
+    pub(crate) fn should_retry(&self) -> bool {
+        !matches!(self, Self::Fatal { .. })
     }
 }
 
-impl std::fmt::Display for FencedIngestionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "L1 ingestion fenced at block {} during {}: {}",
-            self.block_number, self.stage, self.source
-        )
-    }
-}
-
-impl std::error::Error for FencedIngestionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-fn fenced_ingestion_error(error: &eyre::Report) -> Option<&FencedIngestionError> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<FencedIngestionError>())
-}
-
-#[cfg(test)]
-pub(crate) fn is_fenced_ingestion_error(error: &eyre::Report) -> bool {
-    fenced_ingestion_error(error).is_some()
-}
+type L1SubscriberResult<T> = Result<T, L1SubscriberError>;
 
 impl L1Subscriber {
     /// Create an L1 subscriber.
@@ -485,10 +461,10 @@ impl L1Subscriber {
     ///
     /// The transport (HTTP or WebSocket) is auto-detected from the URL scheme.
     #[instrument(skip(self), fields(l1_rpc_url = %self.config.l1_rpc_url))]
-    async fn connect(&self) -> eyre::Result<DynProvider<TempoNetwork>> {
+    async fn connect(&self) -> L1SubscriberResult<DynProvider<TempoNetwork>> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
-        let url: url::Url = self.config.l1_rpc_url.parse()?;
+        let url: url::Url = self.config.l1_rpc_url.parse().map_err(eyre::Report::from)?;
         let mut conn_config =
             crate::rpc::rpc_connection_config(self.config.retry_connection_interval);
 
@@ -517,7 +493,7 @@ impl L1Subscriber {
     pub(crate) async fn head_triggers<'a>(
         &self,
         provider: &'a DynProvider<TempoNetwork>,
-    ) -> eyre::Result<Pin<Box<dyn Stream<Item = eyre::Result<()>> + Send + 'a>>> {
+    ) -> L1SubscriberResult<Pin<Box<dyn Stream<Item = eyre::Result<()>> + Send + 'a>>> {
         match provider.subscribe_blocks().await {
             Ok(subscription) => {
                 info!("Using WebSocket newHeads notifications");
@@ -546,19 +522,18 @@ impl L1Subscriber {
     /// The zone's persisted Tempo checkpoint is the authoritative source for
     /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
     /// block-zero genesis from the unanchored template.
-    pub(crate) fn resolve_start_block(&self) -> eyre::Result<u64> {
+    pub(crate) fn resolve_start_block(&self) -> L1SubscriberResult<u64> {
         let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
-        eyre::ensure!(
-            local_checkpoint.hash != B256::ZERO,
-            "zone genesis is not anchored to an L1 block"
-        );
+        if local_checkpoint.hash == B256::ZERO {
+            return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
+        }
         let local_tempo_block_number = local_checkpoint.number;
         info!(local_tempo_block_number, "Resuming from local zone state");
         Ok(local_tempo_block_number + 1)
     }
 
     /// Resolve the first L1 block that has not already been ingested.
-    pub(crate) fn next_block_to_sync(&self) -> eyre::Result<u64> {
+    pub(crate) fn next_block_to_sync(&self) -> L1SubscriberResult<u64> {
         let resolved = self.resolve_start_block()?;
         let queued = self
             .deposit_queue
@@ -588,13 +563,13 @@ impl L1Subscriber {
     async fn finalized_block_number(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<u64> {
+    ) -> L1SubscriberResult<u64> {
         l1_provider
             .get_header_by_number(BlockNumberOrTag::Finalized)
             .await
             .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
             .map(|header| header.number())
-            .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
+            .ok_or_else(|| eyre::eyre!("L1 finalized block is not available").into())
     }
 
     /// Synchronize all missing blocks through the current finalized L1 head.
@@ -605,7 +580,7 @@ impl L1Subscriber {
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
         next_block: u64,
-    ) -> eyre::Result<u64> {
+    ) -> L1SubscriberResult<u64> {
         let finalized = self.finalized_block_number(l1_provider).await?;
         if next_block > finalized {
             self.record_seen_block(finalized, 0);
@@ -638,7 +613,7 @@ impl L1Subscriber {
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
         triggers: S,
-    ) -> eyre::Result<()>
+    ) -> L1SubscriberResult<()>
     where
         S: Stream<Item = eyre::Result<()>> + Send,
     {
@@ -654,7 +629,7 @@ impl L1Subscriber {
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 
-        Err(eyre::eyre!("L1 head notification stream ended"))
+        Err(eyre::eyre!("L1 head notification stream ended").into())
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -669,7 +644,7 @@ impl L1Subscriber {
         l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
-    ) -> eyre::Result<()> {
+    ) -> L1SubscriberResult<()> {
         use futures::stream;
 
         let concurrency = self.config.l1_fetch_concurrency.max(1);
@@ -686,12 +661,10 @@ impl L1Subscriber {
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
                     let header_resp = async {
-                        provider
-                            .get_header_by_number(block_number.into())
-                            .await?
-                            .ok_or_else(|| {
-                                eyre::eyre!("L1 header not found for block {block_number}")
-                            })
+                        let header = provider.get_header_by_number(block_number.into()).await?;
+                        Ok::<_, L1SubscriberError>(header.ok_or_else(|| {
+                            eyre::eyre!("L1 header not found for block {block_number}")
+                        })?)
                     }
                     .await
                     .inspect_err(|_| {
@@ -720,7 +693,7 @@ impl L1Subscriber {
                         "Fetched and validated L1 block data"
                     );
                     let header = header_resp.inner.inner;
-                    Ok::<_, eyre::Report>((header, receipts))
+                    Ok::<_, L1SubscriberError>((header, receipts))
                 }
             })
             .buffered(concurrency);
@@ -731,13 +704,16 @@ impl L1Subscriber {
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
             // Decoding fails closed: a decode failure of a recognized portal log aborts this
-            // block before anything is enqueued or any cache advances. Ingestion halts here (fenced)
-            // instead of continuing under a partial event view.
+            // block before anything is enqueued or any cache advances.
             let processed_events = self
                 .extract_events(block_number, &receipts)
                 .map_err(|err| {
                     self.subscriber_metrics.decode_fence_failures.increment(1);
-                    FencedIngestionError::new(block_number, "portal event decoding", err)
+                    L1SubscriberError::Fatal {
+                        block_number,
+                        stage: "portal event decoding",
+                        source: err,
+                    }
                 })?;
             let (events, invalidated, portal_logs) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
@@ -748,9 +724,14 @@ impl L1Subscriber {
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.config.leadership_sink {
-                let transition = events.final_leader_transition().map_err(|err| {
-                    FencedIngestionError::new(block_number, "leadership event validation", err)
-                })?;
+                let transition =
+                    events
+                        .final_leader_transition()
+                        .map_err(|err| L1SubscriberError::Fatal {
+                            block_number,
+                            stage: "leadership event validation",
+                            source: err,
+                        })?;
                 if let Some(transition) = transition {
                     sink.apply_leader_transition(transition)
                         .wrap_err_with(|| {
@@ -758,24 +739,21 @@ impl L1Subscriber {
                                 "cannot apply the leadership transition from block {block_number}"
                             )
                         })
-                        .map_err(|err| {
-                            FencedIngestionError::new(
-                                block_number,
-                                "leadership transition application",
-                                err,
-                            )
+                        .map_err(|source| L1SubscriberError::Fatal {
+                            block_number,
+                            stage: "leadership transition application",
+                            source,
                         })?;
                 }
             }
             if let Some(keys) = &self.config.encryption_keys {
                 for rotation in &events.encryption_key_rotations {
-                    keys.apply_rotation(rotation).map_err(|err| {
-                        FencedIngestionError::new(
+                    keys.apply_rotation(rotation)
+                        .map_err(|source| L1SubscriberError::Fatal {
                             block_number,
-                            "encryption key rotation application",
-                            err,
-                        )
-                    })?;
+                            stage: "encryption key rotation application",
+                            source,
+                        })?;
                 }
             }
             let appended = self
@@ -836,8 +814,8 @@ impl L1Subscriber {
     /// `newHeads` or HTTP block-filter updates are used as wakeups; each
     /// notification ingests the missing finalized range in order.
     ///
-    /// Transient failures reconnect after the configured retry interval. Deterministic failures
-    /// while applying a receipt-verified finalized block are fatal.
+    /// Transport and ordinary failures reconnect after the configured retry interval.
+    /// Deterministic failures while applying a receipt-verified finalized block are fatal.
     pub async fn run(self) {
         loop {
             let result = async {
@@ -851,24 +829,19 @@ impl L1Subscriber {
             }
             .await;
 
-            if let Err(e) = result {
-                if let Some(fenced) = fenced_ingestion_error(&e) {
+            if let Err(error) = result {
+                if error.should_retry() {
+                    let retry_interval = self.config.retry_connection_interval;
+                    self.subscriber_metrics.reconnects.increment(1);
                     error!(
-                        block_number = fenced.block_number,
-                        stage = fenced.stage,
-                        error = %e,
-                        "Fatal L1 ingestion fence; refusing to retry an immutable finalized block"
+                        error = %error,
+                        retry_secs = retry_interval.as_secs_f32(),
+                        "L1 subscriber failed, reconnecting after retry interval"
                     );
-                    panic!("{fenced}");
+                    tokio::time::sleep(retry_interval).await;
+                } else {
+                    panic!("{error}");
                 }
-                let retry_interval = self.config.retry_connection_interval;
-                self.subscriber_metrics.reconnects.increment(1);
-                error!(
-                    error = %e,
-                    retry_secs = retry_interval.as_secs_f32(),
-                    "L1 subscriber failed, reconnecting after retry interval"
-                );
-                tokio::time::sleep(retry_interval).await;
             }
         }
     }
@@ -993,7 +966,7 @@ async fn fetch_and_verify_receipts_for_header(
     block: NumHash,
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
-) -> eyre::Result<Vec<tempo_alloy::rpc::TempoTransactionReceipt>> {
+) -> L1SubscriberResult<Vec<tempo_alloy::rpc::TempoTransactionReceipt>> {
     let block_number = block.number;
     let block_hash = block.hash;
     let receipts = provider
