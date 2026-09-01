@@ -676,6 +676,24 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
 }
 
 #[test]
+fn non_canonical_tempo_import_calldata_reverts() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let mut advance = harness.advance_call(Vec::new(), Vec::new()).abi_encode();
+    advance.extend([0; 32]);
+    assert!(!is_canonical_tempo_import_calldata(&advance));
+    assert!(harness.call(Address::ZERO, advance)?.is_revert());
+
+    let mut headers = IZoneInbox::advanceTempoHeadersCall {
+        headers: vec![encode_header(&harness.child_header())],
+    }
+    .abi_encode();
+    headers.extend([0; 32]);
+    assert!(!is_canonical_tempo_import_calldata(&headers));
+    assert!(harness.call(Address::ZERO, headers)?.is_revert());
+    Ok(())
+}
+
+#[test]
 fn non_canonical_encrypted_deposit_is_rejected() {
     let deposit = Deposit {
         token: Address::ZERO,

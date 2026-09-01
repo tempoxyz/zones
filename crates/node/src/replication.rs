@@ -31,6 +31,7 @@ use zone_payload::{
     ZonePayloadTypes,
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
 };
+use zone_precompiles::{is_canonical_tempo_import_calldata, is_tempo_import_calldata};
 use zone_sequencer::{
     BatchAnchorConfig,
     attestation::{
@@ -1552,6 +1553,11 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
     if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
         eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
     }
+    if is_tempo_import_calldata(signed.tx().input.as_ref())
+        && !is_canonical_tempo_import_calldata(signed.tx().input.as_ref())
+    {
+        eyre::bail!("first Tempo system transaction has non-canonical calldata");
+    }
     if signed
         .tx()
         .input
@@ -1898,6 +1904,8 @@ mod tests {
     fn rejects_malformed_advance_tempo_calldata() {
         use alloy_consensus::{Signed, TxLegacy};
         use alloy_primitives::{Bytes, U256};
+        use alloy_rlp::Encodable as _;
+        use alloy_sol_types::SolCall as _;
         use reth_primitives_traits::SealedBlock;
         use tempo_primitives::{
             Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
@@ -1927,6 +1935,35 @@ mod tests {
                 .to_string()
                 .contains("does not decode as advanceTempo")
         );
+
+        let mut header = Vec::new();
+        TempoHeader::default().encode(&mut header);
+        let mut calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
+            header: header.into(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabledTokens: Vec::new(),
+        }
+        .abi_encode();
+        calldata.extend([0; 32]);
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader::default(),
+            body: alloy_consensus::BlockBody {
+                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                    TxLegacy {
+                        to: zone_payload::abi::ZONE_INBOX_ADDRESS.into(),
+                        value: U256::ZERO,
+                        input: calldata.into(),
+                        ..Default::default()
+                    },
+                    TEMPO_SYSTEM_TX_SIGNATURE,
+                ))],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        });
+        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        assert!(error.to_string().contains("non-canonical calldata"));
     }
 
     #[test]

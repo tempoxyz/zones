@@ -26,7 +26,9 @@ use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
-use zone_precompiles::{outbox, tempo_state};
+use zone_precompiles::{
+    is_canonical_tempo_import_calldata, is_tempo_import_calldata, outbox, tempo_state,
+};
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
@@ -859,6 +861,14 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                 if tempo_import.is_some() {
                     bail!(
                         "Zone block {} contains multiple advanceTempo calls",
+                        header.number()
+                    );
+                }
+                if is_tempo_import_calldata(envelope.input())
+                    && !is_canonical_tempo_import_calldata(envelope.input())
+                {
+                    bail!(
+                        "Zone block {} contains non-canonical Tempo import calldata",
                         header.number()
                     );
                 }

@@ -14174,6 +14174,7 @@ dependencies = [
  "tracing",
  "zone-chainspec",
  "zone-l1",
+ "zone-precompiles",
  "zone-primitives",
  "zone-prover",
  "zone-rpc",

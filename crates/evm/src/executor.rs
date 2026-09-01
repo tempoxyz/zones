@@ -24,7 +24,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{
     ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader,
-    is_finalize_withdrawal_batch_calldata,
+    is_canonical_tempo_import_calldata, is_finalize_withdrawal_batch_calldata,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -114,7 +114,9 @@ impl ZoneTransactionKind {
         }
 
         if tx.calls().any(|(kind, input)| {
-            kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
+            kind.to() == Some(&ZONE_INBOX_ADDRESS)
+                && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
+                && is_canonical_tempo_import_calldata(input)
         }) {
             return Self::AdvanceTempo;
         }
@@ -122,6 +124,7 @@ impl ZoneTransactionKind {
         if tx.calls().any(|(kind, input)| {
             kind.to() == Some(&ZONE_INBOX_ADDRESS)
                 && input.starts_with(&ADVANCE_TEMPO_HEADERS_SELECTOR)
+                && is_canonical_tempo_import_calldata(input)
         }) {
             return Self::AdvanceTempoHeaders;
         }
@@ -344,7 +347,14 @@ mod tests {
     fn advance_tempo_tx() -> TempoTxEnvelope {
         system_tx(
             ZONE_INBOX_ADDRESS,
-            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
+            IZoneInbox::advanceTempoCall {
+                header: Bytes::new(),
+                deposits: Vec::new(),
+                decryptions: Vec::new(),
+                enabledTokens: Vec::new(),
+            }
+            .abi_encode()
+            .into(),
         )
     }
 
@@ -697,6 +707,37 @@ mod tests {
                 .unwrap(),
             ZoneBlockPhase::Executing
         );
+    }
+
+    #[test]
+    fn non_canonical_tempo_imports_do_not_satisfy_block_guard() {
+        let mut advance_calldata = match advance_tempo_tx() {
+            TempoTxEnvelope::Legacy(tx) => tx.tx().input.to_vec(),
+            _ => unreachable!(),
+        };
+        advance_calldata.extend([0; 32]);
+        let advance = system_tx(ZONE_INBOX_ADDRESS, advance_calldata.into());
+
+        let mut headers_calldata = IZoneInbox::advanceTempoHeadersCall {
+            headers: vec![Bytes::new()],
+        }
+        .abi_encode();
+        headers_calldata.extend([0; 32]);
+        let headers = system_tx(ZONE_INBOX_ADDRESS, headers_calldata.into());
+
+        for tx in [&advance, &headers] {
+            assert_eq!(
+                ZoneTransactionKind::classify(tx),
+                ZoneTransactionKind::UnexpectedSystem
+            );
+            assert_eq!(
+                ZoneBlockPhase::AwaitingAdvanceTempo
+                    .validate_transaction(tx)
+                    .unwrap_err()
+                    .to_string(),
+                "advanceTempo must be the first transaction in a zone block"
+            );
+        }
     }
 
     #[test]

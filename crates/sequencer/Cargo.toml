@@ -21,6 +21,7 @@ zone-chainspec.workspace = true
 zone-l1.workspace = true
 zone-primitives.workspace = true
 zone-prover.workspace = true
+zone-precompiles = { workspace = true, features = ["std"] }
 zone-rpc.workspace = true
 zone-spf.workspace = true
 

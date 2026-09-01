@@ -25,6 +25,11 @@ impl ZoneInbox {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
         }
+        if super::is_tempo_import_calldata(calldata)
+            && !super::is_canonical_tempo_import_calldata(calldata)
+        {
+            return Ok(self.storage.revert_output(Bytes::new()));
+        }
 
         dispatch!(
             calldata,

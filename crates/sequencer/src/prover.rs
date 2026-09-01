@@ -32,6 +32,7 @@ use tokio::{
 use tracing::{debug, error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
+use zone_precompiles::{is_canonical_tempo_import_calldata, is_tempo_import_calldata};
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
 };
@@ -637,6 +638,12 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                 ensure!(
                     tempo_import.is_none(),
                     "Zone block {} contains multiple advanceTempo calls",
+                    header.number()
+                );
+                ensure!(
+                    !is_tempo_import_calldata(transaction.input())
+                        || is_canonical_tempo_import_calldata(transaction.input()),
+                    "Zone block {} contains non-canonical Tempo import calldata",
                     header.number()
                 );
                 let call = ZoneInbox::IZoneInboxCalls::abi_decode(transaction.input())

@@ -50,6 +50,25 @@ pub const ADVANCE_TEMPO_SELECTOR: [u8; 4] = IZoneInbox::advanceTempoCall::SELECT
 /// ABI selector for the checkpoint-only `advanceTempoHeaders` system call.
 pub const ADVANCE_TEMPO_HEADERS_SELECTOR: [u8; 4] = IZoneInbox::advanceTempoHeadersCall::SELECTOR;
 
+/// Returns whether calldata is the canonical ABI encoding of a block-opening Inbox call.
+pub fn is_canonical_tempo_import_calldata(calldata: &[u8]) -> bool {
+    if calldata.starts_with(&ADVANCE_TEMPO_SELECTOR) {
+        return IZoneInbox::advanceTempoCall::abi_decode(calldata)
+            .is_ok_and(|call| call.abi_encode() == calldata);
+    }
+    if calldata.starts_with(&ADVANCE_TEMPO_HEADERS_SELECTOR) {
+        return IZoneInbox::advanceTempoHeadersCall::abi_decode(calldata)
+            .is_ok_and(|call| call.abi_encode() == calldata);
+    }
+    false
+}
+
+/// Returns whether calldata has a block-opening Inbox call selector.
+pub fn is_tempo_import_calldata(calldata: &[u8]) -> bool {
+    calldata.starts_with(&ADVANCE_TEMPO_SELECTOR)
+        || calldata.starts_with(&ADVANCE_TEMPO_HEADERS_SELECTOR)
+}
+
 /// Zone-side bridge Inbox state and deposit-processing logic.
 #[contract(addr = ZONE_INBOX_ADDRESS)]
 pub struct ZoneInbox {
