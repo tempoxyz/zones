@@ -37,7 +37,7 @@ use zone_prover::{
 };
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
-    BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
+    BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoImport, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
 };
 
@@ -418,7 +418,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         deposits: witness
             .zone_blocks
             .iter()
-            .map(|block| block.deposits.len())
+            .map(|block| block.tempo_import.deposits().len())
             .sum(),
         withdrawals: witness
             .zone_blocks
@@ -621,24 +621,21 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
 
 fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
     let header = block.header();
-    let mut tempo_headers_rlp = None;
-    let mut deposits = Vec::new();
-    let mut decryptions = Vec::new();
-    let mut enabled_tokens = Vec::new();
+    let mut tempo_import = None;
     let mut finalize_count = None;
     let mut finalize_encrypted_senders = Vec::new();
-    let mut user_transactions = Vec::new();
+    let mut transactions = Vec::new();
 
     for transaction in &block.body().transactions {
         if !transaction.is_system_tx() {
-            user_transactions.push(Bytes::from(transaction.encoded_2718()));
+            transactions.push(Bytes::from(transaction.encoded_2718()));
             continue;
         }
 
         match transaction.to() {
             Some(to) if to == ZONE_INBOX_ADDRESS => {
                 ensure!(
-                    tempo_headers_rlp.is_none(),
+                    tempo_import.is_none(),
                     "Zone block {} contains multiple advanceTempo calls",
                     header.number()
                 );
@@ -649,20 +646,24 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                 match call {
                     ZoneInbox::IZoneInboxCalls::advanceTempo(call) => {
                         decode_tempo_header(&call.header)?;
-                        tempo_headers_rlp = Some(vec![call.header]);
-                        deposits = call.deposits;
-                        decryptions = call.decryptions;
-                        enabled_tokens = call.enabledTokens;
+                        tempo_import = Some(TempoImport::Full {
+                            header_rlp: call.header,
+                            deposits: call.deposits,
+                            decryptions: call.decryptions,
+                            enabled_tokens: call.enabledTokens,
+                        });
                     }
                     ZoneInbox::IZoneInboxCalls::advanceTempoHeaders(call) => {
                         ensure!(
-                            call.headers.len() > 1,
-                            "checkpoint-only Zone block must have more than one header"
+                            !call.headers.is_empty(),
+                            "checkpoint-only Zone block has no headers"
                         );
                         for encoded in &call.headers {
                             decode_tempo_header(encoded)?;
                         }
-                        tempo_headers_rlp = Some(call.headers);
+                        tempo_import = Some(TempoImport::CheckpointOnly {
+                            headers_rlp: call.headers,
+                        });
                     }
                     _ => {
                         return Err(eyre::eyre!(
@@ -701,7 +702,7 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         }
     }
 
-    let tempo_headers_rlp = tempo_headers_rlp.ok_or_eyre(format!(
+    let tempo_import = tempo_import.ok_or_eyre(format!(
         "no advanceTempo call in Zone block {}",
         header.number()
     ))?;
@@ -712,19 +713,17 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         timestamp: header.timestamp(),
         timestamp_millis_part: header.timestamp_millis_part,
         beneficiary: header.beneficiary(),
-        tempo_headers_rlp,
-        deposits,
-        decryptions,
-        enabled_tokens,
+        tempo_import,
         finalize_withdrawal_batch_count: finalize_count,
         finalize_withdrawal_batch_encrypted_senders: finalize_encrypted_senders,
-        transactions: user_transactions,
+        transactions,
     })
 }
 
 fn final_tempo_header(block: &ZoneBlock) -> Result<TempoHeader> {
     let encoded = block
-        .tempo_headers_rlp
+        .tempo_import
+        .headers_rlp()
         .last()
         .ok_or_eyre("Zone block has no Tempo headers")?;
     decode_tempo_header(encoded)
@@ -1003,7 +1002,8 @@ fn witness_size(witness: &BatchWitness) -> usize {
             .iter()
             .map(|block| {
                 block
-                    .tempo_headers_rlp
+                    .tempo_import
+                    .headers_rlp()
                     .iter()
                     .map(|bytes| bytes.len())
                     .sum::<usize>()
