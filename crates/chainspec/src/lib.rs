@@ -268,6 +268,10 @@ impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
 
     const SUPPORTED_CHAINS: &'static [&'static str] = &["dev"];
 
+    fn default_value() -> Option<&'static str> {
+        None
+    }
+
     fn parse(s: &str) -> eyre::Result<std::sync::Arc<Self::ChainSpec>> {
         // Reth's `node --dev` selects a chain named `dev` before the node launcher runs. The
         // launcher replaces this deterministic placeholder with the L1-anchored genesis it
@@ -484,6 +488,12 @@ mod tests {
         let zone = ZoneChainSpecParser::parse(&json).expect("valid Zone genesis JSON");
 
         assert_eq!(zone.chain().id(), chain_id);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn parser_has_no_default_chain() {
+        assert_eq!(ZoneChainSpecParser::default_value(), None);
     }
 
     #[cfg(feature = "cli")]

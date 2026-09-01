@@ -9,6 +9,7 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent, SolValue as _};
+use futures::{FutureExt as _, future::BoxFuture};
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
@@ -52,8 +53,15 @@ pub struct ProvisionedZone {
     pub genesis: Genesis,
 }
 
+pub(crate) struct DevStartup {
+    pub(crate) l1_rpc_url: String,
+    pub(crate) portal: Address,
+    pub(crate) signer: PrivateKeySigner,
+    pub(crate) l1_exit: BoxFuture<'static, eyre::Result<()>>,
+}
+
 /// Starts an embedded Tempo L1 and provisions the local zone.
-pub async fn init(
+pub(crate) async fn init(
     config: &mut NodeConfig<ZoneChainSpec>,
     executor: TaskExecutor,
     initial_token: Address,
@@ -61,7 +69,7 @@ pub async fn init(
     gateway_mode: bool,
     zone_gateways: &[Address],
     allowed_accounts: &[Address],
-) -> eyre::Result<(String, Address, PrivateKeySigner)> {
+) -> eyre::Result<DevStartup> {
     let signer = dev_signer(&config.dev.dev_mnemonic)?;
     let l1_chain_spec = Arc::new(dev_l1_chain_spec(signer.address()));
     let mut l1_config = NodeConfig::new(l1_chain_spec.clone())
@@ -84,7 +92,7 @@ pub async fn init(
     l1_config.dev.finality_depth = NonZeroUsize::MIN;
 
     let l1 = NodeBuilder::new(l1_config)
-        .testing_node(executor.clone())
+        .testing_node(executor)
         .node(TempoNode::default())
         .launch_with_debug_capabilities()
         .await?;
@@ -154,11 +162,12 @@ pub async fn init(
         zone_rpc = %zone_rpc_url,
         "Tempo Zone dev stack ready"
     );
-    executor.spawn_task(async move {
-        let _ = l1.wait_for_node_exit().await;
-    });
-
-    Ok((l1_rpc_url, provisioned.portal, signer))
+    Ok(DevStartup {
+        l1_rpc_url,
+        portal: provisioned.portal,
+        signer,
+        l1_exit: l1.wait_for_node_exit().boxed(),
+    })
 }
 
 /// Creates a zone through the protocol-managed ZoneFactory and constructs its genesis.

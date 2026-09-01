@@ -1,6 +1,7 @@
 //! Tempo Zone CLI.
 
 use std::{
+    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,6 +12,8 @@ use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, Parser as _};
+use eyre::WrapErr as _;
+use futures::future::BoxFuture;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
@@ -49,27 +52,15 @@ pub fn run() -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
-        Ok(url) if !url.is_empty() => {
-            let url = url
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
-            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
-                .map_err(|error| {
-                    eyre::eyre!(
-                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
-                    )
-                })?
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
-            eyre::ensure!(
-                !portal_address.is_zero(),
-                "L1_PORTAL_ADDRESS must be nonzero"
-            );
-            Some((url, portal_address))
-        }
-        Ok(_) | Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    let (dev, external_l1) = match cli.as_node_command_mut() {
+        Some(command) if command.dev.dev => (true, None),
+        Some(command) => (false, Some(external_l1_config(&command.ext)?)),
+        None => (false, None),
+    };
+    let l1_config = if dev {
+        None
+    } else {
+        l1_http_config_from_env()?
     };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
@@ -84,13 +75,13 @@ pub fn run() -> eyre::Result<()> {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        let (l1_rpc_url, portal_address, sequencer_signer) = if builder.config().dev.dev {
+        let (l1_rpc_url, portal_address, sequencer_signer, l1_exit) = if builder.config().dev.dev {
             eyre::ensure!(
                 args.sequencer_manifest.is_none(),
                 "--sequencer.manifest cannot be used with --dev"
             );
             let executor = builder.task_executor().clone();
-            let (l1_rpc_url, portal, signer) = crate::dev::init(
+            let dev = crate::dev::init(
                 builder.config_mut(),
                 executor,
                 args.dev_token,
@@ -100,13 +91,16 @@ pub fn run() -> eyre::Result<()> {
                 &args.dev_allowed_accounts,
             )
             .await?;
-            (l1_rpc_url, portal, Some(signer))
-        } else {
             (
-                args.l1_rpc_url.clone().expect("required without --dev"),
-                args.portal_address.expect("required without --dev"),
-                None,
+                dev.l1_rpc_url,
+                dev.portal,
+                Some(dev.signer),
+                Some(dev.l1_exit),
             )
+        } else {
+            let (l1_rpc_url, portal_address) =
+                external_l1.expect("external L1 config resolved for non-dev node");
+            (l1_rpc_url, portal_address, None, None)
         };
 
         let zone_id = builder.config().chain.zone_id();
@@ -152,10 +146,9 @@ pub fn run() -> eyre::Result<()> {
         node = configure_sequencing(&args, zone_id, node, sequencer_signer).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
-        match args.checker_mode {
+        let handle = match args.checker_mode {
             CheckerMode::Off => {
-                let handle = builder.node(node).launch().await?;
-                handle.wait_for_node_exit().await
+                builder.node(node).launch().await?
             }
             CheckerMode::Observe => {
                 info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
@@ -173,11 +166,73 @@ pub fn run() -> eyre::Result<()> {
                     .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
                     .launch()
                     .await?
-                    .wait_for_node_exit()
-                    .await
             }
-        }
+        };
+        wait_for_exit(handle.wait_for_node_exit(), l1_exit).await
     })
+}
+
+async fn wait_for_exit(
+    zone_exit: impl Future<Output = eyre::Result<()>>,
+    l1_exit: Option<BoxFuture<'static, eyre::Result<()>>>,
+) -> eyre::Result<()> {
+    let Some(l1_exit) = l1_exit else {
+        return zone_exit.await;
+    };
+
+    tokio::select! {
+        result = zone_exit => result,
+        result = l1_exit => {
+            result.wrap_err("embedded Tempo L1 failed")?;
+            Err(eyre::eyre!("embedded Tempo L1 exited unexpectedly"))
+        }
+    }
+}
+
+fn external_l1_config(args: &ZoneArgs) -> eyre::Result<(String, Address)> {
+    let l1_rpc_url = match args.l1_rpc_url.as_ref() {
+        Some(url) => url.clone(),
+        None => {
+            let url = std::env::var("L1_RPC_URL")
+                .map_err(|_| eyre::eyre!("--l1.rpc-url or L1_RPC_URL is required without --dev"))?;
+            parse_l1_rpc_url(&url).map_err(eyre::Report::msg)?
+        }
+    };
+    let portal_address = match args.portal_address {
+        Some(address) => address,
+        None => {
+            let address = std::env::var("L1_PORTAL_ADDRESS").map_err(|_| {
+                eyre::eyre!("--l1.portal-address or L1_PORTAL_ADDRESS is required without --dev")
+            })?;
+            parse_portal_address(&address).map_err(eyre::Report::msg)?
+        }
+    };
+    Ok((l1_rpc_url, portal_address))
+}
+
+fn l1_http_config_from_env() -> eyre::Result<Option<(url::Url, Address)>> {
+    match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            eyre::ensure!(
+                !portal_address.is_zero(),
+                "L1_PORTAL_ADDRESS must be nonzero"
+            );
+            Ok(Some((url, portal_address)))
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    }
 }
 
 /// Creates the EVM config used by CLI subcommands.
@@ -336,8 +391,7 @@ pub struct ZoneArgs {
     /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
     #[arg(
         long = "l1.rpc-url",
-        env = "L1_RPC_URL",
-        required_unless_present = "dev",
+        conflicts_with = "dev",
         value_parser = parse_l1_rpc_url
     )]
     pub l1_rpc_url: Option<String>,
@@ -345,8 +399,7 @@ pub struct ZoneArgs {
     /// ZonePortal contract address on L1.
     #[arg(
         long = "l1.portal-address",
-        env = "L1_PORTAL_ADDRESS",
-        required_unless_present = "dev",
+        conflicts_with = "dev",
         value_parser = parse_portal_address
     )]
     pub portal_address: Option<Address>,
@@ -632,11 +685,13 @@ mod tests {
     use std::{io::Write as _, path::Path, process::Command, thread, time::Duration};
 
     use clap::Parser as _;
+    use futures::future::{self, BoxFuture};
     use reth_node_core::args::DevArgs;
 
     use super::{
         Role, ZoneArgs, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
         parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
+        wait_for_exit,
     };
     use reth_ethereum::cli::Cli;
     use zone_chainspec::ZoneChainSpecParser;
@@ -710,6 +765,50 @@ mod tests {
             Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(["tempo-zone", "node", "--dev"])
                 .unwrap();
         assert!(parsed.as_node_command_mut().unwrap().dev.dev);
+    }
+
+    #[test]
+    fn node_requires_chain_without_dev() {
+        let error = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(["tempo-zone", "node"])
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn node_dev_rejects_external_l1_arguments() {
+        let error = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[tokio::test]
+    async fn embedded_l1_exit_terminates_the_dev_stack() {
+        let l1_exit: BoxFuture<'static, eyre::Result<()>> = Box::pin(async { Ok(()) });
+        let error = wait_for_exit(future::pending(), Some(l1_exit))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exited unexpectedly"));
+    }
+
+    #[tokio::test]
+    async fn embedded_l1_error_terminates_the_dev_stack() {
+        let l1_exit: BoxFuture<'static, eyre::Result<()>> =
+            Box::pin(async { Err(eyre::eyre!("test failure")) });
+        let error = wait_for_exit(future::pending(), Some(l1_exit))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("embedded Tempo L1 failed"));
     }
 
     #[test]
