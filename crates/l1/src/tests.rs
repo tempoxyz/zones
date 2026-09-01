@@ -1385,7 +1385,7 @@ fn external_enqueue_accepts_duplicate_producers() {
 }
 
 #[test]
-fn confirm_through_is_idempotent_and_drains_stale_entries() {
+fn confirm_operational_through_is_idempotent_and_drains_stale_entries() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
     let h11 = make_chained_header(11, header_hash(&h10));
@@ -1397,9 +1397,9 @@ fn confirm_through_is_idempotent_and_drains_stale_entries() {
             .unwrap();
     }
 
-    queue.confirm_through(anchor).unwrap();
+    queue.confirm_operational_through(anchor).unwrap();
     assert!(queue.peek().is_none());
-    queue.confirm_through(anchor).unwrap();
+    queue.confirm_operational_through(anchor).unwrap();
 }
 
 #[test]
@@ -1583,14 +1583,14 @@ fn compacted_deferred_work_releases_only_a_confirmed_prefix() {
 }
 
 #[test]
-fn confirm_through_rejects_a_conflicting_anchor() {
+fn confirm_operational_through_rejects_a_conflicting_anchor() {
     let queue = DepositQueue::new();
     queue
         .try_enqueue_sealed(seal(make_test_header(10)), L1PortalEvents::default())
         .unwrap();
 
     let err = queue
-        .confirm_through(NumHash::new(10, B256::repeat_byte(0xab)))
+        .confirm_operational_through(NumHash::new(10, B256::repeat_byte(0xab)))
         .expect_err("a different hash at the same height must fail");
     assert!(err.to_string().contains("deposit queue holds L1 block 10"));
     assert_eq!(queue.peek().unwrap().header.number(), 10);

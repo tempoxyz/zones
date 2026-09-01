@@ -275,28 +275,12 @@ impl PendingDeposits {
         Ok(())
     }
 
-    /// Reconcile an already-canonical full import, including after its exact-front bookkeeping
-    /// was interrupted.
-    pub(crate) fn confirm_operational_through(&mut self, expected: NumHash) -> eyre::Result<()> {
-        // A delayed duplicate of an older full block must not erase checkpoint work deferred by
-        // newer canonical blocks. Only release work at or before the full block's anchor.
-        self.confirm_through(expected)?;
-        if let Some(deferred) = &mut self.deferred {
-            if deferred.last_header.number() <= expected.number {
-                self.deferred = None;
-            } else if deferred.first_number <= expected.number {
-                deferred.retain_after(expected.number);
-            }
-        }
-        Ok(())
-    }
-
     /// Confirm every pending L1 block up to and including `expected`.
     ///
     /// Follower import calls this only after the corresponding zone block is
     /// canonical. It is therefore idempotent and tolerates stale entries before
     /// `expected`, but rejects a different hash at the expected height.
-    pub(crate) fn confirm_through(&mut self, expected: NumHash) -> eyre::Result<()> {
+    pub(crate) fn confirm_operational_through(&mut self, expected: NumHash) -> eyre::Result<()> {
         while let Some(front) = self.pending.front().map(|entry| entry.header.num_hash()) {
             if front.number > expected.number {
                 break;
@@ -310,6 +294,16 @@ impl PendingDeposits {
             );
             self.confirm(front)
                 .expect("front was just read and matches by construction");
+        }
+
+        if let Some(deferred) = &mut self.deferred {
+            // A delayed duplicate of an older full block must not erase checkpoint work deferred by
+            // newer canonical blocks. Only release work at or before the full block's anchor.
+            if deferred.last_header.number() <= expected.number {
+                self.deferred = None;
+            } else if deferred.first_number <= expected.number {
+                deferred.retain_after(expected.number);
+            }
         }
         Ok(())
     }
@@ -476,11 +470,6 @@ impl DepositQueue {
     /// Idempotently reconcile a canonical full import and release the deferred work it consumed.
     pub fn confirm_operational_through(&self, expected: NumHash) -> eyre::Result<()> {
         self.inner.lock().confirm_operational_through(expected)
-    }
-
-    /// Advance the queue past a canonical follower anchor.
-    pub fn confirm_through(&self, expected: NumHash) -> eyre::Result<()> {
-        self.inner.lock().confirm_through(expected)
     }
 
     /// Wait until an L1 block is available.
