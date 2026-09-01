@@ -10,7 +10,7 @@ use std::{
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use clap::Args;
+use clap::{Args, Parser as _};
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
@@ -43,11 +43,9 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "rustls::client=warn"
 );
 
-/// The standard Reth CLI with Tempo Zone node arguments.
-pub type ZoneCli = Cli<ZoneChainSpecParser, ZoneArgs>;
-
-/// Main entry point for the `node` command.
-pub fn run(mut cli: ZoneCli) -> eyre::Result<()> {
+/// Runs the Tempo Zone CLI.
+pub fn run() -> eyre::Result<()> {
+    let mut cli = Cli::<ZoneChainSpecParser, ZoneArgs>::parse();
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
@@ -637,9 +635,11 @@ mod tests {
     use reth_node_core::args::DevArgs;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
+        Role, ZoneArgs, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
         parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
     };
+    use reth_ethereum::cli::Cli;
+    use zone_chainspec::ZoneChainSpecParser;
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
@@ -697,7 +697,8 @@ mod tests {
 
     #[test]
     fn node_help_lists_reth_dev_flag() {
-        let result = ZoneCli::try_parse_from(["tempo-zone", "node", "--help"]);
+        let result =
+            Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(["tempo-zone", "node", "--help"]);
         let error = result.expect_err("--help exits through clap");
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
         assert!(error.to_string().contains("--dev"));
@@ -705,7 +706,9 @@ mod tests {
 
     #[test]
     fn node_dev_uses_the_standard_reth_flag() {
-        let mut parsed = ZoneCli::try_parse_from(["tempo-zone", "node", "--dev"]).unwrap();
+        let mut parsed =
+            Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(["tempo-zone", "node", "--dev"])
+                .unwrap();
         assert!(parsed.as_node_command_mut().unwrap().dev.dev);
     }
 

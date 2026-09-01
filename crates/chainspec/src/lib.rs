@@ -276,14 +276,14 @@ impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
             let mut genesis = DEV.genesis().clone();
             genesis.config.chain_id =
                 zone_primitives::constants::zone_chain_id(DEV.chain().id(), 1)?;
-            return Ok(Arc::new(ZoneChainSpec::from_genesis_with_l1(
+            Ok(Arc::new(ZoneChainSpec::from_genesis_with_l1(
                 genesis,
                 DEV.as_ref(),
-            )?));
+            )?))
+        } else {
+            let genesis = reth_cli::chainspec::parse_genesis(s)?;
+            Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
         }
-
-        let genesis = reth_cli::chainspec::parse_genesis(s)?;
-        Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
     }
 }
 
