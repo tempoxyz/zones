@@ -3,36 +3,22 @@ use std::collections::VecDeque;
 
 /// Bounded portal work crossed by canonical checkpoint-only Zone blocks.
 ///
-/// Empty L1 blocks and events already applied during ingestion are represented only by the range
-/// endpoints. Blocks containing deposits or token enablements retain one compact event group so a
-/// delayed full-import reconciliation can release just the prefix it consumed. The protocol caps
-/// bound the total number of retained groups.
+/// Empty L1 blocks and events already applied during ingestion are represented only by the final
+/// header. Blocks containing deposits or token enablements retain one compact event group. The
+/// protocol caps bound the total number of retained groups.
 #[derive(Debug, Clone)]
 pub(crate) struct DeferredPortalWork {
-    first_number: u64,
     last_header: SealedHeader<TempoHeader>,
-    event_blocks: Vec<DeferredPortalEventBlock>,
-    deposit_count: usize,
-    enabled_token_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct DeferredPortalEventBlock {
-    number: u64,
-    events: L1PortalEvents,
+    event_blocks: Vec<L1PortalEvents>,
 }
 
 impl DeferredPortalWork {
     pub(crate) fn new(block: L1BlockDeposits) -> Self {
-        let first_number = block.header.number();
         let mut work = Self {
-            first_number,
             last_header: block.header,
             event_blocks: Vec::new(),
-            deposit_count: 0,
-            enabled_token_count: 0,
         };
-        work.push_events(first_number, block.events);
+        work.push_events(block.events);
         work
     }
 
@@ -41,15 +27,14 @@ impl DeferredPortalWork {
     }
 
     pub(crate) fn push(&mut self, block: L1BlockDeposits) {
-        let number = block.header.number();
         self.last_header = block.header;
-        self.push_events(number, block.events);
+        self.push_events(block.events);
     }
 
     fn aggregated_block(&self) -> L1BlockDeposits {
         let mut events = L1PortalEvents::default();
         for block in &self.event_blocks {
-            events.extend_operational(block.events.clone());
+            events.extend_operational(block.clone());
         }
         L1BlockDeposits {
             header: self.last_header.clone(),
@@ -57,28 +42,10 @@ impl DeferredPortalWork {
         }
     }
 
-    fn push_events(&mut self, number: u64, events: L1PortalEvents) {
+    fn push_events(&mut self, events: L1PortalEvents) {
         if !events.deposits.is_empty() || !events.enabled_tokens.is_empty() {
-            self.deposit_count += events.deposits.len();
-            self.enabled_token_count += events.enabled_tokens.len();
-            self.event_blocks
-                .push(DeferredPortalEventBlock { number, events });
+            self.event_blocks.push(events);
         }
-    }
-
-    fn retain_after(&mut self, number: u64) {
-        self.first_number = number.saturating_add(1);
-        self.event_blocks.retain(|block| block.number > number);
-        self.deposit_count = self
-            .event_blocks
-            .iter()
-            .map(|block| block.events.deposits.len())
-            .sum();
-        self.enabled_token_count = self
-            .event_blocks
-            .iter()
-            .map(|block| block.events.enabled_tokens.len())
-            .sum();
     }
 
     #[cfg(test)]
@@ -301,8 +268,6 @@ impl PendingDeposits {
             // newer canonical blocks. Only release work at or before the full block's anchor.
             if deferred.last_header.number() <= expected.number {
                 self.deferred = None;
-            } else if deferred.first_number <= expected.number {
-                deferred.retain_after(expected.number);
             }
         }
         Ok(())
@@ -330,13 +295,6 @@ impl PendingDeposits {
         self.deferred
             .as_ref()
             .map_or(0, DeferredPortalWork::event_block_len)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn deferred_range(&self) -> Option<(u64, u64)> {
-        self.deferred
-            .as_ref()
-            .map(|work| (work.first_number, work.last_header.number()))
     }
 }
 

@@ -1524,62 +1524,6 @@ fn deferred_empty_blocks_use_constant_space() {
     }
 
     assert_eq!(queue.deferred_event_block_len(), 0);
-    assert_eq!(queue.deferred_range(), Some((1, 10_000)));
-}
-
-#[test]
-fn compacted_deferred_work_releases_only_a_confirmed_prefix() {
-    let mut queue = PendingDeposits::default();
-    let tokens: Vec<_> = (1..=4)
-        .map(|index| EnabledToken {
-            token: Address::repeat_byte(index),
-            name: format!("Token {index}"),
-            symbol: format!("T{index}"),
-            currency: "USD".into(),
-        })
-        .collect();
-    let mut parent_hash = B256::ZERO;
-    let mut anchors = Vec::new();
-    for (index, token) in tokens[..3].iter().enumerate() {
-        let number = index as u64 + 1;
-        let header = if number == 1 {
-            make_test_header(number)
-        } else {
-            make_chained_header(number, parent_hash)
-        };
-        let header = seal(header);
-        let anchor = header.num_hash();
-        parent_hash = anchor.hash;
-        queue
-            .try_enqueue(
-                header,
-                L1PortalEvents {
-                    enabled_tokens: vec![token.clone()],
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        queue.defer_through(anchor).unwrap();
-        anchors.push(anchor);
-    }
-
-    queue.confirm_operational_through(anchors[1]).unwrap();
-    assert_eq!(queue.deferred_range(), Some((3, 3)));
-
-    let current = seal(make_chained_header(4, parent_hash));
-    queue
-        .try_enqueue(
-            current,
-            L1PortalEvents {
-                enabled_tokens: vec![tokens[3].clone()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let work = queue.operational_work(queue.peek().unwrap()).unwrap();
-    assert_eq!(work.len(), 2);
-    assert_eq!(work[0].events.enabled_tokens[0].token, tokens[2].token);
-    assert_eq!(work[1].events.enabled_tokens[0].token, tokens[3].token);
 }
 
 #[test]
