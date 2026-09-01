@@ -616,6 +616,37 @@ impl L1Subscriber {
         Ok(next)
     }
 
+    /// Resolve the latest L1 anchor already admitted by local state or this subscriber.
+    fn latest_ingested_anchor(&self) -> eyre::Result<NumHash> {
+        let mut latest = self.local_state.latest_tempo_checkpoint()?;
+        eyre::ensure!(
+            latest.hash != B256::ZERO,
+            "zone genesis is not anchored to an L1 block"
+        );
+
+        for candidate in [
+            self.deposit_queue.last_enqueued(),
+            self.config.block_tracker.latest(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if candidate.number > latest.number {
+                latest = candidate;
+            } else if candidate.number == latest.number {
+                eyre::ensure!(
+                    candidate.hash == latest.hash,
+                    "conflicting ingested L1 anchors at height {}: {} and {}",
+                    latest.number,
+                    latest.hash,
+                    candidate.hash
+                );
+            }
+        }
+
+        Ok(latest)
+    }
+
     /// Return the block number referenced by the L1 `finalized` tag.
     async fn finalized_block_number(
         &self,
@@ -704,6 +735,18 @@ impl L1Subscriber {
     ) -> eyre::Result<()> {
         use futures::stream;
 
+        let mut parent = self.latest_ingested_anchor()?;
+        let expected_from = parent
+            .number
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("finalized L1 block number overflow"))?;
+        eyre::ensure!(
+            from == expected_from,
+            "finalized L1 backfill must continue after block {} at {}, received start {from}",
+            parent.number,
+            parent.hash
+        );
+
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.config.block_tracker.clone();
@@ -729,10 +772,11 @@ impl L1Subscriber {
                     .inspect_err(|_| {
                         fetch_failures.increment(1);
                     })?;
-                    let block_hash = header_resp.hash();
+                    let header = validate_header_response(header_resp)?;
+                    let block_hash = header.hash();
                     let block = NumHash::new(block_number, block_hash);
-                    let expected_receipts_root = header_resp.receipts_root();
-                    let expected_logs_bloom = header_resp.logs_bloom();
+                    let expected_receipts_root = header.receipts_root();
+                    let expected_logs_bloom = header.logs_bloom();
                     let receipts = fetch_and_verify_receipts_for_header(
                         provider,
                         block,
@@ -751,7 +795,6 @@ impl L1Subscriber {
                         receipts = receipts.len(),
                         "Fetched and validated L1 block data"
                     );
-                    let header = header_resp.inner.inner;
                     Ok::<_, eyre::Report>((header, receipts))
                 }
             })
@@ -762,6 +805,21 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
+            let expected_block_number = parent
+                .number
+                .checked_add(1)
+                .ok_or_else(|| eyre::eyre!("finalized L1 block number overflow"))?;
+            eyre::ensure!(
+                block_number == expected_block_number,
+                "non-contiguous finalized L1 header: expected height {expected_block_number}, received {block_number}"
+            );
+            eyre::ensure!(
+                header.parent_hash() == parent.hash,
+                "finalized L1 parent mismatch at height {block_number}: expected {}, received {}",
+                parent.hash,
+                header.parent_hash()
+            );
+
             // Decoding fails closed: a decode failure of a recognized portal log aborts this
             // block before anything is enqueued or any cache advances. Ingestion halts here (fenced)
             // instead of continuing under a partial event view.
@@ -774,7 +832,7 @@ impl L1Subscriber {
             let (events, invalidated, portal_logs) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            let sealed = SealedHeader::seal_slow(header);
+            let sealed = header;
             let anchor = sealed.num_hash();
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
@@ -835,6 +893,7 @@ impl L1Subscriber {
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
             }
+            parent = anchor;
             processed += 1;
 
             if processed.is_multiple_of(100) {
@@ -991,6 +1050,21 @@ impl L1Subscriber {
             .lock()
             .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
+}
+
+fn validate_header_response(
+    response: tempo_alloy::rpc::TempoHeaderResponse,
+) -> eyre::Result<SealedHeader<TempoHeader>> {
+    let reported_hash = response.hash();
+    let header = SealedHeader::seal_slow(response.inner.inner);
+    eyre::ensure!(
+        header.hash() == reported_hash,
+        "L1 header {} reports hash {}, computed {}",
+        header.number(),
+        reported_hash,
+        header.hash()
+    );
+    Ok(header)
 }
 
 /// Fetch receipts for the L1 header by block hash and verify they match the

@@ -423,13 +423,7 @@ fn subscriber_applies_state_and_records_observation() {
 }
 
 fn make_test_header(number: u64) -> TempoHeader {
-    TempoHeader {
-        inner: Header {
-            number,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+    make_chained_header(number, B256::with_last_byte(1))
 }
 
 /// Create a header that chains to the given parent.
@@ -803,6 +797,117 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         subscriber.config.block_tracker.observed_hash(12),
         Some(anchor_12.hash),
         "a queue-backed subscriber must retain observations until its consumer prunes them"
+    );
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn finalized_backfill_rejects_a_first_header_disconnected_from_local_state() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let disconnected = make_chained_header(10, B256::with_last_byte(0xee));
+
+    asserter.push_success(&Some(header_response(disconnected.clone())));
+    push_header_and_empty_receipts(&asserter, disconnected);
+
+    let error = subscriber
+        .sync_finalized_once(&l1_provider, 10)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("finalized L1 parent mismatch at height 10")
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.latest(),
+        None,
+        "a disconnected first header must not advance observations"
+    );
+    assert_eq!(subscriber.deposit_queue.last_enqueued(), None);
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn finalized_backfill_rejects_a_reported_hash_that_does_not_match_the_header() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let header = make_test_header(10);
+    let mut response = header_response(header);
+    response.inner.hash = B256::with_last_byte(0xee);
+
+    asserter.push_success(&Some(response.clone()));
+    asserter.push_success(&Some(response));
+
+    let error = subscriber
+        .sync_finalized_once(&l1_provider, 10)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("reports hash"));
+    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.deposit_queue.last_enqueued(), None);
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn finalized_backfill_stops_at_a_disconnected_successor_and_recovers() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let header_10 = make_test_header(10);
+    let header_10_hash = header_hash(&header_10);
+    let disconnected_11 = make_chained_header(11, B256::with_last_byte(0xee));
+
+    asserter.push_success(&Some(header_response(disconnected_11.clone())));
+    push_header_and_empty_receipts(&asserter, header_10.clone());
+    push_header_and_empty_receipts(&asserter, disconnected_11);
+
+    let error = subscriber
+        .sync_finalized_once(&l1_provider, 10)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("finalized L1 parent mismatch at height 11")
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.latest(),
+        Some(NumHash::new(10, header_10_hash)),
+        "the valid prefix should remain available as the retry boundary"
+    );
+    assert_eq!(
+        subscriber.deposit_queue.last_enqueued(),
+        Some(NumHash::new(10, header_10_hash)),
+        "the disconnected successor must not replace the valid queued prefix"
+    );
+
+    let canonical_11 = make_chained_header(11, header_10_hash);
+    let canonical_11_hash = header_hash(&canonical_11);
+    asserter.push_success(&Some(header_response(canonical_11.clone())));
+    push_header_and_empty_receipts(&asserter, canonical_11);
+
+    assert_eq!(
+        subscriber
+            .sync_finalized_once(&l1_provider, 11)
+            .await
+            .unwrap(),
+        12
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.latest(),
+        Some(NumHash::new(11, canonical_11_hash))
+    );
+    assert_eq!(
+        subscriber.deposit_queue.last_enqueued(),
+        Some(NumHash::new(11, canonical_11_hash))
     );
     assert!(asserter.read_q().is_empty());
 }
