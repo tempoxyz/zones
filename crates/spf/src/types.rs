@@ -90,6 +90,38 @@ pub struct BatchWitness {
     pub tempo_ancestry_headers: Vec<Bytes>,
 }
 
+/// Typed inputs for the opening ZoneInbox system transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub enum TempoImport {
+    Full {
+        header_rlp: Bytes,
+        deposits: Vec<QueuedDeposit>,
+        decryptions: Vec<DecryptionData>,
+        enabled_tokens: Vec<EnabledToken>,
+    },
+    CheckpointOnly {
+        headers_rlp: Vec<Bytes>,
+    },
+}
+
+impl TempoImport {
+    pub fn headers_rlp(&self) -> &[Bytes] {
+        match self {
+            Self::Full { header_rlp, .. } => core::slice::from_ref(header_rlp),
+            Self::CheckpointOnly { headers_rlp } => headers_rlp,
+        }
+    }
+
+    pub fn deposits(&self) -> &[QueuedDeposit] {
+        match self {
+            Self::Full { deposits, .. } => deposits,
+            Self::CheckpointOnly { .. } => &[],
+        }
+    }
+}
+
 /// Zone block input, including its system-call inputs and raw user transactions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -100,16 +132,7 @@ pub struct ZoneBlock {
     pub timestamp: u64,
     pub timestamp_millis_part: u64,
     pub beneficiary: Address,
-    /// RLP-encoded consecutive Tempo headers imported by this block. A full block contains exactly
-    /// one header; a checkpoint-only block contains more than one and has no operational inputs.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub tempo_headers_rlp: Vec<Bytes>,
-    /// Deposits processed by `ZoneInbox.advanceTempo`, in calldata order.
-    pub deposits: Vec<QueuedDeposit>,
-    /// Encrypted-deposit decryption data, in calldata order.
-    pub decryptions: Vec<DecryptionData>,
-    /// Tokens enabled by `ZoneInbox.advanceTempo`, in calldata order.
-    pub enabled_tokens: Vec<EnabledToken>,
+    pub tempo_import: TempoImport,
     /// Withdrawal count passed to finalization in this block, if any.
     pub finalize_withdrawal_batch_count: Option<U256>,
     /// Encrypted sender payloads passed to withdrawal finalization.
