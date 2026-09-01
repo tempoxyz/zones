@@ -231,7 +231,7 @@ demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
         --tick "{{tick}}"
 
 [group('zone')]
-[doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone. Use profile=release for production.')]
+[doc('Starts a manifest-backed Tempo Zone node. Requires SEQUENCER_MANIFEST, P2P_KEY, and SECP256K1_KEY. Use profile=release for production.')]
 zone-up name reset="false" profile="dev" args="":
     #!/bin/bash
     set -euo pipefail
@@ -249,6 +249,9 @@ zone-up name reset="false" profile="dev" args="":
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
+    MANIFEST="${SEQUENCER_MANIFEST:?Set SEQUENCER_MANIFEST to the Zone topology manifest}"
+    P2P_KEY_FILE="${P2P_KEY:?Set P2P_KEY to this node's Ed25519 identity key}"
+    SECP256K1_KEY_FILE="${SECP256K1_KEY:?Set SECP256K1_KEY to this node's settlement key}"
     SEQ_KEY_FILE="${SEQUENCER_KEY_FILE:-}"
     if [[ -z "$SEQ_KEY_FILE" ]] && ! jq -e '.sequencerKey? | strings | select(length > 0)' "$ZONE_JSON" > /dev/null; then
         echo "Error: SEQUENCER_KEY_FILE env var not set and no sequencer key found in $ZONE_JSON" >&2
@@ -279,7 +282,10 @@ zone-up name reset="false" profile="dev" args="":
                       --http.api all \
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
-                      --sequencer \
+                      --sequencer.manifest "$MANIFEST" \
+                      --p2p.key "$P2P_KEY_FILE" \
+                      --secp256k1.key "$SECP256K1_KEY_FILE" \
+                      --sequencer.role leader \
                       --sequencer-key-file "$SEQ_KEY_FILE" \
                       {{args}}
 
@@ -955,7 +961,8 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     cargo build --bin tempo-zone --release
     DATADIR="/tmp/tempo-zone-{{name}}"
     rm -rf "$DATADIR" || true
-    exec cargo run --release --bin tempo-zone -- \
+    exec env -u SEQUENCER_MANIFEST -u P2P_KEY -u SECP256K1_KEY \
+        cargo run --release --bin tempo-zone -- \
                       node \
                       --chain "$OUTPUT/genesis.json" \
                       --l1.rpc-url "$L1_RPC" \

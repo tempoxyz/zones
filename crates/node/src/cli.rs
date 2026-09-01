@@ -332,6 +332,16 @@ async fn configure_sequencing(
     }
 
     let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+    eyre::ensure!(
+        signer.is_some() || args.sequencer || p2p_config.is_some(),
+        "--sequencer.manifest is required for node startup"
+    );
+    if args.sequencer {
+        warn!(
+            target: "reth::cli",
+            "--sequencer is deprecated; configure --sequencer.manifest, --p2p.key, and --secp256k1.key"
+        );
+    }
     let sequencing = signer.is_some()
         || args.sequencer
         || p2p_config
@@ -617,11 +627,15 @@ pub struct ZoneArgs {
     )]
     pub redacted_rpc_max_auth_token_validity_secs: u64,
 
-    /// Enable legacy single-sequencer mode without a multi-sequencer manifest.
+    /// Deprecated manifestless node startup.
+    ///
+    /// Use `--dev` for local development, or configure `--sequencer.manifest`, `--p2p.key`, and
+    /// `--secp256k1.key` for a networked node.
     #[arg(
         long = "sequencer",
         env = "SEQUENCER",
-        conflicts_with = "sequencer_manifest"
+        conflicts_with = "sequencer_manifest",
+        help = "Deprecated: start a node without a sequencer manifest"
     )]
     pub sequencer: bool,
 

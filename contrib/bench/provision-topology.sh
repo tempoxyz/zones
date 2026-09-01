@@ -951,6 +951,7 @@ provision_up() {
     # default sparse-trie pruning can make a multi-transaction Zone payload
     # disagree with the root obtained during final validation.
     start_process zone "$ZONE_BIN" "${ZONES_BENCH_ZONE_CPUS:-8-13,24-29}" "$log_dir/zone.log" \
+        env -u SEQUENCER_MANIFEST -u P2P_KEY -u SECP256K1_KEY \
         "$ZONE_BIN" node \
         --chain "$zone_genesis" --datadir "$zone_db" \
         --l1.rpc-url ws://127.0.0.1:8545 \

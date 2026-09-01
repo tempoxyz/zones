@@ -32,8 +32,8 @@ unavailable, or skipped Portal epochs make the recovery boundary ambiguous.
 After a normal Portal transition ends recovery, a restart skips the completed stale directive and
 logs a removal warning. Operators should still remove the directive from every manifest promptly.
 
-If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
-behavior.
+The manifestless `--sequencer` startup path is deprecated. Use `tempo-zone node --dev` for local
+development.
 
 ## Roles
 
@@ -208,8 +208,8 @@ the internet-facing standby would put deposit recipients and memos within reach 
 compromise. Startup rejects that key-file flag on an `rpc_only` node rather than ignoring it.
 This key is independent from the shared `--sequencer-key-file`; reusing that shared key
 would collapse several nodes into one recoverable quorum identity.
-The `--sequencer` flag conflicts with `--sequencer.manifest` because the
-manifest determines whether the node starts the sequencer tasks.
+The deprecated `--sequencer` flag conflicts with `--sequencer.manifest` because the manifest
+determines whether the node starts the sequencer tasks.
 
 DNS peer addresses do not provide a stable egress IP for Commonware's inbound
 source-IP filter. A manifest containing any DNS peer therefore requires the
