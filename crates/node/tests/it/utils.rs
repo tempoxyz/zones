@@ -3682,14 +3682,14 @@ impl P2pCluster {
         let block = self.fixture.next_block();
         let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
         let events = self.fixture.portal_events_from_deposits(&deposits);
+        for node in &self.nodes {
+            self.fixture
+                .enqueue(&block, node.deposit_queue(), deposits.clone());
+        }
         for index in observers {
             self.nodes[*index]
                 .l1_block_tracker()
                 .record_with_portal_events(anchor, events.clone())?;
-        }
-        for node in &self.nodes {
-            self.fixture
-                .enqueue(&block, node.deposit_queue(), deposits.clone());
         }
         Ok(anchor)
     }
@@ -3800,8 +3800,8 @@ impl RealP2pCluster {
 }
 
 /// Start a three-member P2P quorum against a real Tempo L1 and a Portal registered with the
-/// exact per-node attestation keys. The short interval keeps tests focused on the first real
-/// batch boundary instead of ordinary long-running block production.
+/// exact per-node attestation keys. The short interval bounds how long the tests wait for an
+/// empty batch boundary. A full import following checkpoint-only blocks may close a batch sooner.
 pub(crate) async fn start_real_p2p_cluster(
     withdrawal_batch_interval_blocks: u64,
 ) -> eyre::Result<RealP2pCluster> {
@@ -5271,11 +5271,37 @@ impl L1Fixture {
         anchor
     }
 
+    /// Inject the same empty L1 block into multiple queues.
+    pub(crate) fn inject_empty_block_into(&mut self, queues: &[&DepositQueue]) -> NumHash {
+        let block = self.next_block();
+        let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
+        for queue in queues {
+            self.enqueue(&block, queue, vec![]);
+        }
+        anchor
+    }
+
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
     pub(crate) fn inject_empty_blocks(&mut self, queue: &DepositQueue, n: u64) {
         for _ in 0..n {
             self.inject_empty_block(queue);
         }
+    }
+
+    /// Produce empty Zone blocks one at a time so each injected Tempo block is the current
+    /// operational import rather than part of a checkpoint-only catch-up range.
+    pub(crate) async fn produce_empty_zone_blocks(
+        &mut self,
+        zone: &ZoneTestNode,
+        count: u64,
+    ) -> eyre::Result<u64> {
+        let mut height = zone.provider().get_block_number().await?;
+        for _ in 0..count {
+            self.inject_empty_block(zone.deposit_queue());
+            height += 1;
+            zone.wait_for_block_number(height, DEFAULT_TIMEOUT).await?;
+        }
+        Ok(height)
     }
 
     /// Inject an L1 block with the given deposits into the queue.
@@ -5289,6 +5315,20 @@ impl L1Fixture {
         let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
         let events = self.portal_events_from_deposits(&deposits);
         queue.enqueue(header, events);
+        anchor
+    }
+
+    /// Inject the same L1 block and deposits into multiple queues.
+    pub(crate) fn inject_deposits_into(
+        &mut self,
+        queues: &[&DepositQueue],
+        deposits: Vec<DepositFixture>,
+    ) -> NumHash {
+        let block = self.next_block();
+        let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
+        for queue in queues {
+            self.enqueue(&block, queue, deposits.clone());
+        }
         anchor
     }
 
