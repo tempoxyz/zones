@@ -59,6 +59,12 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             actual: witness.public_inputs.portal,
         });
     }
+    let has_t12_block = witness.zone_blocks.iter().any(|block| {
+        config
+            .chain_spec()
+            .tempo_hardfork_at(block.timestamp)
+            .is_t12()
+    });
 
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
@@ -91,12 +97,16 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // Keep the public transition anchored to the physical pre-state. On the first T12 batch this
     // is zero; ZoneInbox authenticates the legacy hash prefix internally before writing the
     // migrated count, so rewriting this value would diverge from settlement attestations.
-    let previous_processed_token_count = read_zone_storage(
-        &mut zone_state,
-        ZONE_INBOX_ADDRESS,
-        inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT,
-    )?
-    .to::<u64>();
+    let previous_processed_token_count = if has_t12_block {
+        read_zone_storage(
+            &mut zone_state,
+            ZONE_INBOX_ADDRESS,
+            inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT,
+        )?
+        .to::<u64>()
+    } else {
+        0
+    };
 
     // The initial Tempo header supplies the root for Tempo-side reads. The
     // Zone's own TempoState must already contain the same number and hash;
@@ -249,12 +259,16 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         inbox::slots::PROCESSED_DEPOSIT_NUMBER,
     )?
     .to::<u64>();
-    let next_processed_token_count = read_zone_storage(
-        &mut zone_state,
-        ZONE_INBOX_ADDRESS,
-        inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT,
-    )?
-    .to::<u64>();
+    let next_processed_token_count = if has_t12_block {
+        read_zone_storage(
+            &mut zone_state,
+            ZONE_INBOX_ADDRESS,
+            inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT,
+        )?
+        .to::<u64>()
+    } else {
+        0
+    };
     let has_withdrawal_finalization = witness
         .zone_blocks
         .iter()
