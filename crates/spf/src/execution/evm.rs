@@ -32,7 +32,7 @@ use tempo_zone_contracts::{
 use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
 
 use crate::{
-    Error, ZoneBlock,
+    Error, TempoImport, ZoneBlock,
     execution::database::{TempoWitnessDatabase, WitnessDatabase},
 };
 
@@ -117,21 +117,24 @@ pub(crate) fn execute_zone_block(
         )
     })?;
 
-    if block.tempo_headers_rlp.len() == 1 {
-        transactions.push(execute_advance_tempo(
+    match &block.tempo_import {
+        TempoImport::Full {
+            header_rlp,
+            deposits,
+            decryptions,
+            enabled_tokens,
+        } => transactions.push(execute_advance_tempo(
             &mut executor,
-            &block.tempo_headers_rlp[0],
-            block,
+            header_rlp,
+            deposits,
+            decryptions,
+            enabled_tokens,
             zone_block_index,
             chain_id,
-        )?);
-    } else {
-        transactions.push(execute_advance_tempo_headers(
-            &mut executor,
-            &block.tempo_headers_rlp,
-            zone_block_index,
-            chain_id,
-        )?);
+        )?),
+        TempoImport::CheckpointOnly { headers_rlp } => transactions.push(
+            execute_advance_tempo_headers(&mut executor, headers_rlp, zone_block_index, chain_id)?,
+        ),
     }
     transactions.extend(execute_user_transactions(
         &mut executor,
@@ -228,7 +231,9 @@ pub(crate) fn next_block_execution_context(
 fn execute_advance_tempo<'a, 'db, I>(
     executor: &mut WitnessExecutor<'a, 'db, I>,
     header: &Bytes,
-    block: &ZoneBlock,
+    deposits: &[tempo_zone_contracts::QueuedDeposit],
+    decryptions: &[tempo_zone_contracts::DecryptionData],
+    enabled_tokens: &[tempo_zone_contracts::EnabledToken],
     block_index: usize,
     chain_id: u64,
 ) -> Result<TempoTxEnvelope, Error>
@@ -237,9 +242,9 @@ where
 {
     let calldata = IZoneInbox::advanceTempoCall {
         header: header.clone(),
-        deposits: block.deposits.clone(),
-        decryptions: block.decryptions.clone(),
-        enabledTokens: block.enabled_tokens.clone(),
+        deposits: deposits.to_vec(),
+        decryptions: decryptions.to_vec(),
+        enabledTokens: enabled_tokens.to_vec(),
     }
     .abi_encode();
     let transaction = TxLegacy {
