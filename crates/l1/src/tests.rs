@@ -141,8 +141,8 @@ fn set_tempo_checkpoint(provider: &MockEthProvider, checkpoint: NumHash) {
 
 fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthProvider> {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let provider = MockEthProvider::new();
-    set_tempo_checkpoint(&provider, checkpoint);
+    let zone_provider = MockEthProvider::new();
+    set_tempo_checkpoint(&zone_provider, checkpoint);
 
     L1Subscriber {
         config: L1SubscriberConfig {
@@ -152,7 +152,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
             retry_connection_interval: Duration::from_secs(1),
             retain_portal_evidence: false,
         },
-        provider,
+        zone_provider,
         deposit_queue: DepositQueue::default(),
         enabled_tokens: crate::state::EnabledTokenRegistry::default(),
         l1_state_cache: crate::L1StateCache::new(),
@@ -721,7 +721,7 @@ fn test_resolve_start_block_reads_live_local_state_each_time() {
     let subscriber = test_subscriber(10);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
     set_tempo_checkpoint(
-        &subscriber.provider,
+        &subscriber.zone_provider,
         NumHash::new(11, B256::with_last_byte(1)),
     );
     assert_eq!(subscriber.resolve_start_block().unwrap(), 12);

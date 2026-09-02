@@ -380,7 +380,7 @@ pub struct L1SubscriberConfig {
 #[derive(Clone)]
 pub struct L1Subscriber<P> {
     pub(crate) config: L1SubscriberConfig,
-    pub(crate) provider: P,
+    pub(crate) zone_provider: P,
     /// Finalized L1 blocks retained until a Zone consumer processes them.
     pub(crate) deposit_queue: DepositQueue,
     /// Shared registry of tokens enabled for this zone.
@@ -436,7 +436,7 @@ where
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         config: L1SubscriberConfig,
-        provider: P,
+        zone_provider: P,
         deposit_queue: DepositQueue,
         enabled_tokens: EnabledTokenRegistry,
         l1_state_cache: L1StateCache,
@@ -446,7 +446,7 @@ where
     ) -> Self {
         Self {
             config,
-            provider,
+            zone_provider,
             deposit_queue,
             enabled_tokens,
             l1_state_cache,
@@ -521,7 +521,7 @@ where
     /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
     /// block-zero genesis from the unanchored template.
     pub(crate) fn resolve_start_block(&self) -> Result<u64, L1SubscriberError> {
-        let state = self.provider.latest().map_err(eyre::Report::from)?;
+        let state = self.zone_provider.latest().map_err(eyre::Report::from)?;
         let local_checkpoint = state.tempo_num_hash().map_err(eyre::Report::from)?;
         if local_checkpoint.hash == B256::ZERO {
             return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
