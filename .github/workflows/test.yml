@@ -51,7 +51,7 @@ jobs:
       - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           tool: nextest@0.9.124
       - name: Install Foundry
@@ -124,7 +124,7 @@ jobs:
       - name: Prepare nextest install directory
         run: mkdir -p "$HOME/.cargo/bin"
 
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           tool: nextest@0.9.124
 

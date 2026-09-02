@@ -56,11 +56,11 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
+      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
 
       - name: Docker metadata for tempo-zone
         id: meta-tempo-zone
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           images: ${{ env.REGISTRY }}/tempo-zone
           bake-target: tempo-zone
@@ -78,7 +78,7 @@ jobs:
 
       - name: Docker metadata for tempo-zone-xtask
         id: meta-tempo-zone-xtask
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           images: ${{ env.REGISTRY }}/tempo-zone-xtask
           bake-target: tempo-zone-xtask
@@ -96,7 +96,7 @@ jobs:
 
       - name: Docker metadata for tempo-zone-prover
         id: meta-tempo-zone-prover
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           images: ${{ env.REGISTRY }}/tempo-zone-prover
           bake-target: tempo-zone-prover
@@ -114,7 +114,7 @@ jobs:
 
       - name: Log in to Container Registry
         if: github.repository == 'tempoxyz/zones'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -140,7 +140,7 @@ jobs:
           echo "Embedding Tempo devnet genesis sha256:${genesis_sha}"
 
       - name: Build and push Docker images
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           files: |
             docker/docker-bake.hcl
@@ -160,7 +160,7 @@ jobs:
 
       # Nitro CLI converts an image from the runner's local Docker image store.
       - name: Load tempo-zone-prover enclave payload
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           files: docker/docker-bake.hcl
           targets: tempo-zone-prover-enclave
@@ -173,7 +173,7 @@ jobs:
           pull: ${{ github.event_name == 'schedule' }}
 
       - name: Load tempo-zone-prover EIF builder
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           files: docker/docker-bake.hcl
           targets: tempo-zone-prover-eif-builder
@@ -204,7 +204,7 @@ jobs:
             | tee "$EIF_OUTPUT_DIR/measurements.json"
 
       - name: Build and push tempo-zone-prover
-        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           files: |
             docker/docker-bake.hcl
