@@ -437,9 +437,11 @@ fn validate_tempo_anchor(
 }
 
 fn validate_t12_block_shape(block: &ZoneBlock, is_last: bool) -> Result<(), Error> {
-    let valid = match &block.tempo_import {
-        TempoImport::CheckpointOnly { .. } => !is_last,
-        TempoImport::Full { .. } => is_last && block.finalize_withdrawal_batch_count.is_some(),
+    let valid = match (&block.tempo_import, is_last) {
+        (TempoImport::CheckpointOnly { .. }, false) => true,
+        (TempoImport::Full { .. }, false) => block.finalize_withdrawal_batch_count.is_none(),
+        (TempoImport::Full { .. }, true) => block.finalize_withdrawal_batch_count.is_some(),
+        (TempoImport::CheckpointOnly { .. }, true) => false,
     };
     if !valid {
         return Err(Error::InvalidT12BatchShape);
@@ -522,8 +524,8 @@ pub enum Error {
     /// A full block exceeded a protocol-wide outstanding portal-work bound.
     #[error("zone block {block_index} exceeds portal-work capacity")]
     PortalWorkCapacityExceeded { block_index: usize },
-    /// A T12 batch must contain exactly one full operational block at the end, optionally preceded
-    /// by checkpoint-only blocks.
+    /// A T12 batch must end in a full operational block that finalizes withdrawals. Intermediate
+    /// blocks may use either Tempo import variant, but must not finalize withdrawals.
     #[error("invalid T12 batch shape")]
     InvalidT12BatchShape,
     /// The witness identifies a Zone other than the verifier-selected chain specification.
@@ -838,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn t12_batch_shape_rejects_multiple_full_blocks() {
+    fn t12_batch_shape_rejects_intermediate_finalization() {
         let mut witness = minimal_batch_witness();
         for number in 1..=2 {
             witness.zone_blocks.push(ZoneBlock {
@@ -858,6 +860,24 @@ mod tests {
             validate_t12_block_shape(&witness.zone_blocks[0], false),
             Err(Error::InvalidT12BatchShape)
         );
+    }
+
+    #[test]
+    fn t12_batch_shape_accepts_intermediate_full_block_without_finalization() {
+        let block = ZoneBlock {
+            number: 1,
+            parent_hash: B256::ZERO,
+            timestamp: 100,
+            timestamp_millis_part: 0,
+            beneficiary: Address::ZERO,
+            tempo_import: full_import(Bytes::from([0x01])),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        };
+
+        validate_system_inputs(&block, 0).unwrap();
+        assert_eq!(validate_t12_block_shape(&block, false), Ok(()));
     }
 
     #[test]
