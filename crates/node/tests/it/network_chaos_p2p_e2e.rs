@@ -96,6 +96,24 @@ async fn synchronized_head(cluster: &RealP2pCluster) -> eyre::Result<u64> {
     Ok(head)
 }
 
+async fn wait_for_p2p_lag(
+    cluster: &RealP2pCluster,
+    leading: usize,
+    lagging: usize,
+) -> eyre::Result<()> {
+    poll_until(
+        NETWORK_TIMEOUT,
+        POLL_INTERVAL,
+        "the disconnected incoming leader to fall behind",
+        || async {
+            let leading_height = cluster.nodes[leading].provider().get_block_number().await?;
+            let lagging_height = cluster.nodes[lagging].provider().get_block_number().await?;
+            Ok((leading_height >= lagging_height.saturating_add(RECOVERY_GAP)).then_some(()))
+        },
+    )
+    .await
+}
+
 async fn rotate_leadership(cluster: &RealP2pCluster, target_index: usize) -> eyre::Result<u64> {
     let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     let previous_epoch = portal.leaderEpoch().call().await?;
@@ -353,7 +371,6 @@ async fn assert_handoff_stalls_without_incoming_leader(
             == a_fenced_height,
         "outgoing leader A continued producing after finalized leadership moved to disconnected B"
     );
-
     let b_height_after_fence = cluster.nodes[INCOMING_LEADER]
         .provider()
         .get_block_number()
@@ -506,6 +523,9 @@ async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()
     let (expected_epoch, accepted_before_outage) = match case.timing {
         FaultTiming::BeforeHandoff => {
             let accepted = disconnect_leadership_case(&network, &l1_proxies, case).await?;
+            if case.planes.disconnects_p2p() && case.disconnected_nodes.contains(&INCOMING_LEADER) {
+                wait_for_p2p_lag(&cluster, OUTGOING_LEADER, INCOMING_LEADER).await?;
+            }
             let epoch = rotate_leadership(&cluster, INCOMING_LEADER).await?;
             (epoch, accepted)
         }
@@ -715,11 +735,12 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     account.approve_outbox(ZONE_TOKEN_ADDRESS).await?;
     let baseline = synchronized_head(&cluster).await?;
 
-    network.disconnect_nodes(&[1]);
+    network.disconnect_nodes(&[INCOMING_LEADER]);
     network
-        .wait_for_nodes_disconnected(&[1], NETWORK_TIMEOUT)
+        .wait_for_nodes_disconnected(&[INCOMING_LEADER], NETWORK_TIMEOUT)
         .await?;
-    let expected_epoch = rotate_leadership(&cluster, 1).await?;
+    wait_for_p2p_lag(&cluster, OUTGOING_LEADER, INCOMING_LEADER).await?;
+    let expected_epoch = rotate_leadership(&cluster, INCOMING_LEADER).await?;
     wait_for_leadership_epoch(
         &cluster,
         &[0, 1, 2],
@@ -728,14 +749,13 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     )
     .await?;
 
-    // B may build locally while isolated, but its transaction and blocks cannot reach the
-    // connected A/C partition. Its eventual canonical inclusion under B creates the settlement
-    // boundary this test follows.
+    // The transaction remains only in B's local pool while every P2P path involving B is down.
+    // Its eventual inclusion under B creates the settlement boundary this test follows.
     let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
         .provider()
         .get_block_number()
         .await?;
-    let c_fenced_height = cluster.nodes[FOLLOWER]
+    let b_fenced_height = cluster.nodes[INCOMING_LEADER]
         .provider()
         .get_block_number()
         .await?;
@@ -760,12 +780,20 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
         "outgoing leader A produced while incoming leader B was P2P-isolated"
     );
     eyre::ensure!(
-        cluster.nodes[FOLLOWER]
+        cluster.nodes[INCOMING_LEADER]
             .provider()
             .get_block_number()
             .await?
-            == c_fenced_height,
-        "follower C advanced from B's private chain while B was P2P-isolated"
+            == b_fenced_height,
+        "incoming leader B produced a private block while P2P-isolated"
+    );
+    eyre::ensure!(
+        cluster.nodes[INCOMING_LEADER]
+            .provider()
+            .get_transaction_receipt(withdrawal_hash)
+            .await?
+            .is_none(),
+        "B included the withdrawal before its P2P links were restored"
     );
     let batches_at_fence = batch_count(&portal).await?;
 
