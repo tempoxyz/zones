@@ -433,6 +433,7 @@ where
     P: StateProviderFactory + Sync,
 {
     /// Create an L1 subscriber.
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         config: L1SubscriberConfig,
         provider: P,

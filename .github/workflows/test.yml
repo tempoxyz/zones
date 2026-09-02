@@ -55,7 +55,7 @@ jobs:
         with:
           tool: nextest@0.9.124
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
+        uses: tempoxyz/gh-actions/actions/setup-foundry@16356ec5155405ba5e33f5558e80b5bf77eb70ab
         with:
           version: nightly
 
