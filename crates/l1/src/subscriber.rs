@@ -531,31 +531,6 @@ where
         Ok(local_tempo_block_number + 1)
     }
 
-    /// Resolve the first L1 block that has not already been ingested.
-    pub(crate) fn next_block_to_sync(&self) -> Result<u64, L1SubscriberError> {
-        let resolved = self.resolve_start_block()?;
-        let queued = self
-            .deposit_queue
-            .last_enqueued()
-            .map(|last| last.number.saturating_add(1));
-        let observed = self
-            .block_tracker
-            .latest()
-            .map(|last| last.number.saturating_add(1));
-
-        let next = [Some(resolved), queued, observed]
-            .into_iter()
-            .flatten()
-            .max()
-            .expect("resolved checkpoint is always present");
-
-        // Only the persisted zone checkpoint proves consumption.
-        // Queue and observation cursors are fetch high-water marks.
-        self.block_tracker
-            .initialize_consumed_through(resolved.saturating_sub(1));
-        Ok(next)
-    }
-
     /// Return the block number referenced by the L1 `finalized` tag.
     async fn finalized_block_number(
         &self,
@@ -571,23 +546,22 @@ where
 
     /// Synchronize all missing blocks through the current finalized L1 head.
     ///
-    /// Callers provide the next block number and receive the next cursor after
-    /// a successful sync.
+    /// The cursor advances after each block is fully applied.
     pub(crate) async fn sync_finalized_once(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        next_block: u64,
-    ) -> Result<u64, L1SubscriberError> {
+        next_block: &mut u64,
+    ) -> Result<(), L1SubscriberError> {
         let finalized = self.finalized_block_number(l1_provider).await?;
-        if next_block > finalized {
+        if *next_block > finalized {
             self.record_seen_block(finalized, 0);
-            return Ok(next_block);
+            return Ok(());
         }
 
-        let blocks = finalized - next_block + 1;
+        let blocks = finalized - *next_block + 1;
         self.record_seen_block(finalized, blocks);
         info!(
-            from = next_block,
+            from = *next_block,
             to = finalized,
             blocks,
             "Synchronizing finalized L1 blocks"
@@ -599,29 +573,7 @@ where
             .backfill_duration_seconds
             .record(start.elapsed().as_secs_f64());
         self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
-        Ok(finalized.saturating_add(1))
-    }
-
-    /// Follow finalized L1 using transport-specific head notifications as wakeups.
-    ///
-    /// Header contents are intentionally ignored. Canonical block selection is
-    /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
-    pub(crate) async fn follow_finalized(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-        mut stream: HeaderStream,
-    ) -> Result<(), L1SubscriberError> {
-        let mut next_block = self.next_block_to_sync()?;
-
-        // Subscribe before the initial sync so a head published while catching
-        // up remains queued in the stream.
-        next_block = self.sync_finalized_once(l1_provider, next_block).await?;
-
-        while stream.next().await.is_some() {
-            next_block = self.sync_finalized_once(l1_provider, next_block).await?;
-        }
-
-        Err(eyre::eyre!("L1 head notification stream ended").into())
+        Ok(())
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -630,15 +582,16 @@ where
     /// parallel, then processes them sequentially (event extraction and enqueue).
     /// Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
-    #[instrument(skip(self, l1_provider), fields(from, to))]
+    #[instrument(skip(self, l1_provider, next_block), fields(from = *next_block, to))]
     async fn backfill(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        from: u64,
+        next_block: &mut u64,
         to: u64,
     ) -> Result<(), L1SubscriberError> {
         use futures::stream;
 
+        let from = *next_block;
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.block_tracker.clone();
@@ -766,6 +719,7 @@ where
             // configured retention sink and the contiguous observation tracker.
             self.apply_enabled_token_events(&events);
             self.update_l1_state_anchor(block_number, &invalidated);
+            *next_block = block_number.saturating_add(1);
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
             }
@@ -804,16 +758,28 @@ where
     ///
     /// Transport and ordinary failures reconnect after the configured retry interval.
     /// Deterministic failures while applying a receipt-verified finalized block are fatal.
-    pub async fn run(self) {
+    pub async fn run(self) -> Result<(), L1SubscriberError> {
+        let mut next_block = self.resolve_start_block()?;
+        self.block_tracker
+            .initialize_consumed_through(next_block.saturating_sub(1));
+
         loop {
-            let result = async {
+            let result: Result<(), L1SubscriberError> = async {
                 let provider = self.connect().await?;
-                let header_stream = self.subscribe_block_headers(&provider).await?;
+                let mut header_stream = self.subscribe_block_headers(&provider).await?;
                 info!(
                     portal = %self.config.portal_address,
                     "Following finalized L1 blocks"
                 );
-                self.follow_finalized(&provider, header_stream).await
+
+                // Subscribe before the initial sync so a head published while catching
+                // up remains queued in the stream.
+                self.sync_finalized_once(&provider, &mut next_block).await?;
+                while let Some(_) = header_stream.next().await {
+                    self.sync_finalized_once(&provider, &mut next_block).await?;
+                }
+
+                Err(eyre::eyre!("L1 head notification stream ended").into())
             }
             .await;
 
@@ -829,7 +795,7 @@ where
                     );
                     tokio::time::sleep(retry_interval).await;
                 } else {
-                    panic!("{error}");
+                    return Err(error);
                 }
             }
         }
