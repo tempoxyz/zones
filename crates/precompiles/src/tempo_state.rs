@@ -205,8 +205,8 @@ impl TempoState {
                         self.apply_checkpoints(l1, msg_sender, core::slice::from_ref(&call.header))
                     },
                     #[schedule(since = T12)]
-                    finalizeTempo_1(call) => {
-                        self.apply_checkpoints(l1, msg_sender, &call.headers)
+                    finalizeTempo_1(_) => {
+                        tempo_precompiles::dispatch::unknown_selector_result(calldata)
                     },
                 }
             },
@@ -219,8 +219,8 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_context_with_hardfork,
-        test_env, test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context_with_hardfork, test_env,
+        test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
     use alloy_evm::precompiles::DynPrecompile;
@@ -239,7 +239,7 @@ mod tests {
 
     impl TempoStateHarness {
         fn new(header: &TempoHeader) -> eyre::Result<Self> {
-            Self::new_with_context(header, test_context())
+            Self::new_with_context(header, test_context_with_hardfork(TempoHardfork::T11))
         }
 
         fn new_with_hardfork(header: &TempoHeader, hardfork: TempoHardfork) -> eyre::Result<Self> {
@@ -308,16 +308,15 @@ mod tests {
             header: Bytes,
             is_static: bool,
         ) -> PrecompileResult {
-            let data = finalizeTempoCall {
-                headers: vec![header],
-            }
-            .abi_encode();
+            let data = legacyFinalizeTempoCall { header }.abi_encode();
             self.call(caller, data, is_static)
         }
 
-        fn finalize_many(&mut self, caller: Address, headers: Vec<Bytes>) -> PrecompileResult {
-            let data = finalizeTempoCall { headers }.abi_encode();
-            self.call(caller, data, false)
+        fn finalize_many(&mut self, headers: Vec<Bytes>) -> ZoneResult<()> {
+            let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || {
+                TempoState::new().finalize_checkpoints(&self.l1, &headers)
+            })
         }
 
         fn finalize_legacy(
@@ -437,6 +436,27 @@ mod tests {
     }
 
     #[test]
+    fn finalize_tempo_is_disabled_from_t12() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let mut harness = TempoStateHarness::new_with_hardfork(&genesis, TempoHardfork::T12)?;
+        let child = child_header(keccak256(encode_header(&genesis)), 1);
+
+        let legacy = harness.finalize_legacy(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(legacy.is_revert());
+
+        let range = harness.call(
+            ZONE_INBOX_ADDRESS,
+            finalizeTempoCall {
+                headers: vec![encode_header(&child)],
+            }
+            .abi_encode(),
+            false,
+        )?;
+        assert!(range.is_revert());
+        Ok(())
+    }
+
+    #[test]
     fn finalize_tempo_accepts_consecutive_header_range() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
@@ -448,11 +468,7 @@ mod tests {
 
         let mut harness = TempoStateHarness::new(&genesis)?;
         harness.set_block_timestamp(&second);
-        let output = harness.finalize_many(
-            ZONE_INBOX_ADDRESS,
-            vec![encode_header(&first), encode_header(&second)],
-        )?;
-        assert!(output.is_success());
+        harness.finalize_many(vec![encode_header(&first), encode_header(&second)])?;
         harness.assert_checkpoint(keccak256(encode_header(&second)), 2)
     }
 
