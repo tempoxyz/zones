@@ -11,7 +11,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
 
 /// Type hash for the data placed in the Nitro attestation document's `user_data` field.
-pub const NITRO_BATCH_ATTESTATION_TYPE: &str = "NitroBatchAttestation(uint256 parentChainId,address verifier,address portal,uint32 zoneId,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,uint64 expectedWithdrawalBatchIndex,bytes32 prevBlockHash,bytes32 nextBlockHash,bytes32 prevProcessedHash,bytes32 nextProcessedHash,uint64 prevDepositNumber,uint64 nextDepositNumber,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
+pub const NITRO_BATCH_ATTESTATION_TYPE: &str = "NitroBatchAttestation(uint256 parentChainId,address verifier,address portal,uint32 zoneId,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,uint64 expectedWithdrawalBatchIndex,bytes32 prevBlockHash,bytes32 nextBlockHash,bytes32 prevProcessedHash,bytes32 nextProcessedHash,uint64 prevDepositNumber,uint64 nextDepositNumber,uint64 prevProcessedTokenCount,uint64 nextProcessedTokenCount,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
 
 /// Proof material returned by an attesting prover.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -116,6 +116,8 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
             output.deposit_queue_transition.nextProcessedHash,
             output.deposit_queue_transition.prevDepositNumber,
             output.deposit_queue_transition.nextDepositNumber,
+            output.token_enablement_transition.prevProcessedTokenCount,
+            output.token_enablement_transition.nextProcessedTokenCount,
             output.withdrawal_queue_hash,
             verifier_config_hash,
         )
@@ -126,7 +128,10 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_spf::{BatchOutput, BlockTransition, DepositQueueTransition, LastBatchCommitment};
+    use zone_spf::{
+        BatchOutput, BlockTransition, DepositQueueTransition, LastBatchCommitment,
+        TokenEnablementTransition,
+    };
 
     #[test]
     fn error_variant_uses_the_wire_field_names() {
@@ -164,9 +169,13 @@ mod tests {
                 prevDepositNumber: 5,
                 nextDepositNumber: 6,
             },
-            withdrawal_queue_hash: B256::with_last_byte(7),
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: 7,
+                nextProcessedTokenCount: 8,
+            },
+            withdrawal_queue_hash: B256::with_last_byte(9),
             last_batch_commitment: LastBatchCommitment {
-                withdrawal_batch_index: 8,
+                withdrawal_batch_index: 10,
             },
         };
 
@@ -182,8 +191,55 @@ mod tests {
         assert_eq!(
             nitro_batch_attestation_hash(&public_inputs, &output),
             alloy_primitives::b256!(
-                "0x36f73f631fe83f439268204b16e9ae3083c6f0d49fad0facaa66431ee50cd40b"
+                "0x764c1f24b00b253ae1a06fe31ba8858a2352e9350e09a6c6028bea47233c0cb9"
             ),
+        );
+    }
+
+    #[test]
+    fn batch_attestation_hash_binds_token_enablement_progress() {
+        let mut output = BatchOutput {
+            block_transition: BlockTransition {
+                prevBlockHash: B256::ZERO,
+                nextBlockHash: B256::ZERO,
+            },
+            deposit_queue_transition: DepositQueueTransition {
+                prevProcessedHash: B256::ZERO,
+                nextProcessedHash: B256::ZERO,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0,
+            },
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: 0,
+                nextProcessedTokenCount: 0,
+            },
+            withdrawal_queue_hash: B256::ZERO,
+            last_batch_commitment: LastBatchCommitment {
+                withdrawal_batch_index: 0,
+            },
+        };
+        let public_inputs = PublicInputs {
+            parent_chain_id: 1,
+            portal: alloy_primitives::Address::ZERO,
+            zone_id: 1,
+            tempo_block_number: 1,
+            anchor_block_number: 1,
+            anchor_block_hash: B256::ZERO,
+            expected_withdrawal_batch_index: 1,
+        };
+        let expected = nitro_batch_attestation_hash(&public_inputs, &output);
+
+        output.token_enablement_transition.prevProcessedTokenCount = 1;
+        assert_ne!(
+            nitro_batch_attestation_hash(&public_inputs, &output),
+            expected
+        );
+
+        output.token_enablement_transition.prevProcessedTokenCount = 0;
+        output.token_enablement_transition.nextProcessedTokenCount = 1;
+        assert_ne!(
+            nitro_batch_attestation_hash(&public_inputs, &output),
+            expected
         );
     }
 }
