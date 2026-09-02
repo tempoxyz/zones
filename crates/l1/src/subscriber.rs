@@ -818,7 +818,7 @@ where
             .await;
 
             if let Err(error) = result {
-                // Retry ordinary errors; finalized event decoding and application errors are fatal.
+                // Retry connection and sync errors, finalized event errors are fatal.
                 if error.should_retry() {
                     let retry_interval = self.config.retry_connection_interval;
                     self.subscriber_metrics.reconnects.increment(1);
