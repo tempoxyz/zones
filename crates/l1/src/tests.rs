@@ -148,17 +148,17 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
-            enabled_tokens: crate::state::EnabledTokenRegistry::default(),
-            l1_state_cache: crate::L1StateCache::new(),
-            block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
-            leadership_sink: None,
-            encryption_keys: None,
             retain_portal_evidence: false,
         },
         provider,
         deposit_queue: DepositQueue::default(),
+        enabled_tokens: crate::state::EnabledTokenRegistry::default(),
+        l1_state_cache: crate::L1StateCache::new(),
+        block_tracker: L1BlockTracker::default(),
+        leadership_sink: None,
+        encryption_keys: None,
         subscriber_metrics: Default::default(),
     }
 }
@@ -389,23 +389,22 @@ fn subscriber_applies_state_and_records_observation() {
     let cached_value = B256::with_last_byte(2);
 
     {
-        let mut cache = subscriber.config.l1_state_cache.lock();
+        let mut cache = subscriber.l1_state_cache.lock();
         cache.invalidate_and_set_anchor(9, []);
         cache.set(cached_address, cached_slot, 9, cached_value);
     }
     subscriber.update_l1_state_anchor(10, &HashSet::new());
-    subscriber.config.block_tracker.record(anchor).unwrap();
+    subscriber.block_tracker.record(anchor).unwrap();
 
     assert_eq!(
         subscriber
-            .config
             .l1_state_cache
             .lock()
             .get(cached_address, cached_slot, 10),
         Some(cached_value)
     );
     assert_eq!(
-        subscriber.config.block_tracker.observed_hash(10),
+        subscriber.block_tracker.observed_hash(10),
         Some(anchor.hash)
     );
 }
@@ -675,17 +674,14 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     let stable_slot = B256::with_last_byte(3);
     let stable_value = B256::with_last_byte(4);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .invalidate_and_set_anchor(9, []);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .set(stable_account, stable_slot, 10, stable_value);
@@ -693,7 +689,6 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     subscriber.update_l1_state_anchor(10, &HashSet::new());
     assert_eq!(
         subscriber
-            .config
             .l1_state_cache
             .lock()
             .get(TIP403_REGISTRY_ADDRESS, slot, 10),
@@ -701,7 +696,7 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     );
 
     subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
-    let mut cache = subscriber.config.l1_state_cache.lock();
+    let mut cache = subscriber.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
         Some(stable_value)
@@ -787,7 +782,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         vec![10, 11, 12]
     );
     assert_eq!(
-        subscriber.config.block_tracker.observed_hash(12),
+        subscriber.block_tracker.observed_hash(12),
         Some(anchor_12.hash),
         "a queue-backed subscriber must retain observations until its consumer prunes them"
     );
@@ -893,7 +888,7 @@ fn confirmed_token_enabled_event_updates_registry() {
 
     subscriber.apply_enabled_token_events(&events);
 
-    assert!(subscriber.config.enabled_tokens.read().contains(&token));
+    assert!(subscriber.enabled_tokens.read().contains(&token));
 }
 
 #[test]
@@ -1682,7 +1677,7 @@ fn pause_events_invalidate_cached_portal_storage() {
     let account = address!("0x0000000000000000000000000000000000000123");
     let pause_slot = B256::with_last_byte(25);
     {
-        let mut cache = subscriber.config.l1_state_cache.lock();
+        let mut cache = subscriber.l1_state_cache.lock();
         cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
     }
     let logs = vec![
@@ -1711,11 +1706,7 @@ fn pause_events_invalidate_cached_portal_storage() {
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(
-        subscriber
-            .config
-            .l1_state_cache
-            .lock()
-            .get(portal, pause_slot, 1),
+        subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
     );
 }
@@ -1752,7 +1743,7 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
         }
     ));
     assert_eq!(queue.last_enqueued(), None);
-    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.block_tracker.latest(), None);
 }
 
 #[test]
@@ -1790,7 +1781,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
         seen: parking_lot::Mutex::new(Vec::new()),
         fail: false,
     });
-    subscriber.config.leadership_sink = Some(sink.clone());
+    subscriber.leadership_sink = Some(sink.clone());
 
     let new_leader = address!("0x0000000000000000000000000000000000002222");
     let log = leader_updated_log(portal, Address::ZERO, new_leader, 2, 10);
@@ -1832,7 +1823,7 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     let mut subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
-    subscriber.config.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
+    subscriber.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
         queue: queue.clone(),
         seen: parking_lot::Mutex::new(Vec::new()),
         fail: true,
@@ -1867,5 +1858,5 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
 
     // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
-    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.block_tracker.latest(), None);
 }

@@ -225,6 +225,8 @@ pub struct ZoneNode {
     enabled_tokens: EnabledTokenRegistry,
     /// L1 anchors independently observed and applied by the subscriber.
     l1_block_tracker: L1BlockTracker,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    encryption_keys: Option<EncryptionKeyRing>,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
     /// Number of zone blocks between withdrawal batch boundaries.
@@ -257,13 +259,8 @@ impl ZoneNode {
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
-            enabled_tokens: enabled_tokens.clone(),
-            l1_state_cache: l1_state_cache.clone(),
-            block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
-            leadership_sink: None,
-            encryption_keys: None,
             retain_portal_evidence: false,
         };
 
@@ -281,6 +278,7 @@ impl ZoneNode {
             l1_state_cache,
             enabled_tokens,
             l1_block_tracker,
+            encryption_keys: None,
             portal_address,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
@@ -322,7 +320,6 @@ impl ZoneNode {
         keys: impl IntoIterator<Item = SecretKey>,
     ) -> Self {
         let ring = self
-            .l1_config
             .encryption_keys
             .get_or_insert_with(EncryptionKeyRing::default);
         for key in keys {
@@ -401,7 +398,7 @@ impl ZoneNode {
 
     /// Returns the shared encrypted-deposit key ring, when configured.
     pub fn deposit_decryption_keys(&self) -> Option<EncryptionKeyRing> {
-        self.l1_config.encryption_keys.clone()
+        self.encryption_keys.clone()
     }
 }
 
@@ -430,6 +427,14 @@ where
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
+    /// Shared L1 state cache updated by the subscriber.
+    l1_state_cache: L1StateCache,
+    /// Shared registry of tokens enabled for this zone.
+    enabled_tokens: EnabledTokenRegistry,
+    /// L1 anchors independently observed and applied by the subscriber.
+    l1_block_tracker: L1BlockTracker,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    encryption_keys: Option<EncryptionKeyRing>,
     /// ZonePortal address on L1.
     portal_address: Address,
     /// Redacted RPC configuration.
@@ -460,6 +465,10 @@ where
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
+        l1_state_cache: L1StateCache,
+        enabled_tokens: EnabledTokenRegistry,
+        l1_block_tracker: L1BlockTracker,
+        encryption_keys: Option<EncryptionKeyRing>,
         portal_address: Address,
         redacted_rpc_config: ZoneRedactedRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
@@ -477,6 +486,10 @@ where
             ),
             deposit_queue,
             l1_config,
+            l1_state_cache,
+            enabled_tokens,
+            l1_block_tracker,
+            encryption_keys,
             portal_address,
             redacted_rpc_config,
             sequencer_config,
@@ -583,7 +596,7 @@ where
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
-        if let Some(keys) = self.l1_config.encryption_keys.clone() {
+        if let Some(keys) = self.encryption_keys.clone() {
             self.resolve_and_seed_encryption_keys(&l1_provider, tempo_block_number, &keys)
                 .await?;
         }
@@ -592,6 +605,7 @@ where
         // snapshot at the local Tempo anchor, and install the transition sink before
         // the subscriber starts so no block is ever consumed ahead of its
         // leadership transition.
+        let mut leadership_sink: Option<Arc<dyn LeadershipSink>> = None;
         if let Some(p2p) = self.p2p_config.as_ref() {
             let schedule = p2p.leadership();
             let snapshot_anchor = tempo_block_number;
@@ -630,7 +644,7 @@ where
                 &schedule,
             )
             .await?;
-            self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
+            leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
                 schedule,
                 manifest: p2p.manifest().clone(),
                 historical_replay_through,
@@ -641,6 +655,11 @@ where
             self.l1_config.clone(),
             ctx.node.provider().clone(),
             self.deposit_queue.clone(),
+            self.enabled_tokens.clone(),
+            self.l1_state_cache.clone(),
+            self.l1_block_tracker.clone(),
+            leadership_sink,
+            self.encryption_keys.clone(),
         );
         let task_executor = ctx.node.task_executor().clone();
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
@@ -662,7 +681,7 @@ where
                         .unwrap_or_default(),
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
-                    self.l1_config.encryption_keys.clone().unwrap_or_default(),
+                    self.encryption_keys.clone().unwrap_or_default(),
                     &task_executor,
                     &sequencer_rpc_slot,
                 )
@@ -740,7 +759,7 @@ where
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
-            self.l1_config.enabled_tokens.clone(),
+            self.enabled_tokens.clone(),
             chain_id,
             max_response_size,
         )
@@ -789,9 +808,9 @@ where
                 payload_builder,
                 chain_spec: provider.chain_spec(),
                 deposit_queue: self.deposit_queue.clone(),
-                l1_block_tracker: self.l1_config.block_tracker.clone(),
+                l1_block_tracker: self.l1_block_tracker.clone(),
                 // Follower-only nodes have no private keys and never construct an engine.
-                encryption_keys: self.l1_config.encryption_keys.clone().unwrap_or_default(),
+                encryption_keys: self.encryption_keys.clone().unwrap_or_default(),
                 commands,
                 backfill_commands,
                 attestation,
@@ -1310,7 +1329,7 @@ where
             "Discovered enabled tokens from L1"
         );
 
-        let mut registry = self.l1_config.enabled_tokens.write();
+        let mut registry = self.enabled_tokens.write();
         registry.clear();
         registry.extend(enabled_tokens);
         Ok(())
@@ -1392,11 +1411,10 @@ where
             ctx.beacon_engine_handle.clone(),
             ctx.node.payload_builder_handle().clone(),
             self.deposit_queue.clone(),
-            self.l1_config.block_tracker.clone(),
+            self.l1_block_tracker.clone(),
             last_header,
             fee_recipient,
-            self.l1_config
-                .encryption_keys
+            self.encryption_keys
                 .clone()
                 .expect("sequencer mode configures deposit decryption keys"),
             self.portal_address,
@@ -1593,6 +1611,10 @@ where
         ZoneAddOns::new(
             self.deposit_queue.clone(),
             self.l1_config.clone(),
+            self.l1_state_cache.clone(),
+            self.enabled_tokens.clone(),
+            self.l1_block_tracker.clone(),
+            self.encryption_keys.clone(),
             self.portal_address,
             self.redacted_rpc_config.clone(),
             self.sequencer_config.clone(),
