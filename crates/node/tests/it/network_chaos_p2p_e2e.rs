@@ -311,6 +311,15 @@ async fn resume_leadership_case(
     accepted_before_outage: [u64; 3],
     case: LeadershipFaultCase,
 ) -> eyre::Result<()> {
+    // Restore the P2P mesh first. An outgoing leader may produce its remaining pre-activation
+    // blocks as soon as L1 returns, and those live broadcasts must not be lost while peers are
+    // still reconnecting.
+    if case.planes.disconnects_p2p() {
+        network.resume_nodes(case.disconnected_nodes);
+        network
+            .wait_for_nodes_connected(case.disconnected_nodes, NETWORK_TIMEOUT)
+            .await?;
+    }
     if case.planes.disconnects_l1() {
         for &index in case.disconnected_nodes {
             l1_proxies[index].resume();
@@ -320,9 +329,6 @@ async fn resume_leadership_case(
                 .wait_for_connections_after(accepted_before_outage[index], 1, NETWORK_TIMEOUT)
                 .await?;
         }
-    }
-    if case.planes.disconnects_p2p() {
-        network.resume_nodes(case.disconnected_nodes);
     }
     Ok(())
 }
@@ -514,15 +520,31 @@ async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()
             // the activation block observable to B and C but impossible for A to consume before
             // its L1 and P2P links are cut.
             l1_proxies[OUTGOING_LEADER].pause_upstream_to_client(true);
+            let a_tempo_block = poll_until(
+                NETWORK_TIMEOUT,
+                POLL_INTERVAL,
+                "L1 to advance beyond A's frozen pre-activation anchor",
+                || async {
+                    let a_tempo_block = cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
+                    let l1_tip = cluster.l1.provider().get_block_number().await?;
+                    Ok((l1_tip > a_tempo_block.saturating_add(1)).then_some(a_tempo_block))
+                },
+            )
+            .await?;
             let (epoch, activation_tempo_block) =
                 submit_leadership_rotation_direct(&cluster, INCOMING_LEADER).await?;
             let accepted = disconnect_leadership_case(&network, &l1_proxies, case).await?;
             l1_proxies[OUTGOING_LEADER].pause_upstream_to_client(false);
 
-            let a_tempo_block = cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
+            let isolated_a_tempo_block =
+                cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
             eyre::ensure!(
-                a_tempo_block < activation_tempo_block,
-                "outgoing A consumed Tempo block {a_tempo_block} before being isolated at activation block {activation_tempo_block}"
+                isolated_a_tempo_block == a_tempo_block,
+                "outgoing A advanced from Tempo block {a_tempo_block} to {isolated_a_tempo_block} while L1 responses were paused"
+            );
+            eyre::ensure!(
+                isolated_a_tempo_block.saturating_add(1) < activation_tempo_block,
+                "outgoing A was not isolated before its final owned anchor: A is at Tempo block {isolated_a_tempo_block}, activation is {activation_tempo_block}"
             );
             (epoch, accepted)
         }
