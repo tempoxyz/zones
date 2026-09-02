@@ -63,7 +63,7 @@ crate::sol! {
         function owner() external view returns (address);
         function transferOwnership(address newOwner) external;
         function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
-        function zones(uint32 zoneId) external view returns (ZoneInfo memory);
+        function zones(uint32 id) external view returns (ZoneInfo memory info);
         function nextZoneId() external view returns (uint32);
         function isZonePortal(address portal) external view returns (bool);
     }

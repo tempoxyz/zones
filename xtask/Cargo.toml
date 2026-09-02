@@ -16,6 +16,7 @@ tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-evm.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
+tempo-precompiles-conformance = { package = "tempo-precompiles", git = "https://github.com/tempoxyz/tempo", rev = "bff370680f497fc6f6853ac89de1175d178a63ad", features = ["test-utils"] }
 tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-primitives.workspace = true

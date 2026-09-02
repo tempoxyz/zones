@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use eyre::bail;
-use tempo_precompiles::test_util::{
+use tempo_precompiles_conformance::test_util::{
     abi_conformance::{AbiSurface, compare_abi},
     foundry_artifact_path,
 };
@@ -35,8 +35,8 @@ const INTERFACES: &[InterfaceSpec] = &[
         source: "IZone.sol",
         rust: || AbiSurface::from_abi(&tempo_zone_contracts::TempoState::abi::contract()),
         ignored_functions: &[
-            "readTempoStorageSlot(address,bytes32) returns (bytes32) [view]",
-            "readTempoStorageSlots(address,bytes32[]) returns (bytes32[]) [view]",
+            "function readTempoStorageSlot(address account, bytes32 slot) view returns (bytes32)",
+            "function readTempoStorageSlots(address account, bytes32[] slots) view returns (bytes32[])",
         ],
     },
     interface!(IZoneInbox, "IZoneInbox"),

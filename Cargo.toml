@@ -189,27 +189,27 @@ revm = { version = "42.0.1", features = [
 ], default-features = false }
 
 # alloy
-alloy = { version = "2.3.0", default-features = false }
+alloy = { version = "2.4.1", default-features = false }
 alloy-chains = "0.2.36"
 alloy-hardforks = { version = "0.4.7", default-features = false }
-alloy-consensus = { version = "2.3.0", default-features = false }
-alloy-contract = { version = "2.3.0", default-features = false }
-alloy-eips = { version = "2.3.0", default-features = false }
+alloy-consensus = { version = "2.4.1", default-features = false }
+alloy-contract = { version = "2.4.1", default-features = false }
+alloy-eips = { version = "2.4.1", default-features = false }
 alloy-evm = { version = "0.38.0", default-features = false }
-alloy-genesis = { version = "2.3.0", default-features = false }
-alloy-json-abi = "1.6.1"
-alloy-network = { version = "2.3.0", default-features = false }
-alloy-primitives = { version = "1.6.1", default-features = false }
-alloy-provider = { version = "2.3.0", default-features = false }
+alloy-genesis = { version = "2.4.1", default-features = false }
+alloy-json-abi = { version = "1.7.1", default-features = false }
+alloy-network = { version = "2.4.1", default-features = false }
+alloy-primitives = { version = "1.7.1", default-features = false }
+alloy-provider = { version = "2.4.1", default-features = false }
 alloy-rlp = { version = "0.3.16", default-features = false }
-alloy-rpc-client = "2.3.0"
-alloy-rpc-types-debug = "2.3.0"
-alloy-rpc-types-engine = "2.3.0"
-alloy-rpc-types-eth = { version = "2.3.0" }
-alloy-signer = "2.3.0"
-alloy-signer-local = "2.3.0"
-alloy-sol-types = { version = "1.6.1", default-features = false }
-alloy-transport = "2.3.0"
+alloy-rpc-client = "2.4.1"
+alloy-rpc-types-debug = "2.4.1"
+alloy-rpc-types-engine = "2.4.1"
+alloy-rpc-types-eth = { version = "2.4.1" }
+alloy-signer = "2.4.1"
+alloy-signer-local = "2.4.1"
+alloy-sol-types = { version = "1.7.1", default-features = false }
+alloy-transport = "2.4.1"
 
 # commonware
 commonware-actor = "=2026.7.0"

@@ -76,8 +76,8 @@ crate::sol! {
         function lastFallbackNonce() external view returns (uint64);
         function pendingWithdrawalsCount() external view returns (uint256);
         function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory);
-        function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
-        function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
+        function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address zoneFallbackRecipient);
+        function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
         function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function WITHDRAWAL_BASE_GAS() external view returns (uint64);
