@@ -50,8 +50,9 @@ docker buildx bake \
   tempo-zone-prover-enclave
 ```
 
-CI supplies the downloaded devnet genesis as a named build context. The enclave payload stores it
-in `/etc/tempo/genesis/` and passes that directory to the prover explicitly through the image
+CI accepts one Tempo genesis URL per line through the `tempo_genesis_urls` workflow input and
+supplies the downloaded files as a named build context. The enclave payload stores them in
+`/etc/tempo/genesis/` and passes that directory to the prover explicitly through the image
 entrypoint.
 
 Convert the payload to an EIF with the repository's pinned Nitro CLI builder image, then build the
