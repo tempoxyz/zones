@@ -367,12 +367,13 @@ interface IZoneFactory {
     );
 
     error InvalidToken();
+    error TokenTransferPolicyNotSet();
+    error InvalidClosedLoopConfig();
     error NotOwner();
     error InvalidAdmin();
     error InvalidSequencerSet();
-    error InvalidClosedLoopConfig();
-    error DuplicateAllowedAccount();
-    error DuplicateZoneGateway();
+    error AlreadyInitialized();
+    error TokenMetadataTooLong();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
