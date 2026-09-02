@@ -1,5 +1,5 @@
 use super::*;
-use eyre::WrapErr as _;
+use eyre::{OptionExt as _, WrapErr as _};
 use std::collections::HashSet;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
@@ -562,12 +562,12 @@ impl L1Subscriber {
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
     ) -> Result<u64, L1SubscriberError> {
-        l1_provider
+        Ok(l1_provider
             .get_header_by_number(BlockNumberOrTag::Finalized)
             .await
             .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
             .map(|header| header.number())
-            .ok_or_else(|| eyre::eyre!("L1 finalized block is not available").into())
+            .ok_or_eyre("L1 finalized block is not available")?)
     }
 
     /// Synchronize all missing blocks through the current finalized L1 head.
@@ -653,16 +653,17 @@ impl L1Subscriber {
                     block_tracker.wait_for_capacity(block_number).await?;
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let header_resp = async {
-                        let header = provider.get_header_by_number(block_number.into()).await?;
-                        Ok::<_, L1SubscriberError>(header.ok_or_else(|| {
-                            eyre::eyre!("L1 header not found for block {block_number}")
-                        })?)
-                    }
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
+                    let header_resp =
+                        async {
+                            let header = provider.get_header_by_number(block_number.into()).await?;
+                            Ok::<_, L1SubscriberError>(header.ok_or_eyre(format!(
+                                "L1 header not found for block {block_number}"
+                            ))?)
+                        }
+                        .await
+                        .inspect_err(|_| {
+                            fetch_failures.increment(1);
+                        })?;
                     let block_hash = header_resp.hash();
                     let block = NumHash::new(block_number, block_hash);
                     let expected_receipts_root = header_resp.receipts_root();
@@ -966,7 +967,9 @@ async fn fetch_and_verify_receipts_for_header(
     let receipts = provider
         .get_block_receipts(BlockId::hash(block_hash))
         .await?
-        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number} ({block_hash})"))?;
+        .ok_or_eyre(format!(
+            "no receipts for block {block_number} ({block_hash})"
+        ))?;
     verify_receipts_against_header(
         block,
         expected_receipts_root,
