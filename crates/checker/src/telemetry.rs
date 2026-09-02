@@ -168,6 +168,20 @@ impl CheckerMetrics {
 /// Log authenticated protocol activity after a Zone block is verified.
 pub(crate) fn log_verified_activity(tempo: &L1BlockEvidence, l2: &L2BlockEvidence, zone: BlockRef) {
     let tempo_ref = BlockRef::from(tempo.block());
+    for (token, movement) in tempo.custody_movements() {
+        if !movement.unattributed_inflow.is_zero() {
+            tracing::info!(
+                target: "zone::checker",
+                zone_block = zone.number,
+                zone_hash = %zone.hash,
+                tempo_block = tempo_ref.number,
+                tempo_hash = %tempo_ref.hash,
+                %token,
+                amount = %movement.unattributed_inflow,
+                "observed unattributed Portal inflow"
+            );
+        }
+    }
     for (index, event) in (0u64..).zip(tempo.portal_events()) {
         log_tempo_event(
             event,
@@ -187,12 +201,14 @@ fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
         L1PortalEvent::DepositMade {
             token,
             net_amount,
+            fee,
             deposit_number,
         } => activity_log!(
             context,
             activity_event::PORTAL_DEPOSIT_ACCOUNTED,
             %token,
             amount = %net_amount,
+            %fee,
             deposit_number,
             "accounted authenticated Portal deposit"
         ),

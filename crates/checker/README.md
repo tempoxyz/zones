@@ -16,6 +16,8 @@ For every canonical Zone block, the checker independently derives:
 - Each enabled token's expected Zone supply from those entitlements.
 - Portal liabilities for circulating supply, pending deposits, pending
   withdrawals, and pending refunds.
+- Every Portal custody outflow and the exact custody change across each imported
+  Tempo block, including protocol fees.
 - The recipient and amount of every Inbox mint from its authenticated bridge
   lifecycle event.
 - Every user withdrawal's exact TIP-20 debit and burn, including sponsored
@@ -36,14 +38,24 @@ affect the aggregate solvency model are retained. Genesis bridge cursors are
 checked only to establish the empty bootstrap baseline.
 
 It then reads affected balances and every enabled token's supply from the exact
-Zone post-state and reads Portal custody at the exact imported Tempo block. The
-required invariants are:
+Zone post-state. Portal custody is verified at both the imported Tempo block and
+its parent. The tip read is retained after durable verification and reused as
+the next block's parent; startup, coordinate mismatches, and newly enabled
+tokens fall back to exact parent reads. The required invariants are:
 
 ```text
 Zone balance(account, token) == derived entitlement(account, token)
 Zone totalSupply(token)      == sum of derived entitlements(token)
+Portal custody(tip)          == Portal custody(parent) + observed inflow - observed outflow
 Portal custody(token)        >= supply + deposits + withdrawals + refunds
 ```
+
+Receipt-local TIP-20 transfers must cover every protocol-required inflow and
+must exactly match every protocol-authorized outflow. Additional inbound
+transfers are accepted as unattributed surplus; they cannot authorize or hide
+an unrelated outflow. Fee amounts emitted by the Portal are included in these
+custody movements, so enabling nonzero fees requires no checker database
+migration or historical backfill.
 
 The checker reads all enabled-token supplies every block and reads balances for
 accounts touched by that block. Its durable entitlement ledger carries earlier

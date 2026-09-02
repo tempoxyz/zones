@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, U256};
 
-use super::{AccountKey, AccountingError, BalanceChange, Effect, LiabilityKind, State, TokenState};
+use super::{
+    AccountKey, AccountingError, BalanceChange, Effect, LiabilityKind, PortalBalanceChange, State,
+    TokenState,
+};
 
 fn address(byte: u8) -> Address {
     Address::repeat_byte(byte)
@@ -224,6 +227,41 @@ fn checks_full_portal_liability() {
     assert!(matches!(
         state.verify_portal_balances([(token, U256::from(161))]),
         Err(AccountingError::CollateralShortfall { .. })
+    ));
+}
+
+#[test]
+fn custody_conservation_detects_a_loss_hidden_by_surplus() {
+    let token = address(1);
+    let mut state = state_with_tokens([token]);
+    state
+        .apply(&[Effect::Account {
+            key: AccountKey::new(token, address(2)),
+            change: BalanceChange::Credit(U256::from(100)),
+        }])
+        .unwrap();
+
+    state
+        .verify_portal_balances([(token, U256::from(103))])
+        .unwrap();
+    state
+        .verify_portal_balance_changes([PortalBalanceChange {
+            token,
+            parent_balance: U256::from(100),
+            actual: U256::from(103),
+            inflow: U256::from(10),
+            outflow: U256::from(7),
+        }])
+        .unwrap();
+    assert!(matches!(
+        state.verify_portal_balance_changes([PortalBalanceChange {
+            token,
+            parent_balance: U256::from(110),
+            actual: U256::from(103),
+            inflow: U256::ZERO,
+            outflow: U256::ZERO,
+        }]),
+        Err(AccountingError::CustodyMismatch { .. })
     ));
 }
 

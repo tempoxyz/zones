@@ -96,8 +96,9 @@ pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
 pub use subscriber::{
-    AuthenticatedPortalLogs, L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink,
-    MAX_L1_LOOKAHEAD_BLOCKS, verify_receipts_against_header,
+    AuthenticatedPortalEvidence, AuthenticatedPortalReceipt, L1BlockTracker, L1Subscriber,
+    L1SubscriberConfig, LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS, is_portal_transfer,
+    verify_receipts_against_header,
 };
 
 #[cfg(test)]
