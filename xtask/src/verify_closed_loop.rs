@@ -8,11 +8,9 @@ use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{
-    ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal, ZonePortal::Role as PortalRole,
-};
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZonePortal, ZonePortal::Role as PortalRole};
 
-use crate::zone_utils::{find_zone_deployment_block, normalize_http_rpc};
+use crate::zone_utils::{find_zone_deployment_block, normalize_http_rpc, zone_factory_info_at};
 
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
@@ -102,12 +100,10 @@ impl VerifyClosedLoop {
             .await
             .wrap_err("failed reading Earn router configuration")?;
 
-        let zone = ZoneFactory::new(ZONE_FACTORY_ADDRESS, &provider)
-            .zones(zone_id)
-            .block(snapshot_block_id)
-            .call()
-            .await
-            .wrap_err("failed resolving Zone through ZoneFactory")?;
+        let zone =
+            zone_factory_info_at(&provider, ZONE_FACTORY_ADDRESS, zone_id, snapshot_block_id)
+                .await
+                .wrap_err("failed resolving Zone through ZoneFactory")?;
         ensure!(
             zone.portal != Address::ZERO,
             "router targets unknown Zone {zone_id}"

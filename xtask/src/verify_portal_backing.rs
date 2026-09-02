@@ -8,12 +8,10 @@ use alloy::{
 use eyre::{WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{
-    IZoneInbox, ZONE_FACTORY_ADDRESS, ZONE_INBOX_ADDRESS, ZoneFactory, ZonePortal,
-};
+use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZONE_INBOX_ADDRESS, ZonePortal};
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::normalize_http_rpc;
+use crate::zone_utils::{normalize_http_rpc, zone_factory_info_at, zone_factory_is_portal_at};
 
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
@@ -85,7 +83,6 @@ impl VerifyPortalBacking {
         let l1_block = BlockId::number(l1_snapshot);
         let zone_block = BlockId::number(zone_snapshot);
         let portal = ZonePortal::new(self.portal, &l1);
-        let factory = ZoneFactory::new(ZONE_FACTORY_ADDRESS, &l1);
         let l1_token = TIP20Token::new(self.token, &l1);
         let zone_token = TIP20Token::new(self.token, &zone);
         let inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, &zone);
@@ -99,8 +96,7 @@ impl VerifyPortalBacking {
             .add(portal.depositCount())
             .add(portal.lastProcessedDepositNumber())
             .add(portal.zoneId())
-            .add(portal.isTokenEnabled(self.token))
-            .add(factory.isZonePortal(self.portal));
+            .add(portal.isTokenEnabled(self.token));
         let zone_reads = zone
             .multicall()
             .block(zone_block)
@@ -116,18 +112,16 @@ impl VerifyPortalBacking {
                 l1_processed_deposits,
                 portal_zone_id,
                 token_enabled,
-                portal_registered,
             ),
             (zone_supply, zone_processed_deposits, inbox_portal),
         ) = tokio::try_join!(l1_reads.aggregate(), zone_reads.aggregate())
             .wrap_err("failed reading backing state")?;
 
-        let factory_zone = factory
-            .zones(portal_zone_id)
-            .block(l1_block)
-            .call()
-            .await
-            .wrap_err("failed reading ZoneFactory registration")?;
+        let (portal_registered, factory_zone) = tokio::try_join!(
+            zone_factory_is_portal_at(&l1, ZONE_FACTORY_ADDRESS, self.portal, l1_block,),
+            zone_factory_info_at(&l1, ZONE_FACTORY_ADDRESS, portal_zone_id, l1_block,),
+        )
+        .wrap_err("failed reading ZoneFactory registration")?;
         let expected_zone_chain_id =
             zone_chain_id(l1_chain_id, portal_zone_id).wrap_err("failed deriving Zone chain ID")?;
 

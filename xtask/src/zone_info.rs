@@ -1,6 +1,6 @@
 use alloy::{
     network::TransactionBuilder,
-    primitives::{Address, Bytes, TxKind, U256},
+    primitives::{Address, Bytes, TxKind},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     sol_types::SolCall,

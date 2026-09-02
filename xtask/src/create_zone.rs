@@ -4,7 +4,7 @@
 
 use alloy::{
     network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
-    primitives::{Address, Bytes, TxKind, address, keccak256},
+    primitives::{Address, Bytes, TxKind, address},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
