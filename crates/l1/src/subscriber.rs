@@ -430,6 +430,14 @@ pub enum L1SubscriberError {
 }
 
 impl L1SubscriberError {
+    fn fatal_from_err(block_number: u64, stage: &'static str) -> impl FnOnce(eyre::Report) -> Self {
+        move |source| Self::Fatal {
+            block_number,
+            stage,
+            source,
+        }
+    }
+
     pub(crate) fn should_retry(&self) -> bool {
         !matches!(self, Self::Fatal { .. })
     }
@@ -701,14 +709,13 @@ impl L1Subscriber {
             // block before anything is enqueued or any cache advances.
             let processed_events = self
                 .extract_events(block_number, &receipts)
-                .map_err(|err| {
+                .inspect_err(|_| {
                     self.subscriber_metrics.decode_fence_failures.increment(1);
-                    L1SubscriberError::Fatal {
-                        block_number,
-                        stage: "portal event decoding",
-                        source: err,
-                    }
-                })?;
+                })
+                .map_err(L1SubscriberError::fatal_from_err(
+                    block_number,
+                    "portal event decoding",
+                ))?;
             let (events, invalidated, portal_logs) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
@@ -721,11 +728,10 @@ impl L1Subscriber {
                 let transition =
                     events
                         .final_leader_transition()
-                        .map_err(|err| L1SubscriberError::Fatal {
+                        .map_err(L1SubscriberError::fatal_from_err(
                             block_number,
-                            stage: "leadership event validation",
-                            source: err,
-                        })?;
+                            "leadership event validation",
+                        ))?;
                 if let Some(transition) = transition {
                     sink.apply_leader_transition(transition)
                         .wrap_err_with(|| {
@@ -733,21 +739,19 @@ impl L1Subscriber {
                                 "cannot apply the leadership transition from block {block_number}"
                             )
                         })
-                        .map_err(|source| L1SubscriberError::Fatal {
+                        .map_err(L1SubscriberError::fatal_from_err(
                             block_number,
-                            stage: "leadership transition application",
-                            source,
-                        })?;
+                            "leadership transition application",
+                        ))?;
                 }
             }
             if let Some(keys) = &self.config.encryption_keys {
                 for rotation in &events.encryption_key_rotations {
                     keys.apply_rotation(rotation)
-                        .map_err(|source| L1SubscriberError::Fatal {
+                        .map_err(L1SubscriberError::fatal_from_err(
                             block_number,
-                            stage: "encryption key rotation application",
-                            source,
-                        })?;
+                            "encryption key rotation application",
+                        ))?;
                 }
             }
             let appended = self
