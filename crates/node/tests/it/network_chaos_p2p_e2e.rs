@@ -728,39 +728,51 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     )
     .await?;
 
-    // The transaction remains only in B's local pool while every P2P path involving B is down.
-    // Its eventual inclusion under B creates the settlement boundary this test follows.
-    let a_fenced_height = cluster.nodes[0].provider().get_block_number().await?;
-    let b_fenced_height = cluster.nodes[1].provider().get_block_number().await?;
+    // B may build locally while isolated, but its transaction and blocks cannot reach the
+    // connected A/C partition. Its eventual canonical inclusion under B creates the settlement
+    // boundary this test follows.
+    let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
+    let c_fenced_height = cluster.nodes[FOLLOWER]
+        .provider()
+        .get_block_number()
+        .await?;
     let withdrawal_hash = account.submit_withdrawal(WITHDRAWAL_AMOUNT).await?;
-    eyre::ensure!(
-        cluster.nodes[0]
-            .provider()
-            .get_transaction_by_hash(withdrawal_hash)
-            .await?
-            .is_none(),
-        "A received B's withdrawal while their P2P links were disconnected"
-    );
+    for &index in &[OUTGOING_LEADER, FOLLOWER] {
+        eyre::ensure!(
+            cluster.nodes[index]
+                .provider()
+                .get_transaction_by_hash(withdrawal_hash)
+                .await?
+                .is_none(),
+            "node {index} received B's withdrawal while their P2P links were disconnected"
+        );
+    }
     tokio::time::sleep(Duration::from_secs(2)).await;
     eyre::ensure!(
-        cluster.nodes[0].provider().get_block_number().await? == a_fenced_height,
+        cluster.nodes[OUTGOING_LEADER]
+            .provider()
+            .get_block_number()
+            .await?
+            == a_fenced_height,
         "outgoing leader A produced while incoming leader B was P2P-isolated"
     );
     eyre::ensure!(
-        cluster.nodes[1].provider().get_block_number().await? == b_fenced_height,
-        "incoming leader B produced a private block while P2P-isolated"
-    );
-    eyre::ensure!(
-        cluster.nodes[1]
+        cluster.nodes[FOLLOWER]
             .provider()
-            .get_transaction_receipt(withdrawal_hash)
+            .get_block_number()
             .await?
-            .is_none(),
-        "B included the withdrawal before its P2P links were restored"
+            == c_fenced_height,
+        "follower C advanced from B's private chain while B was P2P-isolated"
     );
     let batches_at_fence = batch_count(&portal).await?;
 
-    network.resume_nodes(&[1]);
+    network.resume_nodes(&[INCOMING_LEADER]);
+    network
+        .wait_for_nodes_connected(&[INCOMING_LEADER], NETWORK_TIMEOUT)
+        .await?;
     let receipt = poll_until(
         NETWORK_TIMEOUT,
         POLL_INTERVAL,
