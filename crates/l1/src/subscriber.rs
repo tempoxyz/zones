@@ -2,7 +2,8 @@ use crate::queue::DeferredPortalWork;
 
 use super::*;
 use eyre::{OptionExt as _, WrapErr as _};
-use std::collections::HashSet;
+use futures::stream;
+use std::{collections::HashSet, ops::RangeInclusive};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
@@ -740,80 +741,16 @@ impl L1Subscriber {
         from: u64,
         to: u64,
     ) -> Result<(), L1SubscriberError> {
-        use futures::stream;
-
-        let concurrency = self.config.l1_fetch_concurrency.max(1);
-        let subscriber_metrics = self.subscriber_metrics.clone();
-        let block_tracker = self.config.block_tracker.clone();
-
-        let mut fetched = stream::iter(from..=to)
-            .map(move |block_number| {
-                let provider = l1_provider;
-                let subscriber_metrics = subscriber_metrics.clone();
-                let block_tracker = block_tracker.clone();
-                async move {
-                    block_tracker.wait_for_capacity(block_number).await?;
-                    let start = std::time::Instant::now();
-                    let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let header_resp =
-                        async {
-                            let header = provider.get_header_by_number(block_number.into()).await?;
-                            Ok::<_, L1SubscriberError>(header.ok_or_eyre(format!(
-                                "L1 header not found for block {block_number}"
-                            ))?)
-                        }
-                        .await
-                        .inspect_err(|_| {
-                            fetch_failures.increment(1);
-                        })?;
-                    let block_hash = header_resp.hash();
-                    let block = NumHash::new(block_number, block_hash);
-                    let expected_receipts_root = header_resp.receipts_root();
-                    let expected_logs_bloom = header_resp.logs_bloom();
-                    let receipts = fetch_and_verify_receipts_for_header(
-                        provider,
-                        block,
-                        expected_receipts_root,
-                        expected_logs_bloom,
-                    )
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
-                    let elapsed = start.elapsed();
-                    debug!(
-                        block_number,
-                        %block_hash,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        receipts = receipts.len(),
-                        "Fetched and validated L1 block data"
-                    );
-                    let header = header_resp.inner.inner;
-                    Ok::<_, L1SubscriberError>((header, receipts))
-                }
-            })
-            .buffered(concurrency);
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to);
 
         let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
 
-        while let Some((header, receipts)) = fetched.try_next().await? {
-            let block_number = header.number();
-            // Decoding fails closed: a decode failure of a recognized portal log aborts this
-            // block before anything is enqueued or any cache advances.
-            let processed_events = self
-                .extract_events(block_number, &receipts)
-                .inspect_err(|_| {
-                    self.subscriber_metrics.decode_fence_failures.increment(1);
-                })
-                .map_err(L1SubscriberError::fatal_from_err(
-                    block_number,
-                    "portal event decoding",
-                ))?;
+        while let Some((sealed, processed_events)) = blocks.try_next().await? {
+            let block_number = sealed.number();
             let (events, invalidated, portal_logs) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
@@ -900,6 +837,77 @@ impl L1Subscriber {
         Ok(())
     }
 
+    /// Fetch, authenticate, and decode an inclusive finalized L1 block range in order.
+    ///
+    /// RPC work is pipelined up to the configured concurrency.
+    fn fetch_l1_blocks<'a>(
+        &'a self,
+        l1_provider: &'a impl Provider<TempoNetwork>,
+        range: RangeInclusive<u64>,
+    ) -> impl Stream<
+        Item = Result<(SealedHeader<TempoHeader>, L1ProcessedEvents), L1SubscriberError>,
+    > + Send
+    + 'a {
+        let concurrency = self.config.l1_fetch_concurrency.max(1);
+        let subscriber_metrics = self.subscriber_metrics.clone();
+        let block_tracker = self.config.block_tracker.clone();
+
+        stream::iter(range)
+            .map(move |block_number| {
+                let provider = l1_provider;
+                let subscriber_metrics = subscriber_metrics.clone();
+                let block_tracker = block_tracker.clone();
+                async move {
+                    block_tracker.wait_for_capacity(block_number).await?;
+                    let start = std::time::Instant::now();
+                    let fetch_failures = &subscriber_metrics.fetch_failures;
+                    let header_resp =
+                        async {
+                            let header = provider.get_header_by_number(block_number.into()).await?;
+                            Ok::<_, L1SubscriberError>(header.ok_or_eyre(format!(
+                                "L1 header not found for block {block_number}"
+                            ))?)
+                        }
+                        .await
+                        .inspect_err(|_| {
+                            fetch_failures.increment(1);
+                        })?;
+                    let block_hash = header_resp.hash();
+                    let receipts = fetch_and_verify_receipts_for_header(
+                        provider,
+                        NumHash::new(block_number, block_hash),
+                        header_resp.receipts_root(),
+                        header_resp.logs_bloom(),
+                    )
+                    .await
+                    .inspect_err(|_| {
+                        fetch_failures.increment(1);
+                    })?;
+                    // Abort before enqueueing work or advancing caches if a portal log fails to decode.
+                    let processed_events = self
+                        .extract_events(block_number, &receipts)
+                        .inspect_err(|_| {
+                            subscriber_metrics.decode_fence_failures.increment(1);
+                        })
+                        .map_err(L1SubscriberError::fatal_from_err(
+                            block_number,
+                            "portal event decoding",
+                        ))?;
+                    let elapsed = start.elapsed();
+                    debug!(
+                        block_number,
+                        %block_hash,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        receipts = receipts.len(),
+                        "Fetched, validated, and decoded L1 block data"
+                    );
+                    let sealed = SealedHeader::seal_slow(header_resp.inner.inner);
+                    Ok::<_, L1SubscriberError>((sealed, processed_events))
+                }
+            })
+            .buffered(concurrency)
+    }
+
     /// Run the L1 subscriber, reconnecting after transient RPC failures.
     ///
     /// The subscriber follows only the L1 `finalized` tag. WebSocket
@@ -943,7 +951,7 @@ impl L1Subscriber {
     async fn recover_deferred_work(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<()> {
+    ) -> Result<(), L1SubscriberError> {
         let Some(from) = self.config.deferred_work_start else {
             return Ok(());
         };
@@ -955,25 +963,10 @@ impl L1Subscriber {
             return Ok(());
         }
 
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number);
         let mut deferred: Option<DeferredPortalWork> = None;
-        for block_number in from..=checkpoint.number {
-            let header = l1_provider
-                .get_header_by_number(block_number.into())
-                .await?
-                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
-            let block_hash = header.hash();
-            let receipts = fetch_and_verify_receipts_for_header(
-                l1_provider,
-                NumHash::new(block_number, block_hash),
-                header.receipts_root(),
-                header.logs_bloom(),
-            )
-            .await?;
-            let (events, _, _) = self.extract_events(block_number, &receipts)?;
-            let block = L1BlockDeposits {
-                header: SealedHeader::seal_slow(header.inner.inner),
-                events,
-            };
+        while let Some((header, (events, _, _))) = blocks.try_next().await? {
+            let block = L1BlockDeposits { header, events };
             if let Some(deferred) = &mut deferred {
                 deferred.push(block);
             } else {
@@ -981,11 +974,12 @@ impl L1Subscriber {
             }
         }
         let deferred = deferred.expect("the recovered deferred range is nonempty");
-        eyre::ensure!(
-            deferred.last_num_hash() == checkpoint,
-            "recovered deferred L1 range ends at {:?}, but the local checkpoint is {checkpoint:?}",
-            deferred.last_num_hash()
-        );
+        if deferred.last_num_hash() != checkpoint {
+            return Err(eyre::eyre!(
+                "recovered deferred L1 range ends at {:?}, but the local checkpoint is {checkpoint:?}",
+                deferred.last_num_hash()
+            ).into());
+        }
         self.deposit_queue.restore_deferred(deferred)?;
         info!(
             from,
