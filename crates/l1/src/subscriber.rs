@@ -746,6 +746,7 @@ impl L1Subscriber {
                 self.config
                     .block_tracker
                     .mark_finalized_target_ready(refreshed)?;
+                self.deposit_queue.notify_consumer();
                 self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
                 return Ok(next_block);
             }
