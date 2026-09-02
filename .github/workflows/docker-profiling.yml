@@ -2,11 +2,6 @@ name: Docker Build (Profiling)
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag for the profiling image (e.g., profiling-latest)"
-        type: string
-        default: "profiling"
 
 env:
   REGISTRY: ghcr.io/tempoxyz
@@ -34,8 +29,8 @@ jobs:
           images: ${{ env.REGISTRY }}/tempo-zone
           bake-target: tempo-zone
           tags: |
-            type=raw,value=${{ github.event.inputs.tag }}
-            type=sha,prefix=${{ github.event.inputs.tag }}-sha-
+            type=raw,value=profiling
+            type=sha,prefix=profiling-sha-
 
       - name: Log in to Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0

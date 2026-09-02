@@ -65,13 +65,24 @@ target "_common" {
 }
 
 target "tempo-zone" {
-  inherits = ["_common", "docker-metadata"]
-  target = "tempo-zone"
+  inherits = ["docker-metadata"]
+  dockerfile = "docker/Dockerfile.reproducible"
+  context = "."
+  target = "tempo-zone-reproducible"
+  args = {
+    SOURCE_DATE_EPOCH = "${SOURCE_DATE_EPOCH}"
+    GIT_SHA = "${GIT_SHA}"
+    VERSION = "${VERSION}"
+  }
+  labels = {
+    "org.opencontainers.image.description" = "Production tempo-zone image; verification covers the tempo-zone binary, runtime execution config, and CA bundle."
+    "org.tempoxyz.reproducible.verification-scope" = "tempo-zone-binary-runtime-config-ca-bundle"
+  }
+  platforms = ["linux/amd64"]
 }
 
-# Non-production candidate image for the manual reproducible-image
-# verification workflow. This uses Dockerfile.reproducible's dedicated build
-# profile and flags, rather than the normal Dockerfile with a profile override.
+# Non-production candidate image for the manual reproducible-image verification
+# workflow. The production target above uses the same binary build contract.
 target "tempo-zone-reproducible" {
   dockerfile = "docker/Dockerfile.reproducible"
   context = "."
