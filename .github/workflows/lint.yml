@@ -13,9 +13,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   rust:
     permissions:
       contents: read
+    needs: cargo-cooldown
     uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@98b1081dcf34361b576aca2ab3041772708582ef
     with:
       rust-toolchain: nightly-2026-02-21

@@ -30,8 +30,14 @@ env:
   FOUNDRY_REF: 6902a96211da7bcc3d9c4d8e97910ac5c9d5d2c6
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   conformance:
     name: ABI and storage conformance
+    needs: cargo-cooldown
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
