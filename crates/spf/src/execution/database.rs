@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::B256Set};
 use alloy_rlp::Decodable as _;
 use revm::{
     Database,
@@ -96,10 +96,19 @@ impl WitnessDatabase {
         bundle_state: BundleState,
     ) -> Result<B256, StatelessSparseTrieError> {
         // Advance the trie from the previous block's root using this block's changes.
+        // `is_storage_known` marks accounts whose bundle storage is a complete view after a
+        // create/reset. Keep that information separately because current Reth intentionally no
+        // longer represents resets on `HashedStorage`.
+        let reset_storage = bundle_state
+            .state()
+            .iter()
+            .filter(|(_, account)| account.status.is_storage_known())
+            .map(|(address, _)| keccak256(address))
+            .collect::<B256Set>();
         let state = reth_trie_common::HashedPostState::from_bundle_state::<
             reth_trie_common::KeccakKeyHasher,
         >(bundle_state.state());
-        let state_root = self.state.calculate_state_root(state)?;
+        let state_root = self.state.calculate_state_root(state, &reset_storage)?;
 
         // Keep database read caches coherent with the newly advanced trie.
         for (address, account) in bundle_state.state() {

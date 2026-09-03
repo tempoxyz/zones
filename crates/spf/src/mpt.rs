@@ -6,7 +6,10 @@
 //! [`reth_trie_sparse::SparseStateTrie`], and checked against the committed
 //! pre-state root before it can serve reads.
 
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::B256Map};
+use alloy_primitives::{
+    Address, B256, Bytes, U256, keccak256,
+    map::{B256Map, B256Set},
+};
 use alloy_rlp::Decodable;
 use reth_trie_common::{DecodedMultiProofV2, EMPTY_ROOT_HASH, HashedPostState, TrieAccount};
 use reth_trie_sparse::{LeafUpdate, RevealableSparseTrie, SparseStateTrie, TrieNodeEpoch};
@@ -119,9 +122,17 @@ impl StatelessSparseTrie {
     /// calculate the resulting state root.
     pub(crate) fn calculate_state_root(
         &mut self,
-        state: HashedPostState,
+        mut state: HashedPostState,
+        reset_storage: &B256Set,
     ) -> Result<B256, StatelessSparseTrieError> {
         guarded(|| {
+            // Reth no longer carries the old `HashedStorage::wiped` flag into
+            // `HashedPostState`. Preserve reset accounts explicitly, including resets that leave
+            // no slots behind, so their post-state storage root is still recomputed as empty.
+            for hashed_address in reset_storage {
+                state.storages.entry(*hashed_address).or_default();
+            }
+
             let HashedPostState { accounts, storages } = state;
             let mut storage_updates = storages.into_iter().collect::<Vec<_>>();
             storage_updates.sort_unstable_by_key(|(address, _)| *address);
@@ -130,18 +141,24 @@ impl StatelessSparseTrie {
             for (hashed_address, storage) in storage_updates {
                 let current_account = self.trie_account(hashed_address)?;
                 let has_revealed_storage = self.inner.storage_trie_ref(&hashed_address).is_some();
-                if current_account
-                    .as_ref()
-                    .is_some_and(|account| account.storage_root != EMPTY_ROOT_HASH)
+                let resets_storage = reset_storage.contains(&hashed_address);
+                if !resets_storage
+                    && current_account
+                        .as_ref()
+                        .is_some_and(|account| account.storage_root != EMPTY_ROOT_HASH)
                     && !has_revealed_storage
                 {
                     return Err(StatelessSparseTrieError::IncompleteStateUpdate);
                 }
 
-                let mut storage_trie = self
-                    .inner
-                    .take_storage_trie(&hashed_address)
-                    .unwrap_or_else(RevealableSparseTrie::revealed_empty);
+                let current_storage_trie = self.inner.take_storage_trie(&hashed_address);
+                let mut storage_trie = if resets_storage {
+                    // A known-storage bundle account contains the complete post-reset slot set.
+                    // Start from an empty trie rather than retaining any proven parent slots.
+                    RevealableSparseTrie::revealed_empty()
+                } else {
+                    current_storage_trie.unwrap_or_else(RevealableSparseTrie::revealed_empty)
+                };
 
                 let mut updates = storage
                     .storage
