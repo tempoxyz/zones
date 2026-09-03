@@ -132,7 +132,7 @@ pub(crate) struct CheckerMetrics {
     pub(crate) observed_zone_height: Gauge,
     /// Delivered blocks not yet verified.
     pub(crate) verification_lag_blocks: Gauge,
-    /// One when a deterministic finding has stopped verification.
+    /// One when a durable finding has stopped verification.
     pub(crate) divergence_active: Gauge,
     /// One when an unrecoverable checker error has disabled verification.
     pub(crate) disabled: Gauge,
@@ -140,8 +140,6 @@ pub(crate) struct CheckerMetrics {
     pub(crate) acquisition_retries_total: Counter,
     /// Number of verified Zone blocks.
     pub(crate) verified_zone_blocks_total: Counter,
-    /// Number of checker-state rebuilds after local history changes.
-    pub(crate) recovery_rebuilds_total: Counter,
 }
 
 impl CheckerMetrics {

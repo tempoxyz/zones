@@ -35,6 +35,7 @@ zone-checker = { workspace = true, optional = true }
 # reth
 reth-chain-state.workspace = true
 reth-chainspec.workspace = true
+reth-config = { workspace = true, optional = true }
 reth-eth-wire-types.workspace = true
 reth-ethereum = { workspace = true, features = [
   "node",
@@ -135,6 +136,7 @@ default = []
 asm-keccak = ["alloy-primitives/asm-keccak"]
 cli = [
   "dep:clap",
+  "dep:reth-config",
   "dep:reth-ethereum",
   "dep:reth-tracing",
   "dep:url",

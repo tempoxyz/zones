@@ -122,9 +122,13 @@ bounce-backs are exempt because they do not debit a Zone user.
 
 Transient acquisition failures retry without advancing the verified tip. A
 deterministic mismatch records a durable divergence and freezes verification at
-the preceding block. Zones are append-only, so an unexpected revert or a saved
-tip absent from local history resets the checker to authenticated genesis for
-replay rather than unwinding derived state. Unrecoverable configuration,
-persistence, or provider failures disable verification while the ExEx drains
-notifications. Observe mode never changes Zone execution or terminates the
-node.
+the preceding block. Zones are append-only, so an unexpected revert, canonical
+tip change, or broken parent link is persisted as a finding rather than
+unwinding derived state. A saved verified tip ahead of Reth's committed Finish
+checkpoint waits for persistence to catch up; once it does, the canonical hash
+must match. The checker never resets durable state behind a verified height.
+Unrecoverable configuration, persistence, or provider failures disable
+verification while the ExEx drains notifications and acknowledges valid
+append-only commits so its WAL can finalize. Observe mode rejects pruning of
+provider history needed for restart, and never changes Zone execution or
+terminates the node.

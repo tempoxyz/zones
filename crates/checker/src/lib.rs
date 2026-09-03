@@ -12,12 +12,15 @@ mod telemetry;
 
 use std::{fmt, path::PathBuf, str::FromStr};
 
-use alloy_primitives::Address;
+use alloy_consensus::{TxReceipt, transaction::TxHashRef};
+use alloy_primitives::{Address, Log};
 use eyre::WrapErr as _;
 use reth_chainspec::ChainSpecProvider;
 use reth_exex::ExExContext;
-use reth_node_api::FullNodeComponents;
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_node_api::{FullNodeComponents, NodePrimitives, PrimitivesTy};
+use reth_storage_api::{
+    BlockReader, PruneCheckpointReader, StageCheckpointReader, StateProviderFactory,
+};
 use tempo_chainspec::spec::TempoHardforks;
 
 /// Whether an operation should be retried or disable the checker.
@@ -127,8 +130,16 @@ impl CheckerExEx {
     pub async fn run<Node>(self, mut ctx: ExExContext<Node>) -> eyre::Result<()>
     where
         Node: FullNodeComponents,
-        Node::Provider: BlockNumReader + ChainSpecProvider + StateProviderFactory,
-        <Node::Provider as ChainSpecProvider>::ChainSpec: TempoHardforks,
+        Node::Provider: BlockReader<
+                Block = <PrimitivesTy<Node::Types> as NodePrimitives>::Block,
+                Receipt = <PrimitivesTy<Node::Types> as NodePrimitives>::Receipt,
+            > + ChainSpecProvider<ChainSpec: TempoHardforks>
+            + PruneCheckpointReader
+            + StageCheckpointReader
+            + StateProviderFactory
+            + Clone,
+        <PrimitivesTy<Node::Types> as NodePrimitives>::SignedTx: TxHashRef,
+        <PrimitivesTy<Node::Types> as NodePrimitives>::Receipt: TxReceipt<Log = Log>,
     {
         runtime::run(self.config, &mut ctx).await
     }

@@ -80,27 +80,3 @@ pub(crate) struct Metadata {
     pub(crate) observed_zone: BlockRef,
     pub(crate) status: Status,
 }
-
-impl Metadata {
-    /// Classify one block coordinate against the verified tip.
-    pub(crate) fn classify(&self, number: u64, hash: B256) -> AppliedStatus {
-        if number > self.verified_zone.number {
-            AppliedStatus::New
-        } else if number == self.verified_zone.number && hash != self.verified_zone.hash {
-            AppliedStatus::Conflicts
-        } else {
-            AppliedStatus::Applied
-        }
-    }
-}
-
-/// Where one block coordinate stands relative to the verified tip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AppliedStatus {
-    /// Not yet verified.
-    New,
-    /// Already covered by the verified tip.
-    Applied,
-    /// Same height as the verified tip but a different hash.
-    Conflicts,
-}

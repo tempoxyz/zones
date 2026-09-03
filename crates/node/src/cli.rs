@@ -186,6 +186,20 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 handle.wait_for_node_exit().await
             }
             CheckerMode::Observe => {
+                let config_path = builder
+                    .config()
+                    .config
+                    .clone()
+                    .unwrap_or_else(|| builder.config().datadir().config());
+                let mut prune_config = builder.config().prune_config().unwrap_or_default();
+                prune_config.merge(reth_config::Config::from_path(config_path)?.prune);
+                eyre::ensure!(
+                    prune_config.segments.account_history.is_none()
+                        && prune_config.segments.storage_history.is_none()
+                        && prune_config.segments.bodies_history.is_none()
+                        && !prune_config.has_receipts_pruning(),
+                    "checker observe mode requires unpruned Zone state, bodies, and receipts; disable account history, storage history, bodies history, receipts, and receipt-log pruning, then resync if required history was already pruned"
+                );
                 info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
                 let node = node.with_portal_evidence_retention();
                 let checker = CheckerExEx::new(CheckerConfig {

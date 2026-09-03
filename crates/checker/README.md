@@ -59,6 +59,13 @@ and authenticating the same evidence from the configured archival Tempo RPC. It
 does not re-execute Tempo. Zone post-state is read through Reth's exact-block
 storage provider.
 
+Checker observe mode requires unpruned account history, storage history, block
+bodies, receipts, and receipt logs. Node startup validates the effective merged
+CLI and `reth.toml` pruning configuration because recovery walks exact blocks,
+receipts, and historical post-state. Sender recovery and transaction lookup
+pruning remain compatible. A data directory whose required history was already
+pruned must be resynced with checker-compatible pruning.
+
 ## Startup and recovery
 
 With `--checker.mode observe`, startup is self-contained:
@@ -75,7 +82,7 @@ With `--checker.mode observe`, startup is self-contained:
    the creation block.
 5. Create `<node datadir>/checker` atomically if it is missing, or validate and
    open it if it exists.
-6. Ask Reth to replay canonical Zone history after the durable verified tip.
+6. Walk canonical Zone blocks and receipts directly after the durable verified tip.
 
 The database is created in `<node datadir>/checker`; no separate checkpoint
 command is required. An existing database is opened only when its Zone, Tempo,
@@ -83,34 +90,68 @@ Portal, and creation identity matches the authenticated bootstrap result.
 
 MDBX stores current nonzero account rows, per-token accounting, metadata, and
 the active finding. Storage therefore scales with the current number of nonzero
-derived entitlements rather than Zone history. Zones are append-only; if the
-saved checker tip is absent from local Zone history or Reth reports an
-unexpected revert, the checker atomically resets to authenticated genesis and
-replays local history.
+derived entitlements rather than Zone history. A saved checker tip ahead of
+Reth's committed Finish checkpoint is treated as temporarily volatile and
+verification waits for persisted history to catch up. Once the database reaches
+that height, its hash must match; the checker never resets durable state behind a
+previously verified height. Zones are append-only, so a live Reth reorg or revert
+notification is persisted as a finding and disables verification rather than
+rewriting checker history.
 
-On normal restart, Reth replays notifications after the last durably verified
-Zone block. Each block transition is persisted before the ExEx acknowledges its
-height.
+On normal restart, the checker resumes from the block after its last durably
+verified Zone block. It verifies only blocks at or below Reth's committed Finish
+checkpoint. `FinishedHeight` follows the lower of that checkpoint and the
+delivered tip after the recovery boundary has been checked, so Reth cannot skip
+an ExEx notification that the checker has not consumed. A node that reports no
+Finish checkpoint at all counts as genesis only while it has committed nothing
+else; with committed history present the frontier is unreadable and the checker
+disables rather than silently treating it as genesis and never advancing.
 
 ## Failure behavior
 
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
-or acknowledging the block. Each retry budget is bounded. Tempo retries use
-exponential backoff, while unavailable local Zone state retries once per second.
-Pruned state disables immediately because it cannot recover.
+or acknowledging the block. Initial connection, bootstrap, and each block's
+verification have deadlines. Individual Tempo RPC requests are bounded so an
+accepted request that never answers disables verification and drops the Tempo
+provider, preventing abandoned WebSocket requests from accumulating or being
+replayed on reconnect. Other unavailable Tempo data and retryable RPC responses
+use exponential backoff under the enclosing bootstrap or block deadline, while
+unavailable local Zone state retries once per second. Pruned state disables
+immediately because it cannot recover. Alloy owns the established WebSocket
+lifecycle for live requests: it detects a dropped connection, reconnects with
+backoff, and replays them. If Alloy exhausts its finite reconnect budget,
+restarting the node creates a fresh provider and resumes from the last durably
+verified Zone block.
+
+While bootstrap or block verification is waiting, the checker continues
+consuming ExEx notifications without acknowledging unverified heights. It keeps
+only the latest delivered block reference and drops the full notification. It
+then walks canonical blocks and receipts directly from the local provider, one
+block at a time, from `verified + 1` to that captured tip. This avoids both
+buffering notification payloads and asking Reth to execute a second backfill.
+
+Zone history is append-only. Reorg and revert notifications disable verification
+immediately. Before persisting an observed tip, the checker confirms that it is
+still canonical; a missing or changed hash is a fatal invariant violation, not a
+recoverable fork. Each directly loaded block must also extend the durable
+verified hash.
 
 A deterministic mismatch records one durable finding, freezes the verified tip,
-and continues acknowledging subsequent notifications while recording how far the
-unchecked range extends. A finding remains active until the checker is rebuilt
-from authenticated genesis.
+and continues draining subsequent notifications while recording how far the
+unchecked range extends. A finding remains active until the checker database is
+explicitly rebuilt from authenticated genesis.
 
-An exhausted retry budget or an unrecoverable checker-local error disables the
-checker and drains ExEx notifications so it cannot terminate or stall Zone
-execution. Verification then stays disabled for the life of the process; since
-the checker runs as an ExEx inside the node, restarting the node attempts to
-resume from the last durably verified Zone block. Observe mode never changes
-block execution or consensus behavior; operators must alert on lag or an active
-divergence.
+An expired deadline, append-only invariant violation, or other unrecoverable
+checker-local error disables the checker. It continues draining notifications
+and acknowledges valid delivered commits so Reth can finalize its ExEx WAL.
+This is safe for an append-only Zone because observe mode rejects every pruning
+mode that could remove provider history needed to resume from the durable
+verified tip. While verifying, replay-history loss is terminal and is rejected
+before `FinishedHeight` advances. Verification stays disabled for the life of
+the process. Restarting the node attempts to resume from the last durably
+verified Zone block, and disables with an explicit resync error if required
+history is unavailable. Observe mode never changes block execution or consensus
+behavior; operators must alert on lag or an active divergence.
 
 The node's existing metrics endpoint exports:
 
@@ -122,7 +163,6 @@ The node's existing metrics endpoint exports:
 - `reth_tempo_zone_checker_disabled`
 - `reth_tempo_zone_checker_acquisition_retries_total`
 - `reth_tempo_zone_checker_verified_zone_blocks_total`
-- `reth_tempo_zone_checker_recovery_rebuilds_total`
 
 At minimum, alert when `disabled` or `divergence_active` is `1`, verification
 lag continues to grow, or the verified height stops advancing while the Zone
@@ -195,7 +235,7 @@ src/
   l2/                Zone events and exact post-state reads
   accounting/        pure account and liability transitions
   persistence/       row-oriented MDBX state and exact verified coordinates
-  runtime.rs         recovery, verification, retry, and divergence handling
+  runtime/           recovery, notifications, verification, and WAL acknowledgement
   telemetry.rs       operational metrics and verified-activity logs
 ```
 

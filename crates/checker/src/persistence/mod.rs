@@ -18,7 +18,7 @@ use reth_db::{
 
 use crate::accounting::{AccountingError, ChangedRows, Effect, State};
 
-pub(crate) use model::{AppliedStatus, BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
+pub(crate) use model::{BlockRef, Checkpoint, Finding, Identity, Metadata, Status};
 use schema::{AccountValue, Accounts, Meta, MetaKey, MetaValue, Tables, TokenValue, Tokens};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -257,35 +257,6 @@ impl Store {
         })
     }
 
-    /// Atomically discard derived rows and restart from authenticated genesis.
-    pub(crate) fn reset(&self, checkpoint: &Checkpoint) -> Result<Snapshot, PersistenceError> {
-        if checkpoint.identity != self.identity {
-            return Err(PersistenceError::Identity);
-        }
-        let metadata = Metadata {
-            identity: self.identity,
-            verified_zone: checkpoint.zone,
-            imported_tempo: checkpoint.tempo,
-            observed_zone: checkpoint.zone,
-            status: Status::Verifying,
-        };
-        let tx = self.db.tx_mut()?;
-        tx.clear::<Accounts>()?;
-        tx.clear::<Tokens>()?;
-        for (key, value) in checkpoint.state.accounts() {
-            tx.put::<Accounts>(key, AccountValue(value))?;
-        }
-        for (token, value) in checkpoint.state.tokens() {
-            tx.put::<Tokens>(token, TokenValue(value))?;
-        }
-        write_metadata(&tx, &metadata)?;
-        tx.commit()?;
-        Ok(Snapshot {
-            metadata,
-            state: Arc::new(checkpoint.state.clone()),
-        })
-    }
-
     /// Persist a terminal finding without advancing verified accounting state.
     pub(crate) fn record_finding(
         &self,
@@ -310,19 +281,31 @@ impl Store {
     /// Persist the latest delivered canonical tip, whether verifying or diverged.
     pub(crate) fn observe(
         &self,
-        prior: &Snapshot,
+        prior: Snapshot,
         observed: BlockRef,
     ) -> Result<Snapshot, PersistenceError> {
-        let mut metadata = prior.metadata.clone();
-        metadata.observed_zone = observed;
+        let current = prior.metadata.observed_zone;
+        if observed.number <= current.number {
+            let tx = self.db.tx()?;
+            ensure_current(&tx, &prior.metadata)?;
+            if observed.number < current.number || observed.hash == current.hash {
+                return Ok(prior);
+            }
+            return Err(PersistenceError::Invalid(format!(
+                "Zone append-only invariant violated: observed block {} changed from {} to {}",
+                observed.number, current.hash, observed.hash
+            )));
+        }
         let tx = self.db.tx_mut()?;
         ensure_current(&tx, &prior.metadata)?;
+        let Snapshot {
+            mut metadata,
+            state,
+        } = prior;
+        metadata.observed_zone = observed;
         write_metadata(&tx, &metadata)?;
         tx.commit()?;
-        Ok(Snapshot {
-            metadata,
-            state: Arc::clone(&prior.state),
-        })
+        Ok(Snapshot { metadata, state })
     }
 }
 
