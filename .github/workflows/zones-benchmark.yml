@@ -201,7 +201,7 @@ jobs:
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -502,7 +502,7 @@ jobs:
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
@@ -515,7 +515,7 @@ jobs:
           scope: tempoxyz/earn
           policy: zones-read
       - name: Check out Earn contracts
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/earn
           ref: main
@@ -556,7 +556,7 @@ jobs:
           echo "::add-mask::$CLICKHOUSE_PASSWORD"
 
       - name: Check out pinned Tempo L1
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/tempo
           ref: ${{ needs.authorize.outputs.tempo-ref }}
