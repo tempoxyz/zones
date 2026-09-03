@@ -1,7 +1,7 @@
 //! Zone read-privacy rules for the upstream Tempo AccountKeychain precompile.
 
 use alloy_primitives::Address;
-use alloy_sol_types::SolInterface;
+use alloy_sol_types::{SolCall, SolInterface};
 use tempo_contracts::precompiles::IAccountKeychain;
 use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
 
@@ -15,11 +15,36 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct AccountKeychainRules;
 
+const UNRESTRICTED_SELECTORS: &[[u8; 4]] = &[
+    IAccountKeychain::authorizeKey_0Call::SELECTOR,
+    IAccountKeychain::authorizeKey_1Call::SELECTOR,
+    IAccountKeychain::authorizeKey_2Call::SELECTOR,
+    IAccountKeychain::authorizeAdminKeyCall::SELECTOR,
+    IAccountKeychain::burnKeyAuthorizationWitnessCall::SELECTOR,
+    IAccountKeychain::revokeKeyCall::SELECTOR,
+    IAccountKeychain::updateSpendingLimitCall::SELECTOR,
+    IAccountKeychain::setAllowedCallsCall::SELECTOR,
+    IAccountKeychain::removeAllowedCallsCall::SELECTOR,
+    IAccountKeychain::getTransactionKeyCall::SELECTOR,
+];
+
 impl CallRules for AccountKeychainRules {
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        let spec = StorageCtx::default().spec();
+
+        // These calls have no Zone-specific privacy policy. Defer directly to the upstream
+        // dispatcher for selector scheduling and ABI decoding.
+        if data.get(..4).is_some_and(|selector| {
+            UNRESTRICTED_SELECTORS
+                .iter()
+                .any(|allowed| selector == allowed.as_slice())
+        }) {
+            return CallCheck::Continue;
+        }
+
         let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode_with_config(
             data,
-            abi_decoder_config_for_spec(StorageCtx::default().spec()),
+            abi_decoder_config_for_spec(spec),
         ) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
@@ -228,5 +253,19 @@ mod tests {
             admit_at(&rules, &data, outsider, TempoHardfork::T11),
             CallCheck::Continue
         ));
+    }
+
+    #[test]
+    fn malformed_unrestricted_calls_remain_deferred_to_upstream() {
+        let rules = AccountKeychainRules;
+
+        for data in UNRESTRICTED_SELECTORS {
+            for spec in [TempoHardfork::T10, TempoHardfork::T11] {
+                assert!(matches!(
+                    admit_at(&rules, data, Address::ZERO, spec),
+                    CallCheck::Continue
+                ));
+            }
+        }
     }
 }

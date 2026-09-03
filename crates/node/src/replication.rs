@@ -6,7 +6,7 @@ use alloy_primitives::B256;
 use alloy_provider::DynProvider;
 use alloy_rlp::Decodable as _;
 use alloy_rpc_types_engine::ForkchoiceState;
-use alloy_sol_types::SolCall as _;
+use alloy_sol_types::{SolCall as _, abi::AbiDecoderConfig};
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::{ConsensusEngineHandle, PayloadTypes as _};
@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
+use tempo_precompiles::dispatch::ABI_DECODER_MEMORY_LIMIT;
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
@@ -1375,8 +1376,13 @@ fn decode_advance_tempo(
     if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
         eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
     }
-    let call = IZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref())
-        .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
+    let call = IZoneInbox::advanceTempoCall::abi_decode_with_config(
+        signed.tx().input.as_ref(),
+        AbiDecoderConfig::new()
+            .memory_limit(ABI_DECODER_MEMORY_LIMIT)
+            .strict(true),
+    )
+    .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
 
     // 3. the system tx is valid.
     let mut header_rlp = call.header.as_ref();
