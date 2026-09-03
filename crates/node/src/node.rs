@@ -5,9 +5,8 @@
 
 use crate::{
     ZoneEngine,
-    replication::{
-        AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, PeerTipRegistry, serve_backfill_requests,
-    },
+    follower::PeerTipRegistry,
+    replication::{AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
         canonical_recovery_height, route_backfill_requests, route_backfill_responses,
