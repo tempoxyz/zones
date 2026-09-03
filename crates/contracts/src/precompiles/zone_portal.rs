@@ -255,7 +255,7 @@ crate::sol! {
         function setAllowedAccount(address account, bool allowed) external;
         function setGateway(address account, bool allowed) external;
         function setPauseGuardian(address account, bool allowed) external;
-        function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
+        function setSequencerSet(address[] calldata sequencers, uint8 threshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
         function sequencerThreshold() external view returns (uint8);
@@ -284,8 +284,8 @@ crate::sol! {
         function MAX_TOKEN_METADATA_BYTES() external view returns (uint256);
         function areDepositsActive(address token) external view returns (bool);
         function tokenConfig(address token) external view returns (TokenConfig memory);
-        function initialize(uint32 zoneId, address initialToken, bool accessMode, bool gatewayMode, address[] calldata allowedAccounts, address[] calldata zoneGateways, address admin, address messenger, address[] calldata sequencers, uint8 threshold, address verifier, string calldata rpcUrl) external;
-        function deliverWithdrawal(address to, address token, uint128 amount, bytes32 memo, uint64 gasLimit, bytes calldata callbackData) external;
+        function initialize(uint32 zoneId, address initialToken, bool accessMode, bool gatewayMode, address[] calldata allowedAccounts, address[] calldata zoneGateways, address messenger, address admin, address[] calldata sequencers, uint8 threshold, address verifier, string calldata rpcUrl) external;
+        function deliverWithdrawal(address token, address target, uint128 amount, bytes32 senderTag, uint64 gasLimit, bytes calldata data) external;
         function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function paused() external view returns (bool);
@@ -307,7 +307,7 @@ crate::sol! {
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
             bytes calldata proof,
-            uint256 nextZoneHeight,
+            uint256 zoneHeight,
             bytes[] calldata signatures
         ) external;
 
@@ -315,9 +315,9 @@ crate::sol! {
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
 
-        function setZoneGasRate(uint128 newZoneGasRate) external;
-        function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
-        function setBouncebackGas(uint64 newBouncebackGas) external;
+        function setZoneGasRate(uint128 _zoneGasRate) external;
+        function setMaxTempoGasRate(uint128 _maxTempoGasRate) external;
+        function setBouncebackGas(uint64 _bouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
