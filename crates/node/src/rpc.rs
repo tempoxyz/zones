@@ -33,10 +33,10 @@ use reth_rpc_api::Web3ApiServer;
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcConvert,
-    helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
+    helpers::{EthApiSpec, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, BlockReaderIdExt, StateProviderFactory};
 use reth_trie_common::{ExecutionWitnessMode, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
@@ -739,19 +739,40 @@ impl<Api> ZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
 {
+    /// Serve the redacted block from the sealed header alone.
+    ///
+    /// Redaction drops the entire body, so loading the recovered block (and evicting the block
+    /// cache with it) only to hash every transaction and RLP-encode the body for `size` is wasted
+    /// work.
     fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
         Box::pin(async move {
-            let block = EthBlocks::rpc_block(&self.eth.api, id, false)
-                .await
-                .map_err(internal)?;
-
-            let Some(mut block) = block else {
+            let Some(header) = self
+                .eth
+                .api
+                .provider()
+                .sealed_header_by_id(id)
+                .map_err(internal)?
+            else {
                 return Ok(raw_null());
             };
 
-            redact_block(&mut block);
+            // A block carries withdrawals exactly when its header has a withdrawals root.
+            let withdrawals = header.withdrawals_root().map(|_| Default::default());
+            // `redact_header` zeroes `size`, so the block's RLP length is never observed.
+            let mut header = self
+                .eth
+                .api
+                .converter()
+                .convert_header(header, 0)
+                .map_err(internal)?;
+            redact_header(&mut header);
 
-            to_raw(&block)
+            to_raw(&RpcBlock {
+                header,
+                uncles: Vec::new(),
+                transactions: BlockTransactions::Hashes(Vec::new()),
+                withdrawals,
+            })
         })
     }
 }
@@ -819,8 +840,11 @@ where
 
     fn coinbase(&self) -> BoxFut<'_> {
         Box::pin(async move {
-            let header = EthBlocks::rpc_block_header(&self.eth.api, BlockId::latest())
-                .await
+            let header = self
+                .eth
+                .api
+                .provider()
+                .latest_header()
                 .map_err(internal)?
                 .ok_or_else(|| JsonRpcError::internal("latest block not found"))?;
             to_raw(&header.beneficiary())
@@ -1450,13 +1474,6 @@ fn apply_public_fee_policy(request: &mut TempoTransactionRequest) {
     if request.max_fee_per_gas().is_none() {
         request.set_max_fee_per_gas(u128::from(TEMPO_T0_BASE_FEE) + priority_fee);
     }
-}
-
-/// Strip privacy-sensitive fields from a block returned by the redacted RPC.
-fn redact_block(block: &mut RpcBlock) {
-    redact_header(&mut block.header);
-    block.transactions = BlockTransactions::Hashes(Vec::new());
-    block.withdrawals = block.withdrawals.take().map(|_| Default::default());
 }
 
 pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> ConnectionConfig {
