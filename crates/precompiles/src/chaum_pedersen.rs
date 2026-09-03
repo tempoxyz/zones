@@ -9,7 +9,7 @@ use alloy_primitives::Keccak256;
 use k256::{
     AffinePoint, FieldBytes, ProjectivePoint, Scalar,
     elliptic_curve::{
-        ops::Reduce,
+        ops::{LinearCombination, Reduce},
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
@@ -17,6 +17,17 @@ use tempo_precompiles::storage::StorageCtx;
 
 /// Gas cost for Chaum-Pedersen proof verification (two EC muls + hashing).
 const CP_VERIFY_GAS: u64 = 6_000;
+
+/// Uncompressed SEC1 encoding of the secp256k1 generator, `0x04 || G.x || G.y`.
+///
+/// Pinned by `test_generator_uncompressed_constant`.
+const GENERATOR_UNCOMPRESSED: [u8; 65] = [
+    0x04, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+    0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17,
+    0x98, 0x48, 0x3a, 0xda, 0x77, 0x26, 0xa3, 0xc4, 0x65, 0x5d, 0xa4, 0xfb, 0xfc, 0x0e, 0x11, 0x08,
+    0xa8, 0xfd, 0x17, 0xb4, 0x48, 0xa6, 0x85, 0x54, 0x19, 0x9c, 0x47, 0xd0, 0x8f, 0xfb, 0x10, 0xd4,
+    0xb8,
+];
 
 /// Chaum-Pedersen DLOG equality proof verifier.
 ///
@@ -66,12 +77,25 @@ impl ChaumPedersenVerify {
         let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&(*s_bytes).into());
         let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&(*c_bytes).into());
 
+        // Each equation is a two-term linear combination, so evaluate it with Shamir's trick
+        // (`lincomb`) instead of two independent scalar multiplications.
+        let neg_c = -c;
+
         // R1 = s*G - c*pubSeq
-        let r1 = ProjectivePoint::GENERATOR * s - ProjectivePoint::from(sequencer_pub) * c;
+        let r1 = ProjectivePoint::lincomb(
+            &ProjectivePoint::GENERATOR,
+            &s,
+            &ProjectivePoint::from(sequencer_pub),
+            &neg_c,
+        );
 
         // R2 = s*ephemeralPub - c*sharedSecretPoint
-        let r2 = ProjectivePoint::from(ephemeral_pub) * s
-            - ProjectivePoint::from(shared_secret_point) * c;
+        let r2 = ProjectivePoint::lincomb(
+            &ProjectivePoint::from(ephemeral_pub),
+            &s,
+            &ProjectivePoint::from(shared_secret_point),
+            &neg_c,
+        );
 
         let r1_affine = AffinePoint::from(r1);
         let r2_affine = AffinePoint::from(r2);
@@ -114,17 +138,9 @@ pub fn challenge_hash(
     r1: &AffinePoint,
     r2: &AffinePoint,
 ) -> Scalar {
-    let g_affine = AffinePoint::from(ProjectivePoint::GENERATOR);
-
     let mut hasher = Keccak256::new();
-    for point in [
-        &g_affine,
-        ephemeral_pub,
-        sequencer_pub,
-        shared_secret,
-        r1,
-        r2,
-    ] {
+    hasher.update(GENERATOR_UNCOMPRESSED);
+    for point in [ephemeral_pub, sequencer_pub, shared_secret, r1, r2] {
         hasher.update(point.to_encoded_point(false).as_bytes());
     }
 
@@ -136,6 +152,15 @@ pub fn challenge_hash(
 mod tests {
     use super::*;
     use k256::elliptic_curve::{Field, PrimeField};
+
+    #[test]
+    fn test_generator_uncompressed_constant() {
+        let g = AffinePoint::from(ProjectivePoint::GENERATOR);
+        assert_eq!(
+            g.to_encoded_point(false).as_bytes(),
+            GENERATOR_UNCOMPRESSED.as_slice()
+        );
+    }
 
     #[test]
     fn test_recover_point_generator() {

@@ -10,7 +10,7 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use alloy_primitives::{Address, B256};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
-    elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
+    elliptic_curve::{PrimeField, ops::MulByGenerator, sec1::ToEncodedPoint},
 };
 use tempo_zone_contracts::Withdrawal;
 
@@ -78,6 +78,105 @@ pub struct DecryptedDeposit {
     pub memo: B256,
 }
 
+/// A sequencer decryption key with its public key material precomputed.
+///
+/// Every proof needs `privSeq * G`, which depends only on the key. Callers that process
+/// more than one deposit with the same key should build this once and reuse it instead of
+/// going through the [`compute_ecdh_proof`] / [`decrypt_deposit`] free functions, which
+/// re-derive it per deposit.
+#[derive(Clone)]
+pub struct PreparedDecryptionKey {
+    scalar: Scalar,
+    public_point: AffinePoint,
+}
+
+impl core::fmt::Debug for PreparedDecryptionKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedDecryptionKey")
+            .field("public_point", &self.public_point)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedDecryptionKey {
+    /// Derive the public key material for `sequencer_privkey`.
+    pub fn new(sequencer_privkey: &k256::SecretKey) -> Self {
+        let scalar: Scalar = *sequencer_privkey.to_nonzero_scalar();
+        Self {
+            public_point: AffinePoint::from(ProjectivePoint::mul_by_generator(&scalar)),
+            scalar,
+        }
+    }
+
+    /// Compute ECDH shared secret and Chaum-Pedersen proof for an encrypted deposit.
+    ///
+    /// See [`compute_ecdh_proof`].
+    pub fn compute_ecdh_proof(
+        &self,
+        ephemeral_pub_x: &B256,
+        ephemeral_pub_y_parity: u8,
+    ) -> Option<EcdhProofResult> {
+        // 1. Recover ephemeral public key
+        let ephemeral_pub = recover_point(&ephemeral_pub_x.0, ephemeral_pub_y_parity)?;
+
+        // 2. ECDH: sharedSecretPoint = privSeq * ephemeralPub
+        let shared_secret_proj = ProjectivePoint::from(ephemeral_pub) * self.scalar;
+        let shared_secret_affine = AffinePoint::from(shared_secret_proj);
+
+        let ss_encoded = shared_secret_affine.to_encoded_point(true);
+        let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
+        let shared_secret_y_parity = ss_encoded.as_bytes()[0]; // 0x02 or 0x03
+
+        // 3. Generate Chaum-Pedersen proof
+        let (s, c) = generate_chaum_pedersen_proof(
+            &self.scalar,
+            &ephemeral_pub,
+            &shared_secret_affine,
+            &self.public_point,
+        )?;
+
+        Some(EcdhProofResult {
+            shared_secret: B256::from(shared_secret_x),
+            shared_secret_y_parity,
+            cp_proof_s: B256::from_slice(s.to_repr().as_ref()),
+            cp_proof_c: B256::from_slice(c.to_repr().as_ref()),
+        })
+    }
+
+    /// Perform ECIES decryption of an encrypted deposit.
+    ///
+    /// See [`decrypt_deposit`].
+    pub fn decrypt_deposit(
+        &self,
+        ephemeral_pub_x: &B256,
+        ephemeral_pub_y_parity: u8,
+        ciphertext: &[u8],
+        nonce: &[u8; 12],
+        tag: &[u8; 16],
+        portal_address: Address,
+        key_index: alloy_primitives::U256,
+        sender: Address,
+    ) -> Option<DecryptedDeposit> {
+        let proof = self.compute_ecdh_proof(ephemeral_pub_x, ephemeral_pub_y_parity)?;
+
+        // HKDF-SHA256: derive AES key
+        let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x, &sender);
+        let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
+
+        // AES-256-GCM decrypt
+        let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, nonce, ciphertext, &[], tag);
+        if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
+            return None;
+        }
+
+        // Parse plaintext: [address(20)][memo(32)][padding(12)]
+        let to = Address::from_slice(&plaintext[..20]);
+        let memo = B256::from_slice(&plaintext[20..52]);
+
+        Some(DecryptedDeposit { proof, to, memo })
+    }
+}
+
 /// Compute ECDH shared secret and Chaum-Pedersen proof for an encrypted deposit.
 ///
 /// This succeeds as long as the ephemeral public key is a valid secp256k1 point.
@@ -86,38 +185,15 @@ pub struct DecryptedDeposit {
 /// with garbage ciphertext instead of reverting.
 ///
 /// Returns `None` if the ephemeral public key cannot be recovered or proof generation fails.
+///
+/// Use [`PreparedDecryptionKey`] when processing multiple deposits with the same key.
 pub fn compute_ecdh_proof(
     sequencer_privkey: &k256::SecretKey,
     ephemeral_pub_x: &B256,
     ephemeral_pub_y_parity: u8,
 ) -> Option<EcdhProofResult> {
-    // 1. Recover ephemeral public key
-    let ephemeral_pub = recover_point(&ephemeral_pub_x.0, ephemeral_pub_y_parity)?;
-
-    // 2. ECDH: sharedSecretPoint = privSeq * ephemeralPub
-    let priv_scalar: Scalar = *sequencer_privkey.to_nonzero_scalar();
-    let shared_secret_proj = ProjectivePoint::from(ephemeral_pub) * priv_scalar;
-    let shared_secret_affine = AffinePoint::from(shared_secret_proj);
-
-    let ss_encoded = shared_secret_affine.to_encoded_point(true);
-    let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
-    let shared_secret_y_parity = ss_encoded.as_bytes()[0]; // 0x02 or 0x03
-
-    // 3. Generate Chaum-Pedersen proof
-    let sequencer_pub = AffinePoint::from(ProjectivePoint::GENERATOR * priv_scalar);
-    let (s, c) = generate_chaum_pedersen_proof(
-        &priv_scalar,
-        &ephemeral_pub,
-        &shared_secret_affine,
-        &sequencer_pub,
-    )?;
-
-    Some(EcdhProofResult {
-        shared_secret: B256::from(shared_secret_x),
-        shared_secret_y_parity,
-        cp_proof_s: B256::from_slice(s.to_repr().as_ref()),
-        cp_proof_c: B256::from_slice(c.to_repr().as_ref()),
-    })
+    PreparedDecryptionKey::new(sequencer_privkey)
+        .compute_ecdh_proof(ephemeral_pub_x, ephemeral_pub_y_parity)
 }
 
 /// Perform ECIES decryption of an encrypted deposit using the sequencer's private key.
@@ -130,6 +206,8 @@ pub fn compute_ecdh_proof(
 /// 5. Generate Chaum-Pedersen proof of correct shared secret derivation
 ///
 /// Returns `None` if any step fails (invalid point, decryption failure, etc.).
+///
+/// Use [`PreparedDecryptionKey`] when processing multiple deposits with the same key.
 pub fn decrypt_deposit(
     sequencer_privkey: &k256::SecretKey,
     ephemeral_pub_x: &B256,
@@ -141,23 +219,16 @@ pub fn decrypt_deposit(
     key_index: alloy_primitives::U256,
     sender: Address,
 ) -> Option<DecryptedDeposit> {
-    let proof = compute_ecdh_proof(sequencer_privkey, ephemeral_pub_x, ephemeral_pub_y_parity)?;
-
-    // HKDF-SHA256: derive AES key
-    let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x, &sender);
-    let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
-
-    // AES-256-GCM decrypt
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, nonce, ciphertext, &[], tag);
-    if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
-        return None;
-    }
-
-    // Parse plaintext: [address(20)][memo(32)][padding(12)]
-    let to = Address::from_slice(&plaintext[..20]);
-    let memo = B256::from_slice(&plaintext[20..52]);
-
-    Some(DecryptedDeposit { proof, to, memo })
+    PreparedDecryptionKey::new(sequencer_privkey).decrypt_deposit(
+        ephemeral_pub_x,
+        ephemeral_pub_y_parity,
+        ciphertext,
+        nonce,
+        tag,
+        portal_address,
+        key_index,
+        sender,
+    )
 }
 
 /// Result of client-side ECIES encryption for a deposit.
@@ -187,6 +258,7 @@ pub fn encrypt_authenticated_withdrawal(
 ) -> Option<Vec<u8>> {
     let eph_key = k256::SecretKey::random(&mut rand::thread_rng());
     let eph_scalar: Scalar = *eph_key.to_nonzero_scalar();
+    let eph_pubkey = compressed_generator_multiple(&eph_scalar)?;
     let nonce_bytes: [u8; 12] = rand::random();
 
     encrypt_authenticated_withdrawal_with_material(
@@ -194,6 +266,7 @@ pub fn encrypt_authenticated_withdrawal(
         sender,
         tx_hash,
         &eph_scalar,
+        &eph_pubkey,
         nonce_bytes,
     )
 }
@@ -220,9 +293,7 @@ pub fn encrypt_authenticated_withdrawal_deterministic(
         tx_hash,
         fallback_nonce,
     )?;
-    let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * eph_scalar);
-    let eph_encoded = eph_pub.to_encoded_point(true);
-    let eph_pubkey: [u8; 33] = eph_encoded.as_bytes().try_into().ok()?;
+    let eph_pubkey = compressed_generator_multiple(&eph_scalar)?;
     let nonce_bytes = derive_authenticated_withdrawal_nonce(
         &derivation_key,
         zone_id,
@@ -238,8 +309,15 @@ pub fn encrypt_authenticated_withdrawal_deterministic(
         sender,
         tx_hash,
         &eph_scalar,
+        &eph_pubkey,
         nonce_bytes,
     )
+}
+
+/// Compressed SEC1 encoding of `scalar * G`.
+fn compressed_generator_multiple(scalar: &Scalar) -> Option<[u8; COMPRESSED_PUBLIC_KEY_SIZE]> {
+    let point = AffinePoint::from(ProjectivePoint::mul_by_generator(scalar));
+    point.to_encoded_point(true).as_bytes().try_into().ok()
 }
 
 fn encrypt_authenticated_withdrawal_with_material(
@@ -247,20 +325,17 @@ fn encrypt_authenticated_withdrawal_with_material(
     sender: Address,
     tx_hash: B256,
     eph_scalar: &Scalar,
+    eph_pubkey: &[u8; COMPRESSED_PUBLIC_KEY_SIZE],
     nonce_bytes: [u8; 12],
 ) -> Option<Vec<u8>> {
     let reveal_pub = decode_compressed_public_key(reveal_to)?;
-
-    let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * *eph_scalar);
-    let eph_encoded = eph_pub.to_encoded_point(true);
-    let eph_pubkey: [u8; 33] = eph_encoded.as_bytes().try_into().ok()?;
 
     let shared_proj = ProjectivePoint::from(reveal_pub) * *eph_scalar;
     let shared_affine = AffinePoint::from(shared_proj);
     let ss_encoded = shared_affine.to_encoded_point(true);
     let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
 
-    let info = authenticated_withdrawal_hkdf_info(&eph_pubkey);
+    let info = authenticated_withdrawal_hkdf_info(eph_pubkey);
     let aes_key = hkdf_sha256(&shared_secret_x, b"authenticated-withdrawal-aes-key", &info);
 
     let plaintext = build_authenticated_withdrawal_plaintext(&sender, &tx_hash);
@@ -271,7 +346,7 @@ fn encrypt_authenticated_withdrawal_with_material(
     let tag = &encrypted[encrypted.len() - 16..];
 
     let mut out = Vec::with_capacity(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE);
-    out.extend_from_slice(&eph_pubkey);
+    out.extend_from_slice(eph_pubkey);
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(ciphertext);
     out.extend_from_slice(tag);
@@ -286,21 +361,24 @@ fn derive_authenticated_withdrawal_ephemeral_scalar(
     tx_hash: B256,
     fallback_nonce: u64,
 ) -> Option<Scalar> {
+    let mut msg = authenticated_withdrawal_context(
+        AUTH_WITHDRAWAL_EPHEMERAL_DOMAIN,
+        zone_id,
+        reveal_to,
+        sender,
+        tx_hash,
+        fallback_nonce,
+    );
     for counter in 0u32.. {
-        let mut msg = authenticated_withdrawal_context(
-            AUTH_WITHDRAWAL_EPHEMERAL_DOMAIN,
-            zone_id,
-            reveal_to,
-            sender,
-            tx_hash,
-            fallback_nonce,
-        );
         msg.extend_from_slice(&counter.to_be_bytes());
 
         let candidate = hmac_sha256(derivation_key, &msg);
         if let Ok(key) = k256::SecretKey::from_slice(&candidate) {
             return Some(*key.to_nonzero_scalar());
         }
+
+        // Reset to try another counter
+        msg.truncate(msg.len() - 4);
     }
 
     None
@@ -430,7 +508,7 @@ pub fn encrypt_deposit(
     // 2. Generate ephemeral key pair
     let eph_key = k256::SecretKey::random(&mut rand::thread_rng());
     let eph_scalar: Scalar = *eph_key.to_nonzero_scalar();
-    let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * eph_scalar);
+    let eph_pub = AffinePoint::from(ProjectivePoint::mul_by_generator(&eph_scalar));
     let (eph_pub_x, eph_pub_y_parity) = compressed_x_and_parity(&eph_pub);
 
     // 3. ECDH: shared = eph_scalar * sequencer_pub
@@ -474,7 +552,7 @@ fn generate_chaum_pedersen_proof(
     // would make otherwise identical zone blocks diverge. Derive the blinding
     // scalar from the encryption key and the complete public statement instead.
     let k = deterministic_cp_nonce(priv_seq, ephemeral_pub, sequencer_pub, shared_secret)?;
-    let r1 = AffinePoint::from(ProjectivePoint::GENERATOR * k);
+    let r1 = AffinePoint::from(ProjectivePoint::mul_by_generator(&k));
     let r2 = AffinePoint::from(ProjectivePoint::from(*ephemeral_pub) * k);
 
     // 2. Challenge via shared helper
@@ -526,6 +604,11 @@ fn deterministic_cp_nonce(
 
 /// HMAC-SHA256 implementation matching ZoneInbox._hmacSha256.
 pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    hmac_sha256_parts(key, &[message])
+}
+
+/// HMAC-SHA256 over the concatenation of `parts`.
+fn hmac_sha256_parts(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
     // Pad/hash key to 64 bytes
@@ -547,7 +630,9 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     // Inner hash: SHA256(ipad || message)
     let mut hasher = Sha256::new();
     hasher.update(ipad);
-    hasher.update(message);
+    for part in parts {
+        hasher.update(part);
+    }
     let inner_hash = hasher.finalize();
 
     // Outer hash: SHA256(opad || innerHash)
@@ -565,10 +650,7 @@ pub fn hkdf_sha256(ikm: &[u8; 32], salt: &[u8], info: &[u8]) -> [u8; 32] {
     let prk = hmac_sha256(salt, ikm);
 
     // Expand: OKM = HMAC-SHA256(PRK, info || 0x01)
-    let mut expand_input = Vec::with_capacity(info.len() + 1);
-    expand_input.extend_from_slice(info);
-    expand_input.push(0x01);
-    hmac_sha256(&prk, &expand_input)
+    hmac_sha256_parts(&prk, &[info, &[0x01]])
 }
 
 /// Extract the compressed x-coordinate and SEC1 parity byte from an affine point.
@@ -664,6 +746,40 @@ mod tests {
         assert_eq!(proof_a.cp_proof_c, proof_b.cp_proof_c);
     }
 
+    /// The proof lands in `advanceTempo` calldata, so its bytes are consensus-relevant.
+    #[test]
+    fn test_cp_proof_fixed_vector() {
+        let f = EncryptedDepositFixture::new();
+        let proof = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
+
+        assert_eq!(
+            proof.shared_secret,
+            b256("cea5bda216d7e5e7862bc606a2c193e2bd8fcc3ab430f011db1b1e3db657146b")
+        );
+        assert_eq!(proof.shared_secret_y_parity, 0x03);
+        assert_eq!(
+            proof.cp_proof_s,
+            b256("3586ebccdb609c247a6f82f22881e2a34df79b202ddad3bf6216c8d9de4c1c1f")
+        );
+        assert_eq!(
+            proof.cp_proof_c,
+            b256("5761e614ca376e15f7a07e00a2b61e002ca0b65db8ddf1bbd8b172e5a234722b")
+        );
+
+        // The prepared key must produce the same proof as the free function.
+        let prepared = super::PreparedDecryptionKey::new(&f.seq_key);
+        let same = prepared
+            .compute_ecdh_proof(&f.eph_pub_x, f.eph_pub_y_parity)
+            .unwrap();
+        assert_eq!(same.shared_secret, proof.shared_secret);
+        assert_eq!(same.cp_proof_s, proof.cp_proof_s);
+        assert_eq!(same.cp_proof_c, proof.cp_proof_c);
+    }
+
+    fn b256(hex: &str) -> B256 {
+        B256::from_slice(&const_hex::decode(hex).unwrap())
+    }
+
     #[test]
     fn test_authenticated_withdrawal_roundtrip() {
         use sha2::{Digest, Sha256};
@@ -733,6 +849,15 @@ mod tests {
         assert_eq!(encrypted_a, encrypted_b);
         assert_ne!(encrypted_a, encrypted_other_withdrawal);
         assert_eq!(encrypted_a.len(), AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE);
+
+        // Zone payload construction depends on these exact bytes.
+        assert_eq!(
+            const_hex::encode(&encrypted_a),
+            "03eacb1103403bbada9016e726fff42be54c1bd5e5f7973948b40e15ec046aa4d2\
+             b73f90b9a40274f41f6627e6c0033441d396a3c3bba3028b29b3f5304deb43aa8a\
+             53f06e23eedb66388dcc3fa209cfcb4ddda9c655d043bf4e167accba40c7773f8d\
+             8bae1ace1d3633c710326093a3d2"
+        );
 
         let (decrypted_sender, decrypted_tx_hash) =
             decrypt_authenticated_withdrawal(&reveal_key, &encrypted_a).unwrap();
