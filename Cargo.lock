@@ -2322,8 +2322,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-actor"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -2335,8 +2335,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "commonware-actor",
  "commonware-codec",
@@ -2351,8 +2351,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -2365,8 +2365,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-macros"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2376,8 +2376,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -2394,8 +2394,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -2424,8 +2424,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2465,8 +2465,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-formatting"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "commonware-macros",
  "const-hex",
@@ -2474,8 +2474,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "commonware-macros-impl",
  "tokio",
@@ -2483,8 +2483,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros-impl"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2495,8 +2495,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-math"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -2508,8 +2508,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "commonware-actor",
  "commonware-codec",
@@ -2534,8 +2534,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-parallel"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -2546,8 +2546,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "bytes",
  "commonware-actor",
@@ -2567,8 +2567,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "ahash",
  "axum",
@@ -2607,8 +2607,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-macros"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2618,8 +2618,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2642,8 +2642,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -2661,8 +2661,8 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "2026.7.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=5950bf7179bb0650a57ed58b9e0478822944b335#5950bf7179bb0650a57ed58b9e0478822944b335"
+version = "2026.7.1"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=da15b3c08ac3a3e8becb2e4742866f07b0112ee8#da15b3c08ac3a3e8becb2e4742866f07b0112ee8"
 dependencies = [
  "ahash",
  "bytes",
@@ -11351,8 +11351,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-alloy"
-version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -11397,8 +11397,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-chainspec"
-version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-eips",
  "alloy-evm",
@@ -11420,8 +11420,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-contracts"
-version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-contract",
  "alloy-primitives",
@@ -11432,8 +11432,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-dkg-onchain-artifacts"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -11444,8 +11444,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-evm"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -11479,8 +11479,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-hardfork"
-version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-eips",
  "alloy-evm",
@@ -11491,8 +11491,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-node"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -11503,9 +11503,13 @@ dependencies = [
  "alloy-serde",
  "async-trait",
  "clap",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
  "commonware-runtime",
  "eyre",
  "futures",
+ "governor",
  "jiff",
  "jsonrpsee",
  "metrics",
@@ -11514,6 +11518,7 @@ dependencies = [
  "reth-errors",
  "reth-ethereum",
  "reth-evm",
+ "reth-metrics",
  "reth-network-api",
  "reth-node-api",
  "reth-node-builder",
@@ -11544,6 +11549,7 @@ dependencies = [
  "tempo-transaction-pool",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "url",
  "vergen",
  "vergen-git2",
@@ -11551,8 +11557,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-payload-builder"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -11589,8 +11595,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-payload-types"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -11609,8 +11615,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-precompiles"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy",
  "alloy-evm",
@@ -11636,8 +11642,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-precompiles-macros"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy",
  "proc-macro2",
@@ -11647,8 +11653,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-primitives"
-version = "1.10.1"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.11.0"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11679,8 +11685,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-revm"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -11702,8 +11708,8 @@ dependencies = [
 
 [[package]]
 name = "tempo-transaction-pool"
-version = "1.11.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1#9f7fc9295ea3fa3b49ec2b0a9e524a8b2cb202b1"
+version = "1.13.1"
+source = "git+https://github.com/tempoxyz/tempo?rev=3832e01cb60fae8fab552195b007bf8fa86dfe80#3832e01cb60fae8fab552195b007bf8fa86dfe80"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
