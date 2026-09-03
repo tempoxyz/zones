@@ -1064,8 +1064,7 @@ impl BatchSubmitter {
             let Some(&zone_block) = zone_block_by_slot.get(&portal_slot) else {
                 continue;
             };
-            let withdrawals =
-                fetch_slot_withdrawals(zone_provider, outbox_address, zone_block).await?;
+            let withdrawals = fetch_slot_withdrawals(zone_provider, outbox_address, zone_block)?;
             slot_withdrawals.insert(portal_slot, withdrawals);
         }
 
@@ -1204,9 +1203,10 @@ pub(crate) struct FinalizedBatch {
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizedBatchLog {
     pub(crate) block_number: u64,
+    /// Index of the transaction that emitted the event, used to resolve the
+    /// `finalizeWithdrawalBatch` transaction once the boundary block is read.
     tx_index: u64,
     log_index: u64,
-    tx_hash: B256,
     withdrawal_queue_hash: B256,
     withdrawal_batch_index: u64,
 }
@@ -1493,16 +1493,18 @@ pub(crate) fn find_processed_offset(
     None
 }
 
-fn block_with_receipts<P: ZoneSequencerProvider>(
+/// Read a canonical zone block together with its receipts.
+///
+/// Only callers that need the transaction bodies should use this; scanning for events needs
+/// [`block_receipts`] alone.
+pub(crate) fn block_with_receipts<P: ZoneSequencerProvider>(
     provider: &P,
     number: u64,
 ) -> Result<(Block, Vec<TempoReceipt>)> {
     let block = provider
         .block_by_number(number)?
         .ok_or_else(|| eyre::eyre!("canonical zone block {number} not found"))?;
-    let receipts = provider
-        .receipts_by_block(BlockHashOrNumber::Number(number))?
-        .ok_or_else(|| eyre::eyre!("receipts for canonical zone block {number} not found"))?;
+    let receipts = block_receipts(provider, number)?;
     if block.body.transactions.len() != receipts.len() {
         return Err(eyre::eyre!(
             "zone block {number} has {} transactions but {} receipts",
@@ -1513,6 +1515,15 @@ fn block_with_receipts<P: ZoneSequencerProvider>(
     Ok((block, receipts))
 }
 
+fn block_receipts<P: ZoneSequencerProvider>(
+    provider: &P,
+    number: u64,
+) -> Result<Vec<TempoReceipt>> {
+    provider
+        .receipts_by_block(BlockHashOrNumber::Number(number))?
+        .ok_or_else(|| eyre::eyre!("receipts for canonical zone block {number} not found"))
+}
+
 /// Read the settlement commitments emitted by the deterministic system transaction in a zone
 /// block.
 pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
@@ -1520,7 +1531,17 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
     inbox_address: Address,
     number: u64,
 ) -> Result<ZoneBlockSnapshot> {
-    let (_, receipts) = block_with_receipts(provider, number)?;
+    let receipts = block_receipts(provider, number)?;
+    zone_block_snapshot(provider, inbox_address, number, &receipts)
+}
+
+/// [`read_zone_block_snapshot`] for callers that already hold the block's receipts.
+pub(crate) fn zone_block_snapshot<P: ZoneSequencerProvider>(
+    provider: &P,
+    inbox_address: Address,
+    number: u64,
+    receipts: &[TempoReceipt],
+) -> Result<ZoneBlockSnapshot> {
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
@@ -1584,20 +1605,20 @@ pub(crate) async fn fetch_finalized_batch_boundaries<P: ZoneSequencerProvider>(
     Ok(boundaries)
 }
 
-/// Fetch one finalized L2 withdrawal batch.
+/// Reconstruct one finalized L2 withdrawal batch from its boundary block.
 ///
 /// The submitted hash and index come from the supplied `BatchFinalized` event.
 /// Withdrawal structs are reconstructed from `WithdrawalRequested` logs in the
 /// same block: every non-empty withdrawal batch is finalized in the block that
 /// contains its requests.
-pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
-    zone_provider: &P,
+pub(crate) fn resolve_finalized_batch(
     outbox_address: Address,
     target: &FinalizedBatchLog,
+    block: &Block,
+    receipts: &[TempoReceipt],
 ) -> Result<FinalizedBatch> {
-    let (block, receipts) = block_with_receipts(zone_provider, target.block_number)?;
     let mut requests = Vec::new();
-    for (tx, receipt) in block.body.transactions.iter().zip(&receipts) {
+    for (tx, receipt) in block.body.transactions.iter().zip(receipts) {
         for log in receipt.logs() {
             if log.address != outbox_address
                 || log.topics().first() != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
@@ -1619,12 +1640,11 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
     let finalize_tx = block
         .body
         .transactions
-        .iter()
-        .find(|tx| *tx.tx_hash() == target.tx_hash)
+        .get(target.tx_index as usize)
         .ok_or_else(|| {
             eyre::eyre!(
-                "missing finalizeWithdrawalBatch tx {} for zone block {}",
-                target.tx_hash,
+                "missing finalizeWithdrawalBatch tx at index {} for zone block {}",
+                target.tx_index,
                 target.block_number
             )
         })?;
@@ -1633,7 +1653,7 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
             .map_err(|err| {
                 eyre::eyre!(
                     "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
-                    target.tx_hash
+                    finalize_tx.tx_hash()
                 )
             })?
             .encryptedSenders;
@@ -1678,22 +1698,23 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
 /// outbox finalizes pending withdrawals in the same zone block as their
 /// requests, so recovery needs to inspect only the block referenced by the
 /// slot's `BatchSubmitted.nextBlockHash`.
-pub(crate) async fn fetch_slot_withdrawals(
+pub(crate) fn fetch_slot_withdrawals(
     zone_provider: &impl ZoneSequencerProvider,
     outbox_address: Address,
     block_number: u64,
 ) -> Result<Vec<abi::Withdrawal>> {
-    let boundaries =
-        fetch_finalized_batch_boundaries(zone_provider, outbox_address, block_number, block_number)
-            .await?;
+    let (block, receipts) = block_with_receipts(zone_provider, block_number)?;
+    let mut boundaries = Vec::new();
+    collect_finalized_batch_logs(outbox_address, block_number, &receipts, &mut boundaries)?;
+    if boundaries.len() > 1 {
+        return Err(eyre::eyre!(
+            "zone block {block_number} contains more than one BatchFinalized event"
+        ));
+    }
     let target = boundaries.into_iter().next().ok_or_else(|| {
         eyre::eyre!("zone block {block_number} does not contain a BatchFinalized boundary")
     })?;
-    Ok(
-        fetch_finalized_batch(zone_provider, outbox_address, &target)
-            .await?
-            .withdrawals,
-    )
+    Ok(resolve_finalized_batch(outbox_address, &target, &block, &receipts)?.withdrawals)
 }
 
 fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
@@ -1704,36 +1725,45 @@ fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
 ) -> Result<Vec<FinalizedBatchLog>> {
     let mut finalized_batches = Vec::new();
     for block_number in from..=to {
-        let (block, receipts) = block_with_receipts(provider, block_number)?;
-        for (tx_index, (tx, receipt)) in block
-            .body
-            .transactions
-            .iter()
-            .zip(receipts.iter())
-            .enumerate()
-        {
-            for (log_index, log) in receipt.logs().iter().enumerate() {
-                if log.address != outbox_address
-                    || log.topics().first() != Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
-                {
-                    continue;
-                }
-                let event = IZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
-                    eyre::eyre!("invalid BatchFinalized log in zone block {block_number}: {err}")
-                })?;
-                finalized_batches.push(FinalizedBatchLog {
-                    block_number,
-                    tx_index: tx_index as u64,
-                    log_index: log_index as u64,
-                    tx_hash: *tx.tx_hash(),
-                    withdrawal_queue_hash: event.withdrawalQueueHash,
-                    withdrawal_batch_index: event.withdrawalBatchIndex,
-                });
-            }
-        }
+        let receipts = block_receipts(provider, block_number)?;
+        collect_finalized_batch_logs(
+            outbox_address,
+            block_number,
+            &receipts,
+            &mut finalized_batches,
+        )?;
     }
     finalized_batches.sort_by_key(|batch| (batch.block_number, batch.tx_index, batch.log_index));
     Ok(finalized_batches)
+}
+
+/// Append every `BatchFinalized` event emitted by `outbox_address` in one block's receipts.
+fn collect_finalized_batch_logs(
+    outbox_address: Address,
+    block_number: u64,
+    receipts: &[TempoReceipt],
+    finalized_batches: &mut Vec<FinalizedBatchLog>,
+) -> Result<()> {
+    for (tx_index, receipt) in receipts.iter().enumerate() {
+        for (log_index, log) in receipt.logs().iter().enumerate() {
+            if log.address != outbox_address
+                || log.topics().first() != Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
+            {
+                continue;
+            }
+            let event = IZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
+                eyre::eyre!("invalid BatchFinalized log in zone block {block_number}: {err}")
+            })?;
+            finalized_batches.push(FinalizedBatchLog {
+                block_number,
+                tx_index: tx_index as u64,
+                log_index: log_index as u64,
+                withdrawal_queue_hash: event.withdrawalQueueHash,
+                withdrawal_batch_index: event.withdrawalBatchIndex,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
@@ -1744,8 +1774,8 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::abi;
-    use alloy_consensus::Header as ConsensusHeader;
-    use alloy_primitives::{B256, address};
+    use alloy_consensus::{Header as ConsensusHeader, Signed, TxLegacy};
+    use alloy_primitives::{B256, Log, Signature, address};
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_sol_types::SolValue;
@@ -1753,7 +1783,7 @@ mod tests {
     use proptest::prelude::*;
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
-    use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
+    use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 
     fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -2676,5 +2706,88 @@ mod tests {
 
         let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, corrupted_hash);
         assert!(result.is_err());
+    }
+
+    fn legacy_tx(input: Bytes) -> TempoTxEnvelope {
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                input,
+                ..Default::default()
+            },
+            Signature::test_signature(),
+        ))
+    }
+
+    fn receipt_with_logs(logs: Vec<Log>) -> TempoReceipt {
+        TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success: true,
+            cumulative_gas_used: 0,
+            logs,
+        }
+    }
+
+    /// The boundary scan runs once per canonical zone block, so it must get by with receipts:
+    /// only the boundary block body is read, and its `finalizeWithdrawalBatch` transaction is
+    /// resolved by index. Blocks before the boundary have no body registered here.
+    #[tokio::test]
+    async fn scans_boundaries_from_receipts_and_resolves_the_batch_by_tx_index() {
+        let outbox_address = Address::repeat_byte(0x22);
+        let boundary_number = 8u64;
+        let zone = MockEthProvider::<TempoPrimitives>::new();
+        for number in 1..boundary_number {
+            zone.add_receipts(number, vec![receipt_with_logs(Vec::new())]);
+        }
+
+        let finalize_call = abi::IZoneOutbox::finalizeWithdrawalBatchCall {
+            count: U256::ZERO,
+            blockNumber: boundary_number,
+            encryptedSenders: Vec::new(),
+        };
+        let mut header = TempoHeader::default();
+        header.inner.number = boundary_number;
+        zone.add_block(
+            B256::repeat_byte(0x08),
+            Block {
+                header,
+                body: alloy_consensus::BlockBody {
+                    transactions: vec![
+                        legacy_tx(Bytes::new()),
+                        legacy_tx(finalize_call.abi_encode().into()),
+                    ],
+                    ..Default::default()
+                },
+            },
+        );
+        zone.add_receipts(
+            boundary_number,
+            vec![
+                receipt_with_logs(Vec::new()),
+                receipt_with_logs(vec![Log {
+                    address: outbox_address,
+                    data: IZoneOutbox::BatchFinalized {
+                        withdrawalQueueHash: B256::ZERO,
+                        withdrawalBatchIndex: 3,
+                    }
+                    .encode_log_data(),
+                }]),
+            ],
+        );
+
+        let boundaries =
+            fetch_finalized_batch_boundaries(&zone, outbox_address, 1, boundary_number)
+                .await
+                .unwrap();
+
+        assert_eq!(boundaries.len(), 1);
+        assert_eq!(boundaries[0].block_number, boundary_number);
+        assert_eq!(boundaries[0].tx_index, 1);
+
+        let (block, receipts) = block_with_receipts(&zone, boundary_number).unwrap();
+        let batch =
+            resolve_finalized_batch(outbox_address, &boundaries[0], &block, &receipts).unwrap();
+
+        assert_eq!(batch.finalized_index, 3);
+        assert!(batch.withdrawals.is_empty());
     }
 }

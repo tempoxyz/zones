@@ -42,8 +42,8 @@ use crate::{
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
-        WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
-        read_zone_block_snapshot,
+        WithdrawalPage, ZoneBlockSnapshot, block_with_receipts, fetch_finalized_batch_boundaries,
+        read_zone_block_snapshot, resolve_finalized_batch, zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -407,13 +407,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<bool, BatchSubmitError> {
         let block_count = to - from + 1;
-        info!(from, to, block_count, "Processing zone block range");
+        debug!(from, to, block_count, "Processing zone block range");
 
         let boundaries =
             fetch_finalized_batch_boundaries(&self.provider, self.config.outbox_address, from, to)
                 .await?;
         if boundaries.is_empty() {
-            info!(from, to, "No finalized batch boundaries ready to submit");
+            debug!(from, to, "No finalized batch boundaries ready to submit");
             return Ok(false);
         }
 
@@ -462,9 +462,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
         let to = boundary.block_number;
+        let (block, receipts) = block_with_receipts(&self.provider, to)?;
         let finalized_batch =
-            fetch_finalized_batch(&self.provider, self.config.outbox_address, &boundary).await?;
-        let end_state = read_zone_block_snapshot(&self.provider, self.config.inbox_address, to)?;
+            resolve_finalized_batch(self.config.outbox_address, &boundary, &block, &receipts)?;
+        let end_state =
+            zone_block_snapshot(&self.provider, self.config.inbox_address, to, &receipts)?;
 
         if !finalized_batch.withdrawals.is_empty() {
             info!(
