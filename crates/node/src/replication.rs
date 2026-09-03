@@ -15,7 +15,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use std::{
     collections::{BTreeMap, HashMap},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
@@ -1207,6 +1207,12 @@ where
         .try_enqueue_sealed(l1_header, observed)
         .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
 
+    // A leader can publish a block at the same millisecond as its timestamp while this follower's
+    // clock is slightly behind. Wait for the local clock to catch up before asking the execution
+    // engine to validate the payload. As with production pacing, cap the wait so a far-future
+    // timestamp is still rejected by consensus validation.
+    wait_for_peer_block_timestamp(block.header().timestamp_millis()).await?;
+
     // 4. All txns in the block execute properly
     let payload = ZonePayloadTypes::block_to_payload(block, None);
     let status = engine.new_payload(payload).await?;
@@ -1235,6 +1241,24 @@ where
 
     info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
     Ok(PeerBlockImportOutcome::Imported)
+}
+
+/// Wait until a peer block's timestamp is no longer ahead of the local wall clock.
+async fn wait_for_peer_block_timestamp(timestamp_millis: u64) -> eyre::Result<()> {
+    let wall_clock_timestamp_millis: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+
+    if timestamp_millis > wall_clock_timestamp_millis {
+        tokio::time::sleep(
+            Duration::from_millis(timestamp_millis - wall_clock_timestamp_millis)
+                .min(Duration::from_secs(1)),
+        )
+        .await;
+    }
+
+    Ok(())
 }
 
 fn validate_live_block_sender(
@@ -1404,7 +1428,7 @@ mod tests {
             Arc,
             atomic::{AtomicU64, AtomicUsize, Ordering},
         },
-        time::Duration,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use alloy_eips::NumHash;
@@ -1416,11 +1440,34 @@ mod tests {
         AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
         MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PersistedBlockSource, PersistedTip,
         broadcast_persisted_blocks, buffer_pending_block, validate_live_block_sender,
-        wait_for_validated_peer_anchor,
+        wait_for_peer_block_timestamp, wait_for_validated_peer_anchor,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState, P2pCommand};
+
+    #[tokio::test]
+    async fn waits_until_peer_block_timestamp_is_not_in_the_future() {
+        let wall_clock_timestamp_millis: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+        let timestamp_millis = wall_clock_timestamp_millis + 10;
+
+        wait_for_peer_block_timestamp(timestamp_millis)
+            .await
+            .unwrap();
+
+        let current_timestamp_millis: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
+        assert!(current_timestamp_millis >= timestamp_millis);
+    }
 
     #[derive(Clone)]
     struct StartupRaceSource {
