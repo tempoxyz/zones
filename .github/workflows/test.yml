@@ -18,11 +18,17 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   build-test-artifacts:
     name: build test artifacts
     # Keep private-copy PR validation while avoiding a full test run for every
     # hourly mirror update to its main branch.
     if: github.repository == 'tempoxyz/zones' || github.event_name != 'push'
+    needs: cargo-cooldown
     runs-on: depot-ubuntu-latest-16
     timeout-minutes: 30
     permissions:

@@ -37,6 +37,11 @@ env:
   TEMPO_DEVNET_GENESIS_URL: ${{ inputs.tempo_genesis_url || 'https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json' }}
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   build-and-push:
     name: Build and Push Docker Images
     # Private copies retain PR image builds, but must not publish shared images
@@ -44,6 +49,7 @@ jobs:
     if: >-
       github.repository == 'tempoxyz/zones' ||
       (github.event_name != 'schedule' && github.event_name != 'push')
+    needs: cargo-cooldown
     runs-on: depot-ubuntu-latest-16
     permissions:
       contents: read
