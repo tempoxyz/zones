@@ -546,17 +546,16 @@ where
             .map(|header| header.number())
             .ok_or_eyre("L1 finalized block is not available")?;
 
-        if *next_block > finalized {
-            self.record_seen_block(finalized, 0);
+        let pending_blocks = finalized.saturating_sub(next_block.saturating_sub(1));
+        self.record_seen_block(finalized, pending_blocks);
+        if pending_blocks == 0 {
             return Ok(());
         }
 
-        let blocks = finalized - *next_block + 1;
-        self.record_seen_block(finalized, blocks);
         info!(
             from = *next_block,
             to = finalized,
-            blocks,
+            blocks = pending_blocks,
             "Synchronizing finalized L1 blocks"
         );
 
@@ -768,7 +767,7 @@ where
                 // Subscribe before the initial sync so a head published while catching
                 // up remains queued in the stream.
                 self.sync_finalized(&provider, &mut next_block).await?;
-                while let Some(_) = header_stream.next().await {
+                while let Some(()) = header_stream.next().await {
                     self.sync_finalized(&provider, &mut next_block).await?;
                 }
 
