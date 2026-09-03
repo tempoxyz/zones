@@ -112,6 +112,24 @@ jobs:
             type=sha,prefix=sha-
             type=ref,event=pr
 
+      - name: Docker metadata for tempo-zone-prover-utils
+        id: meta-tempo-zone-prover-utils
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+        with:
+          images: ${{ env.REGISTRY }}/tempo-zone-prover-utils
+          bake-target: tempo-zone-prover-utils
+          tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
+            type=ref,event=pr
+
       - name: Log in to Container Registry
         if: github.repository == 'tempoxyz/zones'
         uses: tempoxyz/gh-actions/vendor/docker/login-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
@@ -146,6 +164,7 @@ jobs:
             docker/docker-bake.hcl
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
+            ${{ steps.meta-tempo-zone-prover-utils.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
           push: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
@@ -158,26 +177,19 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
 
-      # Nitro CLI converts an image from the runner's local Docker image store.
-      - name: Load tempo-zone-prover enclave payload
+      # Nitro CLI converts images from the runner's local Docker image store.
+      # Bake both independent inputs together so BuildKit can build them in parallel.
+      - name: Load tempo-zone-prover EIF inputs
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           files: docker/docker-bake.hcl
-          targets: tempo-zone-prover-enclave
+          targets: |
+            tempo-zone-prover-enclave
+            tempo-zone-prover-eif-builder
           set: |
             tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
             tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
-          project: 0c6tg19qsp
-          load: true
-          no-cache: ${{ github.event_name == 'schedule' }}
-          pull: ${{ github.event_name == 'schedule' }}
-
-      - name: Load tempo-zone-prover EIF builder
-        uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
-        with:
-          files: docker/docker-bake.hcl
-          targets: tempo-zone-prover-eif-builder
-          set: tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
+            tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
           project: 0c6tg19qsp
           load: true
           no-cache: ${{ github.event_name == 'schedule' }}
@@ -203,6 +215,20 @@ jobs:
             --output-file /output/tempo-zone-prover.eif \
             | tee "$EIF_OUTPUT_DIR/measurements.json"
 
+      - name: Read tempo-zone-prover PCR measurements
+        id: prover_measurements
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          measurements=target/tempo-zone-prover-eif/measurements.json
+          {
+            echo "hash_algorithm=$(jq -er '.Measurements.HashAlgorithm | strings | select(length > 0)' "$measurements")"
+            echo "pcr0=$(jq -er '.Measurements.PCR0 | strings | select(length > 0)' "$measurements")"
+            echo "pcr1=$(jq -er '.Measurements.PCR1 | strings | select(length > 0)' "$measurements")"
+            echo "pcr2=$(jq -er '.Measurements.PCR2 | strings | select(length > 0)' "$measurements")"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push tempo-zone-prover
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
@@ -210,6 +236,11 @@ jobs:
             docker/docker-bake.hcl
             ${{ steps.meta-tempo-zone-prover.outputs.bake-file }}
           targets: tempo-zone-prover
+          set: |
+            tempo-zone-prover.args.NITRO_HASH_ALGORITHM=${{ steps.prover_measurements.outputs.hash_algorithm }}
+            tempo-zone-prover.args.NITRO_PCR0=${{ steps.prover_measurements.outputs.pcr0 }}
+            tempo-zone-prover.args.NITRO_PCR1=${{ steps.prover_measurements.outputs.pcr1 }}
+            tempo-zone-prover.args.NITRO_PCR2=${{ steps.prover_measurements.outputs.pcr2 }}
           project: 0c6tg19qsp
           push: >-
             ${{ github.repository == 'tempoxyz/zones' &&
