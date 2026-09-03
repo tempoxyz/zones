@@ -112,6 +112,24 @@ jobs:
             type=sha,prefix=sha-
             type=ref,event=pr
 
+      - name: Docker metadata for tempo-zone-prover-utils
+        id: meta-tempo-zone-prover-utils
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/tempo-zone-prover-utils
+          bake-target: tempo-zone-prover-utils
+          tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
+            type=ref,event=pr
+
       - name: Log in to Container Registry
         if: github.repository == 'tempoxyz/zones'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -146,6 +164,7 @@ jobs:
             docker/docker-bake.hcl
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
             ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
+            ${{ steps.meta-tempo-zone-prover-utils.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
           push: ${{ github.repository == 'tempoxyz/zones' && github.event_name != 'pull_request' }}
