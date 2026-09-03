@@ -19,6 +19,7 @@ build_scenario_report_args() {
         "bootstrap-deposit-amount:ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT"
         "l1-gas-limit:ZONES_BENCH_L1_GAS_LIMIT"
         "l1-general-gas-limit:ZONES_BENCH_L1_GENERAL_GAS_LIMIT"
+        "zone-gas-limit:ZONES_BENCH_ZONE_GAS_LIMIT"
         "withdrawal-max-batch-gas:ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS"
         "withdrawal-max-in-flight-batches:ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES"
         "zone-batch-interval-blocks:ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS"
