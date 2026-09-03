@@ -13828,6 +13828,7 @@ dependencies = [
  "k256",
  "metrics",
  "parking_lot",
+ "rayon",
  "reth-metrics",
  "reth-primitives-traits",
  "reth-provider",
