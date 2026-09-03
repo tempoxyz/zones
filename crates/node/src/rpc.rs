@@ -70,7 +70,7 @@ use zone_rpc::{
     },
 };
 
-use crate::{replication::PeerTipRegistry, role::SharedRoleStatus};
+use crate::{follower::PeerTipRegistry, role::SharedRoleStatus};
 
 /// Multi-sequencer handles for the sequencer RPC methods.
 ///

@@ -49,9 +49,9 @@ mod zone_transaction_pool_alias {
 
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
+    follower::{BlockSyncP2p, FollowerBlockSync, FollowerBlockSyncContext, PeerTipRegistry},
     replication::{
-        AttestationContext, BlockSyncP2p, BroadcasterShutdown, FollowerBlockSync,
-        FollowerBlockSyncContext, PeerTipRegistry, broadcast_persisted_blocks,
+        AttestationContext, BroadcasterShutdown, broadcast_persisted_blocks,
         collect_follower_settlement_signatures,
     },
     settlement_attestation::collect_leader_settlements,
