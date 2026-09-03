@@ -29,24 +29,30 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, ErrorCode, PROTOCOL_VERSION, ProverConnection, VerifyRequest,
     VerifyResponse,
 };
-use zone_rpc::ZoneDebugApi;
+use zone_rpc::types::TempoStorageRead;
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
+use crate::{
+    BatchAnchorConfig, BatchData, ZoneSequencerProvider,
+    metrics::ProverMetrics,
+    proofs::{ProofCollectorHandle, StoredBlockProof},
+};
 
 /// Number of shadow proof candidates allowed to wait behind the active validation.
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
+
+pub(crate) type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 /// Typed error context for an SPF rejection or a mismatch in its output.
 /// Errors without this context mean validation could not complete and must not
@@ -64,8 +70,6 @@ pub struct ShadowProverConfig {
     pub zone_id: u32,
     /// Chain spec used to configure the SPF.
     pub chain_spec: Arc<ZoneChainSpec>,
-    /// In-process Zone debug API used to generate execution witnesses.
-    pub debug_api: Arc<dyn ZoneDebugApi>,
     /// Remote prover TCP address. When absent, execute the SPF in-process.
     pub prover_address: Option<String>,
 }
@@ -77,7 +81,6 @@ impl fmt::Debug for ShadowProverConfig {
             .field("parent_chain_id", &self.parent_chain_id)
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
-            .field("debug_api", &"<in-process>")
             .field("prover_address", &self.prover_address)
             .finish()
     }
@@ -86,6 +89,30 @@ impl fmt::Debug for ShadowProverConfig {
 #[derive(Debug, Clone)]
 pub struct ShadowProver {
     sender: mpsc::Sender<ProverJob>,
+    proofs: ProofCollectorHandle,
+}
+
+/// Proof collection plus optional observational SPF validation for the monitor.
+#[derive(Debug, Clone)]
+pub(crate) struct ProofServices {
+    collector: ProofCollectorHandle,
+    shadow: Option<ShadowProver>,
+}
+
+impl ProofServices {
+    pub(crate) const fn new(collector: ProofCollectorHandle, shadow: Option<ShadowProver>) -> Self {
+        Self { collector, shadow }
+    }
+
+    pub(crate) async fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+        if let Some(shadow) = &self.shadow {
+            shadow.try_enqueue(from, to, batch).await;
+        }
+    }
+
+    pub(crate) async fn prune_through(&self, through: u64) -> Result<()> {
+        self.collector.prune_through(through).await
+    }
 }
 
 /// Exact Tempo anchor committed by a finalized batch submission.
@@ -103,6 +130,7 @@ struct ProverJob {
     to: u64,
     batch: BatchData,
     anchor: Option<ShadowProofAnchor>,
+    proofs: Vec<Arc<StoredBlockProof>>,
     enqueued_at: Instant,
 }
 
@@ -125,11 +153,12 @@ struct ProverContext<P> {
     l1_provider: DynProvider<TempoNetwork>,
 }
 
-struct ZoneInputs {
-    parent_header: TempoHeader,
-    blocks: Vec<ZoneBlock>,
-    initial_tempo_number: u64,
-    initial_tempo_hash: B256,
+pub(crate) struct ZoneInputs {
+    pub(crate) parent_header: TempoHeader,
+    pub(crate) blocks: Vec<ZoneBlock>,
+    pub(crate) checkpoint_by_zone_block: BTreeMap<u64, u64>,
+    pub(crate) initial_tempo_number: u64,
+    pub(crate) initial_tempo_hash: B256,
 }
 
 struct Anchor {
@@ -180,6 +209,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
 
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
+    proofs: ProofCollectorHandle,
     portal: Address,
     anchor_config: BatchAnchorConfig,
     zone_provider: P,
@@ -292,17 +322,31 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
         }
     });
 
-    ShadowProver { sender }
+    ShadowProver { sender, proofs }
 }
 
 impl ShadowProver {
     /// Queue a candidate without waiting for validation or queue capacity.
-    pub(crate) fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+    pub(crate) async fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
+        let proofs = match self.proofs.wait_for_range(from, to).await {
+            Ok(proofs) => proofs,
+            Err(err) => {
+                error!(
+                    target: "zone::sequencer::prover",
+                    zone_from = from,
+                    zone_to = to,
+                    error = %err,
+                    "Proof range unavailable; skipping finalized batch candidate"
+                );
+                return;
+            }
+        };
         if let Err(err) = self.sender.try_send(ProverJob {
             from,
             to,
             batch: batch.clone(),
             anchor: None,
+            proofs,
             enqueued_at: Instant::now(),
         }) {
             error!(
@@ -336,6 +380,7 @@ impl ShadowProver {
                 to,
                 batch,
                 anchor: Some(anchor),
+                proofs: self.proofs.wait_for_range(from, to).await?,
                 enqueued_at: Instant::now(),
             })
             .await
@@ -387,16 +432,18 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     }
 
     let started = Instant::now();
-    let (zone_state_witness, tempo_state_witness) =
-        zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
+    ensure!(
+        job.proofs.last().map(|proof| proof.block_hash) == Some(expected_next_hash),
+        "stored proof range does not end at candidate Zone hash {expected_next_hash}"
+    );
+    let (zone_state_witness, tempo_state_witness, initial_tempo_header) =
+        merge_stored_proofs(&job.proofs, &zone_inputs)?;
     metrics
         .zone_witness_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
     let (final_tempo_header, anchor) = async {
-        let initial_tempo_header =
-            decode_tempo_header(&tempo_state_witness.initial_tempo_header_rlp)?;
         ensure!(
             initial_tempo_header.hash_slow() == zone_inputs.initial_tempo_hash,
             "parent Zone state commits Tempo block {} hash {}, but witness returned {}",
@@ -442,6 +489,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .tempo_headers_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
+    metrics.tempo_witness_duration_seconds.record(0.0);
     let witness = BatchWitness {
         public_inputs: PublicInputs {
             parent_chain_id: context.config.parent_chain_id,
@@ -632,7 +680,69 @@ async fn verify_remotely(
     }
 }
 
-fn build_zone_inputs<P: ZoneSequencerProvider>(
+fn merge_stored_proofs(
+    proofs: &[Arc<StoredBlockProof>],
+    inputs: &ZoneInputs,
+) -> Result<(ZoneStateWitness, TempoStateWitness, TempoHeader)> {
+    ensure!(
+        proofs.len() == inputs.blocks.len(),
+        "stored proof count does not match Zone block count"
+    );
+    let first = proofs.first().ok_or_eyre("stored proof range is empty")?;
+    let mut expected_parent = inputs.parent_header.hash_slow();
+    let mut zone_nodes = BTreeMap::new();
+    let mut bytecodes = BTreeMap::new();
+    let mut tempo_nodes = BTreeMap::new();
+
+    for (proof, block) in proofs.iter().zip(&inputs.blocks) {
+        ensure!(
+            proof.block_number == block.number,
+            "stored proof at height {} belongs to Zone block {}",
+            block.number,
+            proof.block_number
+        );
+        ensure!(
+            proof.parent_hash == expected_parent,
+            "stored proof for Zone block {} has parent {}, expected {}",
+            block.number,
+            proof.parent_hash,
+            expected_parent
+        );
+        for node in &proof.zone_state_witness.node_pool {
+            zone_nodes
+                .entry(keccak256(node))
+                .or_insert_with(|| node.clone());
+        }
+        for code in &proof.zone_state_witness.bytecodes {
+            bytecodes
+                .entry(keccak256(code))
+                .or_insert_with(|| code.clone());
+        }
+        for node in &proof.tempo_state_witness.node_pool {
+            tempo_nodes
+                .entry(keccak256(node))
+                .or_insert_with(|| node.clone());
+        }
+        expected_parent = proof.block_hash;
+    }
+
+    let initial_tempo_header =
+        decode_tempo_header(&first.tempo_state_witness.initial_tempo_header_rlp)
+            .context("decode initial Tempo header from stored proof")?;
+    Ok((
+        ZoneStateWitness {
+            node_pool: zone_nodes.into_values().collect(),
+            bytecodes: bytecodes.into_values().collect(),
+        },
+        TempoStateWitness {
+            initial_tempo_header_rlp: first.tempo_state_witness.initial_tempo_header_rlp.clone(),
+            node_pool: tempo_nodes.into_values().collect(),
+        },
+        initial_tempo_header,
+    ))
+}
+
+pub(crate) fn build_zone_inputs<P: ZoneSequencerProvider>(
     provider: &P,
     from: u64,
     to: u64,
@@ -707,6 +817,34 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
     Ok(ZoneInputs {
         parent_header,
         blocks: extracted,
+        initial_tempo_number: initial_tempo.number,
+        initial_tempo_hash: initial_tempo.hash,
+    })
+}
+
+pub(crate) fn build_zone_inputs_for_block<P: ZoneSequencerProvider>(
+    provider: &P,
+    block: &RecoveredBlock<Block>,
+) -> Result<ZoneInputs> {
+    let number = block.number();
+    ensure!(number > 0, "SPF block cannot be Zone genesis");
+    let parent_header = provider
+        .header_by_number(number - 1)?
+        .ok_or_eyre(format!("canonical Zone parent {} not found", number - 1))?;
+    let parent_hash = parent_header.hash_slow();
+    ensure!(
+        block.parent_hash() == parent_hash,
+        "executed Zone block {number} does not extend canonical parent {parent_hash}"
+    );
+    let initial_tempo = provider
+        .state_by_block_hash(parent_hash)?
+        .tempo_num_hash()?;
+    let extracted = extract_zone_block(block)?;
+    let checkpoint = decode_tempo_header(&extracted.tempo_header_rlp)?.number();
+    Ok(ZoneInputs {
+        parent_header,
+        blocks: vec![extracted],
+        checkpoint_by_zone_block: BTreeMap::from([(number, checkpoint)]),
         initial_tempo_number: initial_tempo.number,
         initial_tempo_hash: initial_tempo.hash,
     })
@@ -804,81 +942,79 @@ fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
     Ok(header)
 }
 
-async fn zone_witnesses(
-    debug_api: &dyn ZoneDebugApi,
-    from: u64,
-    to: u64,
-) -> Result<(ZoneStateWitness, TempoStateWitness)> {
-    let results = stream::iter(from..=to)
-        .map(|number| async move {
-            let started = Instant::now();
-            debug!(
-                target: "zone::sequencer::prover",
-                zone_block = number,
-                "Requesting Zone execution witness"
-            );
-            let witness = debug_api
-                .zone_execution_witness(BlockNumberOrTag::Number(number))
+pub(crate) fn collect_l1_reads(
+    tempo_reads: Vec<(u64, TempoStorageRead)>,
+    checkpoints: &BTreeMap<u64, u64>,
+) -> Result<L1Reads> {
+    let mut reads = L1Reads::new();
+    for (zone_block, read) in tempo_reads {
+        let checkpoint = checkpoints.get(&zone_block).copied().ok_or_eyre(format!(
+            "missing Tempo checkpoint for Zone block {zone_block}"
+        ))?;
+        reads
+            .entry(checkpoint)
+            .or_default()
+            .entry(read.account)
+            .or_default()
+            .insert(read.slot);
+    }
+    Ok(reads)
+}
+
+pub(crate) async fn tempo_state_witness(
+    provider: &DynProvider<TempoNetwork>,
+    initial_header: &TempoHeader,
+    reads: L1Reads,
+) -> Result<TempoStateWitness> {
+    let requests = reads
+        .into_iter()
+        .map(|(block, accounts)| {
+            let targets = accounts
+                .into_iter()
+                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            (block, targets)
+        })
+        .collect::<Vec<_>>();
+    let proofs = stream::iter(requests)
+        .map(|(block, targets)| async move {
+            provider
+                .client()
+                .request::<_, Vec<EIP1186AccountProofResponse>>(
+                    "eth_getMultiProof",
+                    (targets, BlockId::number(block)),
+                )
                 .await
-                .map_err(|error| eyre::eyre!(error.to_string()))
-                .wrap_err_with(|| {
-                    format!("debug_zoneExecutionWitness for Zone block {number}")
-                })?;
-            if witness.execution_witness.headers.len() > 1 {
-                bail!(
-                    "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"
-                );
-            }
-            debug!(
-                target: "zone::sequencer::prover",
-                zone_block = number,
-                state_nodes = witness.execution_witness.state.len(),
-                bytecodes = witness.execution_witness.codes.len(),
-                ancestor_headers = witness.execution_witness.headers.len(),
-                tempo_state_nodes = witness.tempo_state.len(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "Received Zone execution witness"
-            );
-            Ok::<_, eyre::Report>((number, witness))
+                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
 
-    let mut state = BTreeMap::new();
-    let mut codes = BTreeMap::new();
-    let mut tempo_nodes = BTreeMap::new();
-    let mut initial_tempo_header_rlp = None;
-    for (number, witness) in results {
-        if number == from {
-            initial_tempo_header_rlp = Some(Bytes::from(alloy_rlp::encode(
-                &witness.initial_tempo_header,
-            )));
-        }
-        for node in witness.execution_witness.state {
-            state.entry(keccak256(&node)).or_insert(node);
-        }
-        for code in witness.execution_witness.codes {
-            codes.entry(keccak256(&code)).or_insert(code);
-        }
-        for node in witness.tempo_state {
-            tempo_nodes.entry(keccak256(&node)).or_insert(node);
+    let mut nodes = BTreeMap::new();
+    for block_proofs in proofs {
+        for proof in block_proofs {
+            for node in proof.account_proof {
+                nodes.entry(keccak256(&node)).or_insert(node);
+            }
+            for storage in proof.storage_proof {
+                for node in storage.proof {
+                    nodes.entry(keccak256(&node)).or_insert(node);
+                }
+            }
         }
     }
 
-    Ok((
-        ZoneStateWitness {
-            node_pool: state.into_values().collect(),
-            bytecodes: codes.into_values().collect(),
-        },
-        TempoStateWitness {
-            initial_tempo_header_rlp: initial_tempo_header_rlp.ok_or_eyre("empty witness range")?,
-            node_pool: tempo_nodes.into_values().collect(),
-        },
-    ))
+    Ok(TempoStateWitness {
+        initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(initial_header)),
+        node_pool: nodes.into_values().collect(),
+    })
 }
 
-async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Result<TempoHeader> {
+pub(crate) async fn tempo_header(
+    provider: &DynProvider<TempoNetwork>,
+    number: u64,
+) -> Result<TempoHeader> {
     provider
         .get_block_by_number(BlockNumberOrTag::Number(number))
         .await?
