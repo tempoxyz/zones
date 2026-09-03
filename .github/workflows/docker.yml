@@ -203,6 +203,20 @@ jobs:
             --output-file /output/tempo-zone-prover.eif \
             | tee "$EIF_OUTPUT_DIR/measurements.json"
 
+      - name: Read tempo-zone-prover PCR measurements
+        id: prover_measurements
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          measurements=target/tempo-zone-prover-eif/measurements.json
+          {
+            echo "hash_algorithm=$(jq -er '.Measurements.HashAlgorithm | strings | select(length > 0)' "$measurements")"
+            echo "pcr0=$(jq -er '.Measurements.PCR0 | strings | select(length > 0)' "$measurements")"
+            echo "pcr1=$(jq -er '.Measurements.PCR1 | strings | select(length > 0)' "$measurements")"
+            echo "pcr2=$(jq -er '.Measurements.PCR2 | strings | select(length > 0)' "$measurements")"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push tempo-zone-prover
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
@@ -210,6 +224,11 @@ jobs:
             docker/docker-bake.hcl
             ${{ steps.meta-tempo-zone-prover.outputs.bake-file }}
           targets: tempo-zone-prover
+          set: |
+            tempo-zone-prover.args.NITRO_HASH_ALGORITHM=${{ steps.prover_measurements.outputs.hash_algorithm }}
+            tempo-zone-prover.args.NITRO_PCR0=${{ steps.prover_measurements.outputs.pcr0 }}
+            tempo-zone-prover.args.NITRO_PCR1=${{ steps.prover_measurements.outputs.pcr1 }}
+            tempo-zone-prover.args.NITRO_PCR2=${{ steps.prover_measurements.outputs.pcr2 }}
           project: 0c6tg19qsp
           push: >-
             ${{ github.repository == 'tempoxyz/zones' &&
