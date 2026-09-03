@@ -88,8 +88,8 @@ pub(crate) trait CallRules: 'static {
         None
     }
 
-    /// Applies Zone-specific admission rules using the active Tempo hardfork.
-    fn admit(&self, _data: &[u8], _caller: Address, _spec: TempoHardfork) -> CallCheck {
+    /// Applies Zone-specific admission rules.
+    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -153,19 +153,17 @@ pub(crate) fn create_precompile(
             storage.set_tip1060_storage_credits(false);
         }
 
-        let mut result = StorageCtx::enter(&mut storage, || {
-            match rules.admit(data, caller, env.cfg.spec) {
-                CallCheck::Continue => execute(data, caller),
-                CallCheck::Revert(output) => {
-                    let s = StorageCtx::default();
-                    let output = s.revert_output(output);
-                    add_input_cost(s, data, Ok(output))
-                }
-                CallCheck::Error(error) => {
-                    let s = StorageCtx::default();
-                    let result = s.error_result(error);
-                    add_input_cost(s, data, result)
-                }
+        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
+            CallCheck::Continue => execute(data, caller),
+            CallCheck::Revert(output) => {
+                let s = StorageCtx::default();
+                let output = s.revert_output(output);
+                add_input_cost(s, data, Ok(output))
+            }
+            CallCheck::Error(error) => {
+                let s = StorageCtx::default();
+                let result = s.error_result(error);
+                add_input_cost(s, data, result)
             }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
@@ -215,7 +213,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, data: &[u8], caller: Address, _spec: TempoHardfork) -> CallCheck {
+        fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(data),
                 selector_from_calldata(data),
@@ -379,7 +377,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, _data: &[u8], _caller: Address, _spec: TempoHardfork) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
             self.0.set(true);
             CallCheck::Revert(Bytes::from_static(b"denied"))
         }
@@ -463,7 +461,7 @@ mod tests {
     struct FatalRules;
 
     impl CallRules for FatalRules {
-        fn admit(&self, _data: &[u8], _caller: Address, _spec: TempoHardfork) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
             StorageCtx::default().deduct_gas(10).unwrap();
             CallCheck::Error(TempoPrecompileError::Fatal("boom".into()))
         }

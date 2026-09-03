@@ -19,6 +19,7 @@ use tempo_zone_contracts::Unauthorized;
 use crate::{
     execution::{CallCheck, CallRules},
     privacy::check_caller,
+    storage::StorageCtx,
 };
 
 alloy_sol_types::sol! {
@@ -53,13 +54,8 @@ impl CallRules for TIP20Rules {
     }
 
     /// Apply zone privacy and selector restrictions before upstream execution.
-    fn admit(
-        &self,
-        data: &[u8],
-        caller: Address,
-        spec: tempo_chainspec::hardfork::TempoHardfork,
-    ) -> CallCheck {
-        let config = abi_decoder_config_for_spec(spec);
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        let config = abi_decoder_config_for_spec(StorageCtx::default().spec());
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode_with_config(data, config) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
@@ -181,16 +177,28 @@ mod tests {
         TIP20Rules
     }
 
+    fn admit_at(
+        rules: &TIP20Rules,
+        data: &[u8],
+        caller: Address,
+        spec: TempoHardfork,
+    ) -> CallCheck {
+        let mut ctx = test_context();
+        ctx.cfg.spec = spec;
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || rules.admit(data, caller))
+    }
+
     fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller, TempoHardfork::T8),
+            admit_at(rules, &call.abi_encode(), caller, TempoHardfork::T8),
             CallCheck::Continue
         ));
     }
 
     fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller, TempoHardfork::T8),
+            admit_at(rules, &call.abi_encode(), caller, TempoHardfork::T8),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -301,27 +309,22 @@ mod tests {
         let sequencer = Address::repeat_byte(0x33);
         let outsider = Address::repeat_byte(0x44);
         let rules = TIP20Rules;
-        let mut ctx = test_context();
-        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let balance = ITIP20::balanceOfCall { account: owner };
+        assert_allowed(&rules, balance.clone(), owner);
+        assert_unauthorized(&rules, balance.clone(), sequencer);
+        assert_unauthorized(&rules, balance, outsider);
 
-        StorageCtx::enter(&mut storage, || {
-            let balance = ITIP20::balanceOfCall { account: owner };
-            assert_allowed(&rules, balance.clone(), owner);
-            assert_unauthorized(&rules, balance.clone(), sequencer);
-            assert_unauthorized(&rules, balance, outsider);
+        let allowance = ITIP20::allowanceCall { owner, spender };
+        for caller in [owner, spender] {
+            assert_allowed(&rules, allowance.clone(), caller);
+        }
+        assert_unauthorized(&rules, allowance.clone(), sequencer);
+        assert_unauthorized(&rules, allowance, outsider);
 
-            let allowance = ITIP20::allowanceCall { owner, spender };
-            for caller in [owner, spender] {
-                assert_allowed(&rules, allowance.clone(), caller);
-            }
-            assert_unauthorized(&rules, allowance.clone(), sequencer);
-            assert_unauthorized(&rules, allowance, outsider);
-
-            let nonce = ITIP20::noncesCall { owner };
-            assert_allowed(&rules, nonce.clone(), owner);
-            assert_unauthorized(&rules, nonce.clone(), sequencer);
-            assert_unauthorized(&rules, nonce, outsider);
-        });
+        let nonce = ITIP20::noncesCall { owner };
+        assert_allowed(&rules, nonce.clone(), owner);
+        assert_unauthorized(&rules, nonce.clone(), sequencer);
+        assert_unauthorized(&rules, nonce, outsider);
     }
 
     #[test]
@@ -381,7 +384,7 @@ mod tests {
 
         for call in calls {
             assert!(matches!(
-                rules.admit(&call, caller, TempoHardfork::T8),
+                admit_at(&rules, &call, caller, TempoHardfork::T8),
                 CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
             ));
         }

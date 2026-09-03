@@ -6,11 +6,11 @@
 
 use crate::{
     execution::{CallCheck, CallRules},
+    storage::StorageCtx,
     ztip20::TIP20_FIXED_TRANSFER_GAS,
 };
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError};
-use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::IReceivePolicyGuard;
 use tempo_precompiles::{
     address_registry::AddressRegistry,
@@ -30,14 +30,14 @@ impl CallRules for ReceivePolicyGuardRules {
             .then_some(TIP20_FIXED_TRANSFER_GAS)
     }
 
-    fn admit(&self, data: &[u8], caller: Address, spec: TempoHardfork) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
         if selector_from_calldata(data) != Some(IReceivePolicyGuard::balanceOfCall::SELECTOR) {
             return CallCheck::Continue;
         }
 
         let Ok(call) = IReceivePolicyGuard::balanceOfCall::abi_decode_raw_with_config(
             &data[4..],
-            abi_decoder_config_for_spec(spec),
+            abi_decoder_config_for_spec(StorageCtx::default().spec()),
         ) else {
             // Preserve the upstream ABI error for malformed calldata.
             return CallCheck::Continue;
@@ -69,6 +69,7 @@ mod tests {
     use alloy_primitives::{B256, Bytes, U256, address};
     use alloy_sol_types::SolValue;
     use revm::precompile::{PrecompileOutput, PrecompileResult};
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{IReceivePolicyGuard::InboundKind, ITIP20, ITIP403Registry};
     use tempo_precompiles::{
         PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS,
@@ -122,7 +123,7 @@ mod tests {
         caller: Address,
     ) {
         assert!(matches!(
-            rules.admit(&balance_call(receipt), caller, TempoHardfork::T8),
+            rules.admit(&balance_call(receipt), caller),
             CallCheck::Continue
         ));
     }
@@ -133,7 +134,7 @@ mod tests {
         caller: Address,
     ) {
         assert!(matches!(
-            rules.admit(&balance_call(receipt), caller, TempoHardfork::T8),
+            rules.admit(&balance_call(receipt), caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -188,7 +189,7 @@ mod tests {
 
         StorageCtx::enter(&mut storage, || {
             assert!(matches!(
-                rules.admit(&balance_call(&receipt), OUTSIDER, TempoHardfork::T8),
+                rules.admit(&balance_call(&receipt), OUTSIDER),
                 CallCheck::Error(tempo_precompiles::error::TempoPrecompileError::OutOfGas)
             ));
         });
@@ -208,14 +209,15 @@ mod tests {
         }
         .abi_encode();
 
-        assert!(matches!(
-            rules.admit(&claim, OUTSIDER, TempoHardfork::T8),
-            CallCheck::Continue
-        ));
-        assert!(matches!(
-            rules.admit(&malformed, OUTSIDER, TempoHardfork::T8),
-            CallCheck::Continue
-        ));
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || {
+            assert!(matches!(rules.admit(&claim, OUTSIDER), CallCheck::Continue));
+            assert!(matches!(
+                rules.admit(&malformed, OUTSIDER),
+                CallCheck::Continue
+            ));
+        });
     }
 
     #[test]
@@ -223,19 +225,18 @@ mod tests {
         let rules = ReceivePolicyGuardRules;
         let mut data = balance_call(&receipt(RECEIVER, RECOVERY)).to_vec();
         data.extend([0; 32]);
-        let mut ctx = test_context();
-        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        let admit_at = |spec| {
+            let mut ctx = test_context();
+            ctx.cfg.spec = spec;
+            let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+            StorageCtx::enter(&mut storage, || rules.admit(&data, OUTSIDER))
+        };
 
-        StorageCtx::enter(&mut storage, || {
-            assert!(matches!(
-                rules.admit(&data, OUTSIDER, TempoHardfork::T8),
-                CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
-            ));
-            assert!(matches!(
-                rules.admit(&data, OUTSIDER, TempoHardfork::T11),
-                CallCheck::Continue
-            ));
-        });
+        assert!(matches!(
+            admit_at(TempoHardfork::T8),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+        ));
+        assert!(matches!(admit_at(TempoHardfork::T11), CallCheck::Continue));
     }
 
     #[test]

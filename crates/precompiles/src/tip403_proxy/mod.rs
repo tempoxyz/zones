@@ -25,12 +25,7 @@ alloy_sol_types::sol! {
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn admit(
-        &self,
-        _data: &[u8],
-        caller: Address,
-        _spec: tempo_chainspec::hardfork::TempoHardfork,
-    ) -> CallCheck {
+    fn admit(&self, _data: &[u8], caller: Address) -> CallCheck {
         // Operator simulations use `address(0)`. Public RPC simulations cannot select this caller.
         if caller.is_zero() {
             return CallCheck::Continue;
@@ -114,20 +109,12 @@ mod tests {
     fn only_zero_address_is_admitted() {
         let data = ITIP403Registry::policyIdCounterCall {}.abi_encode();
         assert!(matches!(
-            Tip403Rules.admit(
-                &data,
-                Address::ZERO,
-                tempo_chainspec::hardfork::TempoHardfork::T8,
-            ),
+            Tip403Rules.admit(&data, Address::ZERO),
             CallCheck::Continue
         ));
         for caller in [CALLER, Address::repeat_byte(0x20)] {
             assert!(matches!(
-                Tip403Rules.admit(
-                    &data,
-                    caller,
-                    tempo_chainspec::hardfork::TempoHardfork::T8,
-                ),
+                Tip403Rules.admit(&data, caller),
                 CallCheck::Revert(data) if data == OnlyPrecompiles {}.abi_encode()
             ));
         }

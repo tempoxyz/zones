@@ -2,13 +2,13 @@
 
 use alloy_primitives::Address;
 use alloy_sol_types::SolInterface;
-use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::IAccountKeychain;
 use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
 
 use crate::{
     execution::{CallCheck, CallRules},
     privacy::check_caller,
+    storage::StorageCtx,
 };
 
 /// Zone-specific rules applied before forwarding to upstream `AccountKeychain`.
@@ -16,10 +16,10 @@ use crate::{
 pub(crate) struct AccountKeychainRules;
 
 impl CallRules for AccountKeychainRules {
-    fn admit(&self, data: &[u8], caller: Address, spec: TempoHardfork) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
         let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode_with_config(
             data,
-            abi_decoder_config_for_spec(spec),
+            abi_decoder_config_for_spec(StorageCtx::default().spec()),
         ) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
@@ -64,12 +64,25 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256};
     use alloy_sol_types::{SolCall, SolError};
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_zone_contracts::Unauthorized;
 
     use crate::{
         storage::StorageCtx,
         test_utils::{test_context, test_storage_provider},
     };
+
+    fn admit_at(
+        rules: &AccountKeychainRules,
+        data: &[u8],
+        caller: Address,
+        spec: TempoHardfork,
+    ) -> CallCheck {
+        let mut ctx = test_context();
+        ctx.cfg.spec = spec;
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || rules.admit(data, caller))
+    }
 
     fn assert_account_scoped<C: SolCall + Clone>(
         rules: &AccountKeychainRules,
@@ -79,12 +92,12 @@ mod tests {
         outsider: Address,
     ) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), owner, TempoHardfork::T8),
+            rules.admit(&call.abi_encode(), owner),
             CallCheck::Continue
         ));
         for caller in [sequencer, outsider] {
             assert!(matches!(
-                rules.admit(&call.clone().abi_encode(), caller, TempoHardfork::T8),
+                rules.admit(&call.clone().abi_encode(), caller),
                 CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
             ));
         }
@@ -172,25 +185,27 @@ mod tests {
         let caller = Address::repeat_byte(0x11);
         let rules = AccountKeychainRules;
 
-        assert!(matches!(
-            rules.admit(
-                &IAccountKeychain::getTransactionKeyCall {}.abi_encode(),
-                caller,
-                TempoHardfork::T8,
-            ),
-            CallCheck::Continue
-        ));
-        assert!(matches!(
-            rules.admit(
-                &IAccountKeychain::revokeKeyCall {
-                    keyId: Address::repeat_byte(0x22),
-                }
-                .abi_encode(),
-                caller,
-                TempoHardfork::T8,
-            ),
-            CallCheck::Continue
-        ));
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || {
+            assert!(matches!(
+                rules.admit(
+                    &IAccountKeychain::getTransactionKeyCall {}.abi_encode(),
+                    caller,
+                ),
+                CallCheck::Continue
+            ));
+            assert!(matches!(
+                rules.admit(
+                    &IAccountKeychain::revokeKeyCall {
+                        keyId: Address::repeat_byte(0x22),
+                    }
+                    .abi_encode(),
+                    caller,
+                ),
+                CallCheck::Continue
+            ));
+        });
     }
 
     #[test]
@@ -206,11 +221,11 @@ mod tests {
         data[4] = 1;
 
         assert!(matches!(
-            rules.admit(&data, outsider, TempoHardfork::T8),
+            admit_at(&rules, &data, outsider, TempoHardfork::T8),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
         assert!(matches!(
-            rules.admit(&data, outsider, TempoHardfork::T11),
+            admit_at(&rules, &data, outsider, TempoHardfork::T11),
             CallCheck::Continue
         ));
     }
