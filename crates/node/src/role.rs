@@ -1017,16 +1017,9 @@ where
             });
 
             let server_token = token.clone();
-            let provider = context.provider.clone();
             let attestation = context.attestation.clone();
             tasks.spawn(async move {
-                collect_follower_settlement_signatures(
-                    provider,
-                    sync_rx,
-                    attestation,
-                    server_token,
-                )
-                .await;
+                collect_follower_settlement_signatures(sync_rx, attestation, server_token).await;
                 TaskEnd::Ended("leader-settlement-signatures")
             });
 

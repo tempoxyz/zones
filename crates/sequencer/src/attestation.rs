@@ -191,6 +191,36 @@ impl AttestationStore {
         Ok(())
     }
 
+    /// The statement `signer` attested to at `(height, digest)`, while it remains stored.
+    ///
+    /// Lets the leader check an incoming follower signature against the proposal it signed itself,
+    /// instead of rebuilding that proposal from the zone chain and L1.
+    pub fn stored_attestation(
+        &self,
+        height: u64,
+        digest: B256,
+        signer: Address,
+    ) -> Option<SettlementAttestation> {
+        let all = self
+            .settlements
+            .read()
+            .expect("attestation store lock poisoned");
+        all.get(&height)?
+            .get(&digest)?
+            .get(&signer)
+            .map(|signed| signed.attestation.clone())
+    }
+
+    /// Most signatures collected for any single statement at `height`.
+    pub fn signature_count(&self, height: u64) -> usize {
+        self.settlements
+            .read()
+            .expect("attestation store lock poisoned")
+            .get(&height)
+            .and_then(|by_digest| by_digest.values().map(BTreeMap::len).max())
+            .unwrap_or(0)
+    }
+
     /// Insert a new follower signature only while its leader proposal remains active.
     pub fn insert_follower_settlement(
         &self,
@@ -474,8 +504,11 @@ mod tests {
         );
         let certificate = waiting.await.unwrap().unwrap();
         assert_eq!(certificate.signatures.len(), 2);
+        assert_eq!(store.signature_count(10), 2);
+        assert_eq!(store.signature_count(11), 0);
 
         store.remove_submitted(10);
         assert!(store.settlement_at(10, 1).is_none());
+        assert_eq!(store.signature_count(10), 0);
     }
 }

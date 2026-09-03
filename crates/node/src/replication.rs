@@ -15,6 +15,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
@@ -41,7 +42,7 @@ use zone_sequencer::{
 use alloy_signer_local::PrivateKeySigner;
 use eyre::{OptionExt as _, WrapErr as _};
 
-use crate::settlement_attestation::build_settlement_attestation;
+use crate::settlement_attestation::{PreviousBatch, build_settlement_attestation};
 
 /// Shared signing and L1-validation context for settlement attestations.
 #[derive(Clone)]
@@ -55,6 +56,11 @@ pub(crate) struct AttestationContext {
     pub(crate) store: AttestationStore,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) anchor_config: BatchAnchorConfig,
+    /// Previous-batch lookup memoized for the boundary height it was computed at.
+    ///
+    /// Shared by every clone of the context so a retried proposal, or a second proposal at the
+    /// same boundary, skips walking a whole batch of receipts again.
+    pub(crate) previous_batch: Arc<Mutex<Option<(u64, PreviousBatch)>>>,
 }
 
 impl AttestationContext {
@@ -75,6 +81,7 @@ impl AttestationContext {
             store,
             l1_provider,
             anchor_config,
+            previous_batch: Arc::default(),
         }
     }
 }
@@ -588,16 +595,12 @@ pub(crate) async fn serve_backfill_requests<P>(
 /// writer. Backfill requests are served by the process-lifetime
 /// [`serve_backfill_requests`] task, never by role generations. The loop exits
 /// when `stop` fires.
-async fn store_follower_settlement_signature<P>(
-    provider: &P,
+fn store_follower_settlement_signature(
     follower: &P2pPeerId,
     signature: &[u8],
     attestation: &AttestationContext,
     store: &AttestationStore,
-) -> eyre::Result<(u64, alloy_primitives::Address, usize)>
-where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
-{
+) -> eyre::Result<(u64, alloy_primitives::Address, usize)> {
     let signed = SignedSettlementAttestation::decode(signature)?;
     let signer = signed.recover_signer(attestation.domain)?;
     let expected_signer = attestation
@@ -622,17 +625,12 @@ where
         .address();
     store.precheck_follower_settlement(height, digest, leader, signer)?;
 
-    let expected = build_settlement_attestation(
-        provider,
-        height,
-        attestation,
-        Some((
-            signed.attestation.anchorBlockNumber,
-            signed.attestation.anchorBlockHash,
-        )),
-    )
-    .await?
-    .ok_or_eyre("signed block is not a batch boundary")?;
+    // The digest commits to the whole statement and the precheck established that the leader holds
+    // its own signature at (height, digest), so the leader's stored proposal is exactly what
+    // rebuilding the attestation from receipts and L1 would produce.
+    let expected = store
+        .stored_attestation(height, digest, leader)
+        .ok_or_eyre("leader settlement proposal is no longer stored")?;
     eyre::ensure!(
         signed.attestation == expected,
         "settlement signature does not match leader state"
@@ -642,22 +640,70 @@ where
     Ok((height, signer, signatures))
 }
 
-pub(crate) async fn collect_follower_settlement_signatures<P>(
-    provider: P,
+/// The settlement signature this follower returned last, keyed by the statement it signed.
+struct LastSignedSettlement {
+    height: u64,
+    digest: B256,
+    signature: Vec<u8>,
+}
+
+/// Validate and sign one settlement proposal, answering a re-broadcast of an already signed
+/// statement from `last_signed`.
+///
+/// The leader re-proposes the pending boundary until its batch is confirmed on L1, and validating
+/// a proposal walks every block back to the previous boundary and makes several L1 round trips.
+/// Signing the same statement again can only produce the same signature, so it is returned as is.
+async fn sign_settlement_proposal<P>(
+    provider: &P,
+    attestation: &AttestationContext,
+    proposal: SettlementAttestation,
+    height: u64,
+    last_signed: &mut Option<LastSignedSettlement>,
+) -> eyre::Result<Vec<u8>>
+where
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
+{
+    let digest = attestation.domain.settlement_digest(&proposal);
+    if let Some(last) = last_signed.as_ref()
+        && last.height == height
+        && last.digest == digest
+    {
+        return Ok(last.signature.clone());
+    }
+
+    let expected = build_settlement_attestation(
+        provider,
+        height,
+        attestation,
+        Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
+    )
+    .await?
+    .ok_or_eyre("proposed block is not a batch boundary")?;
+    eyre::ensure!(
+        proposal == expected,
+        "settlement proposal does not match follower state"
+    );
+
+    // Unreachable on an rpc-only member: the P2P layer never routes a proposal to one. Fails
+    // closed rather than panicking if it ever does.
+    let signer = attestation.signer.as_ref().ok_or_eyre(
+        "this node holds no individual secp256k1 key, so it cannot sign a settlement attestation",
+    )?;
+    let signature =
+        SignedSettlementAttestation::sign(proposal, attestation.domain, signer)?.encode();
+    *last_signed = Some(LastSignedSettlement {
+        height,
+        digest,
+        signature: signature.clone(),
+    });
+    Ok(signature)
+}
+
+pub(crate) async fn collect_follower_settlement_signatures(
     mut events: mpsc::Receiver<P2pEvent>,
     attestation: AttestationContext,
     stop: sync::CancellationToken,
-) where
-    P: BlockNumReader
-        + BlockReader<Block = Block>
-        + HeaderProvider<Header = TempoHeader>
-        + StateProviderFactory
-        + ReceiptProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
+) {
     loop {
         tokio::select! {
             biased;
@@ -673,15 +719,12 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                 match event {
                     P2pEvent::Started { .. } => {}
                     P2pEvent::SettlementSignatureReceived { follower, signature } => {
-                        let result = async {
-                            store_follower_settlement_signature(
-                                &provider,
-                                &follower,
-                                &signature,
-                                &attestation,
-                                &attestation.store,
-                            ).await
-                        }.await;
+                        let result = store_follower_settlement_signature(
+                            &follower,
+                            &signature,
+                            &attestation,
+                            &attestation.store,
+                        );
                         match result {
                             Ok((height, signer, signatures)) => info!(target: "zone::p2p", %follower, %signer, height, signatures, "Stored follower settlement signature"),
                             Err(err) => tracing::warn!(target: "zone::p2p", %follower, %err, "Rejected follower settlement signature"),
@@ -736,6 +779,7 @@ pub(crate) async fn run_follower_block_sync<P>(
     // This is capped to `MAX_PENDING_BLOCKS`.
     let mut pending = BTreeMap::<u64, PendingPeerBlock>::new();
     let mut backfill = BackfillProgress::new();
+    let mut last_signed: Option<LastSignedSettlement> = None;
 
     // Always probe on startup to see if we're behind
     let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
@@ -826,31 +870,20 @@ pub(crate) async fn run_follower_block_sync<P>(
                                 height <= persisted_head,
                                 "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
                             );
-                            let expected = build_settlement_attestation(
+                            let signature = sign_settlement_proposal(
                                 &provider,
-                                height,
                                 &attestation,
-                                Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
-                            ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
-                            eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
-
-                            // Unreachable on an rpc-only member: the P2P layer never routes a
-                            // proposal to one. Fails closed rather than panicking if it ever does.
-                            let signer = attestation.signer.as_ref().ok_or_eyre(
-                                "this node holds no individual secp256k1 key, so it cannot sign a settlement attestation",
-                            )?;
-                            let signed = SignedSettlementAttestation::sign(
                                 proposal,
-                                attestation.domain,
-                                signer,
-                            )?;
+                                height,
+                                &mut last_signed,
+                            ).await?;
 
                             // Return the signed settlement attestation to the peer that
                             // proposed it. During a scheduled handoff that is the outgoing
                             // leader, not the most recently observed one.
                             commands.send(P2pCommand::SendSettlementSignature {
                                 leader: leader.clone(),
-                                signature: signed.encode(),
+                                signature,
                             })
                                 .await
                                 .wrap_err("P2P command channel closed")?;
@@ -1413,12 +1446,22 @@ mod tests {
     use tokio_util::sync;
 
     use super::{
-        AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
+        AdvanceTempoPortalInputs, AttestationContext, AttestationDomain, AttestationStore,
+        BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock, HashMap, HeaderProvider,
         MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PersistedBlockSource, PersistedTip,
-        broadcast_persisted_blocks, buffer_pending_block, validate_live_block_sender,
+        PrivateKeySigner, ReceiptProvider, SettlementAttestation, SignedSettlementAttestation,
+        TempoHeader, TempoNetwork, broadcast_persisted_blocks, buffer_pending_block,
+        build_settlement_attestation, sign_settlement_proposal,
+        store_follower_settlement_signature, validate_live_block_sender,
         wait_for_validated_peer_anchor,
     };
-    use alloy_primitives::B256;
+    use alloy_primitives::{Address, B256, Bytes, Log, Sealable as _, U256};
+    use alloy_provider::{Provider as _, mock::Asserter};
+    use alloy_sol_types::{SolEvent as _, SolValue as _};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use reth_provider::{ProviderResult, test_utils::MockEthProvider};
+    use tempo_primitives::{TempoPrimitives, TempoReceipt};
+    use tempo_zone_contracts as zone_contracts;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState, P2pCommand};
 
@@ -2102,5 +2145,440 @@ mod tests {
         );
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);
         assert!(!pending.contains_key(&farther));
+    }
+
+    /// Zone provider that counts the reads a settlement path performs.
+    struct CountingZoneProvider {
+        inner: MockEthProvider<TempoPrimitives>,
+        receipt_reads: Arc<AtomicUsize>,
+        header_reads: Arc<AtomicUsize>,
+    }
+
+    impl CountingZoneProvider {
+        fn new() -> Self {
+            Self {
+                inner: MockEthProvider::new(),
+                receipt_reads: Arc::default(),
+                header_reads: Arc::default(),
+            }
+        }
+
+        /// `(receipt reads, sealed header reads)` observed so far.
+        fn reads(&self) -> (usize, usize) {
+            (
+                self.receipt_reads.load(Ordering::Relaxed),
+                self.header_reads.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    impl HeaderProvider for CountingZoneProvider {
+        type Header = TempoHeader;
+
+        fn header(&self, block_hash: B256) -> ProviderResult<Option<Self::Header>> {
+            self.inner.header(block_hash)
+        }
+
+        fn header_by_number(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
+            self.inner.header_by_number(num)
+        }
+
+        fn headers_range(
+            &self,
+            range: impl std::ops::RangeBounds<u64>,
+        ) -> ProviderResult<Vec<Self::Header>> {
+            self.inner.headers_range(range)
+        }
+
+        fn sealed_header(
+            &self,
+            number: u64,
+        ) -> ProviderResult<Option<reth_primitives_traits::SealedHeader<Self::Header>>> {
+            self.header_reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.sealed_header(number)
+        }
+
+        fn sealed_headers_while(
+            &self,
+            range: impl std::ops::RangeBounds<u64>,
+            predicate: impl FnMut(&reth_primitives_traits::SealedHeader<Self::Header>) -> bool,
+        ) -> ProviderResult<Vec<reth_primitives_traits::SealedHeader<Self::Header>>> {
+            self.inner.sealed_headers_while(range, predicate)
+        }
+    }
+
+    impl ReceiptProvider for CountingZoneProvider {
+        type Receipt = TempoReceipt;
+
+        fn receipt(&self, id: u64) -> ProviderResult<Option<Self::Receipt>> {
+            self.inner.receipt(id)
+        }
+
+        fn receipt_by_hash(&self, hash: B256) -> ProviderResult<Option<Self::Receipt>> {
+            self.inner.receipt_by_hash(hash)
+        }
+
+        fn receipts_by_block(
+            &self,
+            block: alloy_eips::BlockHashOrNumber,
+        ) -> ProviderResult<Option<Vec<Self::Receipt>>> {
+            self.receipt_reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.receipts_by_block(block)
+        }
+
+        fn receipts_by_tx_range(
+            &self,
+            range: impl std::ops::RangeBounds<u64>,
+        ) -> ProviderResult<Vec<Self::Receipt>> {
+            self.inner.receipts_by_tx_range(range)
+        }
+
+        fn receipts_by_block_range(
+            &self,
+            range: std::ops::RangeInclusive<u64>,
+        ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
+            self.inner.receipts_by_block_range(range)
+        }
+    }
+
+    /// Batch boundary the settlement fixture proposes, one full batch after the previous one.
+    const FIXTURE_BOUNDARY: u64 = 240;
+    const FIXTURE_PREVIOUS_BOUNDARY: u64 = 120;
+    /// Receipt reads a cold attestation build performs: the boundary block, then every block back
+    /// to the previous boundary.
+    const COLD_RECEIPT_READS: usize = (FIXTURE_BOUNDARY - FIXTURE_PREVIOUS_BOUNDARY + 1) as usize;
+    /// L1 block the fixture's batch anchors to, which is also the current L1 tip.
+    const FIXTURE_L1_TIP: u64 = 100;
+    const FIXTURE_SET_VERSION: u64 = 3;
+    const FIXTURE_WITHDRAWAL_QUEUE_HASH: B256 = B256::repeat_byte(0x42);
+    const FIXTURE_VERIFIER: Address = Address::repeat_byte(0x22);
+    const FIXTURE_PORTAL: Address = Address::repeat_byte(0x11);
+
+    /// A minimal header; `parent_hash` keeps the zone and L1 chains from sharing block hashes.
+    fn fixture_header(number: u64, parent_hash: B256) -> TempoHeader {
+        TempoHeader {
+            inner: alloy_consensus::Header {
+                number,
+                parent_hash,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn deposit_hash(number: u64) -> B256 {
+        B256::from(U256::from(number))
+    }
+
+    fn advance_log(anchor_hash: B256, number: u64) -> Log {
+        Log {
+            address: zone_contracts::ZONE_INBOX_ADDRESS,
+            data: zone_contracts::IZoneInbox::TempoAdvanced {
+                tempoBlockHash: anchor_hash,
+                tempoBlockNumber: FIXTURE_L1_TIP,
+                depositsProcessed: U256::ZERO,
+                newProcessedDepositQueueHash: deposit_hash(number),
+                lastProcessedDepositNumber: number,
+            }
+            .encode_log_data(),
+        }
+    }
+
+    fn batch_finalized_log(index: u64) -> Log {
+        Log {
+            address: zone_contracts::ZONE_OUTBOX_ADDRESS,
+            data: zone_contracts::IZoneOutbox::BatchFinalized {
+                withdrawalQueueHash: FIXTURE_WITHDRAWAL_QUEUE_HASH,
+                withdrawalBatchIndex: index,
+            }
+            .encode_log_data(),
+        }
+    }
+
+    /// Zone chain, L1 mock and signing context for one batch boundary.
+    struct SettlementFixture {
+        provider: CountingZoneProvider,
+        l1: Asserter,
+        context: AttestationContext,
+        leader: PrivateKeySigner,
+        follower: PrivateKeySigner,
+        follower_peer: zone_p2p::P2pPeerId,
+        anchor_header: tempo_alloy::rpc::TempoHeaderResponse,
+        anchor_hash: B256,
+        previous_tip: B256,
+    }
+
+    impl SettlementFixture {
+        /// A zone chain whose batch boundaries are [`FIXTURE_PREVIOUS_BOUNDARY`] and
+        /// [`FIXTURE_BOUNDARY`], with this node signing as the follower.
+        fn new() -> Self {
+            let anchor = fixture_header(FIXTURE_L1_TIP, B256::repeat_byte(0xa1));
+            let anchor_hash = anchor.hash_slow();
+            let anchor_header = tempo_alloy::rpc::TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header {
+                    hash: anchor_hash,
+                    inner: anchor,
+                    total_difficulty: None,
+                    size: None,
+                },
+                timestamp_millis: 0,
+            };
+
+            let provider = CountingZoneProvider::new();
+            let mut previous_tip = B256::ZERO;
+            for number in 1..=FIXTURE_BOUNDARY {
+                let header = fixture_header(number, B256::ZERO);
+                let hash = header.hash_slow();
+                if number == FIXTURE_PREVIOUS_BOUNDARY {
+                    previous_tip = hash;
+                }
+                provider.inner.add_header(hash, header);
+
+                let mut logs = vec![advance_log(anchor_hash, number)];
+                match number {
+                    FIXTURE_PREVIOUS_BOUNDARY => logs.push(batch_finalized_log(1)),
+                    FIXTURE_BOUNDARY => logs.push(batch_finalized_log(2)),
+                    _ => {}
+                }
+                provider.inner.add_receipts(
+                    number,
+                    vec![TempoReceipt {
+                        tx_type: tempo_primitives::TempoTxType::Legacy,
+                        success: true,
+                        cumulative_gas_used: 0,
+                        logs,
+                    }],
+                );
+            }
+
+            let l1 = Asserter::new();
+            let leader = PrivateKeySigner::random();
+            let follower = PrivateKeySigner::random();
+            let leader_peer = PrivateKey::from_seed(1).public_key();
+            let follower_peer = PrivateKey::from_seed(2).public_key();
+            let context = AttestationContext::new(
+                AttestationDomain {
+                    l1_chain_id: 1337,
+                    portal_address: FIXTURE_PORTAL,
+                    zone_id: 7,
+                },
+                Some(FIXTURE_SET_VERSION),
+                Some(follower.clone()),
+                HashMap::from([
+                    (leader_peer, leader.address()),
+                    (follower_peer.clone(), follower.address()),
+                ]),
+                AttestationStore::default(),
+                alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                    .connect_mocked_client(l1.clone())
+                    .erased(),
+                zone_sequencer::BatchAnchorConfig::default(),
+            );
+
+            Self {
+                provider,
+                l1,
+                context,
+                leader,
+                follower,
+                follower_peer,
+                anchor_header,
+                anchor_hash,
+                previous_tip,
+            }
+        }
+
+        /// Forget the reads and the cached previous batch, so the next build is cold again.
+        fn reset_reads(&self) {
+            self.provider.receipt_reads.store(0, Ordering::Relaxed);
+            self.provider.header_reads.store(0, Ordering::Relaxed);
+            *self.context.previous_batch.lock().unwrap() = None;
+        }
+
+        /// Queue the L1 responses one attestation build consumes: the portal multicall, the tip,
+        /// and the anchor and Tempo headers.
+        ///
+        /// `derives_anchor` covers a leader proposal, which reads the tip once more to pick one.
+        fn push_l1_responses(&self, derives_anchor: bool) {
+            let word = |value: u64| Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>());
+            let returns = vec![
+                word(FIXTURE_SET_VERSION),
+                word(1),
+                FIXTURE_VERIFIER.abi_encode().into(),
+                Bytes::copy_from_slice(self.previous_tip.as_slice()),
+            ];
+            self.l1
+                .push_success(&Bytes::from((U256::ZERO, returns).abi_encode_params()));
+            if derives_anchor {
+                self.l1.push_success(&FIXTURE_L1_TIP);
+            }
+            self.l1.push_success(&FIXTURE_L1_TIP);
+            self.l1.push_success(&self.anchor_header);
+            self.l1.push_success(&self.anchor_header);
+        }
+    }
+
+    /// A retried leader proposal must not walk back through the previous batch again.
+    #[tokio::test]
+    async fn retried_settlement_proposal_reuses_the_previous_batch_walk() {
+        let fixture = SettlementFixture::new();
+        fixture.push_l1_responses(true);
+        fixture.push_l1_responses(true);
+
+        let first = build_settlement_attestation(
+            &fixture.provider,
+            FIXTURE_BOUNDARY,
+            &fixture.context,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(fixture.provider.reads(), (COLD_RECEIPT_READS, 2));
+
+        let second = build_settlement_attestation(
+            &fixture.provider,
+            FIXTURE_BOUNDARY,
+            &fixture.context,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(second, first);
+        assert_eq!(
+            fixture.provider.reads(),
+            (COLD_RECEIPT_READS + 1, 3),
+            "the retry must only read the boundary block itself"
+        );
+        assert!(fixture.l1.read_q().is_empty());
+    }
+
+    /// A follower answers a re-broadcast proposal from the signature it already returned.
+    #[tokio::test]
+    async fn rebroadcast_settlement_proposal_is_answered_without_revalidating() {
+        let fixture = SettlementFixture::new();
+        fixture.push_l1_responses(true);
+        let proposal = build_settlement_attestation(
+            &fixture.provider,
+            FIXTURE_BOUNDARY,
+            &fixture.context,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        fixture.reset_reads();
+
+        fixture.push_l1_responses(false);
+        let mut last_signed = None;
+        let signature = sign_settlement_proposal(
+            &fixture.provider,
+            &fixture.context,
+            proposal.clone(),
+            FIXTURE_BOUNDARY,
+            &mut last_signed,
+        )
+        .await
+        .unwrap();
+        let after_first = fixture.provider.reads();
+        assert_eq!(after_first, (COLD_RECEIPT_READS, 2));
+        assert!(
+            fixture.l1.read_q().is_empty(),
+            "validating a proposal consumes every queued L1 response"
+        );
+
+        let resigned = sign_settlement_proposal(
+            &fixture.provider,
+            &fixture.context,
+            proposal,
+            FIXTURE_BOUNDARY,
+            &mut last_signed,
+        )
+        .await
+        .unwrap();
+
+        // The empty response queue also proves the re-broadcast made no L1 request: one would
+        // have failed the call.
+        assert_eq!(resigned, signature);
+        assert_eq!(
+            fixture.provider.reads(),
+            after_first,
+            "a re-broadcast proposal must not read the zone chain again"
+        );
+    }
+
+    /// The leader checks a follower signature against its own stored proposal.
+    #[test]
+    fn follower_settlement_signature_is_verified_without_rebuilding() {
+        let fixture = SettlementFixture::new();
+        let context = {
+            let mut context = fixture.context.clone();
+            context.signer = Some(fixture.leader.clone());
+            context
+        };
+        let attestation = SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: FIXTURE_SET_VERSION,
+            zoneHeight: U256::from(FIXTURE_BOUNDARY),
+            withdrawalBatchIndex: U256::from(2),
+            verifier: FIXTURE_VERIFIER,
+            tempoBlockNumber: FIXTURE_L1_TIP,
+            anchorBlockNumber: FIXTURE_L1_TIP,
+            anchorBlockHash: fixture.anchor_hash,
+            blockTransitionHash: B256::repeat_byte(0x31),
+            depositQueueTransitionHash: B256::repeat_byte(0x32),
+            withdrawalQueueHash: FIXTURE_WITHDRAWAL_QUEUE_HASH,
+            verifierConfigHash: B256::repeat_byte(0x33),
+        };
+
+        let leader_signed =
+            SignedSettlementAttestation::sign(attestation.clone(), context.domain, &fixture.leader)
+                .unwrap();
+        context
+            .store
+            .insert_settlement(context.domain, fixture.leader.address(), leader_signed);
+
+        let mut forged = attestation.clone();
+        forged.withdrawalQueueHash = B256::repeat_byte(0x43);
+        let forged =
+            SignedSettlementAttestation::sign(forged, context.domain, &fixture.follower).unwrap();
+        let follower_signed =
+            SignedSettlementAttestation::sign(attestation, context.domain, &fixture.follower)
+                .unwrap();
+
+        // Any L1 read would consume this response.
+        fixture.l1.push_success(&FIXTURE_L1_TIP);
+        let rejected = store_follower_settlement_signature(
+            &fixture.follower_peer,
+            &forged.encode(),
+            &context,
+            &context.store,
+        )
+        .expect_err("a signature over another statement must be rejected");
+        assert!(
+            rejected
+                .to_string()
+                .contains("settlement response has no active leader proposal"),
+            "unexpected error: {rejected}"
+        );
+
+        let (height, signer, signatures) = store_follower_settlement_signature(
+            &fixture.follower_peer,
+            &follower_signed.encode(),
+            &context,
+            &context.store,
+        )
+        .unwrap();
+
+        assert_eq!(height, FIXTURE_BOUNDARY);
+        assert_eq!(signer, fixture.follower.address());
+        assert_eq!(signatures, 2);
+        assert_eq!(
+            fixture.l1.read_q().len(),
+            1,
+            "verifying a follower signature must not read L1"
+        );
     }
 }

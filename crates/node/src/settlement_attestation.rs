@@ -26,6 +26,9 @@ use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttesta
 /// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
 const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Ceiling for the retry backoff applied while the same boundary stays pending.
+const MAX_SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Check the manifest's settlement quorum against `ZonePortal` before any role task starts.
 ///
 /// A quorum node the portal has not registered can never settle, and an unreachable threshold
@@ -172,10 +175,13 @@ where
     })
 }
 
+/// Previous batch tip hash, its processed deposit-queue hash and processed deposit number.
+pub(crate) type PreviousBatch = (B256, B256, u64);
+
 /// Get the previous batch's (i.e the last block in the previous batch) block_hash,
 /// deposit_hash and processed deposit number. These values
 /// are used to identify the previous batch while submitting the current batch.
-fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64)>
+fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<PreviousBatch>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
@@ -198,6 +204,33 @@ where
     Ok((B256::ZERO, B256::ZERO, 0))
 }
 
+/// [`previous_batch`] memoized on `context` for the boundary it was computed at.
+///
+/// The walk reads the receipts of every block back to the previous boundary — a whole batch
+/// interval — and the zone's instant finality makes its result a pure function of `number` on the
+/// canonical chain. A retried proposal, or a second proposal at the same boundary, reuses it.
+fn cached_previous_batch<P>(
+    provider: &P,
+    number: u64,
+    context: &AttestationContext,
+) -> eyre::Result<PreviousBatch>
+where
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
+{
+    let mut cached = context
+        .previous_batch
+        .lock()
+        .expect("previous batch cache lock poisoned");
+    if let Some((cached_number, previous)) = *cached
+        && cached_number == number
+    {
+        return Ok(previous);
+    }
+    let previous = previous_batch(provider, number)?;
+    *cached = Some((number, previous));
+    Ok(previous)
+}
+
 /// Build the settlement attestation at a batch boundary in the exact format ZonePortal expects.
 pub(crate) async fn build_settlement_attestation<P>(
     provider: &P,
@@ -217,7 +250,7 @@ where
         .ok_or_eyre(format!("missing batch-tip header {number}"))?
         .hash();
     let (previous_tip, previous_deposit_hash, previous_deposit_number) =
-        previous_batch(provider, number)?;
+        cached_previous_batch(provider, number, context)?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
     let (set_version, portal_batch_index, verifier, portal_tip) = context
@@ -410,8 +443,13 @@ pub(crate) async fn collect_leader_settlements<P>(
             .await;
 
     let mut last_scanned = head;
-    let mut retry = tokio::time::interval(SETTLEMENT_RETRY_INTERVAL);
-    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Each tick rebuilds the whole attestation, so a boundary that is only waiting for its L1
+    // confirmation backs off instead of re-proposing twice a second. A new pending boundary
+    // restarts at the base interval, keeping recovery from a dropped proposal prompt.
+    let mut retry_delay = SETTLEMENT_RETRY_INTERVAL;
+    let mut retry_boundary = pending_boundary;
+    let retry = tokio::time::sleep(retry_delay);
+    tokio::pin!(retry);
     loop {
         tokio::select! {
             tip = persisted.next() => {
@@ -459,8 +497,18 @@ pub(crate) async fn collect_leader_settlements<P>(
                 ).await;
                 last_scanned = head;
             }
-            _ = retry.tick(), if pending_boundary.is_some() => {
+            _ = &mut retry, if pending_boundary.is_some() => {
                 let number = pending_boundary.expect("guarded by is_some");
+                retry_delay = (retry_delay * 2).min(MAX_SETTLEMENT_RETRY_INTERVAL);
+                retry.as_mut().reset(tokio::time::Instant::now() + retry_delay);
+
+                // Every quorum member has signed this boundary already, so another proposal can
+                // only repeat work the batch submitter is waiting on. An unusable certificate is
+                // dropped by the submitter, which reopens proposing here.
+                if quorum_fully_signed(&context, number) {
+                    continue;
+                }
+
                 match propose_settlement(&provider, number, &commands, &context).await {
                     Ok(true) => {}
                     Ok(false) => {
@@ -513,7 +561,26 @@ pub(crate) async fn collect_leader_settlements<P>(
                 }
             }
         }
+
+        // A different boundary is pending, so restart the backoff. The `continue` paths above only
+        // bail out on a transient head read and leave `pending_boundary` untouched.
+        if retry_boundary != pending_boundary {
+            retry_boundary = pending_boundary;
+            retry_delay = SETTLEMENT_RETRY_INTERVAL;
+            retry
+                .as_mut()
+                .reset(tokio::time::Instant::now() + retry_delay);
+        }
     }
+}
+
+/// Whether every quorum member has already signed some statement at `height`.
+///
+/// The portal's threshold can never exceed the manifest quorum, so a fully signed height cannot
+/// gain anything from another proposal.
+fn quorum_fully_signed(context: &AttestationContext, height: u64) -> bool {
+    let quorum = context.addresses.len();
+    quorum > 0 && context.store.signature_count(height) >= quorum
 }
 
 /// Wait until the submitter or portal resync confirms at least `pending_height`.
