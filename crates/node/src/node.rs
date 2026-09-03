@@ -648,15 +648,15 @@ where
             }));
         }
 
-        L1Subscriber::spawn(
+        let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
             ctx.node.provider().clone(),
             self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
         );
+        let task_executor = ctx.node.task_executor().clone();
+        task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
-        let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
@@ -1024,17 +1024,15 @@ async fn seed_leadership_schedule(
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    // All three describe the same transition at the same block and have no data dependency
-    // on each other, so they go out as one batch rather than three serial round trips on the
-    // startup path.
-    let leader_call = portal.leader().block(block_id);
-    let epoch_call = portal.leaderEpoch().block(block_id);
-    let activation_call = portal.leaderActivationTempoBlock().block(block_id);
-    let (leader, epoch, activation) = tokio::try_join!(
-        leader_call.call(),
-        epoch_call.call(),
-        activation_call.call(),
-    )?;
+    // Read the complete transition atomically at the authenticated snapshot.
+    let (leader, epoch, activation) = l1_provider
+        .multicall()
+        .block(block_id)
+        .add(portal.leader())
+        .add(portal.leaderEpoch())
+        .add(portal.leaderActivationTempoBlock())
+        .aggregate()
+        .await?;
     eyre::ensure!(
         !leader.is_zero(),
         "portal {portal_address} has no leader at finalized L1 snapshot block {snapshot_anchor}"

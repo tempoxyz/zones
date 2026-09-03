@@ -66,21 +66,22 @@ pub(crate) async fn validate_registered_sequencer_set(
     // harmless for a startup sanity check.
     let portal = ZonePortal::new(portal_address, l1_provider);
     let quorum: Vec<_> = manifest.quorum_nodes().collect();
-    let sequencer_set_version = portal
-        .sequencerSetVersion()
-        .call()
+    let (sequencer_set_version, threshold, registered_count) = l1_provider
+        .multicall()
+        .add(portal.sequencerSetVersion())
+        .add(portal.sequencerThreshold())
+        .add(portal.sequencerCount())
+        .aggregate()
         .await
-        .wrap_err("failed reading the ZonePortal sequencer-set version")?;
-    let threshold_call = portal.sequencerThreshold();
-    let count_call = portal.sequencerCount();
-    let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
-        let (name, address) = (node.name(), *address);
-        let call = portal.isSequencer(address);
-        async move { call.call().await.map(|ok| (name, address, ok)) }
-    }));
-    let (threshold, registered_count, registered) =
-        tokio::try_join!(threshold_call.call(), count_call.call(), registered)
-            .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+        .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+    let mut registration_calls = l1_provider.multicall().dynamic();
+    for (_, address) in &quorum {
+        registration_calls = registration_calls.add_dynamic(portal.isSequencer(*address));
+    }
+    let registered = registration_calls
+        .aggregate()
+        .await
+        .wrap_err("failed reading the registered sequencers from ZonePortal")?;
     let validated_version = portal
         .sequencerSetVersion()
         .call()
@@ -91,7 +92,8 @@ pub(crate) async fn validate_registered_sequencer_set(
         "ZonePortal sequencer set changed during startup validation ({sequencer_set_version} -> {validated_version})"
     );
 
-    for (name, address, is_registered) in registered {
+    for ((node, address), is_registered) in quorum.iter().zip(registered) {
+        let name = node.name();
         eyre::ensure!(
             is_registered,
             "manifest quorum node `{name}` ({address}) is not a registered ZonePortal sequencer"
@@ -250,16 +252,15 @@ where
     let settlement_abi = SettlementAbi::from_l1(&context.l1_provider).await?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
-    let set_version_call = portal.sequencerSetVersion();
-    let portal_batch_index_call = portal.withdrawalBatchIndex();
-    let verifier_call = portal.verifier();
-    let portal_tip_call = portal.blockHash();
-    let (set_version, portal_batch_index, verifier, portal_tip) = tokio::try_join!(
-        set_version_call.call(),
-        portal_batch_index_call.call(),
-        verifier_call.call(),
-        portal_tip_call.call(),
-    )?;
+    let (set_version, portal_batch_index, verifier, portal_tip) = context
+        .l1_provider
+        .multicall()
+        .add(portal.sequencerSetVersion())
+        .add(portal.withdrawalBatchIndex())
+        .add(portal.verifier())
+        .add(portal.blockHash())
+        .aggregate()
+        .await?;
     validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
     eyre::ensure!(
         portal_tip == previous_tip,
