@@ -1054,6 +1054,8 @@ To avoid leaking how much activity occurred in a block, some fields of returned 
 - `transactionIndex` is set to `0` on every log, so the caller cannot infer its transaction's position among, or the number of, other transactions in the block.
 - `logIndex` is renumbered per transaction rather than exposing the log's global position in the block. `(transactionHash, logIndex)` is stable and consistent for a given log across `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_getTransactionReceipt`, and `eth_subscribe("logs")`.
 
+For log queries and subscriptions, the server first selects all whitelisted events from allowed addresses for the requested blocks, filters that superset to events visible to the authenticated caller, and assigns the per-transaction `logIndex`. The caller's requested address and topic constraints are applied last. Consequently, changing the query filter cannot change the identity of a returned log.
+
 
 ### WebSocket Subscriptions
 

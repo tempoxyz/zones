@@ -152,6 +152,18 @@ pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
         .collect()
 }
 
+/// Filters a complete log superset for `caller`, assigns query-independent ordering fields, then
+/// applies the caller's scoped filter.
+///
+/// The input must contain every potentially visible whitelisted log for the selected blocks. This
+/// ensures a narrower address or topic filter cannot change a log's redacted `log_index`.
+pub fn filter_logs_for_query(logs: Vec<Log>, caller: &Address, filter: &Filter) -> Vec<Log> {
+    filter_logs(logs, caller)
+        .into_iter()
+        .filter(|log| filter.rpc_matches(log))
+        .collect()
+}
+
 /// Filters a receipt's logs for its sender and recomputes `logsBloom`.
 pub fn filter_receipt_logs(mut receipt: TempoTransactionReceipt) -> TempoTransactionReceipt {
     let caller = receipt.from();
@@ -185,6 +197,24 @@ pub fn scope_filter_addresses(
     } else {
         Err(JsonRpcError::invalid_params("invalid filter address"))
     }
+}
+
+/// Builds the internal filter used to derive stable private-RPC log indices.
+///
+/// Only the caller's block selection is retained. Address and topic constraints are widened to all
+/// events the private RPC may expose so ordering is computed before the original user filter is
+/// applied.
+pub fn log_indexing_filter(filter: &Filter, zone_tokens: &[Address]) -> Filter {
+    let mut indexing_filter = Filter {
+        block_option: filter.block_option.clone(),
+        ..Default::default()
+    };
+
+    let mut allowed_addresses = zone_tokens.to_vec();
+    allowed_addresses.push(RECEIVE_POLICY_GUARD_ADDRESS);
+    indexing_filter.address = FilterSet::from(allowed_addresses);
+    indexing_filter.topics[0] = FilterSet::from(WHITELISTED_TOPICS.to_vec());
+    indexing_filter
 }
 
 /// Scopes a user-supplied filter to only match whitelisted event topics.
@@ -716,6 +746,48 @@ mod tests {
     }
 
     #[test]
+    fn query_filter_is_applied_after_log_index_redaction() {
+        let zone_token = address!("0x000000000000000000000000000000000000aaaa");
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let tx_hash = B256::with_last_byte(0xaa);
+        let block_hash = B256::with_last_byte(0xbb);
+
+        let mut outgoing = make_log_in_tx(
+            zone_token,
+            vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
+            tx_hash,
+            7,
+        );
+        outgoing.block_hash = Some(block_hash);
+        outgoing.block_number = Some(12);
+
+        let mut incoming = make_log_in_tx(
+            zone_token,
+            vec![TRANSFER_TOPIC, caller_word(&other), caller_word(&caller)],
+            tx_hash,
+            8,
+        );
+        incoming.block_hash = Some(block_hash);
+        incoming.block_number = Some(12);
+
+        let mut filter = Filter {
+            address: FilterSet::from(zone_token),
+            ..Default::default()
+        };
+        filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
+        filter.topics[2] = FilterSet::from(caller_word(&caller));
+        scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        let result = filter_logs_for_query(vec![outgoing, incoming], &caller, &filter);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].transaction_hash, Some(tx_hash));
+        assert_eq!(result[0].transaction_index, Some(0));
+        assert_eq!(result[0].log_index, Some(1));
+    }
+
+    #[test]
     fn filter_receipt_logs_recomputes_logs_and_bloom() {
         let caller = address!("0x0000000000000000000000000000000000000001");
         let other = address!("0x0000000000000000000000000000000000000002");
@@ -924,5 +996,36 @@ mod tests {
 
         assert_eq!(err.code, JsonRpcError::invalid_params("").code);
         assert_eq!(err.message, "invalid filter address");
+    }
+
+    #[test]
+    fn log_indexing_filter_widens_addresses_and_topics_but_preserves_blocks() {
+        let token_a = address!("0x00000000000000000000000000000000000000aa");
+        let token_b = address!("0x00000000000000000000000000000000000000bb");
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut user_filter = Filter {
+            block_option: (10u64..=20u64).into(),
+            address: FilterSet::from(token_a),
+            ..Default::default()
+        };
+        user_filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
+        user_filter.topics[1] = FilterSet::from(caller_word(&caller));
+
+        let indexing_filter = log_indexing_filter(&user_filter, &[token_a, token_b]);
+
+        assert_eq!(indexing_filter.block_option, user_filter.block_option);
+        assert_eq!(indexing_filter.address.len(), 3);
+        assert!(indexing_filter.address.contains(&token_a));
+        assert!(indexing_filter.address.contains(&token_b));
+        assert!(
+            indexing_filter
+                .address
+                .contains(&RECEIVE_POLICY_GUARD_ADDRESS)
+        );
+        assert_eq!(indexing_filter.topics[0].len(), WHITELISTED_TOPICS.len());
+        for topic in WHITELISTED_TOPICS {
+            assert!(indexing_filter.topics[0].contains(&topic));
+        }
+        assert!(indexing_filter.topics[1..].iter().all(FilterSet::is_empty));
     }
 }
