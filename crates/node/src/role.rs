@@ -50,8 +50,8 @@ mod zone_transaction_pool_alias {
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     replication::{
-        AttestationContext, BroadcasterShutdown, PeerTipRegistry, broadcast_persisted_blocks,
-        collect_follower_settlement_signatures, run_follower_block_sync,
+        AttestationContext, BroadcasterShutdown, FollowerBlockSync, PeerTipRegistry,
+        broadcast_persisted_blocks, collect_follower_settlement_signatures,
     },
     settlement_attestation::collect_leader_settlements,
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
@@ -897,7 +897,7 @@ where
             let schedule = context.schedule.clone();
             let peer_tips = context.peer_tips.clone();
             tasks.spawn(async move {
-                run_follower_block_sync(
+                FollowerBlockSync::new(
                     provider,
                     engine,
                     sync_rx,
@@ -911,6 +911,7 @@ where
                     peer_tips,
                     follower_token.clone(),
                 )
+                .run()
                 .await;
                 if follower_token.is_cancelled() {
                     TaskEnd::Ended("follower-block-sync (cancelled)")
