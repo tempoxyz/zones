@@ -32,13 +32,14 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
+use zone_prover::ProofBundle;
 
 use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     AttestationStore, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX, ZonePortal},
-    prover::ShadowProver,
+    prover::SettlementProver,
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -138,8 +139,8 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     prev_zone_block_hash: B256,
     /// Most recent canonical zone block observed from the node.
     latest_observed_zone_block: u64,
-    /// Detached, observational SPF worker.
-    shadow_prover: Option<ShadowProver>,
+    /// Backpressured SPF and Nitro attestation worker required before configured settlement.
+    settlement_prover: Option<SettlementProver>,
 }
 
 struct PortalResyncSnapshot {
@@ -184,7 +185,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
-        shadow_prover: Option<ShadowProver>,
+        settlement_prover: Option<SettlementProver>,
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let mut batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
@@ -244,7 +245,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             prev_processed_token_count,
             prev_zone_block_hash,
             latest_observed_zone_block: last_submitted_zone_block,
-            shadow_prover,
+            settlement_prover,
         };
 
         // Restore pending withdrawal data from zone L2 events so the
@@ -513,12 +514,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             if let Some(store) = &self.config.attestation_store {
                 store.replace_prepared_anchor(to, prepared.anchor.clone());
             }
-            if let Some(prover) = &self.shadow_prover {
-                prover.try_enqueue(from, to, prepared.clone());
-            }
 
             match self
-                .submit_batch_with_retry(
+                .prove_and_submit_batch(
+                    from,
                     &prepared,
                     to,
                     finalized_batch.withdrawals.clone(),
@@ -541,6 +540,33 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
+    async fn prove_and_submit_batch(
+        &mut self,
+        from: u64,
+        prepared: &PreparedBatch,
+        last_zone_block: u64,
+        withdrawals: Vec<abi::Withdrawal>,
+        shutdown: &sync::CancellationToken,
+    ) -> std::result::Result<(), BatchSubmitError> {
+        let proof_bundle = if let Some(prover) = &self.settlement_prover {
+            Some(
+                prover
+                    .prove(from, last_zone_block, prepared.clone())
+                    .await?,
+            )
+        } else {
+            None
+        };
+        self.submit_batch_with_retry(
+            prepared,
+            proof_bundle.as_ref(),
+            last_zone_block,
+            withdrawals,
+            shutdown,
+        )
+        .await
+    }
+
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
     /// backoff retry.
     ///
@@ -559,6 +585,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     async fn submit_batch_with_retry(
         &mut self,
         prepared: &PreparedBatch,
+        proof_bundle: Option<&ProofBundle>,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
@@ -612,7 +639,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             }
 
             let submit_started = std::time::Instant::now();
-            match self.batch_submitter.submit_batch(prepared, shutdown).await {
+            match self
+                .batch_submitter
+                .submit_batch(prepared, proof_bundle, shutdown)
+                .await
+            {
                 Ok(event) => {
                     let portal_index = if event.withdrawalQueueIndex == NO_QUEUE_INDEX {
                         None
@@ -886,7 +917,7 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     l1_provider: DynProvider<TempoNetwork>,
     signer: PrivateKeySigner,
     shared_state: ZoneMonitorSharedState,
-    shadow_prover: Option<ShadowProver>,
+    settlement_prover: Option<SettlementProver>,
     shutdown: sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let ZoneMonitorSharedState {
@@ -908,7 +939,7 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
                 repair_notify.clone(),
-                shadow_prover.clone(),
+                settlement_prover.clone(),
             )
             .await
             {
@@ -1072,7 +1103,7 @@ mod tests {
             prev_processed_token_count: 0,
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             latest_observed_zone_block: 50,
-            shadow_prover: None,
+            settlement_prover: None,
         }
     }
 
@@ -1083,6 +1114,47 @@ mod tests {
             },
             batch,
         }
+    }
+
+    #[tokio::test]
+    async fn attestation_failure_prevents_submit_batch() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover = Some(SettlementProver::failing(
+            "remote prover rejected request (AttestationUnavailable): NSM unavailable",
+        ));
+        let batch_data = BatchData {
+            zone_height: 20,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0xbb),
+            next_block_hash: B256::repeat_byte(0xcc),
+            prev_processed_deposit_hash: B256::repeat_byte(0xaa),
+            next_processed_deposit_hash: B256::repeat_byte(0xdd),
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 1,
+        };
+        let prepared = prepared(batch_data);
+
+        let error = monitor
+            .prove_and_submit_batch(
+                11,
+                &prepared,
+                20,
+                Vec::new(),
+                &sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("AttestationUnavailable"));
+        assert!(
+            l1.read_q().is_empty(),
+            "submitBatch must not issue any L1 request after proving fails"
+        );
     }
 
     #[tokio::test]
@@ -1126,7 +1198,7 @@ mod tests {
         let prepared = prepared(batch_data.clone());
         let submission = tokio::spawn(async move {
             monitor
-                .submit_batch_with_retry(&prepared, 71, Vec::new(), &submission_shutdown)
+                .submit_batch_with_retry(&prepared, None, 71, Vec::new(), &submission_shutdown)
                 .await
         });
 
@@ -1402,6 +1474,7 @@ mod tests {
         monitor
             .submit_batch_with_retry(
                 &prepared(batch_data.clone()),
+                None,
                 20,
                 Vec::new(),
                 &sync::CancellationToken::new(),
@@ -1456,6 +1529,7 @@ mod tests {
         let error = monitor
             .submit_batch_with_retry(
                 &prepared(batch_data),
+                None,
                 pending_boundary,
                 Vec::new(),
                 &sync::CancellationToken::new(),
@@ -1501,6 +1575,7 @@ mod tests {
         let error = monitor
             .submit_batch_with_retry(
                 &prepared(batch_data),
+                None,
                 20,
                 Vec::new(),
                 &sync::CancellationToken::new(),

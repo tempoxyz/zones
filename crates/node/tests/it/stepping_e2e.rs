@@ -617,18 +617,18 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
             .all(|call| call.recentTempoBlockNumber > call.tempoBlockNumber),
         "boundary catch-up submissions should use ancestry anchors: {tempo_block_numbers:?}"
     );
-    // Proof bytes stay empty until real proof generation is wired in.
+    // This pre-T11 test leaves proving unconfigured, so proof bytes stay empty.
     eyre::ensure!(
         calls.iter().all(|call| call.proof.is_empty()),
-        "boundary catch-up submissions should keep proof bytes empty for now"
+        "unconfigured boundary catch-up submissions should keep proof bytes empty"
     );
 
     Ok(())
 }
 
 /// Verifies that the fast configured-window ancestry path submits ancestry-mode
-/// calldata, not a direct `tempoBlockNumber` lookup, while proof bytes remain
-/// empty until real proof generation is implemented.
+/// calldata, not a direct `tempoBlockNumber` lookup. Proving is intentionally unconfigured, so
+/// this also preserves the pre-T11 empty-proof path.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -743,7 +743,7 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
     );
     eyre::ensure!(
         call.proof.is_empty(),
-        "ancestry submission should keep proof bytes empty until proof generation is implemented"
+        "unconfigured ancestry submission should keep proof bytes empty"
     );
 
     Ok(())
