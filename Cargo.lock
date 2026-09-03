@@ -13868,6 +13868,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "base64 0.22.1",
+ "bytes",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -13947,6 +13948,7 @@ version = "0.2.2"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
+ "bytes",
  "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
