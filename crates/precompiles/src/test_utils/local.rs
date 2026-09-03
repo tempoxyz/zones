@@ -33,9 +33,9 @@ pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_
 pub(crate) type TestContext =
     Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 
-/// Create an empty test EVM context at the default Tempo hardfork.
+/// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
 pub(crate) fn test_context() -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
+    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::T8)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
@@ -60,6 +60,7 @@ pub(crate) fn test_storage_provider(
 pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
     ZonePrecompileEnv::new(
         &ctx.cfg,
+        zone_hardfork::ZoneHardfork::Z0,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
     )
@@ -123,6 +124,7 @@ pub(crate) struct EncryptedDepositFixture {
     pub eph_pub_y_parity: u8,
     pub portal: Address,
     pub key_index: U256,
+    pub sender: Address,
     pub to: Address,
     pub memo: B256,
     pub ciphertext: Vec<u8>,
@@ -156,9 +158,10 @@ impl EncryptedDepositFixture {
 
         let portal = Address::repeat_byte(0xAA);
         let key_index = U256::from(42u64);
+        let sender = Address::repeat_byte(0xDD);
 
         // HKDF key derivation
-        let info = crate::ecies::hkdf_info(&portal, &key_index, &eph_pub_x);
+        let info = crate::ecies::hkdf_info(&portal, &key_index, &eph_pub_x, &sender);
         let aes_key = crate::ecies::hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext
@@ -175,6 +178,7 @@ impl EncryptedDepositFixture {
             eph_pub_y_parity,
             portal,
             key_index,
+            sender,
             to,
             memo,
             ciphertext,
@@ -194,6 +198,7 @@ impl EncryptedDepositFixture {
             &self.tag,
             self.portal,
             self.key_index,
+            self.sender,
         )
     }
 }

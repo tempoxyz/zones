@@ -25,7 +25,6 @@ reth-metrics.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-storage-api.workspace = true
-reth-tasks.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -35,6 +34,7 @@ alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
 alloy-rpc-client.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-signer.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 
@@ -47,6 +47,7 @@ metrics.workspace = true
 parking_lot.workspace = true
 schnellru.workspace = true
 serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url = "2"

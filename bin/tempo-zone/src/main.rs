@@ -1,6 +1,8 @@
 //! Tempo Zone L2 Node.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod defaults;
+
 use zone_node::cli::ZoneCli;
 
 #[global_allocator]
@@ -16,6 +18,9 @@ fn main() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
+
+    zone_node::init_version_metadata();
+    defaults::init_defaults();
 
     if let Err(err) = ZoneCli::parse().run() {
         eprintln!("Error: {err:?}");

@@ -7,7 +7,7 @@
 //!
 //! The module is split into:
 //! - [`subscriber`] — the [`L1Subscriber`] background task and its config.
-//! - [`deposit`] — deposit value types ([`Deposit`], [`EncryptedDeposit`],
+//! - [`deposit`] — deposit value types ([`WithdrawalBounceBackDeposit`], [`Deposit`],
 //!   [`L1Deposit`]).
 //! - [`event`] — portal event types extracted per L1 block.
 //! - [`block`] — per-block deposit grouping and prepared payload types.
@@ -18,7 +18,7 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockNumberOrTag, NumHash};
-use alloy_network::primitives::HeaderResponse as _;
+use alloy_network::{ReceiptResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, Bloom, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
@@ -67,10 +67,10 @@ pub(crate) mod rpc {
 }
 
 use crate::abi::{
-    EncryptedDeposit as AbiEncryptedDeposit, EncryptedDepositPayload as AbiEncryptedDepositPayload,
+    Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, EncryptedDepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated,
-        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
+        WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 
@@ -85,18 +85,22 @@ mod subscriber;
 mod tests;
 
 pub use block::{L1BlockDeposits, PreparedL1Block};
-pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
-pub use encryption_keys::EncryptionKeyRing;
-pub use event::{EnabledToken, EncryptionKeyRotation, L1PortalEvents, LeaderTransition};
+pub use deposit::{Deposit, L1Deposit, WithdrawalBounceBackDeposit};
+pub use encryption_keys::{
+    BoundPublicKeyFingerprint, EncryptionKeyPublicStatus, EncryptionKeyRing, PublicKeyFingerprint,
+};
+pub use event::{
+    EnabledToken, EncryptionKeyRotation, L1PortalEvents, LeaderTransition, encryption_key_address,
+};
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
 pub use subscriber::{
-    L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink,
-    MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
+    AuthenticatedPortalLogs, L1BlockTracker, L1Subscriber, L1SubscriberConfig, L1SubscriberError,
+    LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS, verify_receipts_against_header,
 };
 
 #[cfg(test)]
 pub(crate) use queue::PendingDeposits;
 #[cfg(test)]
-pub(crate) use subscriber::{LocalTempoCheckpointReader, verify_receipts};
+pub(crate) use subscriber::LocalTempoCheckpointReader;

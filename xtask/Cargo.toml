@@ -15,11 +15,13 @@ tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-evm.workspace = true
-tempo-precompiles.workspace = true
+tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-primitives.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
+zone-p2p.workspace = true
+zone-rpc.workspace = true
 zone-sequencer.workspace = true
 tempo-revm.workspace = true
 
@@ -46,12 +48,14 @@ commonware-math.workspace = true
 const-hex.workspace = true
 eyre.workspace = true
 futures.workspace = true
-rand.workspace = true
+rand = "0.10.2"
 reth-evm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+toml.workspace = true
+zeroize.workspace = true
 
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 

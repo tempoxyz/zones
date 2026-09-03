@@ -12,7 +12,6 @@ profile.json.gz
 .idea
 **/.env
 **/.envrc
-!.envrc
 localnet/**
 generated/
 /earn/
@@ -25,11 +24,11 @@ generated/
 docs/dist
 docs/node_modules
 docs/.vocs-cache/
-specs/ref-impls/cache/
-specs/ref-impls/out/
-specs/ref-impls/benchmark-out/
-specs/ref-impls/*.log
-specs/ref-impls/soljson-latest.js
+crates/contracts/cache/
+crates/contracts/out/
+crates/contracts/benchmark-out/
+crates/contracts/*.log
+crates/contracts/soljson-latest.js
 docs/.vercel
 docs/_
 docs/tmp

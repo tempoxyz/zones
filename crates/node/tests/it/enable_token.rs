@@ -6,7 +6,7 @@
 
 use alloy::primitives::{U256, address};
 use alloy_network::ReceiptResponse;
-use zone_l1::{EnabledToken, L1Deposit, L1PortalEvents};
+use zone_l1::EnabledToken;
 
 use crate::utils::{
     DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, local_dev_tempo_zone_account,
@@ -91,12 +91,8 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     // Single L1 block with both TokenEnabled + deposit
     let block = fixture.next_block();
     let deposit = L1Fixture::make_deposit_for_block(beta_token, sender, recipient, deposit_amount);
-    let events = L1PortalEvents {
-        deposits: vec![L1Deposit::Regular(deposit)],
-        enabled_tokens: vec![enabled],
-        encryption_key_rotations: vec![],
-        leader_transitions: vec![],
-    };
+    let mut events = fixture.portal_events_from_deposits(&[deposit]);
+    events.enabled_tokens = vec![enabled];
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
     // Verify the recipient received the BetaUSD
@@ -122,6 +118,7 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
 /// The enabled token is used for direct fee collection. The regression assertion checks that pool
 /// admission accepts its anchored policy without requiring FeeAMM liquidity.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -134,21 +131,14 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
 
     let block = fixture.next_block();
     let deposit = L1Fixture::make_deposit_for_block(token_address, sender, sender, deposit_amount);
-    fixture.enqueue_events(
-        &block,
-        zone.deposit_queue(),
-        L1PortalEvents {
-            deposits: vec![L1Deposit::Regular(deposit)],
-            leader_transitions: vec![],
-            enabled_tokens: vec![EnabledToken {
-                token: token_address,
-                name: "PoolPolicyUSD".to_string(),
-                symbol: "ppUSD".to_string(),
-                currency: "USD".to_string(),
-            }],
-            encryption_key_rotations: vec![],
-        },
-    );
+    let mut events = fixture.portal_events_from_deposits(&[deposit]);
+    events.enabled_tokens = vec![EnabledToken {
+        token: token_address,
+        name: "PoolPolicyUSD".to_string(),
+        symbol: "ppUSD".to_string(),
+        currency: "USD".to_string(),
+    }];
+    fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
     zone.wait_for_balance(
         token_address,
@@ -232,7 +222,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///    |<-- withdraw AlphaUSD -----------|  ✓ AlphaUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
+/// NOTE: Requires `forge build` in `crates/contracts/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -311,6 +301,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
     let alpha_withdrawal: u128 = 1_000_000; // 1 AlphaUSD
+    let alpha_balance_before = l1.balance_of(l1_alpha_usd, account.address()).await?;
     account
         .withdraw_token(l2_alpha_usd, alpha_withdrawal)
         .await?;
@@ -320,6 +311,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
         portal_address,
         l1_alpha_usd,
         account.address(),
+        alpha_balance_before,
         alpha_withdrawal,
         withdrawal_timeout,
     )

@@ -28,6 +28,7 @@ use crate::utils::{
 /// Verifies sender balance decreased (minus gas) and recipient received the
 /// exact transfer amount.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_deposit_then_transfer() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -166,7 +167,6 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
             alloy_primitives::Bytes::new(),
         )
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(WITHDRAWAL_TX_GAS)
         .send()
         .await?;
     fixture.inject_empty_block(zone.deposit_queue());
@@ -196,6 +196,7 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
 /// Verifies that chained transfers work correctly and each intermediate balance
 /// is accurate after accounting for gas.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_sequential_transfers() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -329,6 +330,7 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
 
 /// Transfer emits a `Transfer` event with correct fields.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_transfer_emits_events() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -395,6 +397,7 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
 
 /// `transferWithMemo` emits a `TransferWithMemo` event with the correct memo.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_transfer_with_memo() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

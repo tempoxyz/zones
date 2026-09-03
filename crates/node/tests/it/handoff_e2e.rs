@@ -10,6 +10,8 @@
 use std::time::Duration;
 
 use alloy::primitives::{U256, address};
+use alloy_consensus::BlockHeader;
+use alloy_network::ReceiptResponse;
 use alloy_provider::Provider;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
@@ -100,7 +102,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     let b_producer = cluster.sequencer_signers[replacement_index].address();
     for height in recovery_start_tempo_block..=optimistic_tip {
         assert_eq!(
-            cluster.assert_same_block(height).await?.beneficiary,
+            cluster.assert_same_block(height).await?.beneficiary(),
             b_producer,
             "replacement leader B did not optimistically produce recovery block {height}"
         );
@@ -138,7 +140,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
         cluster
             .assert_same_block(portal_activation_tempo_block)
             .await?
-            .beneficiary,
+            .beneficiary(),
         c_producer,
         "portal-selected leader C did not produce the transition block"
     );
@@ -154,7 +156,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     let next_height = portal_activation_tempo_block + 1;
     cluster.wait_all_at(next_height, HANDOFF_TIMEOUT).await?;
     assert_eq!(
-        cluster.assert_same_block(next_height).await?.beneficiary,
+        cluster.assert_same_block(next_height).await?.beneficiary(),
         c_producer
     );
     Ok(())
@@ -200,14 +202,13 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         )
         .await?;
 
-    // Submit a transfer to follower C. C admits it locally and forwards it to every quorum peer,
+    // Submit an approval to follower C. C admits it locally and forwards it to every quorum peer,
     // including active leader A and incoming leader B. Nobody includes it before the handoff
     // because no further anchor is injected under A's authorization.
-    let recipient = address!("0x00000000000000000000000000000000000ffff1");
-    cluster.fixture.seed_no_receive_policy(recipient)?;
-    let transfer_amount = 123_456_u128;
+    let spender = address!("0x00000000000000000000000000000000000ffff1");
+    let approval_amount = 123_456_u128;
     let pending = ITIP20::new(PATH_USD_ADDRESS, sender_wallet)
-        .transfer(recipient, U256::from(transfer_amount))
+        .approve(spender, U256::from(approval_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -252,7 +253,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     );
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // Produce blocks under B until the pending transfer is included. B already retained the
+    // Produce blocks under B until the pending approval is included. B already retained the
     // transaction before the handoff, independently of A's post-demotion reconciliation.
     let receipt = tokio::time::timeout(HANDOFF_TIMEOUT, async {
         loop {
@@ -271,10 +272,10 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         }
     })
     .await
-    .map_err(|_| eyre::eyre!("timed out waiting for the pending transfer under leader B"))??;
+    .map_err(|_| eyre::eyre!("timed out waiting for the pending approval under leader B"))??;
     assert!(
         receipt.status(),
-        "the pending transfer must succeed under B"
+        "the pending approval must succeed under B"
     );
     let inclusion_block = receipt
         .block_number
@@ -299,7 +300,8 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
             b_producer
         };
         assert_eq!(
-            header.beneficiary, expected,
+            header.beneficiary(),
+            expected,
             "block {height} has the wrong producer (boundary at {handoff_anchor})"
         );
     }
@@ -309,17 +311,18 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     let next = final_height + 1;
     cluster.wait_all_at(next, HANDOFF_TIMEOUT).await?;
     let header = cluster.assert_same_block(next).await?;
-    assert_eq!(header.beneficiary, b_producer);
+    assert_eq!(header.beneficiary(), b_producer);
 
-    // Every recipient balance is identical everywhere.
+    // Every node observes the included approval.
     for node in &cluster.nodes {
-        node.wait_for_balance(
-            PATH_USD_ADDRESS,
-            recipient,
-            U256::from(transfer_amount),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        assert_eq!(
+            ITIP20::new(PATH_USD_ADDRESS, node.provider())
+                .allowance(sender, spender)
+                .from(sender)
+                .call()
+                .await?,
+            U256::from(approval_amount)
+        );
     }
     Ok(())
 }
@@ -400,7 +403,8 @@ async fn test_lagged_follower_promotes_only_after_catching_up() -> eyre::Result<
             b_producer
         };
         assert_eq!(
-            header.beneficiary, expected,
+            header.beneficiary(),
+            expected,
             "block {height} has the wrong producer (boundary at {handoff_anchor})"
         );
     }
@@ -408,7 +412,10 @@ async fn test_lagged_follower_promotes_only_after_catching_up() -> eyre::Result<
     // B keeps producing; everyone follows.
     cluster.inject_block(vec![])?;
     cluster.wait_all_at(7, HANDOFF_TIMEOUT).await?;
-    assert_eq!(cluster.assert_same_block(7).await?.beneficiary, b_producer);
+    assert_eq!(
+        cluster.assert_same_block(7).await?.beneficiary(),
+        b_producer
+    );
     Ok(())
 }
 
@@ -462,13 +469,12 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
     let handoff_anchor = next_anchor + 3;
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // A transfer submitted to follower C during the window is forwarded to every quorum peer,
+    // An approval submitted to follower C during the window is forwarded to every quorum peer,
     // including both still-active leader A and not-yet-active leader B.
-    let recipient = address!("0x00000000000000000000000000000000000ffff2");
-    cluster.fixture.seed_no_receive_policy(recipient)?;
-    let transfer_amount = 123_456_u128;
+    let spender = address!("0x00000000000000000000000000000000000ffff2");
+    let approval_amount = 123_456_u128;
     let pending = ITIP20::new(PATH_USD_ADDRESS, sender_wallet)
-        .transfer(recipient, U256::from(transfer_amount))
+        .approve(spender, U256::from(approval_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -494,19 +500,19 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
             .await?;
     }
 
-    // The forwarded transfer was included by A before the boundary.
+    // The forwarded approval was included by A before the boundary.
     let receipt = cluster.nodes[0]
         .provider()
         .get_transaction_receipt(transaction_hash)
         .await?
-        .ok_or_else(|| eyre::eyre!("transfer was not included during the window"))?;
-    assert!(receipt.status(), "the window transfer must succeed under A");
+        .ok_or_else(|| eyre::eyre!("approval was not included during the window"))?;
+    assert!(receipt.status(), "the window approval must succeed under A");
     let inclusion_block = receipt
         .block_number
         .ok_or_else(|| eyre::eyre!("receipt missing block number"))?;
     assert!(
         inclusion_block < handoff_anchor,
-        "the transfer must be included by the outgoing leader (block {inclusion_block}), \
+        "the approval must be included by the outgoing leader (block {inclusion_block}), \
          before the boundary at {handoff_anchor}"
     );
 
@@ -528,20 +534,22 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
             b_producer
         };
         assert_eq!(
-            header.beneficiary, expected,
+            header.beneficiary(),
+            expected,
             "block {height} has the wrong producer (boundary at {handoff_anchor})"
         );
     }
 
-    // Every recipient balance is identical everywhere.
+    // Every node observes the included approval.
     for node in &cluster.nodes {
-        node.wait_for_balance(
-            PATH_USD_ADDRESS,
-            recipient,
-            U256::from(transfer_amount),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        assert_eq!(
+            ITIP20::new(PATH_USD_ADDRESS, node.provider())
+                .allowance(sender, spender)
+                .from(sender)
+                .call()
+                .await?,
+            U256::from(approval_amount)
+        );
     }
     Ok(())
 }

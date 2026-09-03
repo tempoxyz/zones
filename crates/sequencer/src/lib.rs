@@ -5,12 +5,13 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy_chains::Chain;
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
 use reth_chain_state::CanonStateSubscriptions;
-use reth_storage_api::BlockReader;
+use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tokio::sync::Notify;
@@ -24,14 +25,21 @@ mod encryption_key;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
+mod prover;
 mod rpc;
 pub mod settlement;
 pub mod withdrawals;
 
 pub use attestation::AttestationStore;
-pub use encryption_key::register_encryption_key;
-pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
-pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
+pub use encryption_key::{
+    EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
+    register_encryption_key,
+};
+pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
+pub use prover::ShadowProverConfig;
+pub use settlement::{
+    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
+};
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
     MAX_WITHDRAWAL_BATCH_GAS, SharedWithdrawalStore, WithdrawalBatchLimits,
@@ -52,6 +60,7 @@ pub trait ZoneSequencerProvider:
         Transaction = TempoTxEnvelope,
         Receipt = TempoReceipt,
     > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+    + StateProviderFactory
     + Clone
     + Send
     + Sync
@@ -66,6 +75,7 @@ impl<T> ZoneSequencerProvider for T where
             Transaction = TempoTxEnvelope,
             Receipt = TempoReceipt,
         > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+        + StateProviderFactory
         + Clone
         + Send
         + Sync
@@ -73,10 +83,7 @@ impl<T> ZoneSequencerProvider for T where
 {
 }
 
-/// Conservative Tempo L1 fee cap for sequencer transactions.
-///
-/// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
-/// explicitly avoids an `eth_feeHistory` request while remaining valid across those regimes.
+/// Upper bound for sequencer transaction fees on Tempo L1.
 pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
     tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128;
 
@@ -124,6 +131,8 @@ pub struct ZoneSequencerHandle {
 ///   same L1 transaction as its batch. Local state only advances on successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for pending withdrawals the batch submitter left behind.
+/// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates
+///   observationally without delaying or changing settlement.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
@@ -134,9 +143,9 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
+    prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
-    let sequencer_address = signer.address();
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
@@ -147,6 +156,16 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
+    let shadow_prover = prover_config.map(|prover_config| {
+        prover::spawn_shadow_prover(
+            prover_config,
+            config.portal_address,
+            config.batch_anchor_config,
+            zone_provider.clone(),
+            l1_provider.clone(),
+        )
+    });
+    let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
@@ -154,7 +173,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
 
     let withdrawal_config = WithdrawalProcessorConfig {
         portal_address: config.portal_address,
-        l1_rpc_url: config.l1_rpc_url.clone(),
         fallback_poll_interval: config.withdrawal_poll_interval,
         sequencer_address,
         batch_limits: config.withdrawal_batch_limits,
@@ -169,7 +187,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         withdrawal_batch_limits: config.withdrawal_batch_limits,
         attestation_store: config.attestation_store,
     };
-
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
         l1_provider.clone(),
@@ -183,12 +200,13 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         withdrawal_notify,
         withdrawal_repair_notify,
     );
-    let monitor_handle = spawn_zone_monitor(
+    let monitor_handle = monitor::spawn_zone_monitor(
         monitor_config,
         zone_provider,
         l1_provider,
         signer,
         monitor_shared_state,
+        shadow_prover,
         shutdown,
     );
 
@@ -211,6 +229,14 @@ async fn connect_l1_provider(
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
         .erased();
+    let l1_chain = Chain::from_id(provider.get_chain_id().await?);
+    if !provider.client().is_local()
+        && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
+    {
+        provider
+            .client()
+            .set_poll_interval(avg_block_time.mul_f32(0.6));
+    }
 
     Ok(provider)
 }
@@ -243,20 +269,22 @@ mod tests {
                 continue;
             };
             let request: Value = serde_json::from_str(&text).unwrap();
-            if request["method"] != "eth_blockNumber" {
-                continue;
-            }
+            let rpc_result = match request["method"].as_str() {
+                Some("eth_chainId") => "0xa5bf",
+                Some("eth_blockNumber") => result,
+                _ => continue,
+            };
 
             let response = json!({
                 "jsonrpc": "2.0",
                 "id": request["id"].clone(),
-                "result": result,
+                "result": rpc_result,
             });
             ws.send(Message::Text(response.to_string().into()))
                 .await
                 .unwrap();
 
-            if close_after_response {
+            if close_after_response && request["method"] == "eth_blockNumber" {
                 let _ = ws.close(None).await;
                 break;
             }
@@ -297,6 +325,11 @@ mod tests {
                 .unwrap();
 
         assert_eq!(provider.get_block_number().await.unwrap(), 1);
+        assert_eq!(
+            provider.client().poll_interval(),
+            Duration::from_millis(250),
+            "chain metadata must not override Alloy's local transport interval"
+        );
 
         let second_block = timeout(Duration::from_secs(2), provider.get_block_number())
             .await

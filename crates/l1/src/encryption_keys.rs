@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::EncryptionKeyRotation;
 
-/// Private keys available for decrypting finalized encrypted deposits.
+/// Private keys available for decrypting finalized deposits.
 ///
 /// Keys are configured by their private material and bound to Portal indexes when the
 /// corresponding finalized registration is observed. The Portal remains authoritative for key
@@ -19,6 +19,28 @@ pub struct EncryptionKeyRing {
 struct EncryptionKeys {
     candidates: BTreeMap<(B256, u8), k256::SecretKey>,
     by_index: BTreeMap<U256, k256::SecretKey>,
+}
+
+/// Public fingerprint of locally configured decryption-key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicKeyFingerprint {
+    pub x: B256,
+    pub y_parity: u8,
+}
+
+/// Public fingerprint associated with a finalized Portal key index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundPublicKeyFingerprint {
+    pub key_index: U256,
+    pub x: B256,
+    pub y_parity: u8,
+}
+
+/// Public-only status of a node's decryption-key ring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionKeyPublicStatus {
+    pub candidates: Vec<PublicKeyFingerprint>,
+    pub bound: Vec<BoundPublicKeyFingerprint>,
 }
 
 impl std::fmt::Debug for EncryptionKeyRing {
@@ -88,6 +110,34 @@ impl EncryptionKeyRing {
     pub fn has_candidate(&self, x: B256, y_parity: u8) -> bool {
         self.inner.read().candidates.contains_key(&(x, y_parity))
     }
+
+    /// Return only public fingerprints and Portal bindings for operator observability.
+    ///
+    /// Private keys and their source paths are intentionally not exposed.
+    pub fn public_status(&self) -> EncryptionKeyPublicStatus {
+        let keys = self.inner.read();
+        let candidates = keys
+            .candidates
+            .keys()
+            .map(|(x, y_parity)| PublicKeyFingerprint {
+                x: *x,
+                y_parity: *y_parity,
+            })
+            .collect();
+        let bound = keys
+            .by_index
+            .iter()
+            .map(|(index, key)| {
+                let (x, y_parity) = public_key(key);
+                BoundPublicKeyFingerprint {
+                    key_index: *index,
+                    x,
+                    y_parity,
+                }
+            })
+            .collect();
+        EncryptionKeyPublicStatus { candidates, bound }
+    }
 }
 
 fn public_key(key: &k256::SecretKey) -> (B256, u8) {
@@ -111,6 +161,7 @@ mod tests {
         EncryptionKeyRotation {
             x,
             y_parity,
+            pubkey: crate::encryption_key_address(x, y_parity).unwrap(),
             key_index: U256::from(key_index),
             activation_block,
         }
@@ -140,5 +191,27 @@ mod tests {
 
         let err = ring.apply_rotation(&rotation(&missing, 1, 20)).unwrap_err();
         assert!(err.to_string().contains("missing private decryption key"));
+    }
+
+    #[test]
+    fn public_status_contains_no_secret_material() {
+        let key = k256::SecretKey::from_slice(&[0x33; 32]).unwrap();
+        let ring = EncryptionKeyRing::new([key.clone()]);
+        ring.apply_rotation(&rotation(&key, 4, 20)).unwrap();
+
+        let status = ring.public_status();
+        let (x, y_parity) = public_key(&key);
+        assert_eq!(
+            status.candidates,
+            vec![PublicKeyFingerprint { x, y_parity }]
+        );
+        assert_eq!(
+            status.bound,
+            vec![BoundPublicKeyFingerprint {
+                key_index: U256::from(4),
+                x,
+                y_parity,
+            }]
+        );
     }
 }

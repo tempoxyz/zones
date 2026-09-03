@@ -39,8 +39,6 @@ scenario:
   bindings:
     account:
       account: { pool: users, select: lease }
-    recipient:
-      account: { pool: users, select: random }
     onramp_action_id:
       bytes32: { random_bytes: 32 }
     earn_deposit_action_id:
@@ -61,27 +59,6 @@ scenario:
         fee_token: "${ZONES_BENCH_DLUSD}"
         amount: ${ZONES_BENCH_DEPOSIT_AMOUNT}
         memo: { var: onramp_action_id }
-
-    - id: private_transfer
-      depends_on: [onramp.zone_deposit.processed]
-      submit:
-        chain: zone
-        template: private_transfer
-        with:
-          from: { var: account.ref }
-          fee_token: "${ZONES_BENCH_DLUSD}"
-          call:
-            args: [${ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT}, ${ZONES_BENCH_ACTIVITY_AMOUNT}]
-      save: private_transfer
-
-    - id: private_transfer_receipt
-      depends_on: [private_transfer]
-      wait_receipt:
-        chain: zone
-        transaction_hash: { var: private_transfer.tx_hash }
-        sender: { var: private_transfer.sender }
-      timeout: 45s
-      save: private_transfer_receipt
 
     - use: earn-deposit-and-return
       as: earn_deposit
@@ -165,7 +142,7 @@ scenario:
       save: offramp_result
 
     - id: offramp_processed
-      depends_on: [l1_before_offramp, offramp]
+      depends_on: [l1_before_offramp, offramp, offramp_result]
       wait_log:
         chain: l1
         from_block: { var: l1_before_offramp.block_number }
@@ -176,8 +153,11 @@ scenario:
           to: "${ZONES_BENCH_BRIDGE_WALLET}"
           senderTag:
             keccak256_packed:
-              types: [address, bytes32]
-              values: [{ var: account.address }, { var: offramp.tx_hash }]
+              types: [address, bytes32, uint64]
+              values:
+                - { var: account.address }
+                - { var: offramp.tx_hash }
+                - { var: offramp_result.args.fallbackNonce }
           token: "${ZONES_BENCH_DLUSD}"
           amount: { var: earn_redeem.zone_return.processed.args.amount }
           callbackSuccess: true
@@ -186,7 +166,6 @@ scenario:
 
     - id: journey_complete
       depends_on:
-        - private_transfer_receipt
         - offramp_result
         - offramp_processed
       checkpoint: { chain: l1 }

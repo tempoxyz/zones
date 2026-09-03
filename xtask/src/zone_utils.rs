@@ -1,6 +1,7 @@
 use alloy::{
+    consensus::BlockHeader as _,
     network::primitives::ReceiptResponse,
-    primitives::{Address, U256, address},
+    primitives::{Address, B256, U256, address},
     providers::Provider,
     rpc::types::Filter,
     sol_types::SolEvent,
@@ -13,7 +14,34 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal};
+
+/// Write a file that may contain key material with owner-only permissions on Unix.
+///
+/// Permissions are restricted before truncating an existing file, so updating a
+/// legacy file with broader permissions does not expose its new contents.
+pub(crate) fn write_owner_only(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::{
+            fs::{OpenOptions, Permissions},
+            io::Write as _,
+            os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+        };
+
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).mode(0o600);
+        let mut file = options.open(path)?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(contents.as_ref())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// Shared Moderato ZoneFactory.
@@ -28,6 +56,56 @@ pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
 const DEFAULT_WAIT_ATTEMPTS: usize = 120;
 const DEFAULT_WAIT_POLL: Duration = Duration::from_millis(500);
+const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
+
+pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
+    provider: &P,
+    zone_id: u32,
+    portal: Address,
+    snapshot_block: u64,
+) -> eyre::Result<u64> {
+    let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
+        .ZoneCreated_filter()
+        .topic1(B256::from(U256::from(zone_id)))
+        .topic2(portal.into_word())
+        .from_block(0)
+        .to_block(snapshot_block)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .query()
+        .await
+        .wrap_err("failed scanning ZoneFactory ZoneCreated events")?;
+
+    eyre::ensure!(
+        events.len() == 1,
+        "expected exactly one ZoneCreated event for Zone {zone_id} and portal {portal}, found {}",
+        events.len()
+    );
+    let (event, log) = &events[0];
+    eyre::ensure!(
+        event.zoneId == zone_id && event.portal == portal,
+        "ZoneCreated event does not match Zone {zone_id} and portal {portal}"
+    );
+    eyre::ensure!(!log.removed, "ZoneCreated query returned a removed log");
+    let block_number = log
+        .block_number
+        .ok_or_else(|| eyre!("ZoneCreated log is missing its block number"))?;
+    let block_hash = log
+        .block_hash
+        .ok_or_else(|| eyre!("ZoneCreated log is missing its block hash"))?;
+    let header = provider
+        .get_header_by_number(block_number.into())
+        .await
+        .wrap_err_with(|| format!("failed reading ZoneCreated block {block_number}"))?
+        .ok_or_else(|| eyre!("ZoneCreated block {block_number} was not found"))?;
+    eyre::ensure!(
+        header.number() == block_number && header.hash == block_hash,
+        "ZoneCreated log block ({block_number}, {block_hash}) does not match canonical header ({}, {})",
+        header.number(),
+        header.hash
+    );
+    Ok(block_number)
+}
 
 pub(crate) struct ZoneMetadata {
     path: PathBuf,
@@ -51,7 +129,7 @@ impl ZoneMetadata {
     }
 
     pub(crate) fn save(&self) -> eyre::Result<()> {
-        std::fs::write(
+        write_owner_only(
             &self.path,
             serde_json::to_string_pretty(&self.value).wrap_err("failed encoding zone.json")?,
         )
@@ -125,7 +203,7 @@ pub(crate) async fn fund_l1_wallet<P: Provider<TempoNetwork>>(
 
 /// Verifies that `resolved_admin` is the portal's on-chain admin.
 ///
-/// Portal governance calls (`enableToken`, deposit pause/resume) are `onlyAdmin`,
+/// Portal governance calls such as `enableToken` and portal unpause are admin-only,
 /// so a key resolved via the sequencer fallback only works on legacy zones where
 /// `admin == sequencer`. Checking against `portal.admin()` fails fast with a
 /// clear message instead of reverting on-chain with `NotAdmin`.

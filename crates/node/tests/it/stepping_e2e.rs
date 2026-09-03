@@ -97,12 +97,9 @@ async fn fetch_submit_batch_call(
     Ok((call, block_number))
 }
 
-/// Proves that a batch anchored to the observed L1 head can be submitted immediately.
-///
-/// Instant mining makes every transaction its own block. Eight funding transactions advance the
-/// Zone to a finalized batch boundary at L1 head N, then the production batch submitter sends the
-/// next transaction. Latest-state gas estimation cannot see hash(N) yet, so the current-tip path
-/// supplies its bounded gas limit and successful inclusion proves execution at N+1 sees hash(N).
+/// A transaction submitted after observing L1 head N can only execute in N+1 or later. Prove that
+/// the production submitter skips latest-state estimation and settles a batch anchored to N in
+/// the immediate successor block, where EIP-2935 exposes hash(N).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_current_tip_batch_submission_lands_in_successor_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

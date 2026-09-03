@@ -1,8 +1,8 @@
 //! Sequencer-side ECIES operations for encrypted deposit decryption.
 //!
 //! These functions run **off-chain** in the payload builder to produce the
-//! `DecryptionData` that the on-chain ZoneInbox contract verifies via the
-//! Chaum-Pedersen and AES-GCM precompiles.
+//! `DecryptionData` that the native ZoneInbox verifies with its Chaum-Pedersen
+//! and AES-GCM implementations.
 
 use alloc::vec::Vec;
 
@@ -43,8 +43,8 @@ pub(crate) fn decode_compressed_public_key(encoded: &[u8]) -> Option<AffinePoint
     recover_point(x, parity)
 }
 
-const AUTH_WITHDRAWAL_EPHEMERAL_DOMAIN: &[u8] = b"tempo-zone-authenticated-withdrawal-ephemeral-v1";
-const AUTH_WITHDRAWAL_NONCE_DOMAIN: &[u8] = b"tempo-zone-authenticated-withdrawal-nonce-v1";
+const AUTH_WITHDRAWAL_EPHEMERAL_DOMAIN: &[u8] = b"tempo-zone-authenticated-withdrawal-ephemeral-v2";
+const AUTH_WITHDRAWAL_NONCE_DOMAIN: &[u8] = b"tempo-zone-authenticated-withdrawal-nonce-v2";
 const AUTH_WITHDRAWAL_DERIVATION_KEY_DOMAIN: &[u8] =
     b"tempo-zone-authenticated-withdrawal-derivation-key-v1";
 const CP_NONCE_DOMAIN: &[u8] = b"tempo-zone-chaum-pedersen-nonce-v1";
@@ -124,7 +124,7 @@ pub fn compute_ecdh_proof(
 ///
 /// This implements the full ECIES flow:
 /// 1. ECDH: compute `sharedSecret = privSeq * ephemeralPub`
-/// 2. HKDF-SHA256: derive AES key from shared secret
+/// 2. HKDF-SHA256: derive AES key from shared secret and deposit sender
 /// 3. AES-256-GCM: decrypt ciphertext and verify tag
 /// 4. Parse plaintext into `(to, memo)`
 /// 5. Generate Chaum-Pedersen proof of correct shared secret derivation
@@ -139,11 +139,12 @@ pub fn decrypt_deposit(
     tag: &[u8; 16],
     portal_address: Address,
     key_index: alloy_primitives::U256,
+    sender: Address,
 ) -> Option<DecryptedDeposit> {
     let proof = compute_ecdh_proof(sequencer_privkey, ephemeral_pub_x, ephemeral_pub_y_parity)?;
 
     // HKDF-SHA256: derive AES key
-    let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x);
+    let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x, &sender);
     let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
     // AES-256-GCM decrypt
@@ -161,7 +162,7 @@ pub fn decrypt_deposit(
 
 /// Result of client-side ECIES encryption for a deposit.
 ///
-/// Contains all fields needed to call `ZonePortal.depositEncrypted`.
+/// Contains all fields needed to call `ZonePortal.deposit`.
 pub struct EncryptedDepositArgs {
     /// Ephemeral public key x-coordinate.
     pub eph_pub_x: B256,
@@ -201,13 +202,14 @@ pub fn encrypt_authenticated_withdrawal(
 ///
 /// This is the consensus-safe variant used by zone payload construction. It
 /// derives both the ECIES ephemeral scalar and AES-GCM nonce from the sequencer
-/// encryption key, zone id, reveal key, sender, and withdrawal transaction hash.
+/// encryption key, zone id, reveal key, sender, withdrawal transaction hash, and fallback nonce.
 pub fn encrypt_authenticated_withdrawal_deterministic(
     encryption_privkey: &k256::SecretKey,
     zone_id: u32,
     reveal_to: &[u8],
     sender: Address,
     tx_hash: B256,
+    fallback_nonce: u64,
 ) -> Option<Vec<u8>> {
     let derivation_key = authenticated_withdrawal_derivation_key(encryption_privkey);
     let eph_scalar = derive_authenticated_withdrawal_ephemeral_scalar(
@@ -216,6 +218,7 @@ pub fn encrypt_authenticated_withdrawal_deterministic(
         reveal_to,
         sender,
         tx_hash,
+        fallback_nonce,
     )?;
     let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * eph_scalar);
     let eph_encoded = eph_pub.to_encoded_point(true);
@@ -226,6 +229,7 @@ pub fn encrypt_authenticated_withdrawal_deterministic(
         reveal_to,
         sender,
         tx_hash,
+        fallback_nonce,
         &eph_pubkey,
     );
 
@@ -280,6 +284,7 @@ fn derive_authenticated_withdrawal_ephemeral_scalar(
     reveal_to: &[u8],
     sender: Address,
     tx_hash: B256,
+    fallback_nonce: u64,
 ) -> Option<Scalar> {
     for counter in 0u32.. {
         let mut msg = authenticated_withdrawal_context(
@@ -288,6 +293,7 @@ fn derive_authenticated_withdrawal_ephemeral_scalar(
             reveal_to,
             sender,
             tx_hash,
+            fallback_nonce,
         );
         msg.extend_from_slice(&counter.to_be_bytes());
 
@@ -306,6 +312,7 @@ fn derive_authenticated_withdrawal_nonce(
     reveal_to: &[u8],
     sender: Address,
     tx_hash: B256,
+    fallback_nonce: u64,
     eph_pubkey: &[u8; 33],
 ) -> [u8; 12] {
     let mut msg = authenticated_withdrawal_context(
@@ -314,6 +321,7 @@ fn derive_authenticated_withdrawal_nonce(
         reveal_to,
         sender,
         tx_hash,
+        fallback_nonce,
     );
     msg.extend_from_slice(eph_pubkey);
 
@@ -336,14 +344,16 @@ fn authenticated_withdrawal_context(
     reveal_to: &[u8],
     sender: Address,
     tx_hash: B256,
+    fallback_nonce: u64,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(domain.len() + 4 + 4 + reveal_to.len() + 20 + 32);
+    let mut msg = Vec::with_capacity(domain.len() + 4 + 4 + reveal_to.len() + 20 + 32 + 8);
     msg.extend_from_slice(domain);
     msg.extend_from_slice(&zone_id.to_be_bytes());
     msg.extend_from_slice(&(reveal_to.len() as u32).to_be_bytes());
     msg.extend_from_slice(reveal_to);
     msg.extend_from_slice(sender.as_slice());
     msg.extend_from_slice(tx_hash.as_slice());
+    msg.extend_from_slice(&fallback_nonce.to_be_bytes());
     msg
 }
 
@@ -396,20 +406,21 @@ pub fn decrypt_authenticated_withdrawal(
     Some((sender, tx_hash))
 }
 
-/// Encrypt deposit data for `ZonePortal.depositEncrypted`.
+/// Encrypt deposit data for `ZonePortal.deposit`.
 ///
 /// This is the depositor-side counterpart of [`decrypt_deposit`] — it performs
 /// ECIES encryption of `(to, memo)` to the sequencer's public key:
 /// 1. Recover sequencer public key from `(seq_pub_x, seq_pub_y_parity)`
 /// 2. Generate ephemeral key pair
 /// 3. ECDH: `sharedSecret = ephPriv * sequencerPub`
-/// 4. HKDF-SHA256: derive AES key
+/// 4. HKDF-SHA256: derive AES key from the shared secret and deposit sender
 /// 5. AES-256-GCM encrypt `[to(20) | memo(32) | padding(12)]`
 pub fn encrypt_deposit(
     seq_pub_x: &B256,
     seq_pub_y_parity: u8,
     to: Address,
     memo: B256,
+    sender: Address,
     portal_address: Address,
     key_index: alloy_primitives::U256,
 ) -> Option<EncryptedDepositArgs> {
@@ -429,7 +440,7 @@ pub fn encrypt_deposit(
     let shared_secret_x: [u8; 32] = ss_enc.x()?.as_slice().try_into().ok()?;
 
     // 4. HKDF key derivation
-    let info = hkdf_info(&portal_address, &key_index, &eph_pub_x);
+    let info = hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender);
     let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
     // 5. Encrypt plaintext with random nonce
@@ -585,16 +596,19 @@ pub fn build_authenticated_withdrawal_plaintext(
     Withdrawal::authenticated_sender_plaintext(*sender, *tx_hash)
 }
 
-/// Build the 84-byte HKDF info parameter: `[portal(20) | key_index(32) | eph_pub_x(32)]`.
+/// Build the 104-byte HKDF info parameter:
+/// `[portal(20) | key_index(32) | eph_pub_x(32) | sender(20)]`.
 pub fn hkdf_info(
     portal: &Address,
     key_index: &alloy_primitives::U256,
     eph_pub_x: &B256,
-) -> [u8; 84] {
-    let mut info = [0u8; 84];
+    sender: &Address,
+) -> [u8; 104] {
+    let mut info = [0u8; 104];
     info[..20].copy_from_slice(portal.as_slice());
     info[20..52].copy_from_slice(&key_index.to_be_bytes::<32>());
     info[52..84].copy_from_slice(&eph_pub_x.0);
+    info[84..].copy_from_slice(sender.as_slice());
     info
 }
 
@@ -672,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn test_authenticated_withdrawal_deterministic_roundtrip() {
+    fn test_authenticated_withdrawal_deterministic_roundtrip_and_withdrawal_uniqueness() {
         use sha2::{Digest, Sha256};
 
         let reveal_key_bytes: [u8; 32] =
@@ -694,6 +708,7 @@ mod tests {
             reveal_encoded.as_bytes(),
             sender,
             tx_hash,
+            7,
         )
         .unwrap();
         let encrypted_b = encrypt_authenticated_withdrawal_deterministic(
@@ -702,10 +717,21 @@ mod tests {
             reveal_encoded.as_bytes(),
             sender,
             tx_hash,
+            7,
+        )
+        .unwrap();
+        let encrypted_other_withdrawal = encrypt_authenticated_withdrawal_deterministic(
+            &encryption_key,
+            zone_id,
+            reveal_encoded.as_bytes(),
+            sender,
+            tx_hash,
+            8,
         )
         .unwrap();
 
         assert_eq!(encrypted_a, encrypted_b);
+        assert_ne!(encrypted_a, encrypted_other_withdrawal);
         assert_eq!(encrypted_a.len(), AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE);
 
         let (decrypted_sender, decrypted_tx_hash) =
@@ -736,6 +762,7 @@ mod tests {
             reveal_encoded.as_bytes(),
             sender,
             tx_hash,
+            7,
         )
         .unwrap();
         let encrypted_b = encrypt_authenticated_withdrawal_deterministic(
@@ -744,6 +771,7 @@ mod tests {
             reveal_encoded.as_bytes(),
             sender,
             tx_hash,
+            7,
         )
         .unwrap();
 
@@ -768,8 +796,26 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong key should fail decryption");
+    }
+
+    #[test]
+    fn test_ecies_decrypt_wrong_sender() {
+        let f = EncryptedDepositFixture::new();
+        let result = decrypt_deposit(
+            &f.seq_key,
+            &f.eph_pub_x,
+            f.eph_pub_y_parity,
+            &f.ciphertext,
+            &f.nonce,
+            &f.tag,
+            f.portal,
+            f.key_index,
+            Address::repeat_byte(0xEE),
+        );
+        assert!(result.is_none(), "wrong sender should fail decryption");
     }
 
     #[test]
@@ -787,6 +833,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "tampered ciphertext should fail");
     }
@@ -806,6 +853,7 @@ mod tests {
             &tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "tampered tag should fail");
     }
@@ -824,6 +872,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong nonce should fail");
     }
@@ -842,6 +891,7 @@ mod tests {
             &f.tag,
             wrong_portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong portal address should fail");
     }
@@ -860,6 +910,7 @@ mod tests {
             &f.tag,
             f.portal,
             wrong_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong key_index should fail");
     }
@@ -877,6 +928,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "invalid y parity should fail");
     }
@@ -895,6 +947,7 @@ mod tests {
             &f.tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "invalid ephemeral x should fail");
     }
@@ -913,7 +966,7 @@ mod tests {
             let shared = AffinePoint::from(ProjectivePoint::from(f.eph_pub) * seq_scalar);
             let ss_enc = shared.to_encoded_point(true);
             let ss_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
-            let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x);
+            let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x, &f.sender);
             hkdf_sha256(&ss_x, b"ecies-aes-key", &info)
         };
         let (ct, nonce, tag) = crate::test_utils::encrypt_plaintext(&aes_key, &short_plaintext);
@@ -927,6 +980,7 @@ mod tests {
             &tag,
             f.portal,
             f.key_index,
+            f.sender,
         );
         assert!(result.is_none(), "wrong plaintext length should fail");
     }
@@ -974,11 +1028,20 @@ mod tests {
 
         let to = Address::repeat_byte(0x42);
         let memo = B256::repeat_byte(0xAB);
+        let sender = Address::repeat_byte(0xCD);
         let portal = Address::repeat_byte(0x01);
         let key_index = U256::from(7u64);
 
-        let enc = super::encrypt_deposit(&seq_pub_x, seq_pub_y_parity, to, memo, portal, key_index)
-            .expect("encryption should succeed");
+        let enc = super::encrypt_deposit(
+            &seq_pub_x,
+            seq_pub_y_parity,
+            to,
+            memo,
+            sender,
+            portal,
+            key_index,
+        )
+        .expect("encryption should succeed");
 
         let dec = super::decrypt_deposit(
             &seq_key,
@@ -989,6 +1052,7 @@ mod tests {
             &enc.tag,
             portal,
             key_index,
+            sender,
         )
         .expect("decryption should succeed");
 

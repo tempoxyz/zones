@@ -107,10 +107,12 @@ async fn test_sequencer_restart_resumes_batch_submission() -> eyre::Result<()> {
     let seq_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     let first_withdrawal: u128 = 500_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(first_withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         first_withdrawal,
         WITHDRAWAL_TIMEOUT,
     )
@@ -138,10 +140,12 @@ async fn test_sequencer_restart_resumes_batch_submission() -> eyre::Result<()> {
 
     // --- Phase 3: Second withdrawal after restart ---
     let second_withdrawal: u128 = 300_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(second_withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         second_withdrawal,
         WITHDRAWAL_TIMEOUT,
     )
@@ -280,10 +284,12 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
 
     // Request a NEW withdrawal after restart to verify normal operation continues.
     let second_withdrawal: u128 = 400_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(second_withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         second_withdrawal,
         WITHDRAWAL_TIMEOUT,
     )
@@ -324,10 +330,12 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     // --- Cycle 1 ---
     let seq1 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(200_000).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         200_000,
         WITHDRAWAL_TIMEOUT,
     )
@@ -340,10 +348,12 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     // --- Cycle 2 ---
     let seq2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(300_000).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         300_000,
         WITHDRAWAL_TIMEOUT,
     )
@@ -356,10 +366,12 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     // --- Cycle 3 (final) ---
     let _seq3 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(400_000).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         400_000,
         WITHDRAWAL_TIMEOUT,
     )
@@ -506,15 +518,14 @@ async fn test_finalized_withdrawal_survives_sequencer_restart() -> eyre::Result<
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     let _seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
-    l1.wait_for_balance(
-        PATH_USD_ADDRESS,
+    l1.wait_for_withdrawal_on_l1(
+        portal_address,
         account.address(),
-        l1_balance_before + U256::from(withdrawal_amount),
+        l1_balance_before,
+        withdrawal_amount,
         WITHDRAWAL_TIMEOUT,
     )
     .await?;
-    l1.assert_withdrawal_processed(portal_address, account.address(), withdrawal_amount)
-        .await?;
 
     Ok(())
 }

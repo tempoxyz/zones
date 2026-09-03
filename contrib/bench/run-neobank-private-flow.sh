@@ -83,17 +83,11 @@ ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-2000000}"
 ZONES_BENCH_ACTIVITY_AMOUNT="${ZONES_BENCH_ACTIVITY_AMOUNT:-1}"
 ZONES_BENCH_WITHDRAWAL_AMOUNT="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
 ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT="${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT:-10000000}"
-# The canonical Zone boundary e2e uses the full callback allowance: a gateway
-# callback can include a swap, vault action, and encrypted return deposit.
-#
-# Do not lower this based on receipt gas: under TIP-1016, each new storage slot needs
-# ~248k gas in-frame on top of execution gas, and that state gas never appears in
-# receipt gas_used (receipts report the regular dimension only). A first-time user's
-# callback creates dozens of slots, so 5M and below deterministically out-of-gases.
-ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
+ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-5000000}"
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/neobank-e2e}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-e2e.json}"
 ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUTPUT/scenario.rendered.yml}"
+ZONES_BENCH_SPF_RANGE="${ZONES_BENCH_SPF_RANGE:-target/zones-benchmark/spf-range.env}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
@@ -117,34 +111,24 @@ ZONES_BENCH_ACTIVITY_GAS_LIMIT="${ZONES_BENCH_ACTIVITY_GAS_LIMIT:-500000}"
 ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT="${ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT:-10000000}"
 ZONES_BENCH_APPROVAL_GAS_LIMIT="${ZONES_BENCH_APPROVAL_GAS_LIMIT:-2000000}"
 ZONES_BENCH_ADMISSION_SEED_AMOUNT="${ZONES_BENCH_ADMISSION_SEED_AMOUNT:-1}"
+ZONES_BENCH_ADMISSION_SEED_TPS="${ZONES_BENCH_ADMISSION_SEED_TPS:-200}"
 ZONES_BENCH_RECIPIENT_ACCOUNT_START="${ZONES_BENCH_RECIPIENT_ACCOUNT_START:-$ZONES_BENCH_ACCOUNT_START}"
 ZONES_BENCH_RECIPIENT_ACCOUNT_END="${ZONES_BENCH_RECIPIENT_ACCOUNT_END:-$ZONES_BENCH_ACCOUNT_END}"
 if [[ -z "${ZONES_BENCH_RECIPIENT_GENERATOR:-}" ]]; then
     ZONES_BENCH_RECIPIENT_GENERATOR='{ pool: { pool: users, select: random } }'
 fi
+ZONES_BENCH_POSITION_RECIPIENT='{ var: account.address }'
 case "$ZONES_BENCH_RECIPIENT_MODE" in
     existing) ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT='{ var: recipient.address }' ;;
     random) ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT=random ;;
     *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
 esac
 case "$ZONES_BENCH_NEOBANK_PRESET" in
-    direct-lifecycle)
-        scenario_file=direct-lifecycle-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
-        leases_per_journey=1
-        ;;
     encrypted-deposit)
         scenario_file=encrypted-deposit-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
-        ;;
-    third-party-recipient)
-        scenario_file=third-party-recipient-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
-        leases_per_journey=2
         ;;
     full-journey)
         scenario_file=private-flow-scenario.yml
@@ -156,12 +140,6 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         scenario_file=private-withdrawal-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
-        leases_per_journey=1
-        ;;
-    rewards-redemption)
-        scenario_file=rewards-redemption-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
         leases_per_journey=1
         ;;
     slippage-bounce)
@@ -185,8 +163,8 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
     *) die "unsupported neobank preset: $ZONES_BENCH_NEOBANK_PRESET" ;;
 esac
 case "$ZONES_BENCH_SWAP_MECHANISM" in
-    direct-swap|simple|stablecoin-dex) ;;
-    *) die "ZONES_BENCH_SWAP_MECHANISM must be direct-swap, simple, or stablecoin-dex" ;;
+    direct-swap) ;;
+    *) die "current Earn only supports ZONES_BENCH_SWAP_MECHANISM=direct-swap" ;;
 esac
 [[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
     die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"
@@ -204,6 +182,7 @@ for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BE
     ZONES_BENCH_RECIPIENT_ACCOUNT_END
 do uint "$name"; done
 positive_rate ZONES_BENCH_TPS
+positive_rate ZONES_BENCH_ADMISSION_SEED_TPS
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
 (( 10#$ZONES_BENCH_MAX_CONCURRENT > 0 )) || die "max concurrency must be positive"
 (( 10#$ZONES_BENCH_SAMPLE_INSTANCES > 0 )) ||
@@ -332,7 +311,7 @@ export ZONES_BENCH_DEPOSIT_GAS_LIMIT ZONES_BENCH_ACTIVITY_GAS_LIMIT
 export ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT ZONES_BENCH_APPROVAL_GAS_LIMIT
 export ZONES_BENCH_ADMISSION_SEED_AMOUNT
 export ZONES_BENCH_RECIPIENT_ACCOUNT_START ZONES_BENCH_RECIPIENT_ACCOUNT_END
-export ZONES_BENCH_RECIPIENT_GENERATOR
+export ZONES_BENCH_RECIPIENT_GENERATOR ZONES_BENCH_POSITION_RECIPIENT
 export ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN
 export ZONES_BENCH_EARN_ROUTER ZONES_BENCH_EARN_VAULT
 export ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER ZONES_BENCH_BRIDGE_WALLET
@@ -497,12 +476,13 @@ trap cleanup EXIT INT TERM
 
 run_setup_scenario() {
     local stage="$1" scenario="$2" count="$3" report="$4" context="${5:-}"
+    local starts_per_second="${6:-0}"
     local concurrency="$ZONES_BENCH_MAX_CONCURRENT"
     if (( 10#$concurrency > 10#$count )); then concurrency="$count"; fi
 
     echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$stage${context:+ $context}"
     "$txgen_bin" scenario run \
-        --scenario "$scenario" --count "$count" --starts-per-second 0 \
+        --scenario "$scenario" --count "$count" --starts-per-second "$starts_per_second" \
         --max-in-flight "$concurrency" --max-rpc-in-flight "$concurrency" \
         --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
         --seed "$ZONES_BENCH_SEED" --report "$report"
@@ -512,15 +492,19 @@ run_setup_scenario() {
 
 # Zone transaction-pool admission requires every sender to hold a nonzero
 # balance of an enabled token. Run one exact encrypted onramp per benchmark
-# account before the untimed outbox approvals. This setup scenario uses account
-# leases, so count=accounts touches every account exactly once while respecting
-# the configured max-in-flight cap.
+# account before the untimed outbox approvals. Pace the deposits so a large
+# account pool is not packed into one L1 block and rejected by ZonePortal's
+# per-block deposit cap. This setup scenario uses account leases, so
+# count=accounts touches every account exactly once while respecting the
+# configured max-in-flight cap.
 seed_zone_admission_balances() {
     local seed_report="$ZONES_BENCH_OUTPUT/admission-seed-report.json"
     local total=$((10#$ZONES_BENCH_ACCOUNTS))
 
     run_setup_scenario \
-        zone_admission_seed "$admission_seed_scenario" "$total" "$seed_report"
+        zone_admission_seed "$admission_seed_scenario" "$total" "$seed_report" \
+        "starts_per_second=$ZONES_BENCH_ADMISSION_SEED_TPS" \
+        "$ZONES_BENCH_ADMISSION_SEED_TPS"
     echo "Zone admission seed verified: $total/$total exact encrypted deposits processed"
 }
 
@@ -578,6 +562,31 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
         zone_approvals "$zone_approval_scenario" "$ZONES_BENCH_ACCOUNTS" \
         "$ZONES_BENCH_OUTPUT/zone-approvals-report.json" \
         "approval_round=base_and_earn"
+fi
+
+# Seed Earn before any setup or measured Earn callback: make one untimed deposit
+# with the full callback allowance and leave its returned EarnToken in an unrelated
+# Zone account. This keeps the EarnVault and engine nonempty, so the benchmark runs
+# steady-state deposit and redemption paths instead of empty-pool transitions.
+earn_warmup_amount="$ZONES_BENCH_WITHDRAWAL_AMOUNT"
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
+    readonly earn_warmup_callback_gas_limit=10000000
+    earn_warmup_recipient_hash="$(cast keccak "zones-benchmark-earn-warmup:$ZONES_BENCH_SEED")"
+    earn_warmup_recipient="0x${earn_warmup_recipient_hash: -40}"
+    ZONES_BENCH_CALLBACK_GAS_LIMIT="$earn_warmup_callback_gas_limit" \
+    ZONES_BENCH_SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT="$ZONES_BENCH_DEPOSIT_AMOUNT" \
+    ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT="$earn_warmup_amount" \
+    ZONES_BENCH_POSITION_RECIPIENT="\"$earn_warmup_recipient\"" run_setup_scenario \
+        earn_warmup "$neobank_specs/swapped-redemption-position-scenario.yml" 1 \
+        "$ZONES_BENCH_OUTPUT/earn-warmup-report.json" \
+        "callback_gas_limit=$earn_warmup_callback_gas_limit amount=$earn_warmup_amount"
+
+    warmup_share_supply_after="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
+    warmup_earn_supply_after="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
+    [[ "$warmup_share_supply_after" == "$earn_warmup_amount" ]] ||
+        die "Earn warmup share supply $warmup_share_supply_after does not equal $earn_warmup_amount"
+    [[ "$warmup_earn_supply_after" == "$earn_warmup_amount" ]] ||
+        die "Earn warmup token supply $warmup_earn_supply_after does not equal $earn_warmup_amount"
 fi
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
@@ -647,8 +656,9 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
       "$ZONES_BENCH_NEOBANK_PRESET" == "swapped-redemption" ]]; then
     initial_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     initial_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
-    [[ "$initial_share_supply" == 0 && "$initial_earn_supply" == 0 ]] ||
-        die "$ZONES_BENCH_NEOBANK_PRESET position setup requires zero initial EarnToken supply"
+    [[ "$initial_share_supply" == "$earn_warmup_amount" &&
+       "$initial_earn_supply" == "$earn_warmup_amount" ]] ||
+        die "$ZONES_BENCH_NEOBANK_PRESET position setup requires only the startup Earn warmup position"
 
     stage_start redemption_position_setup
     position_concurrency="$ZONES_BENCH_MAX_CONCURRENT"
@@ -670,10 +680,11 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
     stage_start redemption_position_check
     positioned_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     positioned_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
-    [[ "$positioned_share_supply" == "$swapped_redemption_total_position" ]] ||
-        die "$ZONES_BENCH_NEOBANK_PRESET share supply $positioned_share_supply does not equal $swapped_redemption_total_position"
-    [[ "$positioned_earn_supply" == "$swapped_redemption_total_position" ]] ||
-        die "$ZONES_BENCH_NEOBANK_PRESET EarnToken supply $positioned_earn_supply does not equal $swapped_redemption_total_position"
+    expected_redemption_position="$(bigint_eval "$swapped_redemption_total_position + $earn_warmup_amount")"
+    [[ "$positioned_share_supply" == "$expected_redemption_position" ]] ||
+        die "$ZONES_BENCH_NEOBANK_PRESET share supply $positioned_share_supply does not equal $expected_redemption_position"
+    [[ "$positioned_earn_supply" == "$expected_redemption_position" ]] ||
+        die "$ZONES_BENCH_NEOBANK_PRESET EarnToken supply $positioned_earn_supply does not equal $expected_redemption_position"
     verify_reward_zone_balances \
         seeded "$swapped_redemption_total_position" \
         "$swapped_redemption_position_per_account"
@@ -702,6 +713,9 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
 esac
 
+private_flow_parent_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+[[ "$private_flow_parent_block" =~ ^[0-9]+$ ]] ||
+    die "could not read the Zone head before the measured private flow"
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
@@ -710,6 +724,16 @@ build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$sample_instances" "${scenario_report_args[@]}"
 stage_end private_flow
+private_flow_tip_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
+[[ "$private_flow_tip_block" =~ ^[0-9]+$ ]] ||
+    die "could not read the Zone head after the measured private flow"
+(( 10#$private_flow_tip_block > 10#$private_flow_parent_block )) ||
+    die "the measured private flow produced no Zone blocks"
+mkdir -p "$(dirname "$ZONES_BENCH_SPF_RANGE")"
+{
+    printf 'ZONES_BENCH_SPF_FROM_BLOCK=%s\n' "$((10#$private_flow_parent_block + 1))"
+    printf 'ZONES_BENCH_SPF_TO_BLOCK=%s\n' "$((10#$private_flow_tip_block))"
+} >"$ZONES_BENCH_SPF_RANGE"
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
     stage_start slippage_postcondition
@@ -742,10 +766,11 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
     stage_start redemption_postcondition
     final_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     final_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
-    [[ "$final_share_supply" == "$swapped_redemption_expected_remaining" ]] ||
-        die "terminal $ZONES_BENCH_NEOBANK_PRESET share supply $final_share_supply does not equal $swapped_redemption_expected_remaining"
-    [[ "$final_earn_supply" == "$swapped_redemption_expected_remaining" ]] ||
-        die "terminal $ZONES_BENCH_NEOBANK_PRESET EarnToken supply $final_earn_supply does not equal $swapped_redemption_expected_remaining"
+    expected_redemption_remaining="$(bigint_eval "$swapped_redemption_expected_remaining + $earn_warmup_amount")"
+    [[ "$final_share_supply" == "$expected_redemption_remaining" ]] ||
+        die "terminal $ZONES_BENCH_NEOBANK_PRESET share supply $final_share_supply does not equal $expected_redemption_remaining"
+    [[ "$final_earn_supply" == "$expected_redemption_remaining" ]] ||
+        die "terminal $ZONES_BENCH_NEOBANK_PRESET EarnToken supply $final_earn_supply does not equal $expected_redemption_remaining"
     verify_reward_zone_balances \
         distributed_remaining "$swapped_redemption_expected_remaining" \
         "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \

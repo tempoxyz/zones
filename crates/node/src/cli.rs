@@ -3,22 +3,26 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
-use reth_chainspec::EthChainSpec;
-use reth_consensus::noop::NoopConsensus;
+use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
-use reth_tracing::tracing::info;
+use reth_tracing::tracing::{info, warn};
+use tempo_alloy::TempoNetwork;
+use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
-use zone_p2p::{P2pConfig, Role};
+use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
+use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
     ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
+use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
     MAX_WITHDRAWAL_BATCH_GAS, WithdrawalBatchLimits,
@@ -95,78 +99,55 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<ZoneChainSpec>| {
-        (
-            ZoneEvmConfig::new_without_l1(spec),
-            NoopConsensus::default(),
-        )
+    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            eyre::ensure!(
+                !portal_address.is_zero(),
+                "L1_PORTAL_ADDRESS must be nonzero"
+            );
+            Some((url, portal_address))
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
+
+    let components = move |spec: Arc<ZoneChainSpec>| {
+        let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
+        (evm_config, TempoConsensus::new(spec))
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
         info!(target: "reth::cli", "Launching Tempo Zone node");
 
-        validate_l1_rpc_url(&args.l1_rpc_url)?;
-        validate_portal_address(args.portal_address)?;
-        args.validate_zone_id(builder.config().chain.genesis().config.chain_id)?;
-
-        let p2p_config = args
-            .sequencer_manifest
-            .as_ref()
-            .map(|manifest_path| {
-                let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
-                    eyre::eyre!("--p2p.key is required with --sequencer.manifest")
-                })?;
-                // Required for a quorum member and rejected for an `rpc_only` node, which never
-                // signs a settlement attestation; the manifest decides which this node is.
-                P2pConfig::load(
-                    manifest_path,
-                    ed25519_key_path,
-                    args.secp256k1_key.as_ref(),
-                    args.p2p_listen,
-                    args.p2p_bypass_ip_check,
-                    args.zone_id,
-                    args.sequencer_role,
-                )
-            })
-            .transpose()?;
-        if let Some(config) = p2p_config.as_ref() {
-            info!(
-                target: "reth::cli",
-                ed25519_public_key = %config.ed25519_public_key(),
-                secp256k1_address = ?config.secp256k1_address(),
-                listen = %config.listen(),
-                "Validated multi-sequencer manifest and local identity"
-            );
+        if args.block_interval_ms.is_some() {
+            warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        let manifest_mode = p2p_config.is_some();
+        let zone_id = builder.config().chain.zone_id();
+        validate_deprecated_zone_id(args.zone_id, zone_id)?;
+
+        let manifest_mode = args.sequencer_manifest.is_some();
+        validate_p2p_transaction_size_limit(
+            manifest_mode,
+            builder.config().txpool.max_tx_input_bytes,
+        )?;
         if manifest_mode {
             // Replicate only durable blocks. Persist every block immediately so followers can
             // acknowledge each block without waiting for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
-        // Every promotable node constructs all the sequencer resources: activation is gated at
-        // runtime by the leadership schedule, so a quorum follower must be able to become a
-        // leader without a restart. An rpc-only standby is not promotable at runtime — that
-        // needs a new individual key registered with `ZonePortal` and a manifest change — so it
-        // is deliberately left without the shared sequencer key, which is also the zone's ECIES
-        // private key for encrypted deposits and must not sit on an internet-facing host.
-        let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
-        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, p2p_config.as_ref());
-        if rpc_only && (args.sequencer_key.is_some() || args.sequencer_key_file.is_some()) {
-            return Err(eyre::eyre!(
-                "this node is `rpc_only` in the manifest, so --sequencer-key/--sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
-            ));
-        }
-        let sequencer_signer = if should_sequence_blocks {
-            Some(
-                load_sequencer_signer(args.sequencer_key, args.sequencer_key_file.as_deref())
-                    .await?,
-            )
-        } else {
-            None
-        };
         let additional_decryption_keys =
             load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
 
@@ -176,7 +157,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
         let mut node = ZoneNode::new(
-            args.l1_rpc_url,
+            args.l1_rpc_url.clone(),
             args.portal_address,
             args.l1_fetch_concurrency,
             Duration::from_millis(args.l1_retry_connection_interval_ms),
@@ -184,7 +165,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
         .with_redacted_rpc(ZoneRedactedRpcConfig {
             redacted_rpc_port: args.redacted_rpc_port,
-            zone_id: args.zone_id,
+            zone_id,
             max_auth_token_validity: Duration::from_secs(
                 args.redacted_rpc_max_auth_token_validity_secs,
             ),
@@ -193,67 +174,149 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
 
-        if should_sequence_blocks {
-            let sequencer_signer = sequencer_signer
-                .expect("sequencer signer is parsed whenever sequencing is enabled");
-            // `None` on an rpc-only node: it holds no individual key, and it is never the
-            // scheduled leader, so it never submits an L1 settlement transaction.
-            let l1_transaction_signer = p2p_config
-                .as_ref()
-                .and_then(P2pConfig::block_attestation_signer);
-            node = node.with_sequencer(ZoneSequencerAddOnsConfig {
-                sequencer_signer,
-                l1_transaction_signer,
-                zone_id: args.zone_id,
-                zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-                batch_anchor_config: BatchAnchorConfig::default(),
-                withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
-                withdrawal_batch_limits: WithdrawalBatchLimits {
-                    max_batch_gas: args.withdrawal_max_batch_gas,
-                    max_in_flight_batches: args.withdrawal_max_in_flight_batches,
-                },
-            });
-        }
-        if let Some(config) = p2p_config {
-            node = node.with_p2p(config);
-        }
+        node = configure_sequencing(&args, zone_id, node).await?;
 
-        let handle = builder.node(node).launch_with_debug_capabilities().await?;
-        handle.wait_for_node_exit().await
+        // Install or skip the checker ExEx based on the configured mode.
+        match args.checker_mode {
+            CheckerMode::Off => {
+                let handle = builder
+                    .node(node)
+                    .launch_with_debug_capabilities()
+                    .await?;
+                handle.wait_for_node_exit().await
+            }
+            CheckerMode::Observe => {
+                info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
+                let node = node.with_portal_evidence_retention();
+                let checker = CheckerExEx::new(CheckerConfig {
+                    l1_rpc_url: args.l1_rpc_url.clone(),
+                    portal_address: args.portal_address,
+                    zone_id,
+                    zone_chain_id: builder.config().chain.chain().id(),
+                    database_path: builder.config().datadir().data_dir().join("checker"),
+                    l1_block_tracker: node.l1_block_tracker(),
+                });
+                builder
+                    .node(node)
+                    .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
+                    .launch_with_debug_capabilities()
+                    .await?
+                    .wait_for_node_exit()
+                    .await
+            }
+        }
     })
 }
 
+/// Creates the EVM config used by CLI subcommands.
+fn cli_evm_config(
+    chain_spec: Arc<ZoneChainSpec>,
+    l1_config: Option<(url::Url, Address)>,
+) -> ZoneEvmConfig {
+    let Some((l1_rpc_url, portal_address)) = l1_config else {
+        return ZoneEvmConfig::new_without_l1(chain_spec);
+    };
+
+    let cache = L1StateCache::default();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_http(l1_rpc_url)
+        .erased();
+    let runtime_handle = tokio::runtime::Handle::current();
+    let config = L1StateProviderConfig::default();
+    let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+    ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
+}
+
+/// Load and attach all sequencer resources to the node.
+async fn configure_sequencing(
+    args: &ZoneArgs,
+    zone_id: u32,
+    mut node: ZoneNode,
+) -> eyre::Result<ZoneNode> {
+    let p2p_config =
+        args.sequencer_manifest
+            .as_ref()
+            .map(|manifest_path| {
+                let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--p2p.key is required with --sequencer.manifest")
+                })?;
+                P2pConfig::load(
+                    manifest_path,
+                    ed25519_key_path,
+                    args.secp256k1_key.as_ref(),
+                    args.p2p_listen,
+                    args.p2p_bypass_ip_check,
+                    zone_id,
+                    args.sequencer_role,
+                )
+            })
+            .transpose()?;
+    if let Some(config) = p2p_config.as_ref() {
+        info!(
+            target: "reth::cli",
+            ed25519_public_key = %config.ed25519_public_key(),
+            secp256k1_address = ?config.secp256k1_address(),
+            listen = %config.listen(),
+            "Validated multi-sequencer manifest and local identity"
+        );
+    }
+
+    let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+    let should_sequence_blocks = args.enable_sequencer
+        || p2p_config
+            .as_ref()
+            .is_some_and(|config| !config.is_rpc_only());
+    if rpc_only && args.sequencer_key_file.is_some() {
+        return Err(eyre::eyre!(
+            "this node is `rpc_only` in the manifest, so --sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
+        ));
+    }
+    eyre::ensure!(
+        !args.enable_prover || should_sequence_blocks,
+        "--sequencer.enable-prover requires a promotable sequencer node"
+    );
+
+    if should_sequence_blocks {
+        let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
+        node = node.with_sequencer(ZoneSequencerAddOnsConfig {
+            sequencer_signer,
+            // `None` on an rpc-only node: it holds no individual key, and it is never the
+            // scheduled leader, so it never submits an L1 settlement transaction.
+            l1_transaction_signer: p2p_config
+                .as_ref()
+                .and_then(P2pConfig::block_attestation_signer),
+            zone_id,
+            zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
+            batch_anchor_config: BatchAnchorConfig::default(),
+            withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
+            withdrawal_batch_limits: WithdrawalBatchLimits {
+                max_batch_gas: args.withdrawal_max_batch_gas,
+                max_in_flight_batches: args.withdrawal_max_in_flight_batches,
+            },
+            enable_prover: args.enable_prover,
+            prover_address: args.prover_address.clone(),
+        });
+    }
+    if let Some(config) = p2p_config {
+        node = node.with_p2p(config);
+    }
+    Ok(node)
+}
+
 async fn load_sequencer_signer(
-    inline_key: Option<String>,
     key_file: Option<&std::path::Path>,
 ) -> eyre::Result<PrivateKeySigner> {
-    let (key, source) = match (inline_key, key_file) {
-        (Some(key), None) => (Zeroizing::new(key), "--sequencer-key".to_owned()),
-        (None, Some(path)) => {
-            let path = path.to_path_buf();
-            let source = format!("--sequencer-key-file {}", path.display());
-            let display_path = path.display().to_string();
-            let key = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
-                .await
-                .map_err(|err| {
-                    eyre::eyre!("sequencer key reader task failed for {display_path}: {err}")
-                })?
-                .map_err(|err| {
-                    eyre::eyre!("failed to read sequencer key from {display_path}: {err}")
-                })?;
-            (Zeroizing::new(key), source)
-        }
-        (Some(_), Some(_)) => {
-            return Err(eyre::eyre!(
-                "--sequencer-key and --sequencer-key-file are mutually exclusive"
-            ));
-        }
-        (None, None) => {
-            return Err(eyre::eyre!(
-                "one of --sequencer-key or --sequencer-key-file is required"
-            ));
-        }
-    };
+    let path = key_file.ok_or_else(|| {
+        eyre::eyre!("--sequencer-key-file is required when sequencing is enabled")
+    })?;
+    let path = path.to_path_buf();
+    let source = format!("--sequencer-key-file {}", path.display());
+    let display_path = path.display().to_string();
+    let key = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(|err| eyre::eyre!("sequencer key reader task failed for {display_path}: {err}"))?
+        .map_err(|err| eyre::eyre!("failed to read sequencer key from {display_path}: {err}"))?;
+    let key = Zeroizing::new(key);
 
     key.trim()
         .parse::<PrivateKeySigner>()
@@ -298,40 +361,38 @@ async fn load_decryption_keys(
 #[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
     /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
-    #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
+    #[arg(
+        long = "l1.rpc-url",
+        env = "L1_RPC_URL",
+        value_parser = parse_l1_rpc_url
+    )]
     pub l1_rpc_url: String,
 
     /// ZonePortal contract address on L1.
-    #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
+    #[arg(
+        long = "l1.portal-address",
+        env = "L1_PORTAL_ADDRESS",
+        value_parser = parse_portal_address
+    )]
     pub portal_address: Address,
 
-    /// Block building interval in milliseconds.
+    /// Deprecated compatibility flag. Ignored.
     #[arg(
         long = "block.interval-ms",
         env = "BLOCK_INTERVAL_MS",
-        default_value_t = 250
+        help = "Deprecated: no longer has any effect and will be removed in the next release."
     )]
-    pub block_interval_ms: u64,
+    pub block_interval_ms: Option<u64>,
 
-    /// Shared sequencer private key (hex, with or without 0x prefix).
+    /// Path to a file or FIFO containing the shared sequencer private key.
     ///
     /// Required by every node that can produce blocks. Requiredness is checked after the
     /// manifest is read rather than by `clap`, because an `rpc_only` node must not hold this
     /// key: it is also the zone's ECIES private key for encrypted deposits.
     #[arg(
-        long = "sequencer-key",
-        env = "SEQUENCER_KEY",
-        value_name = "HEX",
-        conflicts_with = "sequencer_key_file"
-    )]
-    pub sequencer_key: Option<String>,
-
-    /// Path to a file or FIFO containing the shared sequencer private key.
-    #[arg(
         long = "sequencer-key-file",
         env = "SEQUENCER_KEY_FILE",
-        value_name = "PATH",
-        conflicts_with = "sequencer_key"
+        value_name = "PATH"
     )]
     pub sequencer_key_file: Option<PathBuf>,
 
@@ -354,7 +415,7 @@ pub struct ZoneArgs {
     )]
     pub sequencer_manifest: Option<PathBuf>,
 
-    /// Path to this node's hex-encoded Ed25519 P2P identity key.
+    /// Path to a file or FIFO containing this node's hex-encoded Ed25519 P2P identity key.
     #[arg(
         long = "p2p.key",
         env = "P2P_KEY",
@@ -363,7 +424,7 @@ pub struct ZoneArgs {
     )]
     pub p2p_key: Option<PathBuf>,
 
-    /// Path to this node's hex-encoded individual secp256k1 private key.
+    /// Path to a file or FIFO containing this node's hex-encoded individual secp256k1 private key.
     #[arg(
         long = "secp256k1.key",
         env = "SECP256K1_KEY",
@@ -465,9 +526,9 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    /// Zone ID used for chain identity and redacted RPC authentication.
-    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u32,
+    /// Deprecated: validates the Zone ID encoded in the genesis chain ID.
+    #[arg(long = "zone.id", env = "ZONE_ID")]
+    pub zone_id: Option<u32>,
 
     /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
@@ -494,26 +555,28 @@ pub struct ZoneArgs {
         conflicts_with = "sequencer_manifest"
     )]
     pub enable_sequencer: bool,
-}
 
-impl ZoneArgs {
-    /// Assert the genesis chain ID is the one `zone.id` requires.
-    ///
-    /// `zone_id == 0` means "unset", which imposes no constraint.
-    fn validate_zone_id(&self, chain_id: u64) -> eyre::Result<()> {
-        if self.zone_id == 0 {
-            return Ok(());
-        }
-        let expected = zone_primitives::constants::zone_chain_id(self.zone_id);
-        eyre::ensure!(
-            chain_id == expected,
-            "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-            self.zone_id,
-            expected,
-            chain_id,
-        );
-        Ok(())
-    }
+    /// Checker ExEx mode: `off` (default) or `observe`.
+    #[arg(
+        long = "checker.mode",
+        env = "CHECKER_MODE",
+        default_value = "off",
+        value_parser = zone_checker::CheckerMode::parse,
+    )]
+    pub checker_mode: zone_checker::CheckerMode,
+
+    /// Validate finalized batch candidates with the SPF without changing settlement.
+    #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
+    pub enable_prover: bool,
+
+    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    #[arg(
+        long = "sequencer.prover-address",
+        env = "SEQUENCER_PROVER_ADDRESS",
+        value_name = "HOST:PORT",
+        requires = "enable_prover"
+    )]
+    pub prover_address: Option<String>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -524,31 +587,49 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
     }
 }
 
-/// Whether the sequencer add-on is configured at boot.
-///
-/// `rpc_only` nodes are excluded: they never produce blocks and cannot be promoted without a
-/// restart, so they must not be given the shared sequencer key.
-fn sequencer_enabled(cli_flag: bool, p2p_config: Option<&P2pConfig>) -> bool {
-    cli_flag || p2p_config.is_some_and(|config| !config.is_rpc_only())
-}
-
-fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
-    let url: url::Url = l1_rpc_url
-        .parse()
-        .map_err(|err| eyre::eyre!("failed parsing --l1.rpc-url as URL: {err}"))?;
-    eyre::ensure!(
-        matches!(url.scheme(), "ws" | "wss"),
-        "--l1.rpc-url must use ws:// or wss://, got `{}`",
-        url.scheme()
-    );
+fn validate_p2p_transaction_size_limit(
+    manifest_mode: bool,
+    max_tx_input_bytes: usize,
+) -> eyre::Result<()> {
+    if manifest_mode {
+        eyre::ensure!(
+            max_tx_input_bytes <= MAX_TRANSACTION_MESSAGE_SIZE,
+            "--txpool.max-tx-input-bytes ({max_tx_input_bytes}) exceeds the multi-sequencer P2P transaction limit ({MAX_TRANSACTION_MESSAGE_SIZE})"
+        );
+    }
     Ok(())
 }
 
-fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
-    eyre::ensure!(
-        !portal_address.is_zero(),
-        "--l1.portal-address must be nonzero"
-    );
+fn parse_l1_rpc_url(l1_rpc_url: &str) -> Result<String, String> {
+    let url: url::Url = l1_rpc_url
+        .parse()
+        .map_err(|err| format!("failed parsing --l1.rpc-url as URL: {err}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(format!(
+            "--l1.rpc-url must use ws:// or wss://, got `{}`",
+            url.scheme()
+        ));
+    }
+    Ok(l1_rpc_url.to_owned())
+}
+
+fn parse_portal_address(value: &str) -> Result<Address, String> {
+    let address = value
+        .parse::<Address>()
+        .map_err(|err| format!("invalid --l1.portal-address: {err}"))?;
+    if address.is_zero() {
+        return Err("--l1.portal-address must be nonzero".to_owned());
+    }
+    Ok(address)
+}
+
+fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
+    if let Some(configured) = configured {
+        eyre::ensure!(
+            configured == derived,
+            "deprecated --zone.id value {configured} does not match zone ID {derived} encoded in the genesis chain ID"
+        );
+    }
     Ok(())
 }
 
@@ -559,8 +640,8 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
-        validate_l1_rpc_url, validate_portal_address,
+        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
+        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -568,6 +649,50 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn checker_mode_defaults_to_off() {
+        let args = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ])
+        .unwrap()
+        .zone;
+        assert_eq!(args.checker_mode, zone_checker::CheckerMode::Off);
+    }
+
+    #[test]
+    fn checker_mode_observe_parses() {
+        let args = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--checker.mode",
+            "observe",
+        ])
+        .unwrap()
+        .zone;
+        assert_eq!(args.checker_mode, zone_checker::CheckerMode::Observe);
+    }
+
+    #[test]
+    fn checker_mode_enforce_is_rejected() {
+        let result = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--checker.mode",
+            "enforce",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -586,13 +711,17 @@ mod tests {
 
     #[test]
     fn portal_address_must_be_nonzero() {
-        assert!(validate_portal_address(alloy_primitives::Address::ZERO).is_err());
-        assert!(validate_portal_address(alloy_primitives::Address::repeat_byte(0x11)).is_ok());
+        assert!(parse_portal_address("0x0000000000000000000000000000000000000000").is_err());
+        assert!(parse_portal_address("0x1111111111111111111111111111111111111111").is_ok());
     }
 
     #[test]
-    fn zone_id_must_match_genesis_chain_id() {
-        let args = ZoneArgsParser::try_parse_from([
+    fn deprecated_zone_id_is_accepted_and_validated() {
+        assert!(validate_deprecated_zone_id(None, 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
+        assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
+
+        let parsed = ZoneArgsParser::try_parse_from([
             "tempo-zone",
             "--l1.rpc-url",
             "ws://localhost:8546",
@@ -601,16 +730,32 @@ mod tests {
             "--zone.id",
             "7",
         ])
-        .unwrap()
-        .zone;
-        let expected = zone_primitives::constants::zone_chain_id(args.zone_id);
-
-        assert!(args.validate_zone_id(expected).is_ok());
-        assert!(args.validate_zone_id(expected + 1).is_err());
+        .unwrap();
+        assert_eq!(parsed.zone.zone_id, Some(7));
     }
 
     #[test]
-    fn sequencer_key_file_is_accepted_and_conflicts_with_inline_key() {
+    fn manifest_mode_rejects_a_txpool_limit_above_the_p2p_wire_limit() {
+        assert!(
+            validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE,)
+                .is_ok()
+        );
+        let error =
+            validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE + 1)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the multi-sequencer P2P transaction limit")
+        );
+        assert!(
+            validate_p2p_transaction_size_limit(false, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE + 1,)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn sequencer_key_file_is_accepted_and_inline_key_option_is_rejected() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -629,16 +774,10 @@ mod tests {
             parsed.zone.sequencer_key_file.as_deref(),
             Some(std::path::Path::new("/run/secrets/sequencer-key"))
         );
-        assert!(parsed.zone.sequencer_key.is_none());
-
-        let error = ZoneArgsParser::try_parse_from(common.into_iter().chain([
-            "--sequencer-key",
-            "0x01",
-            "--sequencer-key-file",
-            "/run/secrets/sequencer-key",
-        ]))
-        .unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        let error =
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--sequencer-key", "0x01"]))
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -651,7 +790,7 @@ mod tests {
         )
         .unwrap();
 
-        let signer = load_sequencer_signer(None, Some(&path)).await.unwrap();
+        let signer = load_sequencer_signer(Some(&path)).await.unwrap();
         std::fs::remove_file(path).unwrap();
 
         assert_eq!(
@@ -717,13 +856,11 @@ mod tests {
             .unwrap();
         });
 
-        let signer = tokio::time::timeout(
-            Duration::from_secs(2),
-            load_sequencer_signer(None, Some(&path)),
-        )
-        .await
-        .expect("FIFO read timed out")
-        .unwrap();
+        let signer =
+            tokio::time::timeout(Duration::from_secs(2), load_sequencer_signer(Some(&path)))
+                .await
+                .expect("FIFO read timed out")
+                .unwrap();
         writer.join().unwrap();
         std::fs::remove_file(path).unwrap();
 
@@ -743,8 +880,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
         ];
 
         let missing_key = ZoneArgsParser::try_parse_from(
@@ -791,8 +926,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
             "--sequencer",
         ])
         .unwrap();
@@ -808,8 +941,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
         ];
 
         let default = ZoneArgsParser::try_parse_from(common).unwrap();
@@ -854,8 +985,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
             "--withdrawal-max-batch-gas",
             &above_limit,
         ])
@@ -871,8 +1000,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
         ];
 
         let without_manifest =
@@ -900,15 +1027,6 @@ mod tests {
     }
 
     #[test]
-    fn sequencer_resources_follow_the_cli_flag_without_a_manifest() {
-        // Manifest mode is covered by `sequencer_enabled`'s other arm, which needs a real
-        // `P2pConfig`; see `manifest_mode_configures_sequencer_resources_except_on_standbys`
-        // in the integration tests.
-        assert!(sequencer_enabled(true, None));
-        assert!(!sequencer_enabled(false, None));
-    }
-
-    #[test]
     fn sequencer_role_argument_accepts_the_rpc_follower_spelling() {
         let parsed = ZoneArgsParser::try_parse_from([
             "tempo-zone",
@@ -928,19 +1046,18 @@ mod tests {
         // A standby holds neither key. Requiredness is checked against the manifest after it is
         // read, so neither flag is a parse-time requirement.
         assert_eq!(parsed.zone.secp256k1_key, None);
-        assert_eq!(parsed.zone.sequencer_key, None);
         assert_eq!(parsed.zone.sequencer_key_file, None);
     }
 
     #[test]
     fn l1_rpc_url_accepts_websocket_schemes() {
-        validate_l1_rpc_url("ws://localhost:8546").unwrap();
-        validate_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
+        parse_l1_rpc_url("ws://localhost:8546").unwrap();
+        parse_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
     }
 
     #[test]
     fn l1_rpc_url_rejects_non_websocket_schemes() {
-        assert!(validate_l1_rpc_url("http://localhost:8545").is_err());
-        assert!(validate_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
+        assert!(parse_l1_rpc_url("http://localhost:8545").is_err());
+        assert!(parse_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
     }
 }

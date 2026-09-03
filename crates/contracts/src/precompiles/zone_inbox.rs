@@ -1,24 +1,24 @@
 //! `IZoneInbox` — Zone L2 system contract interface (0x1c00...0001).
 
 pub use IZoneInbox::{
-    ChaumPedersenProof, DecryptionData, Deposit, DepositType, EnabledToken,
+    ChaumPedersenProof, DecryptionData, DepositType, EnabledToken,
     IZoneInboxErrors as ZoneInboxError, IZoneInboxEvents as ZoneInboxEvent, QueuedDeposit,
+    WithdrawalBounceBackDeposit,
 };
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, keccak256};
+use alloy_sol_types::SolValue;
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract IZoneInbox {
         // -- Shared types --
 
-        struct Deposit {
+        struct WithdrawalBounceBackDeposit {
             address token;
-            address sender;
             address to;
             uint128 amount;
-            address tempoRefundRecipient;
-            bytes32 memo;
         }
 
         /// A TIP-20 token enabled on L1 for bridging to the zone.
@@ -29,16 +29,19 @@ crate::sol! {
             string currency;
         }
 
-        /// Deposit types for the unified deposit queue.
+        /// Entry types for the unified deposit queue.
         enum DepositType {
-            Regular,
-            Encrypted,
+            /// Internal withdrawal bounce-back entry.
+            WithdrawalBounceBack,
+            /// User deposit with an encrypted recipient and memo.
+            Deposit,
         }
 
-        /// A canonical deposit (regular or encrypted) passed to `advanceTempo`.
+        /// A user deposit or internal withdrawal bounce-back passed to `advanceTempo`.
         struct QueuedDeposit {
             DepositType depositType;
             bytes depositData;
+            bool rejected;
         }
 
         /// Chaum-Pedersen proof for ECDH shared secret derivation.
@@ -47,7 +50,7 @@ crate::sol! {
             bytes32 c;
         }
 
-        /// Decryption data provided by the sequencer for encrypted deposits.
+        /// Decryption data provided by the sequencer for user deposits.
         struct DecryptionData {
             bytes32 sharedSecret;
             uint8 sharedSecretYParity;
@@ -73,26 +76,17 @@ crate::sol! {
             bytes32 memo
         );
 
-        event EncryptedDepositProcessed(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            address indexed to,
-            address token,
-            uint128 amount,
-            bytes32 memo
-        );
-
-        event EncryptedDepositFailed(
+        event DepositFailed(
             bytes32 indexed depositHash,
             address indexed sender,
             address token,
             uint128 amount
         );
 
-        event DepositFailed(
+        event DepositRejected(
             bytes32 indexed depositHash,
             address indexed sender,
-            address indexed to,
+            DepositType depositType,
             address token,
             uint128 amount,
             address tempoRefundRecipient
@@ -109,6 +103,8 @@ crate::sol! {
 
         error OnlySequencer();
         error InvalidDepositQueueHash();
+        error InvalidWithdrawalBounceBack();
+        error InvalidTokenEnablementHash();
         error MissingDecryptionData();
         error ExtraDecryptionData();
         error InvalidSharedSecretProof();
@@ -116,6 +112,7 @@ crate::sol! {
 
         function processedDepositQueueHash() external view returns (bytes32);
         function processedDepositNumber() external view returns (uint64);
+        function processedTokenEnablementHash() external view returns (bytes32);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
@@ -131,37 +128,27 @@ crate::sol! {
 }
 
 impl EnabledToken {
+    /// Hash this token enablement as the next link in the portal commitment.
+    pub fn hash_with_previous(&self, previous_hash: B256) -> B256 {
+        keccak256(
+            (
+                previous_hash,
+                self.token,
+                self.name.as_str(),
+                self.symbol.as_str(),
+                self.currency.as_str(),
+            )
+                .abi_encode_params(),
+        )
+    }
+
     /// Build the event emitted after enabling this token on the zone.
     pub fn enabled_event(self) -> ZoneInboxEvent {
         ZoneInboxEvent::token_enabled(self.token, self.name, self.symbol, self.currency)
     }
 }
 
-impl Deposit {
-    /// Build the event emitted after a successful regular deposit.
-    pub fn processed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::deposit_processed(
-            deposit_hash,
-            self.sender,
-            self.to,
-            self.token,
-            self.amount,
-            self.memo,
-        )
-    }
-
-    /// Build the event emitted after a failed regular deposit.
-    pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::deposit_failed(
-            deposit_hash,
-            self.sender,
-            self.to,
-            self.token,
-            self.amount,
-            self.tempoRefundRecipient,
-        )
-    }
-
+impl WithdrawalBounceBackDeposit {
     /// Build the event emitted after processing a withdrawal bounce-back.
     pub fn withdrawal_bounce_back_processed_event(
         &self,

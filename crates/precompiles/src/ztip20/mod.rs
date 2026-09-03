@@ -15,8 +15,7 @@ use tempo_zone_contracts::Unauthorized;
 
 use crate::{
     execution::{CallCheck, CallRules},
-    privacy::check_caller_or_sequencer,
-    storage::{L1State, L1StorageReader},
+    privacy::check_caller,
 };
 
 alloy_sol_types::sol! {
@@ -36,21 +35,14 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
     ITIP20::transferWithMemoCall::SELECTOR,
     ITIP20::transferFromWithMemoCall::SELECTOR,
     ITIP20::approveCall::SELECTOR,
+    ITIP20::permitCall::SELECTOR,
 ];
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
-pub(crate) struct TIP20Rules<P> {
-    l1: L1State<P>,
-}
+pub(crate) struct TIP20Rules;
 
-impl<P> TIP20Rules<P> {
-    pub(crate) fn new(l1: L1State<P>) -> Self {
-        Self { l1 }
-    }
-}
-
-impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
+impl CallRules for TIP20Rules {
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
         selector
             .is_some_and(|selector| TIP20_FIXED_GAS_SELECTORS.contains(&selector))
@@ -62,13 +54,21 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
+                    check_caller(caller, &[call.account])
                 }
                 ITIP20::ITIP20Calls::allowance(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
+                    check_caller(caller, &[call.owner, call.spender])
                 }
                 ITIP20::ITIP20Calls::nonces(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+                    check_caller(caller, &[call.owner])
+                }
+                // Transfers are disabled during the initial permissioned Zone phase.
+                // Private asset movement is limited to the protocol-managed inbox and outbox paths.
+                ITIP20::ITIP20Calls::transferFrom(_)
+                | ITIP20::ITIP20Calls::transfer(_)
+                | ITIP20::ITIP20Calls::transferWithMemo(_)
+                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
+                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
                 }
                 // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
                 ITIP20::ITIP20Calls::mint(_)
@@ -109,11 +109,7 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 | ITIP20::ITIP20Calls::UNPAUSE_ROLE(_)
                 | ITIP20::ITIP20Calls::ISSUER_ROLE(_)
                 | ITIP20::ITIP20Calls::BURN_BLOCKED_ROLE(_)
-                | ITIP20::ITIP20Calls::transferFrom(_)
-                | ITIP20::ITIP20Calls::transfer(_)
                 | ITIP20::ITIP20Calls::approve(_)
-                | ITIP20::ITIP20Calls::transferWithMemo(_)
-                | ITIP20::ITIP20Calls::transferFromWithMemo(_)
                 | ITIP20::ITIP20Calls::permit(_)
                 | ITIP20::ITIP20Calls::DOMAIN_SEPARATOR(_) => CallCheck::Continue,
             };
@@ -142,7 +138,7 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, Bytes, U256, address};
+    use alloy::primitives::{Address, B256, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
@@ -151,7 +147,10 @@ mod tests {
         PATH_USD_ADDRESS,
         storage::{Handler, StorageCtx},
         test_util::TIP20Setup,
-        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
+        tip20::{
+            IRolesAuth, ISSUER_ROLE, ITIP20,
+            ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token,
+        },
         zone_factory::ZonePortalStorage as ZonePortal,
     };
     use tempo_zone_contracts::Unauthorized;
@@ -168,18 +167,18 @@ mod tests {
     const TEMPO_BLOCK_NUMBER: u64 = 7;
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
 
-    fn rules() -> TIP20Rules<MockL1Reader> {
-        TIP20Rules::new(L1State::new(MockL1Reader::default(), PORTAL_ADDRESS))
+    fn rules() -> TIP20Rules {
+        TIP20Rules
     }
 
-    fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
+    fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
             rules.admit(&call.abi_encode(), caller),
             CallCheck::Continue
         ));
     }
 
-    fn assert_unauthorized(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
+    fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
         assert!(matches!(
             rules.admit(&call.abi_encode(), caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
@@ -208,7 +207,6 @@ mod tests {
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
             let l1_reader = MockL1Reader::default();
             l1_reader.seed_active_sequencer(PORTAL_ADDRESS, TEMPO_BLOCK_NUMBER, sequencer);
-            let l1 = L1State::new(l1_reader.clone(), PORTAL_ADDRESS);
             let mut ctx = test_context();
 
             {
@@ -231,7 +229,7 @@ mod tests {
             }
 
             let env = test_env(&ctx);
-            let precompile = crate::create_tip20_precompile(token, &env, l1);
+            let precompile = crate::create_tip20_precompile(token, &env);
 
             Ok(Self {
                 ctx,
@@ -282,32 +280,31 @@ mod tests {
     }
 
     #[test]
-    fn read_privacy_rules_allow_owner_spender_and_sequencer() {
+    fn read_privacy_rules_allow_only_owner_and_spender() {
         let owner = Address::repeat_byte(0x11);
         let spender = Address::repeat_byte(0x22);
         let sequencer = Address::repeat_byte(0x33);
         let outsider = Address::repeat_byte(0x44);
-        let reader = MockL1Reader::default();
-        reader.seed_active_sequencer(PORTAL_ADDRESS, 0, sequencer);
-        let rules = TIP20Rules::new(L1State::new(reader, PORTAL_ADDRESS));
+        let rules = TIP20Rules;
         let mut ctx = test_context();
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || {
             let balance = ITIP20::balanceOfCall { account: owner };
             assert_allowed(&rules, balance.clone(), owner);
-            assert_allowed(&rules, balance.clone(), sequencer);
+            assert_unauthorized(&rules, balance.clone(), sequencer);
             assert_unauthorized(&rules, balance, outsider);
 
             let allowance = ITIP20::allowanceCall { owner, spender };
-            for caller in [owner, spender, sequencer] {
+            for caller in [owner, spender] {
                 assert_allowed(&rules, allowance.clone(), caller);
             }
+            assert_unauthorized(&rules, allowance.clone(), sequencer);
             assert_unauthorized(&rules, allowance, outsider);
 
             let nonce = ITIP20::noncesCall { owner };
             assert_allowed(&rules, nonce.clone(), owner);
-            assert_allowed(&rules, nonce.clone(), sequencer);
+            assert_unauthorized(&rules, nonce.clone(), sequencer);
             assert_unauthorized(&rules, nonce, outsider);
         });
     }
@@ -331,6 +328,48 @@ mod tests {
             IRolesAuth::getRoleAdminCall { role: *ISSUER_ROLE },
             caller,
         );
+    }
+
+    #[test]
+    fn all_transfer_calls_are_disallowed() {
+        let rules = rules();
+        let caller = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
+        let amount = U256::from(1);
+        let memo = B256::repeat_byte(0x33);
+        let calls = [
+            ITIP20::transferCall {
+                to: recipient,
+                amount,
+            }
+            .abi_encode(),
+            ITIP20::transferFromCall {
+                from: caller,
+                to: recipient,
+                amount,
+            }
+            .abi_encode(),
+            ITIP20::transferWithMemoCall {
+                to: recipient,
+                amount,
+                memo,
+            }
+            .abi_encode(),
+            ITIP20::transferFromWithMemoCall {
+                from: caller,
+                to: recipient,
+                amount,
+                memo,
+            }
+            .abi_encode(),
+        ];
+
+        for call in calls {
+            assert!(matches!(
+                rules.admit(&call, caller),
+                CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+            ));
+        }
     }
 
     #[test]
@@ -410,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn sequencer_privacy_access_uses_portal_storage_handler() -> eyre::Result<()> {
+    fn sequencer_privacy_access_is_denied_regardless_of_portal_state() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
         let next_sequencer = Address::repeat_byte(0x77);
         let calldata: Bytes = ITIP20::balanceOfCall {
@@ -422,7 +461,7 @@ mod tests {
         assert!(
             harness
                 .call(harness.sequencer, calldata.clone(), 100_000, true)?
-                .is_success()
+                .is_revert()
         );
         assert!(
             harness
@@ -432,14 +471,16 @@ mod tests {
 
         harness.l1_reader.with_storage(TEMPO_BLOCK_NUMBER, || {
             let mut portal = ZonePortal::new(PORTAL_ADDRESS);
-            portal.is_sequencer[harness.sequencer].write(false)?;
-            portal.is_sequencer[next_sequencer].write(true)
+            portal.role[harness.sequencer]
+                .write(u8::from(tempo_zone_contracts::ZonePortal::Role::None))?;
+            portal.role[next_sequencer]
+                .write(u8::from(tempo_zone_contracts::ZonePortal::Role::Sequencer))
         })?;
 
         assert!(
             harness
                 .call(next_sequencer, calldata.clone(), 100_000, true)?
-                .is_success()
+                .is_revert()
         );
         assert!(
             harness
@@ -495,10 +536,10 @@ mod tests {
             Bytes::from(Unauthorized {}.abi_encode())
         );
 
-        let transfer = harness.call(
+        let approve = harness.call(
             harness.alice,
-            ITIP20::transferCall {
-                to: harness.bob,
+            ITIP20::approveCall {
+                spender: harness.spender,
                 amount: U256::from(12_345u64),
             }
             .abi_encode()
@@ -506,9 +547,12 @@ mod tests {
             TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert!(transfer.is_success());
-        assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
+        assert!(approve.is_success());
+        assert_eq!(approve.gas_used, TIP20_FIXED_TRANSFER_GAS);
+        assert_eq!(
+            harness.allowance(harness.alice, harness.spender)?,
+            U256::from(12_345u64)
+        );
 
         Ok(())
     }
@@ -517,16 +561,12 @@ mod tests {
     fn uninitialized_token_rejects_before_policy_read() -> eyre::Result<()> {
         let token = address!("20C0000000000000000000000000000000000999");
         let caller = address!("0x00000000000000000000000000000000000000a2");
-        let to = address!("0x00000000000000000000000000000000000000a3");
+        let spender = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
         let env = test_env(&ctx);
-        let precompile = crate::create_tip20_precompile(
-            token,
-            &env,
-            L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
-        );
-        let calldata: Bytes = ITIP20::transferCall {
-            to,
+        let precompile = crate::create_tip20_precompile(token, &env);
+        let calldata: Bytes = ITIP20::approveCall {
+            spender,
             amount: U256::from(1u64),
         }
         .abi_encode()
@@ -629,19 +669,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "TODO: re-enable once zones allow user transfers"]
     fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
+        // Craft a successful allowance return whose first four bytes collide with the upstream
+        // error selector, exercising the redaction filter's revert-status guard.
+        let mut allowance_bytes = [0u8; 32];
+        allowance_bytes[..4].copy_from_slice(&TIP20InsufficientBalance::SELECTOR);
+        allowance_bytes[31] = 1;
+        let allowance = U256::from_be_bytes(allowance_bytes);
+
         harness.call(
             harness.alice,
             ITIP20::approveCall {
                 spender: harness.spender,
-                amount: U256::from(1_000_001u64),
+                amount: allowance,
             }
             .abi_encode()
             .into(),
             TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
+
+        let allowance_result = harness.call(
+            harness.alice,
+            ITIP20::allowanceCall {
+                owner: harness.alice,
+                spender: harness.spender,
+            }
+            .abi_encode()
+            .into(),
+            100_000,
+            true,
+        )?;
+        assert!(allowance_result.is_success());
+        assert_eq!(
+            allowance_result.bytes,
+            Bytes::copy_from_slice(&allowance_bytes)
+        );
 
         let result = harness.call(
             harness.spender,
@@ -748,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_gas_keeps_allowance_and_balance_state_changes_intact() -> eyre::Result<()> {
+    fn fixed_gas_keeps_allowance_state_changes_intact() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
 
         let approve = harness.call(
@@ -767,20 +832,6 @@ mod tests {
             harness.allowance(harness.alice, harness.spender)?,
             U256::from(123_456u64)
         );
-
-        let transfer = harness.call(
-            harness.alice,
-            ITIP20::transferCall {
-                to: harness.bob,
-                amount: U256::from(7_654u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert!(transfer.is_success());
-        assert_eq!(harness.balance_of(harness.bob)?, U256::from(7_654u64));
 
         Ok(())
     }

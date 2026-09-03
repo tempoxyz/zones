@@ -15,7 +15,7 @@
 
 Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo) *(currently available in testnet only),* with native support for confidential balances and transactions. Zones inherit compliance via TIP403 policies from Tempo and support interoperability with Tempo for moving assets in and out of Zones.
 
-You can get started today by [deploying a Zone](#getting-started) on Tempo testnet, reading the [Zones documentation](https://docs.tempo.xyz/guide/private-zones), or exploring the [Zone spec](specs/ref-impls/zone_spec.md).
+You can get started today by [deploying a Zone](#getting-started) on Tempo testnet, reading the [Zones documentation](https://docs.tempo.xyz/guide/private-zones), or exploring the [Zone spec](specs/spec.md).
 
 <br>
 
@@ -83,15 +83,9 @@ export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 export PRIVATE_KEY=$(jq -r '.sequencerKey' generated/my-zone/zone.json)
 just max-approve-portal
 
-# deposit into the zone
-just send-deposit 1000000                       # deposit to your own address
-just send-deposit 1000000 <recipient-address>   # deposit to a specific address
-```
-
-```bash
-# send an encrypted deposit
-just send-deposit-encrypted 1000000                       # to your own address
-just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+# Deposits are encrypted; the command fetches the portal's active encryption key.
+just send-deposit 1000000                       # to your own address
+just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
 
 ### Withdrawing from Zone to Tempo
@@ -135,4 +129,3 @@ Licensed under either of [Apache License](./LICENSE-APACHE), Version
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in these crates by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
-
