@@ -114,7 +114,7 @@ jobs:
 
       - name: Docker metadata for tempo-zone-prover-utils
         id: meta-tempo-zone-prover-utils
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           images: ${{ env.REGISTRY }}/tempo-zone-prover-utils
           bake-target: tempo-zone-prover-utils
