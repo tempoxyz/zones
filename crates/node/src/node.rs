@@ -98,8 +98,9 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorInput,
+    ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
+    prune_proof_directory_through, resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -700,6 +701,8 @@ where
         );
         let portal_address = self.portal_address;
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
+        let proof_directory = ctx.config.datadir().data_dir().join("proofs");
+        let replication_proof_directory = proof_directory.clone();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -722,6 +725,10 @@ where
                 Ok(())
             })
             .await?;
+        let proof_collector_config = ProofCollectorConfig {
+            directory: proof_directory,
+            debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+        };
         let prover_config = self
             .sequencer_config
             .as_ref()
@@ -730,7 +737,6 @@ where
                 parent_chain_id: l1_chain_id,
                 zone_id: config.zone_id,
                 chain_spec: evm_chain_spec,
-                debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
                 prover_address: config.prover_address.clone(),
             });
 
@@ -758,6 +764,39 @@ where
             backfill_requests_rx,
         }) = p2p_runtime
         {
+            let prune_provider = provider.clone();
+            let prune_l1_provider = l1_provider.clone();
+            let prune_directory = replication_proof_directory.clone();
+            let prune_portal = self.portal_address;
+            task_executor.spawn_critical_task("zone-proof-pruner", async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    let anchor = match resolve_portal_zone_anchor(
+                        &prune_provider,
+                        prune_portal,
+                        &prune_l1_provider,
+                    )
+                    .await
+                    {
+                        Ok(anchor) => anchor,
+                        Err(error) => {
+                            warn!(target: "zone::proofs", %error, "Failed resolving portal anchor for proof pruning");
+                            continue;
+                        }
+                    };
+                    let directory = prune_directory.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        prune_proof_directory_through(&directory, anchor.block_number)
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(eyre::eyre!(error)))
+                    {
+                        warn!(target: "zone::proofs", %error, "Failed pruning settled proof sidecars");
+                    }
+                }
+            });
+
             // Backfill serving is role-neutral: every role serves the same canonical
             // provider, so the server outlives role generations and a leadership handoff
             // can never drop an accepted request.
@@ -766,6 +805,7 @@ where
                 serve_backfill_requests(
                     provider.clone(),
                     backfill_commands.clone(),
+                    replication_proof_directory.clone(),
                     backfill_requests_rx,
                 ),
             );
@@ -776,6 +816,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    proof_collector_config.clone(),
                     prover_config.clone(),
                 )?),
                 None => None,
@@ -796,6 +837,7 @@ where
                 backfill_commands,
                 attestation,
                 portal_address: self.portal_address,
+                proof_directory: replication_proof_directory,
                 sequencer,
                 peer_tips,
                 status: role_status,
@@ -828,6 +870,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                Some(proof_collector_config),
                 prover_config,
             )
             .await?;
@@ -1243,6 +1286,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
+        proof_collector_config: ProofCollectorConfig,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
@@ -1260,6 +1304,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            proof_collector_config,
             prover_config,
         })
     }
@@ -1457,6 +1502,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
+        proof_collector_config: Option<ProofCollectorConfig>,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
@@ -1480,13 +1526,14 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            proof_collector_config.map(ProofCollectorInput::Start),
             prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
-        // Critical task — node shuts down if either exits.
+        // Critical task — node shuts down if any sequencer child exits.
         task_executor.spawn_critical_task("zone-monitor", async move {
             tokio::select! {
                 res = seq_handle.withdrawal_handle => {
@@ -1494,6 +1541,14 @@ where
                 }
                 res = seq_handle.monitor_handle => {
                     tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
+                }
+                res = async {
+                    match seq_handle.proof_collector_handle {
+                        Some(handle) => handle.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    tracing::error!(target: "reth::cli", ?res, "Proof collector task exited");
                 }
             }
         });

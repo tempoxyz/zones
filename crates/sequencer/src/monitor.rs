@@ -38,7 +38,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     AttestationStore, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX, ZonePortal},
-    prover::ShadowProver,
+    prover::ProofServices,
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -136,8 +136,8 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     prev_zone_block_hash: B256,
     /// Most recent canonical zone block observed from the node.
     latest_observed_zone_block: u64,
-    /// Detached, observational SPF worker.
-    shadow_prover: Option<ShadowProver>,
+    /// Durable proof collection and optional observational SPF worker.
+    proof_services: Option<ProofServices>,
 }
 
 struct PortalResyncSnapshot {
@@ -182,7 +182,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
-        shadow_prover: Option<ShadowProver>,
+        proof_services: Option<ProofServices>,
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let mut batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
@@ -239,7 +239,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             prev_processed_deposit_number,
             prev_zone_block_hash,
             latest_observed_zone_block: last_submitted_zone_block,
-            shadow_prover,
+            proof_services,
         };
 
         // Restore pending withdrawal data from zone L2 events so the
@@ -490,8 +490,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             withdrawal_batch_index: finalized_batch.finalized_index,
         };
 
-        if let Some(prover) = &self.shadow_prover {
-            prover.try_enqueue(from, to, batch_data.clone());
+        if let Some(proofs) = &self.proof_services {
+            proofs.try_enqueue(from, to, batch_data.clone()).await;
         }
         self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals, shutdown)
             .await
@@ -607,6 +607,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
                     self.prev_processed_deposit_number = batch_data.next_deposit_number;
                     self.last_submitted_zone_block = last_zone_block;
+                    if let Some(proofs) = &self.proof_services
+                        && let Err(error) = proofs.prune_through(last_zone_block).await
+                    {
+                        warn!(
+                            %error,
+                            last_zone_block,
+                            "Failed to prune portal-confirmed proof files"
+                        );
+                    }
                     self.metrics
                         .latest_zone_block_submitted_to_l1
                         .set(last_zone_block as f64);
@@ -841,7 +850,7 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     l1_provider: DynProvider<TempoNetwork>,
     signer: PrivateKeySigner,
     shared_state: ZoneMonitorSharedState,
-    shadow_prover: Option<ShadowProver>,
+    proof_services: Option<ProofServices>,
     shutdown: sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let ZoneMonitorSharedState {
@@ -863,7 +872,7 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
                 repair_notify.clone(),
-                shadow_prover.clone(),
+                proof_services.clone(),
             )
             .await
             {
@@ -1025,7 +1034,7 @@ mod tests {
             prev_processed_deposit_number: 0,
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             latest_observed_zone_block: 50,
-            shadow_prover: None,
+            proof_services: None,
         }
     }
 

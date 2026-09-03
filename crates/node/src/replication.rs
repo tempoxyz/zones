@@ -15,6 +15,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use std::{
     collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
@@ -32,10 +33,11 @@ use zone_payload::{
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
 };
 use zone_sequencer::{
-    BatchAnchorConfig,
+    BatchAnchorConfig, ProofParentState,
     attestation::{
         AttestationDomain, AttestationStore, SettlementAttestation, SignedSettlementAttestation,
     },
+    persist_received_proof_json, read_proof_json, resolve_portal_zone_anchor,
 };
 
 use alloy_signer_local::PrivateKeySigner;
@@ -89,6 +91,63 @@ pub(crate) struct EncodedPersistedBlock {
     number: u64,
     hash: B256,
     encoded: Vec<u8>,
+}
+
+const PROOF_FRAME_MAGIC: &[u8; 4] = b"ZPRF";
+const PROOF_FRAME_VERSION: u8 = 1;
+const PROOF_FRAME_HEADER_LEN: usize = PROOF_FRAME_MAGIC.len() + 1 + 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplicatedBlock {
+    block: Vec<u8>,
+    proof_json: Option<Vec<u8>>,
+}
+
+fn encode_replicated_block(block: Vec<u8>, proof_json: Option<Vec<u8>>) -> eyre::Result<Vec<u8>> {
+    let block_len = u32::try_from(block.len()).wrap_err("encoded Zone block is too large")?;
+    let proof_len = proof_json.as_ref().map_or(0, Vec::len);
+    let mut encoded = Vec::with_capacity(PROOF_FRAME_HEADER_LEN + block.len() + proof_len);
+    encoded.extend_from_slice(PROOF_FRAME_MAGIC);
+    encoded.push(PROOF_FRAME_VERSION);
+    encoded.extend_from_slice(&block_len.to_be_bytes());
+    encoded.extend_from_slice(&block);
+    if let Some(proof_json) = proof_json {
+        encoded.extend_from_slice(&proof_json);
+    }
+    Ok(encoded)
+}
+
+fn decode_replicated_block(encoded: &[u8]) -> eyre::Result<ReplicatedBlock> {
+    if !encoded.starts_with(PROOF_FRAME_MAGIC) {
+        return Ok(ReplicatedBlock {
+            block: encoded.to_vec(),
+            proof_json: None,
+        });
+    }
+    eyre::ensure!(
+        encoded.len() >= PROOF_FRAME_HEADER_LEN,
+        "truncated block proof frame"
+    );
+    eyre::ensure!(
+        encoded[PROOF_FRAME_MAGIC.len()] == PROOF_FRAME_VERSION,
+        "unsupported block proof frame version {}",
+        encoded[PROOF_FRAME_MAGIC.len()]
+    );
+    let length_start = PROOF_FRAME_MAGIC.len() + 1;
+    let block_len = u32::from_be_bytes(
+        encoded[length_start..length_start + 4]
+            .try_into()
+            .expect("fixed-length slice"),
+    ) as usize;
+    let block_end = PROOF_FRAME_HEADER_LEN
+        .checked_add(block_len)
+        .ok_or_eyre("block proof frame length overflow")?;
+    eyre::ensure!(block_end <= encoded.len(), "truncated block proof frame");
+    let proof = &encoded[block_end..];
+    Ok(ReplicatedBlock {
+        block: encoded[PROOF_FRAME_HEADER_LEN..block_end].to_vec(),
+        proof_json: (!proof.is_empty()).then(|| proof.to_vec()),
+    })
 }
 
 /// The one shutdown decision the role controller makes for a leader's block broadcaster.
@@ -148,7 +207,7 @@ where
     }
 }
 
-/// Broadcast every newly persisted leader block in canonical order until cancelled.
+/// Broadcast every newly persisted leader block and its durable proof sidecar in canonical order.
 ///
 /// A single shutdown command decides how to handle the leader's final block:
 ///
@@ -162,6 +221,7 @@ where
 pub(crate) async fn broadcast_persisted_blocks<P>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
+    proof_directory: Option<PathBuf>,
     mut shutdown: oneshot::Receiver<BroadcasterShutdown>,
 ) where
     P: PersistedBlockSource,
@@ -185,9 +245,15 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
         }
     };
 
-    if let Err(err) =
-        broadcast_persisted_range(&provider, &commands, &mut last_broadcast, startup_tip, None)
-            .await
+    if let Err(err) = broadcast_persisted_range(
+        &provider,
+        &commands,
+        proof_directory.as_deref(),
+        &mut last_broadcast,
+        startup_tip,
+        None,
+    )
+    .await
     {
         tracing::error!(target: "zone::p2p", %err, "Failed broadcasting persisted zone blocks");
         return;
@@ -202,6 +268,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
                         if let Err(err) = drain_persisted_blocks_after_engine_stop(
                             &provider,
                             &commands,
+                            proof_directory.as_deref(),
                             &mut last_broadcast,
                             &mut persisted,
                         )
@@ -221,6 +288,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
                                 if let Err(err) = broadcast_persisted_range(
                                     &provider,
                                     &commands,
+                                    proof_directory.as_deref(),
                                     &mut last_broadcast,
                                     persisted_head,
                                     None,
@@ -260,6 +328,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
         if let Err(err) = broadcast_persisted_range(
             &provider,
             &commands,
+            proof_directory.as_deref(),
             &mut last_broadcast,
             persisted_tip.number,
             Some(persisted_tip.hash),
@@ -285,6 +354,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
 async fn drain_persisted_blocks_after_engine_stop<P>(
     provider: &P,
     commands: &mpsc::Sender<P2pCommand>,
+    proof_directory: Option<&Path>,
     last_broadcast: &mut u64,
     persisted: &mut BoxStream<'static, PersistedTip>,
 ) -> eyre::Result<()>
@@ -293,7 +363,15 @@ where
 {
     let canonical = provider.canonical_block_number()?;
     let persisted_head = provider.last_block_number()?;
-    broadcast_persisted_range(provider, commands, last_broadcast, persisted_head, None).await?;
+    broadcast_persisted_range(
+        provider,
+        commands,
+        proof_directory,
+        last_broadcast,
+        persisted_head,
+        None,
+    )
+    .await?;
 
     while *last_broadcast < canonical {
         let persisted_tip = persisted.next().await.ok_or_else(|| {
@@ -309,6 +387,7 @@ where
         broadcast_persisted_range(
             provider,
             commands,
+            proof_directory,
             last_broadcast,
             persisted_tip.number,
             Some(persisted_tip.hash),
@@ -323,6 +402,7 @@ where
 async fn broadcast_persisted_range<P>(
     provider: &P,
     commands: &mpsc::Sender<P2pCommand>,
+    proof_directory: Option<&Path>,
     last_broadcast: &mut u64,
     tip_number: u64,
     expected_tip_hash: Option<B256>,
@@ -342,14 +422,30 @@ where
                 "persisted zone block hash does not match notification at height {number}: expected={expected}, actual={hash}"
             );
         }
+        let proof_json = match proof_directory {
+            Some(directory) => Some(wait_for_proof_json(directory, number, hash).await?),
+            None => None,
+        };
         commands
-            .send(P2pCommand::BroadcastBlock(block.encoded))
+            .send(P2pCommand::BroadcastBlock(encode_replicated_block(
+                block.encoded,
+                proof_json,
+            )?))
             .await
             .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
         debug!(target: "zone::p2p", number, ?hash, "Queued persisted block for followers");
         *last_broadcast = number;
     }
     Ok(())
+}
+
+async fn wait_for_proof_json(directory: &Path, number: u64, hash: B256) -> eyre::Result<Vec<u8>> {
+    loop {
+        if let Some(json) = read_proof_json(directory, number, hash)? {
+            return Ok(json);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 const BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -420,6 +516,7 @@ impl BackfillProgress {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPeerBlock {
     encoded: Vec<u8>,
+    proof_json: Option<Vec<u8>>,
     live_sender: Option<P2pPeerId>,
 }
 
@@ -476,7 +573,8 @@ fn buffer_pending_block(
 }
 
 fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
-    let mut input = encoded;
+    let replicated = decode_replicated_block(encoded)?;
+    let mut input = replicated.block.as_slice();
     let block = Block::decode(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
     eyre::ensure!(
@@ -493,6 +591,7 @@ fn serve_backfill_page<P>(
     peer: zone_p2p::P2pPeerId,
     request_id: u64,
     start: u64,
+    proof_directory: &Path,
 ) -> eyre::Result<()>
 where
     P: BlockNumReader
@@ -506,11 +605,14 @@ where
         let block = provider.block_by_number(number)?.ok_or_else(|| {
             eyre::eyre!("persisted canonical block {number} is missing while serving backfill")
         })?;
+        let hash = SealedBlock::seal_slow(block.clone()).hash();
+        let proof_json = read_proof_json(proof_directory, number, hash)?;
+        let replicated = encode_replicated_block(alloy_rlp::encode(block), proof_json)?;
         commands
             .blocking_send(BackfillCommand::SendBlock {
                 peer: peer.clone(),
                 request_id,
-                block: alloy_rlp::encode(block),
+                block: replicated,
             })
             .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
     }
@@ -546,6 +648,7 @@ where
 pub(crate) async fn serve_backfill_requests<P>(
     provider: P,
     commands: mpsc::Sender<BackfillCommand>,
+    proof_directory: PathBuf,
     mut requests: mpsc::Receiver<BackfillRequest>,
 ) where
     P: BlockNumReader
@@ -567,8 +670,16 @@ pub(crate) async fn serve_backfill_requests<P>(
     {
         let page_provider = provider.clone();
         let page_commands = commands.clone();
+        let proof_directory = proof_directory.clone();
         let page = tokio::task::spawn_blocking(move || {
-            serve_backfill_page(&page_provider, &page_commands, peer, request_id, start)
+            serve_backfill_page(
+                &page_provider,
+                &page_commands,
+                peer,
+                request_id,
+                start,
+                &proof_directory,
+            )
         })
         .await;
         let result = match page {
@@ -706,8 +817,9 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 /// `schedule.leader_for(the block's embedded anchor)`. We do this because if there are accidentally
 /// two leaders (split brain) for a block, we need to decide to import the correct one.
 ///
-/// Backfilled blocks carry no producer claim and are judged by
-/// parent/anchor/execution/conflict validation alone. The loop exits when `stop` fires.
+/// Backfilled blocks carry no producer claim and are judged by parent/anchor/execution/conflict
+/// validation. Blocks beyond the portal-confirmed prefix must also carry a proof sidecar. The loop
+/// exits when `stop` fires.
 pub(crate) async fn run_follower_block_sync<P>(
     provider: P,
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
@@ -720,6 +832,7 @@ pub(crate) async fn run_follower_block_sync<P>(
     attestation: AttestationContext,
     schedule: LeadershipSchedule,
     peer_tips: PeerTipRegistry,
+    proof_directory: PathBuf,
     stop: sync::CancellationToken,
 ) where
     P: BlockNumReader
@@ -775,6 +888,8 @@ pub(crate) async fn run_follower_block_sync<P>(
                             &l1_block_tracker,
                             &deposit_queue,
                             &schedule,
+                            &proof_directory,
+                            &attestation,
                             &mut pending,
                             &mut backfill,
                             number,
@@ -884,6 +999,8 @@ pub(crate) async fn run_follower_block_sync<P>(
                             &l1_block_tracker,
                             &deposit_queue,
                             &schedule,
+                            &proof_directory,
+                            &attestation,
                             &mut pending,
                             &mut backfill,
                             number,
@@ -951,6 +1068,8 @@ async fn process_follower_block<P>(
     l1_block_tracker: &L1BlockTracker,
     deposit_queue: &DepositQueue,
     schedule: &LeadershipSchedule,
+    proof_directory: &Path,
+    attestation: &AttestationContext,
     pending: &mut BTreeMap<u64, PendingPeerBlock>,
     backfill: &mut BackfillProgress,
     number: u64,
@@ -976,8 +1095,16 @@ where
             return true;
         }
     };
+    let replicated = match decode_replicated_block(&block) {
+        Ok(replicated) => replicated,
+        Err(err) => {
+            tracing::error!(target: "zone::p2p", %err, "Rejected malformed block proof frame");
+            return true;
+        }
+    };
     let peer_block = PendingPeerBlock {
-        encoded: block,
+        encoded: replicated.block,
+        proof_json: replicated.proof_json,
         live_sender,
     };
     if number <= best {
@@ -987,6 +1114,8 @@ where
             l1_block_tracker,
             deposit_queue,
             schedule,
+            proof_directory,
+            attestation,
             &peer_block,
             stop,
         )
@@ -1016,6 +1145,8 @@ where
         l1_block_tracker,
         deposit_queue,
         schedule,
+        proof_directory,
+        attestation,
         pending,
         stop,
     )
@@ -1054,6 +1185,8 @@ async fn drain_pending_blocks<P>(
     l1_block_tracker: &L1BlockTracker,
     deposit_queue: &DepositQueue,
     schedule: &LeadershipSchedule,
+    proof_directory: &Path,
+    attestation: &AttestationContext,
     pending: &mut BTreeMap<u64, PendingPeerBlock>,
     stop: &sync::CancellationToken,
 ) -> eyre::Result<PeerBlockImportOutcome>
@@ -1077,6 +1210,8 @@ where
             l1_block_tracker,
             deposit_queue,
             schedule,
+            proof_directory,
+            attestation,
             &block,
             stop,
         )
@@ -1090,6 +1225,8 @@ async fn import_peer_block<P>(
     l1_block_tracker: &L1BlockTracker,
     deposit_queue: &DepositQueue,
     schedule: &LeadershipSchedule,
+    proof_directory: &Path,
+    attestation: &AttestationContext,
     peer_block: &PendingPeerBlock,
     stop: &sync::CancellationToken,
 ) -> eyre::Result<PeerBlockImportOutcome>
@@ -1113,6 +1250,7 @@ where
     let block = SealedBlock::seal_slow(block);
     let block_number = block.number();
     let hash = block.hash();
+    let block_parent_hash = block.parent_hash();
     let best_block = provider.best_block_number()?;
 
     // 1. Block number is correct
@@ -1121,6 +1259,28 @@ where
             eyre::eyre!("missing local canonical header at height {block_number}")
         })?;
         if existing.hash() == hash {
+            if let Some(proof_json) = &peer_block.proof_json {
+                let parent = provider
+                    .sealed_header(block_number.saturating_sub(1))?
+                    .ok_or_else(|| {
+                        eyre::eyre!("missing parent of duplicate block {block_number}")
+                    })?;
+                let parent_tempo = provider
+                    .state_by_block_hash(parent.hash())?
+                    .tempo_num_hash()?;
+                persist_received_proof_json(
+                    proof_directory,
+                    proof_json,
+                    block_number,
+                    hash,
+                    block.parent_hash(),
+                    ProofParentState {
+                        zone_state_root: parent.state_root(),
+                        tempo_number: parent_tempo.number,
+                        tempo_hash: parent_tempo.hash,
+                    },
+                )?;
+            }
             debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate peer block");
             return Ok(PeerBlockImportOutcome::Imported);
         }
@@ -1207,11 +1367,49 @@ where
         .try_enqueue_sealed(l1_header, observed)
         .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
 
+    if peer_block.live_sender.is_some() {
+        eyre::ensure!(
+            peer_block.proof_json.is_some(),
+            "live Zone block {block_number} is missing its proof sidecar"
+        );
+    }
+    if peer_block.proof_json.is_none() {
+        let portal_anchor = resolve_portal_zone_anchor(
+            provider,
+            attestation.domain.portal_address,
+            &attestation.l1_provider,
+        )
+        .await
+        .wrap_err("resolve portal anchor for proofless backfill block")?;
+        eyre::ensure!(
+            block_number <= portal_anchor.block_number,
+            "unsettled backfill block {block_number} is missing its proof sidecar; portal is at {}",
+            portal_anchor.block_number
+        );
+    }
     // 4. All txns in the block execute properly
     let payload = ZonePayloadTypes::block_to_payload(block, None);
     let status = engine.new_payload(payload).await?;
     if !status.is_valid() {
         eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
+    }
+
+    // The block is executed but not canonical yet. Validate both witness roots and make the JSON
+    // sidecar durable before the final forkchoice update can expose this block as local history.
+    if let Some(proof_json) = &peer_block.proof_json {
+        persist_received_proof_json(
+            proof_directory,
+            proof_json,
+            block_number,
+            hash,
+            block_parent_hash,
+            ProofParentState {
+                zone_state_root: parent.state_root(),
+                tempo_number: local.number,
+                tempo_hash: local.hash,
+            },
+        )
+        .wrap_err_with(|| format!("persist proof sidecar for Zone block {block_number}"))?;
     }
 
     // 5. Forkchoice
@@ -1415,12 +1613,39 @@ mod tests {
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
         MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PersistedBlockSource, PersistedTip,
-        broadcast_persisted_blocks, buffer_pending_block, validate_live_block_sender,
-        wait_for_validated_peer_anchor,
+        broadcast_persisted_blocks, buffer_pending_block, decode_replicated_block,
+        encode_replicated_block, validate_live_block_sender, wait_for_validated_peer_anchor,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState, P2pCommand};
+
+    #[test]
+    fn replicated_block_frame_round_trips_json_proof() {
+        let block = vec![0xf8, 0x02, 0x80];
+        let proof = br#"{"formatVersion":1}"#.to_vec();
+        let encoded = encode_replicated_block(block.clone(), Some(proof.clone())).unwrap();
+
+        assert_eq!(
+            decode_replicated_block(&encoded).unwrap(),
+            super::ReplicatedBlock {
+                block,
+                proof_json: Some(proof),
+            }
+        );
+    }
+
+    #[test]
+    fn replicated_block_decoder_accepts_legacy_block_only_frame() {
+        let block = vec![0xf8, 0x02, 0x80];
+        assert_eq!(
+            decode_replicated_block(&block).unwrap(),
+            super::ReplicatedBlock {
+                block,
+                proof_json: None,
+            }
+        );
+    }
 
     #[derive(Clone)]
     struct StartupRaceSource {
@@ -1897,11 +2122,13 @@ mod tests {
         let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
         let (_shutdown, shutdown_rx) = oneshot::channel();
 
-        broadcast_persisted_blocks(source, commands, shutdown_rx).await;
+        broadcast_persisted_blocks(source, commands, None, shutdown_rx).await;
 
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
+            Some(P2pCommand::BroadcastBlock(
+                encode_replicated_block(vec![1], None).unwrap()
+            ))
         );
         assert_eq!(command_rx.recv().await, None);
     }
@@ -1926,13 +2153,15 @@ mod tests {
             .send(BroadcasterShutdown::Stop)
             .expect("the broadcaster must retain the shutdown receiver");
 
-        broadcast_persisted_blocks(source, commands, shutdown_rx).await;
+        broadcast_persisted_blocks(source, commands, None, shutdown_rx).await;
 
         // Block 1 is durable and must be flushed; block 2 exists only in memory and would be
         // lost on restart, stranding any follower that imported it.
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
+            Some(P2pCommand::BroadcastBlock(
+                encode_replicated_block(vec![1], None).unwrap()
+            ))
         );
         assert_eq!(
             command_rx.recv().await,
@@ -1957,7 +2186,12 @@ mod tests {
         };
         let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(broadcast_persisted_blocks(source, commands, shutdown_rx));
+        let task = tokio::spawn(broadcast_persisted_blocks(
+            source,
+            commands,
+            None,
+            shutdown_rx,
+        ));
 
         shutdown
             .send(BroadcasterShutdown::Drain)
@@ -1966,7 +2200,9 @@ mod tests {
         // The durable prefix goes out immediately.
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
+            Some(P2pCommand::BroadcastBlock(
+                encode_replicated_block(vec![1], None).unwrap()
+            ))
         );
         // The canonical tail must not, until it persists.
         assert!(
@@ -1986,7 +2222,9 @@ mod tests {
 
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![2]))
+            Some(P2pCommand::BroadcastBlock(
+                encode_replicated_block(vec![2], None).unwrap()
+            ))
         );
         task.await.expect("the broadcaster task must not panic");
         assert_eq!(command_rx.recv().await, None);
@@ -2071,6 +2309,7 @@ mod tests {
     fn pending_block(payload: u64) -> super::PendingPeerBlock {
         super::PendingPeerBlock {
             encoded: vec![payload as u8],
+            proof_json: None,
             live_sender: None,
         }
     }
