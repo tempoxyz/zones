@@ -16,7 +16,8 @@ use tempo_primitives::TempoHeader;
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use crate::{
-    Error, StatelessSparseTrieError, TempoStateWitness, ZoneStateWitness, mpt::StatelessSparseTrie,
+    Error, StatelessSparseTrieError, TempoStateWitness, ZoneStateWitness,
+    mpt::{StatelessSparseTrie, index_node_pool},
 };
 
 /// Errors emitted while resolving an execution read against a witness.
@@ -177,9 +178,10 @@ impl Database for WitnessDatabase {
 #[derive(Clone, Debug)]
 pub struct TempoWitnessDatabase {
     state: Option<Arc<StatelessSparseTrie>>,
+    state_root: B256,
     tempo_block_hash: B256,
     tempo_block_number: u64,
-    node_pool: Arc<Vec<Bytes>>,
+    nodes: Arc<B256Map<Bytes>>,
     missing_read: Arc<Mutex<Option<MissingTempoStorageRead>>>,
 }
 
@@ -193,15 +195,18 @@ pub(crate) struct MissingTempoStorageRead {
 impl TempoWitnessDatabase {
     /// Construct the reader for the initial Tempo checkpoint.
     pub fn from_tempo_state_witness(witness: TempoStateWitness) -> Result<Self, Error> {
-        let node_pool = Arc::new(witness.node_pool);
-        let (state, tempo_block_hash, tempo_block_number) =
-            checkpoint_state(&witness.initial_tempo_header_rlp, node_pool.as_ref())?;
+        let header = decode_checkpoint_header(&witness.initial_tempo_header_rlp)?;
+        // Every checkpoint imported by this batch resolves against the same
+        // pool, so it is hashed and indexed once here rather than per Zone block.
+        let nodes = Arc::new(index_node_pool(&witness.node_pool)?);
+        let state_root = header.state_root();
 
         Ok(Self {
-            state,
-            tempo_block_hash,
-            tempo_block_number,
-            node_pool,
+            state: checkpoint_state(state_root, &nodes)?,
+            state_root,
+            tempo_block_hash: keccak256(&witness.initial_tempo_header_rlp),
+            tempo_block_number: header.number(),
+            nodes,
             missing_read: Arc::default(),
         })
     }
@@ -213,14 +218,22 @@ impl TempoWitnessDatabase {
         self,
         header_rlp: &alloy_primitives::Bytes,
     ) -> Result<Self, Error> {
-        let (state, tempo_block_hash, tempo_block_number) =
-            checkpoint_state(header_rlp, self.node_pool.as_ref())?;
+        let header = decode_checkpoint_header(header_rlp)?;
+        let state_root = header.state_root();
+        // A checkpoint that carries the previous state root resolves every read
+        // against the trie already revealed for it.
+        let state = if state_root == self.state_root {
+            self.state
+        } else {
+            checkpoint_state(state_root, &self.nodes)?
+        };
 
         Ok(Self {
             state,
-            tempo_block_hash,
-            tempo_block_number,
-            node_pool: self.node_pool,
+            state_root,
+            tempo_block_hash: keccak256(header_rlp),
+            tempo_block_number: header.number(),
+            nodes: self.nodes,
             missing_read: self.missing_read,
         })
     }
@@ -250,25 +263,25 @@ impl TempoWitnessDatabase {
     }
 }
 
-fn checkpoint_state(
-    header_rlp: &[u8],
-    node_pool: &[Bytes],
-) -> Result<(Option<Arc<StatelessSparseTrie>>, B256, u64), Error> {
+fn decode_checkpoint_header(header_rlp: &[u8]) -> Result<TempoHeader, Error> {
     let mut encoded_header = header_rlp;
     let header = TempoHeader::decode(&mut encoded_header)
         .map_err(|_| WitnessDatabaseError::InvalidTempoHeader)?;
     if !encoded_header.is_empty() {
         return Err(WitnessDatabaseError::InvalidTempoHeader.into());
     }
+    Ok(header)
+}
 
-    let state_root = header.state_root();
-    let state = match StatelessSparseTrie::new(state_root, node_pool) {
-        Ok(state) => Some(Arc::new(state)),
-        Err(StatelessSparseTrieError::MissingStateRootNode { .. }) => None,
-        Err(error) => return Err(error.into()),
-    };
-
-    Ok((state, keccak256(header_rlp), header.number()))
+fn checkpoint_state(
+    state_root: B256,
+    nodes: &B256Map<Bytes>,
+) -> Result<Option<Arc<StatelessSparseTrie>>, Error> {
+    match StatelessSparseTrie::from_indexed_nodes(state_root, nodes) {
+        Ok(state) => Ok(Some(Arc::new(state))),
+        Err(StatelessSparseTrieError::MissingStateRootNode { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl L1StorageReader for TempoWitnessDatabase {
