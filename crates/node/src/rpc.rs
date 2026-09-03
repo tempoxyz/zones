@@ -26,7 +26,8 @@ use eyre::WrapErr;
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_provider::{CanonStateSubscriptions, HeaderProvider};
+use reth_primitives_traits::SealedHeader;
+use reth_provider::{CanonStateSubscriptions, HeaderProvider, ProviderError};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -36,7 +37,7 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{BlockIdReader, BlockNumReader, BlockReaderIdExt, StateProviderFactory};
 use reth_trie_common::{ExecutionWitnessMode, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
@@ -743,17 +744,23 @@ where
     ///
     /// Redaction drops the entire body, so loading the recovered block (and evicting the block
     /// cache with it) only to hash every transaction and RLP-encode the body for `size` is wasted
-    /// work.
+    /// work. The header is read through the eth state cache, which serves it from the cached
+    /// header or the cached full block and only loads it from the provider on a miss.
     fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
         Box::pin(async move {
-            let Some(header) = self
+            let Some(hash) = self
                 .eth
                 .api
                 .provider()
-                .sealed_header_by_id(id)
+                .block_hash_for_id(id)
                 .map_err(internal)?
             else {
                 return Ok(raw_null());
+            };
+            let header = match self.eth.api.cache().get_header(hash).await {
+                Ok(header) => SealedHeader::new(header, hash),
+                Err(ProviderError::HeaderNotFound(_)) => return Ok(raw_null()),
+                Err(err) => return Err(internal(err)),
             };
 
             // A block carries withdrawals exactly when its header has a withdrawals root.
