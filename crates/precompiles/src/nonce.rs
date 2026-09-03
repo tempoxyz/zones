@@ -2,7 +2,9 @@
 
 use alloy_primitives::Address;
 use alloy_sol_types::SolInterface;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::INonce;
+use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
 
 use crate::{
     execution::{CallCheck, CallRules},
@@ -14,8 +16,10 @@ use crate::{
 pub(crate) struct NonceRules;
 
 impl CallRules for NonceRules {
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Ok(call) = INonce::INonceCalls::abi_decode(data) else {
+    fn admit(&self, data: &[u8], caller: Address, spec: TempoHardfork) -> CallCheck {
+        let Ok(call) =
+            INonce::INonceCalls::abi_decode_with_config(data, abi_decoder_config_for_spec(spec))
+        else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
         };
@@ -55,15 +59,37 @@ mod tests {
 
         StorageCtx::enter(&mut storage, || {
             assert!(matches!(
-                rules.admit(&call.abi_encode(), owner),
+                rules.admit(&call.abi_encode(), owner, TempoHardfork::T8),
                 CallCheck::Continue
             ));
             for caller in [sequencer, outsider, intermediary] {
                 assert!(matches!(
-                    rules.admit(&call.abi_encode(), caller),
+                    rules.admit(&call.abi_encode(), caller, TempoHardfork::T8),
                     CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
                 ));
             }
         });
+    }
+
+    #[test]
+    fn t11_defers_noncanonical_address_calldata_to_upstream() {
+        let owner = Address::repeat_byte(0x11);
+        let outsider = Address::repeat_byte(0x22);
+        let rules = NonceRules;
+        let mut data = INonce::getNonceCall {
+            account: owner,
+            nonceKey: U256::from(1),
+        }
+        .abi_encode();
+        data[4] = 1;
+
+        assert!(matches!(
+            rules.admit(&data, outsider, TempoHardfork::T8),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+        ));
+        assert!(matches!(
+            rules.admit(&data, outsider, TempoHardfork::T11),
+            CallCheck::Continue
+        ));
     }
 }

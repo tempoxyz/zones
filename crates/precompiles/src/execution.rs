@@ -88,8 +88,8 @@ pub(crate) trait CallRules: 'static {
         None
     }
 
-    /// Applies pure Zone-specific admission rules before storage setup.
-    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+    /// Applies Zone-specific admission rules using the active Tempo hardfork.
+    fn admit(&self, _data: &[u8], _caller: Address, _spec: TempoHardfork) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -115,7 +115,13 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
-        if input.gas < input_cost(data.len()) {
+        let Ok(input_gas) = input_cost(env.cfg.spec, data.len()) else {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::OutOfGas,
+                input.reservoir,
+            ));
+        };
+        if input.gas < input_gas {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
                 input.reservoir,
@@ -147,17 +153,19 @@ pub(crate) fn create_precompile(
             storage.set_tip1060_storage_credits(false);
         }
 
-        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
-            CallCheck::Continue => execute(data, caller),
-            CallCheck::Revert(output) => {
-                let s = StorageCtx::default();
-                let output = s.revert_output(output);
-                add_input_cost(s, data, Ok(output))
-            }
-            CallCheck::Error(error) => {
-                let s = StorageCtx::default();
-                let result = s.error_result(error);
-                add_input_cost(s, data, result)
+        let mut result = StorageCtx::enter(&mut storage, || {
+            match rules.admit(data, caller, env.cfg.spec) {
+                CallCheck::Continue => execute(data, caller),
+                CallCheck::Revert(output) => {
+                    let s = StorageCtx::default();
+                    let output = s.revert_output(output);
+                    add_input_cost(s, data, Ok(output))
+                }
+                CallCheck::Error(error) => {
+                    let s = StorageCtx::default();
+                    let result = s.error_result(error);
+                    add_input_cost(s, data, result)
+                }
             }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
@@ -207,7 +215,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        fn admit(&self, data: &[u8], caller: Address, _spec: TempoHardfork) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(data),
                 selector_from_calldata(data),
@@ -371,7 +379,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address, _spec: TempoHardfork) -> CallCheck {
             self.0.set(true);
             CallCheck::Revert(Bytes::from_static(b"denied"))
         }
@@ -418,10 +426,44 @@ mod tests {
         assert_eq!(rejected.bytes, Bytes::from_static(b"denied"));
     }
 
+    #[test]
+    fn input_gas_threshold_tracks_t11() {
+        let calldata = [0u8; 32];
+
+        for (spec, required_gas) in [(TempoHardfork::T10, 6), (TempoHardfork::T11, 30)] {
+            let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+            cfg.spec = spec;
+            let env = ZonePrecompileEnv::new(
+                &cfg,
+                zone_hardfork::ZoneHardfork::Z0,
+                StorageActions::disabled(),
+                Rc::new(RefCell::new(NonCreditableSlots::empty())),
+            );
+            let precompile = create_precompile("InputGasTest", &env, NoCallRules, |_, _| {
+                Ok(StorageCtx::default().success_output(Bytes::new()))
+            });
+            let mut ctx = test_context();
+
+            let insufficient = precompile
+                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas - 1))
+                .unwrap();
+            assert_eq!(
+                insufficient.halt_reason(),
+                Some(&PrecompileHalt::OutOfGas),
+                "{spec:?} must require {required_gas} input gas"
+            );
+
+            let sufficient = precompile
+                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas))
+                .unwrap();
+            assert!(!sufficient.is_halt(), "{spec:?} must accept its exact cost");
+        }
+    }
+
     struct FatalRules;
 
     impl CallRules for FatalRules {
-        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address, _spec: TempoHardfork) -> CallCheck {
             StorageCtx::default().deduct_gas(10).unwrap();
             CallCheck::Error(TempoPrecompileError::Fatal("boom".into()))
         }

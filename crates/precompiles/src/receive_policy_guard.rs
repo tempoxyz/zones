@@ -10,8 +10,12 @@ use crate::{
 };
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::IReceivePolicyGuard;
-use tempo_precompiles::{address_registry::AddressRegistry, dispatch::selector_from_calldata};
+use tempo_precompiles::{
+    address_registry::AddressRegistry,
+    dispatch::{abi_decoder_config_for_spec, selector_from_calldata},
+};
 use tempo_zone_contracts::Unauthorized;
 
 /// Stakeholder-only admission for receipt balance lookups.
@@ -26,12 +30,15 @@ impl CallRules for ReceivePolicyGuardRules {
             .then_some(TIP20_FIXED_TRANSFER_GAS)
     }
 
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address, spec: TempoHardfork) -> CallCheck {
         if selector_from_calldata(data) != Some(IReceivePolicyGuard::balanceOfCall::SELECTOR) {
             return CallCheck::Continue;
         }
 
-        let Ok(call) = IReceivePolicyGuard::balanceOfCall::abi_decode_raw(&data[4..]) else {
+        let Ok(call) = IReceivePolicyGuard::balanceOfCall::abi_decode_raw_with_config(
+            &data[4..],
+            abi_decoder_config_for_spec(spec),
+        ) else {
             // Preserve the upstream ABI error for malformed calldata.
             return CallCheck::Continue;
         };
@@ -115,7 +122,7 @@ mod tests {
         caller: Address,
     ) {
         assert!(matches!(
-            rules.admit(&balance_call(receipt), caller),
+            rules.admit(&balance_call(receipt), caller, TempoHardfork::T8),
             CallCheck::Continue
         ));
     }
@@ -126,7 +133,7 @@ mod tests {
         caller: Address,
     ) {
         assert!(matches!(
-            rules.admit(&balance_call(receipt), caller),
+            rules.admit(&balance_call(receipt), caller, TempoHardfork::T8),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -181,7 +188,7 @@ mod tests {
 
         StorageCtx::enter(&mut storage, || {
             assert!(matches!(
-                rules.admit(&balance_call(&receipt), OUTSIDER),
+                rules.admit(&balance_call(&receipt), OUTSIDER, TempoHardfork::T8),
                 CallCheck::Error(tempo_precompiles::error::TempoPrecompileError::OutOfGas)
             ));
         });
@@ -201,11 +208,34 @@ mod tests {
         }
         .abi_encode();
 
-        assert!(matches!(rules.admit(&claim, OUTSIDER), CallCheck::Continue));
         assert!(matches!(
-            rules.admit(&malformed, OUTSIDER),
+            rules.admit(&claim, OUTSIDER, TempoHardfork::T8),
             CallCheck::Continue
         ));
+        assert!(matches!(
+            rules.admit(&malformed, OUTSIDER, TempoHardfork::T8),
+            CallCheck::Continue
+        ));
+    }
+
+    #[test]
+    fn t11_defers_noncanonical_balance_calldata_to_upstream() {
+        let rules = ReceivePolicyGuardRules;
+        let mut data = balance_call(&receipt(RECEIVER, RECOVERY)).to_vec();
+        data.extend([0; 32]);
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+
+        StorageCtx::enter(&mut storage, || {
+            assert!(matches!(
+                rules.admit(&data, OUTSIDER, TempoHardfork::T8),
+                CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+            ));
+            assert!(matches!(
+                rules.admit(&data, OUTSIDER, TempoHardfork::T11),
+                CallCheck::Continue
+            ));
+        });
     }
 
     #[test]
