@@ -574,6 +574,7 @@ where
             *next_block = block_number.saturating_add(1);
         }
 
+        // TODO: abstract metric recording into fn
         let elapsed = start.elapsed();
         self.subscriber_metrics
             .backfill_duration_seconds
@@ -628,6 +629,7 @@ where
         Ok((header_resp.inner.inner, receipts))
     }
 
+    /// Apply one fetched L1 block to local subscriber state.
     fn apply_block(
         &self,
         header: TempoHeader,
@@ -636,40 +638,36 @@ where
         let block_number = header.number();
         // Decoding fails closed: a decode failure of a recognized portal log aborts this
         // block before anything is enqueued or any cache advances.
-        let processed_events = self
+        let (events, invalidated, portal_logs) = self
             .extract_events(block_number, receipts)
-            .inspect_err(|_| {
-                self.subscriber_metrics.decode_fence_failures.increment(1);
-            })
+            .inspect_err(|_| self.subscriber_metrics.decode_fence_failures.increment(1))
             .map_err(L1SubscriberError::fatal_from_err(
                 block_number,
                 "portal event decoding",
             ))?;
-        let (events, invalidated, portal_logs) = processed_events;
 
         let sealed = SealedHeader::seal_slow(header);
         let anchor = sealed.num_hash();
         let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
-        // Publish the leadership transition _before_ the activation block becomes
-        // consumable.
-        if let Some(sink) = &self.leadership_sink {
-            let transition =
+
+        // Apply updates that must be visible before the block becomes consumable.
+        if let Some(sink) = &self.leadership_sink
+            && let Some(transition) =
                 events
                     .final_leader_transition()
                     .map_err(L1SubscriberError::fatal_from_err(
                         block_number,
                         "leadership event validation",
-                    ))?;
-            if let Some(transition) = transition {
-                sink.apply_leader_transition(transition)
-                    .wrap_err_with(|| {
-                        format!("cannot apply the leadership transition from block {block_number}")
-                    })
-                    .map_err(L1SubscriberError::fatal_from_err(
-                        block_number,
-                        "leadership transition application",
-                    ))?;
-            }
+                    ))?
+        {
+            sink.apply_leader_transition(transition)
+                .wrap_err_with(|| {
+                    format!("cannot apply the leadership transition from block {block_number}")
+                })
+                .map_err(L1SubscriberError::fatal_from_err(
+                    block_number,
+                    "leadership transition application",
+                ))?;
         }
         if let Some(keys) = &self.encryption_keys {
             for rotation in &events.encryption_key_rotations {
@@ -680,6 +678,8 @@ where
                     ))?;
             }
         }
+
+        // Publish the block to the queue and observation tracker.
         let appended = self
             .deposit_queue
             .try_enqueue_sealed(sealed, events.clone())
@@ -697,8 +697,8 @@ where
             self.block_tracker
                 .record_with_portal_events(anchor, events.clone())?;
         }
-        // Publish derived L1 state only after the header has been admitted to every
-        // configured retention sink and the contiguous observation tracker.
+
+        // Publish derived state only after the block has been admitted everywhere.
         self.apply_enabled_token_events(&events);
         self.update_l1_state_anchor(block_number, &invalidated);
         if appended {
