@@ -531,28 +531,21 @@ where
         Ok(local_tempo_block_number + 1)
     }
 
-    /// Return the block number referenced by the L1 `finalized` tag.
-    async fn finalized_block_number(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> Result<u64, L1SubscriberError> {
-        Ok(l1_provider
-            .get_header_by_number(BlockNumberOrTag::Finalized)
-            .await
-            .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
-            .map(|header| header.number())
-            .ok_or_eyre("L1 finalized block is not available")?)
-    }
-
     /// Synchronize all missing blocks through the current finalized L1 head.
     ///
     /// The cursor advances after each block is fully applied.
-    pub(crate) async fn sync_finalized_once(
+    pub(crate) async fn sync_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
         next_block: &mut u64,
     ) -> Result<(), L1SubscriberError> {
-        let finalized = self.finalized_block_number(l1_provider).await?;
+        let finalized = l1_provider
+            .get_header_by_number(BlockNumberOrTag::Finalized)
+            .await
+            .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
+            .map(|header| header.number())
+            .ok_or_eyre("L1 finalized block is not available")?;
+
         if *next_block > finalized {
             self.record_seen_block(finalized, 0);
             return Ok(());
@@ -774,9 +767,9 @@ where
 
                 // Subscribe before the initial sync so a head published while catching
                 // up remains queued in the stream.
-                self.sync_finalized_once(&provider, &mut next_block).await?;
+                self.sync_finalized(&provider, &mut next_block).await?;
                 while let Some(_) = header_stream.next().await {
-                    self.sync_finalized_once(&provider, &mut next_block).await?;
+                    self.sync_finalized(&provider, &mut next_block).await?;
                 }
 
                 Err(eyre::eyre!("L1 head notification stream ended").into())
