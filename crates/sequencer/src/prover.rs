@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    error::Error as StdError,
     fmt, io,
     pin::Pin,
     sync::{Arc, OnceLock},
@@ -33,7 +34,8 @@ use tracing::{debug, error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, ProverConnectionError,
+    VerifyRequest, VerifyResponse,
 };
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
@@ -121,6 +123,24 @@ struct Anchor {
     number: u64,
     hash: B256,
     ancestry_headers: Vec<Bytes>,
+}
+
+/// Marks a remote prover transport failure so it can be excluded from validation alerts.
+#[derive(Debug)]
+struct RemoteProverConnectivityError(String);
+
+impl fmt::Display for RemoteProverConnectivityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl StdError for RemoteProverConnectivityError {}
+
+fn is_remote_prover_connectivity_error(error: &eyre::Report) -> bool {
+    error
+        .downcast_ref::<RemoteProverConnectivityError>()
+        .is_some()
 }
 
 /// I/O wrapper that records when the first response byte is read.
@@ -248,7 +268,10 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                     );
                 }
                 Err(err) => {
-                    metrics.validation_failure_total.increment(1);
+                    let connectivity_failure = is_remote_prover_connectivity_error(&err);
+                    if !connectivity_failure {
+                        metrics.validation_failure_total.increment(1);
+                    }
                     error!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
@@ -256,6 +279,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         prev_block_hash = %job.batch.prev_block_hash,
                         next_block_hash = %job.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
+                        connectivity_failure,
                         error = ?err,
                         "Shadow prover failed to validate finalized batch candidate"
                     );
@@ -470,7 +494,20 @@ async fn verify_remotely(
     metrics
         .spf_remote_connect_duration_seconds
         .record(started.elapsed().as_secs_f64());
-    let stream = stream.wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+    let stream = match stream {
+        Ok(stream) => {
+            metrics.spf_remote_connect_success_total.increment(1);
+            stream
+        }
+        Err(err) => {
+            metrics.spf_remote_connect_failure_total.increment(1);
+            metrics.spf_remote_connectivity_failure_total.increment(1);
+            return Err(RemoteProverConnectivityError(format!(
+                "connect to remote prover at {address}: {err}"
+            ))
+            .into());
+        }
+    };
 
     let first_read_at = Arc::new(OnceLock::new());
     let stream = FirstReadTimed {
@@ -484,7 +521,16 @@ async fn verify_remotely(
     metrics
         .spf_remote_request_send_duration_seconds
         .record(started.elapsed().as_secs_f64());
-    send_result.wrap_err_with(|| format!("send request to remote prover at {address}"))?;
+    if let Err(err) = send_result {
+        if matches!(&err, ProverConnectionError::Io(_)) {
+            metrics.spf_remote_connectivity_failure_total.increment(1);
+            return Err(RemoteProverConnectivityError(format!(
+                "send request to remote prover at {address}: {err}"
+            ))
+            .into());
+        }
+        return Err(err).wrap_err_with(|| format!("send request to remote prover at {address}"));
+    }
 
     let response_started = Instant::now();
     let response_result = connection.receive();
@@ -507,9 +553,27 @@ async fn verify_remotely(
                 .as_secs_f64(),
         );
     }
-    let response: VerifyResponse = response_result
-        .wrap_err_with(|| format!("read response from remote prover at {address}"))?
-        .ok_or_else(|| eyre::eyre!("remote prover closed the connection without a response"))?;
+    let response: VerifyResponse = match response_result {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            metrics.spf_remote_connectivity_failure_total.increment(1);
+            return Err(RemoteProverConnectivityError(
+                "remote prover closed the connection without a response".into(),
+            )
+            .into());
+        }
+        Err(err) if matches!(&err, ProverConnectionError::Io(_)) => {
+            metrics.spf_remote_connectivity_failure_total.increment(1);
+            return Err(RemoteProverConnectivityError(format!(
+                "read response from remote prover at {address}: {err}"
+            ))
+            .into());
+        }
+        Err(err) => {
+            return Err(err)
+                .wrap_err_with(|| format!("read response from remote prover at {address}"));
+        }
+    };
 
     match response {
         VerifyResponse::Ok {
@@ -526,6 +590,7 @@ async fn verify_remotely(
                 "remote prover response request ID {request_id:?} does not match {:?}",
                 request.request_id
             );
+            metrics.spf_remote_response_success_total.increment(1);
             Ok(output)
         }
         VerifyResponse::Error {
@@ -545,6 +610,7 @@ async fn verify_remotely(
                     request.request_id
                 );
             }
+            metrics.spf_remote_response_failure_total.increment(1);
             bail!("remote prover rejected request ({code:?}): {message}")
         }
     }
@@ -985,4 +1051,19 @@ fn witness_size(witness: &BatchWitness) -> usize {
                         .sum::<usize>()
             })
             .sum::<usize>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_only_remote_connectivity_errors() {
+        let connectivity_error =
+            eyre::Report::new(RemoteProverConnectivityError("connection refused".into()));
+        assert!(is_remote_prover_connectivity_error(&connectivity_error));
+
+        let validation_error = eyre::eyre!("remote prover rejected request");
+        assert!(!is_remote_prover_connectivity_error(&validation_error));
+    }
 }
