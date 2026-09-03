@@ -385,6 +385,10 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .zone_inputs_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
+    if job.anchor.is_some() {
+        validate_settlement_boundary(&zone_inputs.blocks)?;
+    }
+
     let started = Instant::now();
     let (zone_state_witness, tempo_reads) =
         zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
@@ -512,6 +516,29 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     })
+}
+
+/// Require an L1-settled range to close exactly one withdrawal snapshot at its final block.
+fn validate_settlement_boundary(blocks: &[ZoneBlock]) -> Result<()> {
+    let (final_block, intermediate_blocks) = blocks
+        .split_last()
+        .ok_or_eyre("settled Zone range contains no blocks")?;
+
+    if let Some(block) = intermediate_blocks
+        .iter()
+        .find(|block| block.finalize_withdrawal_batch_count.is_some())
+    {
+        bail!(
+            "intermediate Zone block {} contains finalizeWithdrawalBatch",
+            block.number
+        );
+    }
+    ensure!(
+        final_block.finalize_withdrawal_batch_count.is_some(),
+        "final Zone block {} does not contain finalizeWithdrawalBatch",
+        final_block.number
+    );
+    Ok(())
 }
 
 async fn verify_remotely(
@@ -1120,6 +1147,24 @@ mod tests {
     use alloy_provider::ProviderBuilder;
     use alloy_transport::mock::Asserter;
 
+    fn zone_block(number: u64, finalizes_withdrawals: bool) -> ZoneBlock {
+        ZoneBlock {
+            number,
+            parent_hash: B256::ZERO,
+            timestamp: 0,
+            timestamp_millis_part: 0,
+            beneficiary: Address::ZERO,
+            tempo_header_rlp: Bytes::new(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: finalizes_withdrawals
+                .then_some(alloy_primitives::U256::ZERO),
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        }
+    }
+
     fn mocked_l1_provider() -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(Asserter::new())
@@ -1173,5 +1218,28 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn settlement_boundary_requires_finalization_in_final_block() {
+        validate_settlement_boundary(&[zone_block(10, false), zone_block(11, true)]).unwrap();
+
+        let err = validate_settlement_boundary(&[zone_block(10, false), zone_block(11, false)])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("final Zone block 11 does not contain finalizeWithdrawalBatch")
+        );
+    }
+
+    #[test]
+    fn settlement_boundary_rejects_intermediate_finalization() {
+        let err = validate_settlement_boundary(&[zone_block(10, true), zone_block(11, true)])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("intermediate Zone block 10 contains finalizeWithdrawalBatch")
+        );
     }
 }
