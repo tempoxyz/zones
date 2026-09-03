@@ -39,7 +39,7 @@ pub const MAX_TRANSACTION_MESSAGE_SIZE: usize = 1024 * 1024;
 pub(crate) const MAX_MESSAGE_SIZE: u32 = 20 * 1024 * 1024;
 
 /// Version of the Tempo Zone P2P wire protocol.
-pub(crate) const WIRE_PROTOCOL_VERSION: u8 = 0;
+pub(crate) const WIRE_PROTOCOL_VERSION: u8 = 1;
 const NETWORK_NAMESPACE_PREFIX: &[u8] = b"TEMPO_ZONE_P2P";
 
 /// Immutable L1 identity used to keep P2P networks for different deployments separate.

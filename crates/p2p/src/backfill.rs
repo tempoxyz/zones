@@ -33,7 +33,7 @@ type CommonwareReceiver = lookup::Receiver<PublicKey>;
 pub enum BackfillCommand {
     /// Ask eligible peers for canonical blocks beginning at `start`.
     Request { start: u64 },
-    /// Return one canonical block to the peer that requested it.
+    /// Return one canonical block replication frame to the peer that requested it.
     SendBlock {
         peer: P2pPeerId,
         request_id: u64,

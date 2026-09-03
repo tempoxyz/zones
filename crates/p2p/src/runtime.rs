@@ -200,7 +200,7 @@ fn validate_ip_check_configuration(
 /// Outbound protocol commands accepted by the dedicated P2P runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum P2pCommand {
-    /// Broadcast one RLP-encoded sealed zone block to all nodes.
+    /// Broadcast one opaque block replication frame (block plus proof sidecar) to all nodes.
     BroadcastBlock(Vec<u8>),
     /// Broadcast one ABI-encoded settlement proposal to all followers.
     BroadcastSettlementProposal(Vec<u8>),
@@ -225,7 +225,7 @@ pub enum P2pEvent {
         ed25519_public_key: PublicKey,
         listen: SocketAddr,
     },
-    /// A follower received an encoded sealed block from its configured leader.
+    /// A follower received an opaque block replication frame from its configured leader.
     BlockReceived {
         leader_ed25519_public_key: PublicKey,
         block: Vec<u8>,

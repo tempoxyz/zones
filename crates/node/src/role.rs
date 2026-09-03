@@ -12,8 +12,9 @@
 //! anchor-aware sender fence inside follower import are the protocol fences; generation
 //! switching is lifecycle management.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use alloy_consensus::BlockHeader as _;
 use alloy_primitives::Address;
 use eyre::WrapErr as _;
 use reth_chain_state::PersistedBlockSubscriptions;
@@ -38,8 +39,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer,
+    ProofCollectorInput, ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle,
+    ZoneSequencerProvider, resolve_portal_zone_anchor, spawn_proof_collector, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -85,6 +86,8 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub backfill_commands: mpsc::Sender<BackfillCommand>,
     pub attestation: AttestationContext,
     pub portal_address: Address,
+    /// Durable per-block proof sidecar directory shared across role generations.
+    pub proof_directory: PathBuf,
     /// Sequencer resources constructed unconditionally at startup; activation is gated by
     /// the leader generation. `None` means this node can never lead.
     pub sequencer: Option<LeaderSequencerDeps>,
@@ -116,6 +119,7 @@ pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
+    pub proof_collector_config: zone_sequencer::ProofCollectorConfig,
     pub prover_config: Option<ShadowProverConfig>,
 }
 
@@ -324,7 +328,7 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
+/// Supervise the long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
 /// generation stop, however, both children retain the graceful shutdown window needed to finish
@@ -335,6 +339,7 @@ async fn supervise_sequencer_tasks(
 ) -> TaskEnd {
     let mut withdrawal = AbortOnDropHandle::new(handle.withdrawal_handle);
     let mut monitor = AbortOnDropHandle::new(handle.monitor_handle);
+    let mut proof_collector = handle.proof_collector_handle.map(AbortOnDropHandle::new);
 
     tokio::select! {
         biased;
@@ -342,13 +347,22 @@ async fn supervise_sequencer_tasks(
             // Both children observe the same token at their poll boundaries. Keep both handles
             // alive until they finish; the outer generation timeout will abort this supervisor
             // and AbortOnDropHandle will then abort either child that is still stuck.
-            let (withdrawal_result, monitor_result) =
-                tokio::join!(&mut withdrawal, &mut monitor);
+            let proof_result = async {
+                match &mut proof_collector {
+                    Some(proof_collector) => Some(proof_collector.await),
+                    None => None,
+                }
+            };
+            let (withdrawal_result, monitor_result, proof_result) =
+                tokio::join!(&mut withdrawal, &mut monitor, proof_result);
             if let Err(err) = withdrawal_result {
                 warn!(target: "zone::role", %err, "Withdrawal processor task failed during shutdown");
             }
             if let Err(err) = monitor_result {
                 warn!(target: "zone::role", %err, "Zone monitor task failed during shutdown");
+            }
+            if let Some(Err(err)) = proof_result {
+                warn!(target: "zone::role", %err, "Proof collector task failed during shutdown");
             }
             TaskEnd::SequencerStopped
         }
@@ -368,6 +382,18 @@ async fn supervise_sequencer_tasks(
             }
             // Returning drops and aborts the withdrawal handle before the generation restarts.
             TaskEnd::Ended("zone-monitor")
+        }
+        result = async {
+            match &mut proof_collector {
+                Some(proof_collector) => proof_collector.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            match result {
+                Ok(()) => warn!(target: "zone::role", "Proof collector task stopped unexpectedly"),
+                Err(err) => warn!(target: "zone::role", %err, "Proof collector task failed"),
+            }
+            TaskEnd::Ended("proof-collector")
         }
     }
 }
@@ -896,6 +922,7 @@ where
             let attestation = context.attestation.clone();
             let schedule = context.schedule.clone();
             let peer_tips = context.peer_tips.clone();
+            let proof_directory = context.proof_directory.clone();
             tasks.spawn(async move {
                 run_follower_block_sync(
                     provider,
@@ -909,6 +936,7 @@ where
                     attestation,
                     schedule,
                     peer_tips,
+                    proof_directory,
                     follower_token.clone(),
                 )
                 .await;
@@ -986,12 +1014,40 @@ where
                 .store
                 .remove_submitted(portal_confirmed_height);
 
+            let (proof_collector, proof_collector_task) = spawn_proof_collector(
+                sequencer.proof_collector_config.clone(),
+                context.provider.clone(),
+                context.attestation.l1_provider.clone(),
+                portal_confirmed_height,
+                token.clone(),
+            )
+            .wrap_err("failed to start proof collector")?;
+            if portal_confirmed_height < last_header.number()
+                && let Err(error) = proof_collector
+                    .wait_for_range(portal_confirmed_height + 1, last_header.number())
+                    .await
+            {
+                proof_collector_task.abort();
+                return Err(error)
+                    .wrap_err("cannot promote without the complete unsubmitted proof tail");
+            }
+            tasks.spawn(async move {
+                match proof_collector_task.await {
+                    Ok(()) => TaskEnd::Ended("proof-collector"),
+                    Err(error) => {
+                        warn!(target: "zone::role", %error, "Proof collector task failed");
+                        TaskEnd::Ended("proof-collector")
+                    }
+                }
+            });
+
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
-            let engine = build_engine(context, sequencer, last_header);
+            let engine = build_engine(context, sequencer, last_header)
+                .with_proof_collector(proof_collector.clone());
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
             tasks.spawn(async move {
@@ -1011,8 +1067,15 @@ where
             });
             let provider = context.provider.clone();
             let commands = context.commands.clone();
+            let proof_directory = context.proof_directory.clone();
             tasks.spawn(async move {
-                broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
+                broadcast_persisted_blocks(
+                    provider,
+                    commands,
+                    Some(proof_directory),
+                    broadcaster_rx,
+                )
+                .await;
                 TaskEnd::Ended("block-broadcast")
             });
 
@@ -1070,12 +1133,14 @@ where
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
             let zone_provider = context.provider.clone();
             let prover_config = sequencer.prover_config.clone();
+            let running_proof_collector = proof_collector;
             let sequencer_token = token.clone();
             tasks.spawn(async move {
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,
                     zone_provider,
+                    Some(ProofCollectorInput::Running(running_proof_collector)),
                     prover_config,
                     sequencer_token.clone(),
                 )
@@ -1220,6 +1285,7 @@ mod tests {
         let handle = ZoneSequencerHandle {
             withdrawal_handle,
             monitor_handle,
+            proof_collector_handle: None,
         };
 
         let outcome = tokio::time::timeout(
@@ -1268,6 +1334,7 @@ mod tests {
             ZoneSequencerHandle {
                 withdrawal_handle,
                 monitor_handle,
+                proof_collector_handle: None,
             },
             stop.clone(),
         ));
