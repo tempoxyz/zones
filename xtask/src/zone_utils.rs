@@ -1,10 +1,10 @@
 use alloy::{
     consensus::BlockHeader as _,
-    network::primitives::ReceiptResponse,
-    primitives::{Address, B256, U256, address},
+    network::{TransactionBuilder, primitives::ReceiptResponse},
+    primitives::{Address, B256, Bytes, TxKind, U256, address},
     providers::Provider,
-    rpc::types::Filter,
-    sol_types::SolEvent,
+    rpc::types::{BlockId, Filter, TransactionRequest},
+    sol_types::{SolCall, SolEvent},
 };
 use eyre::{WrapErr as _, eyre};
 use serde_json::Value;
@@ -14,7 +14,7 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZoneFactory, ZoneInfo, ZonePortal};
 
 /// Write a file that may contain key material with owner-only permissions on Unix.
 ///
@@ -58,23 +58,73 @@ const DEFAULT_WAIT_ATTEMPTS: usize = 120;
 const DEFAULT_WAIT_POLL: Duration = Duration::from_millis(500);
 const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
+pub(crate) async fn zone_factory_info_at<P: Provider<TempoNetwork>>(
+    provider: &P,
+    factory_address: Address,
+    zone_id: u32,
+    block_id: BlockId,
+) -> eyre::Result<ZoneInfo> {
+    let call = ZoneFactory::zonesCall { id: zone_id };
+    let output = provider
+        .call(
+            TransactionRequest::default()
+                .with_kind(TxKind::Call(factory_address))
+                .input(Bytes::from(call.abi_encode()).into())
+                .into(),
+        )
+        .block(block_id)
+        .await?;
+    Ok(ZoneFactory::zonesCall::abi_decode_returns(&output)?)
+}
+
+pub(crate) async fn zone_factory_is_portal_at<P: Provider<TempoNetwork>>(
+    provider: &P,
+    factory_address: Address,
+    portal: Address,
+    block_id: BlockId,
+) -> eyre::Result<bool> {
+    let call = ZoneFactory::isZonePortalCall { portal };
+    let output = provider
+        .call(
+            TransactionRequest::default()
+                .with_kind(TxKind::Call(factory_address))
+                .input(Bytes::from(call.abi_encode()).into())
+                .into(),
+        )
+        .block(block_id)
+        .await?;
+    Ok(ZoneFactory::isZonePortalCall::abi_decode_returns(&output)?)
+}
+
 pub(crate) async fn find_zone_deployment_block<P: Provider<TempoNetwork>>(
     provider: &P,
     zone_id: u32,
     portal: Address,
     snapshot_block: u64,
 ) -> eyre::Result<u64> {
-    let events = ZoneFactory::new(ZONE_FACTORY_ADDRESS, provider)
-        .ZoneCreated_filter()
-        .topic1(B256::from(U256::from(zone_id)))
-        .topic2(portal.into_word())
-        .from_block(0)
-        .to_block(snapshot_block)
-        .chunked()
-        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
-        .query()
-        .await
-        .wrap_err("failed scanning ZoneFactory ZoneCreated events")?;
+    let mut events = Vec::new();
+    for start in (0..=snapshot_block).step_by(LOG_QUERY_BLOCK_CHUNK as usize) {
+        let filter = Filter::new()
+            .address(ZONE_FACTORY_ADDRESS)
+            .event_signature(ZoneFactory::ZoneCreated::SIGNATURE_HASH)
+            .topic1(B256::from(U256::from(zone_id)))
+            .topic2(portal.into_word())
+            .from_block(start)
+            .to_block(
+                start
+                    .saturating_add(LOG_QUERY_BLOCK_CHUNK - 1)
+                    .min(snapshot_block),
+            );
+        for log in provider
+            .get_logs(&filter)
+            .await
+            .wrap_err("failed scanning ZoneFactory ZoneCreated events")?
+        {
+            if let Ok(event) = ZoneFactory::ZoneCreated::decode_log(&log.inner) {
+                events.push((event, log));
+            }
+        }
+    }
 
     eyre::ensure!(
         events.len() == 1,

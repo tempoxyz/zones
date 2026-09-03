@@ -3,11 +3,12 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address},
+    network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
+    primitives::{Address, Bytes, TxKind, address},
     providers::{Provider, ProviderBuilder},
+    rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::SolEvent,
+    sol_types::{SolCall, SolEvent},
 };
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
@@ -166,8 +167,6 @@ impl CreateZone {
             .connect(&self.l1_rpc_url)
             .await?;
 
-        let factory = ZoneFactory::new(self.zone_factory, &provider);
-
         println!("Verifier: {ZONE_VERIFIER_ADDRESS}");
         println!("Messenger: {ZONE_MESSENGER_ADDRESS}");
 
@@ -212,15 +211,16 @@ impl CreateZone {
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
         );
-        // Install the requested set in the factory transaction. A separate
-        // setSequencerSet call would leave the portal live as a temporary
-        // 1-of-1 settlement authority before the intended quorum is active.
-        // The portal bootstraps the first sequencer as the initial
-        // block-production leader (leaderEpoch 1); later transfers go through
-        // setLeader. The factory-installed set starts at version 0.
-        let receipt = factory
-            .createZone(self.factory_params())
-            .send_sync()
+        let create_zone = ZoneFactory::createZoneCall {
+            params: self.factory_params(),
+        };
+        let tx = TransactionRequest::default()
+            .with_kind(TxKind::Call(self.zone_factory))
+            .input(Bytes::from(create_zone.abi_encode()).into());
+        let receipt = provider
+            .send_transaction(tx.into())
+            .await?
+            .get_receipt()
             .await?;
         println!("Transaction confirmed in block {:?}", receipt.block_number);
         println!("Status: {}", receipt.status());

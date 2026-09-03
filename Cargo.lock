@@ -11816,6 +11816,7 @@ dependencies = [
  "const-hex",
  "k256",
  "serde",
+ "tempo-contracts",
  "tokio",
  "zone-primitives",
 ]

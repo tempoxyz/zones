@@ -11,12 +11,13 @@ use eyre::{Context as _, ensure, eyre};
 use futures::future::{join_all, try_join_all};
 use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{ZoneFactory, ZonePortal};
+use tempo_zone_contracts::ZonePortal;
 use tokio::time::timeout;
 use zone_p2p::ZoneManifest;
 use zone_rpc::types::{SequencerInfoResponse, ZoneInfoResponse};
 
 use super::config::{EffectiveConfig, OperatorEndpoint, format_duration};
+use crate::zone_utils::zone_factory_info_at;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,11 +192,7 @@ where
     let block_number = finalized.number.to::<u64>();
     let block_id = BlockId::number(block_number);
 
-    let factory = ZoneFactory::new(factory_address, provider);
-    let factory_info = factory
-        .zones(expected_zone_id)
-        .block(block_id)
-        .call()
+    let factory_info = zone_factory_info_at(provider, factory_address, expected_zone_id, block_id)
         .await
         .wrap_err("failed resolving Zone through ZoneFactory")?;
     ensure!(
