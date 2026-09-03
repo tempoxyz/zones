@@ -96,6 +96,24 @@ async fn synchronized_head(cluster: &RealP2pCluster) -> eyre::Result<u64> {
     Ok(head)
 }
 
+async fn wait_for_p2p_lag(
+    cluster: &RealP2pCluster,
+    leading: usize,
+    lagging: usize,
+) -> eyre::Result<()> {
+    poll_until(
+        NETWORK_TIMEOUT,
+        POLL_INTERVAL,
+        "the disconnected incoming leader to fall behind",
+        || async {
+            let leading_height = cluster.nodes[leading].provider().get_block_number().await?;
+            let lagging_height = cluster.nodes[lagging].provider().get_block_number().await?;
+            Ok((leading_height >= lagging_height.saturating_add(RECOVERY_GAP)).then_some(()))
+        },
+    )
+    .await
+}
+
 async fn rotate_leadership(cluster: &RealP2pCluster, target_index: usize) -> eyre::Result<u64> {
     let portal = ZonePortal::new(cluster.portal_address, cluster.l1.provider());
     let previous_epoch = portal.leaderEpoch().call().await?;
@@ -311,6 +329,15 @@ async fn resume_leadership_case(
     accepted_before_outage: [u64; 3],
     case: LeadershipFaultCase,
 ) -> eyre::Result<()> {
+    // Restore the P2P mesh first. An outgoing leader may produce its remaining pre-activation
+    // blocks as soon as L1 returns, and those live broadcasts must not be lost while peers are
+    // still reconnecting.
+    if case.planes.disconnects_p2p() {
+        network.resume_nodes(case.disconnected_nodes);
+        network
+            .wait_for_nodes_connected(case.disconnected_nodes, NETWORK_TIMEOUT)
+            .await?;
+    }
     if case.planes.disconnects_l1() {
         for &index in case.disconnected_nodes {
             l1_proxies[index].resume();
@@ -320,9 +347,6 @@ async fn resume_leadership_case(
                 .wait_for_connections_after(accepted_before_outage[index], 1, NETWORK_TIMEOUT)
                 .await?;
         }
-    }
-    if case.planes.disconnects_p2p() {
-        network.resume_nodes(case.disconnected_nodes);
     }
     Ok(())
 }
@@ -347,7 +371,6 @@ async fn assert_handoff_stalls_without_incoming_leader(
             == a_fenced_height,
         "outgoing leader A continued producing after finalized leadership moved to disconnected B"
     );
-
     let b_height_after_fence = cluster.nodes[INCOMING_LEADER]
         .provider()
         .get_block_number()
@@ -500,6 +523,9 @@ async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()
     let (expected_epoch, accepted_before_outage) = match case.timing {
         FaultTiming::BeforeHandoff => {
             let accepted = disconnect_leadership_case(&network, &l1_proxies, case).await?;
+            if case.planes.disconnects_p2p() && case.disconnected_nodes.contains(&INCOMING_LEADER) {
+                wait_for_p2p_lag(&cluster, OUTGOING_LEADER, INCOMING_LEADER).await?;
+            }
             let epoch = rotate_leadership(&cluster, INCOMING_LEADER).await?;
             (epoch, accepted)
         }
@@ -514,15 +540,31 @@ async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()
             // the activation block observable to B and C but impossible for A to consume before
             // its L1 and P2P links are cut.
             l1_proxies[OUTGOING_LEADER].pause_upstream_to_client(true);
+            let a_tempo_block = poll_until(
+                NETWORK_TIMEOUT,
+                POLL_INTERVAL,
+                "L1 to advance beyond A's frozen pre-activation anchor",
+                || async {
+                    let a_tempo_block = cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
+                    let l1_tip = cluster.l1.provider().get_block_number().await?;
+                    Ok((l1_tip > a_tempo_block.saturating_add(1)).then_some(a_tempo_block))
+                },
+            )
+            .await?;
             let (epoch, activation_tempo_block) =
                 submit_leadership_rotation_direct(&cluster, INCOMING_LEADER).await?;
             let accepted = disconnect_leadership_case(&network, &l1_proxies, case).await?;
             l1_proxies[OUTGOING_LEADER].pause_upstream_to_client(false);
 
-            let a_tempo_block = cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
+            let isolated_a_tempo_block =
+                cluster.nodes[OUTGOING_LEADER].tempo_block_number().await?;
             eyre::ensure!(
-                a_tempo_block < activation_tempo_block,
-                "outgoing A consumed Tempo block {a_tempo_block} before being isolated at activation block {activation_tempo_block}"
+                isolated_a_tempo_block == a_tempo_block,
+                "outgoing A advanced from Tempo block {a_tempo_block} to {isolated_a_tempo_block} while L1 responses were paused"
+            );
+            eyre::ensure!(
+                isolated_a_tempo_block.saturating_add(1) < activation_tempo_block,
+                "outgoing A was not isolated before its final owned anchor: A is at Tempo block {isolated_a_tempo_block}, activation is {activation_tempo_block}"
             );
             (epoch, accepted)
         }
@@ -693,11 +735,12 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     account.approve_outbox(ZONE_TOKEN_ADDRESS).await?;
     let baseline = synchronized_head(&cluster).await?;
 
-    network.disconnect_nodes(&[1]);
+    network.disconnect_nodes(&[INCOMING_LEADER]);
     network
-        .wait_for_nodes_disconnected(&[1], NETWORK_TIMEOUT)
+        .wait_for_nodes_disconnected(&[INCOMING_LEADER], NETWORK_TIMEOUT)
         .await?;
-    let expected_epoch = rotate_leadership(&cluster, 1).await?;
+    wait_for_p2p_lag(&cluster, OUTGOING_LEADER, INCOMING_LEADER).await?;
+    let expected_epoch = rotate_leadership(&cluster, INCOMING_LEADER).await?;
     wait_for_leadership_epoch(
         &cluster,
         &[0, 1, 2],
@@ -708,28 +751,44 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
 
     // The transaction remains only in B's local pool while every P2P path involving B is down.
     // Its eventual inclusion under B creates the settlement boundary this test follows.
-    let a_fenced_height = cluster.nodes[0].provider().get_block_number().await?;
-    let b_fenced_height = cluster.nodes[1].provider().get_block_number().await?;
+    let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
+    let b_fenced_height = cluster.nodes[INCOMING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
     let withdrawal_hash = account.submit_withdrawal(WITHDRAWAL_AMOUNT).await?;
-    eyre::ensure!(
-        cluster.nodes[0]
-            .provider()
-            .get_transaction_by_hash(withdrawal_hash)
-            .await?
-            .is_none(),
-        "A received B's withdrawal while their P2P links were disconnected"
-    );
+    for &index in &[OUTGOING_LEADER, FOLLOWER] {
+        eyre::ensure!(
+            cluster.nodes[index]
+                .provider()
+                .get_transaction_by_hash(withdrawal_hash)
+                .await?
+                .is_none(),
+            "node {index} received B's withdrawal while their P2P links were disconnected"
+        );
+    }
     tokio::time::sleep(Duration::from_secs(2)).await;
     eyre::ensure!(
-        cluster.nodes[0].provider().get_block_number().await? == a_fenced_height,
+        cluster.nodes[OUTGOING_LEADER]
+            .provider()
+            .get_block_number()
+            .await?
+            == a_fenced_height,
         "outgoing leader A produced while incoming leader B was P2P-isolated"
     );
     eyre::ensure!(
-        cluster.nodes[1].provider().get_block_number().await? == b_fenced_height,
+        cluster.nodes[INCOMING_LEADER]
+            .provider()
+            .get_block_number()
+            .await?
+            == b_fenced_height,
         "incoming leader B produced a private block while P2P-isolated"
     );
     eyre::ensure!(
-        cluster.nodes[1]
+        cluster.nodes[INCOMING_LEADER]
             .provider()
             .get_transaction_receipt(withdrawal_hash)
             .await?
@@ -738,7 +797,10 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     );
     let batches_at_fence = batch_count(&portal).await?;
 
-    network.resume_nodes(&[1]);
+    network.resume_nodes(&[INCOMING_LEADER]);
+    network
+        .wait_for_nodes_connected(&[INCOMING_LEADER], NETWORK_TIMEOUT)
+        .await?;
     let receipt = poll_until(
         NETWORK_TIMEOUT,
         POLL_INTERVAL,
