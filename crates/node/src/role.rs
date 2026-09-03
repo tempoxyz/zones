@@ -116,6 +116,7 @@ pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
+    pub proof_collector_config: zone_sequencer::ProofCollectorConfig,
     pub prover_config: Option<ShadowProverConfig>,
 }
 
@@ -324,7 +325,7 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
+/// Supervise the long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
 /// generation stop, however, both children retain the graceful shutdown window needed to finish
@@ -335,6 +336,7 @@ async fn supervise_sequencer_tasks(
 ) -> TaskEnd {
     let mut withdrawal = AbortOnDropHandle::new(handle.withdrawal_handle);
     let mut monitor = AbortOnDropHandle::new(handle.monitor_handle);
+    let mut proof_collector = handle.proof_collector_handle.map(AbortOnDropHandle::new);
 
     tokio::select! {
         biased;
@@ -342,13 +344,22 @@ async fn supervise_sequencer_tasks(
             // Both children observe the same token at their poll boundaries. Keep both handles
             // alive until they finish; the outer generation timeout will abort this supervisor
             // and AbortOnDropHandle will then abort either child that is still stuck.
-            let (withdrawal_result, monitor_result) =
-                tokio::join!(&mut withdrawal, &mut monitor);
+            let proof_result = async {
+                match &mut proof_collector {
+                    Some(proof_collector) => Some(proof_collector.await),
+                    None => None,
+                }
+            };
+            let (withdrawal_result, monitor_result, proof_result) =
+                tokio::join!(&mut withdrawal, &mut monitor, proof_result);
             if let Err(err) = withdrawal_result {
                 warn!(target: "zone::role", %err, "Withdrawal processor task failed during shutdown");
             }
             if let Err(err) = monitor_result {
                 warn!(target: "zone::role", %err, "Zone monitor task failed during shutdown");
+            }
+            if let Some(Err(err)) = proof_result {
+                warn!(target: "zone::role", %err, "Proof collector task failed during shutdown");
             }
             TaskEnd::SequencerStopped
         }
@@ -368,6 +379,18 @@ async fn supervise_sequencer_tasks(
             }
             // Returning drops and aborts the withdrawal handle before the generation restarts.
             TaskEnd::Ended("zone-monitor")
+        }
+        result = async {
+            match &mut proof_collector {
+                Some(proof_collector) => proof_collector.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            match result {
+                Ok(()) => warn!(target: "zone::role", "Proof collector task stopped unexpectedly"),
+                Err(err) => warn!(target: "zone::role", %err, "Proof collector task failed"),
+            }
+            TaskEnd::Ended("proof-collector")
         }
     }
 }
@@ -1070,12 +1093,14 @@ where
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
             let zone_provider = context.provider.clone();
             let prover_config = sequencer.prover_config.clone();
+            let proof_collector_config = sequencer.proof_collector_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,
                     zone_provider,
+                    Some(proof_collector_config),
                     prover_config,
                     sequencer_token.clone(),
                 )
@@ -1220,6 +1245,7 @@ mod tests {
         let handle = ZoneSequencerHandle {
             withdrawal_handle,
             monitor_handle,
+            proof_collector_handle: None,
         };
 
         let outcome = tokio::time::timeout(
@@ -1268,6 +1294,7 @@ mod tests {
             ZoneSequencerHandle {
                 withdrawal_handle,
                 monitor_handle,
+                proof_collector_handle: None,
             },
             stop.clone(),
         ));

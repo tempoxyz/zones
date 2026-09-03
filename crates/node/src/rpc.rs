@@ -257,14 +257,13 @@ impl<E> NodeZoneDebugApi<E> {
     }
 }
 
-#[jsonrpsee::core::async_trait]
-impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
+impl<E> NodeZoneDebugApi<E>
 where
     E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
 {
-    async fn zone_execution_witness(
+    async fn execution_witness_at(
         &self,
-        block_id: BlockNumberOrTag,
+        block_id: alloy_rpc_types_eth::BlockId,
     ) -> RpcResult<ZoneExecutionWitness> {
         let _permit = self
             .eth_api
@@ -275,7 +274,7 @@ where
 
         let block = self
             .eth_api
-            .recovered_block(block_id.into())
+            .recovered_block(block_id)
             .await
             .map_err(|error| operator_rpc_error(internal(error)))?
             .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
@@ -312,6 +311,23 @@ where
             })
             .await
             .map_err(|error| operator_rpc_error(internal(error)))
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
+where
+    E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
+{
+    async fn zone_execution_witness(
+        &self,
+        block_id: BlockNumberOrTag,
+    ) -> RpcResult<ZoneExecutionWitness> {
+        self.execution_witness_at(block_id.into()).await
+    }
+
+    async fn zone_execution_witness_by_hash(&self, hash: B256) -> RpcResult<ZoneExecutionWitness> {
+        self.execution_witness_at(hash.into()).await
     }
 }
 
