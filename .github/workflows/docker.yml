@@ -177,26 +177,19 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
 
-      # Nitro CLI converts an image from the runner's local Docker image store.
-      - name: Load tempo-zone-prover enclave payload
+      # Nitro CLI converts images from the runner's local Docker image store.
+      # Bake both independent inputs together so BuildKit can build them in parallel.
+      - name: Load tempo-zone-prover EIF inputs
         uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
         with:
           files: docker/docker-bake.hcl
-          targets: tempo-zone-prover-enclave
+          targets: |
+            tempo-zone-prover-enclave
+            tempo-zone-prover-eif-builder
           set: |
             tempo-zone-prover-enclave.tags=tempo-zone-prover-enclave:eif-source
             tempo-zone-prover-enclave.contexts.tempo-genesis=.tempo-genesis
-          project: 0c6tg19qsp
-          load: true
-          no-cache: ${{ github.event_name == 'schedule' }}
-          pull: ${{ github.event_name == 'schedule' }}
-
-      - name: Load tempo-zone-prover EIF builder
-        uses: tempoxyz/gh-actions/vendor/depot/bake-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
-        with:
-          files: docker/docker-bake.hcl
-          targets: tempo-zone-prover-eif-builder
-          set: tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
+            tempo-zone-prover-eif-builder.tags=tempo-zone-prover-eif-builder:local
           project: 0c6tg19qsp
           load: true
           no-cache: ${{ github.event_name == 'schedule' }}
