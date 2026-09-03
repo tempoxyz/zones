@@ -3,6 +3,7 @@
 use alloy_primitives::Address;
 use alloy_sol_types::SolInterface;
 use tempo_contracts::precompiles::IAccountKeychain;
+use tempo_precompiles::dispatch::abi_decoder_config;
 
 use crate::{
     execution::{CallCheck, CallRules},
@@ -15,7 +16,10 @@ pub(crate) struct AccountKeychainRules;
 
 impl CallRules for AccountKeychainRules {
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode(data) else {
+        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode_with_config(
+            data,
+            abi_decoder_config(),
+        ) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
         };
@@ -160,6 +164,45 @@ mod tests {
                 outsider,
             );
         });
+    }
+
+    #[test]
+    fn aliased_set_allowed_calls_is_bounded() {
+        fn word(value: usize) -> [u8; 32] {
+            let mut out = [0_u8; 32];
+            out[24..].copy_from_slice(&(value as u64).to_be_bytes());
+            out
+        }
+
+        let width = 500;
+        let mut data = Vec::new();
+        data.extend(IAccountKeychain::setAllowedCallsCall::SELECTOR);
+        data.extend(word(0));
+        data.extend(word(64));
+        data.extend(word(width));
+        for _ in 0..width {
+            data.extend(word(width * 32));
+        }
+        data.extend(word(1));
+        data.extend(word(64));
+        data.extend(word(width));
+        for _ in 0..width {
+            data.extend(word(width * 32));
+        }
+        let mut selector = [0_u8; 32];
+        selector[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        data.extend(selector);
+        data.extend(word(64));
+        data.extend(word(width));
+        for i in 0..width {
+            data.extend(word(i + 1));
+        }
+
+        assert_eq!(data.len(), 48_292);
+        assert!(matches!(
+            AccountKeychainRules.admit(&data, Address::ZERO),
+            CallCheck::Continue
+        ));
     }
 
     #[test]

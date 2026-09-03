@@ -20,6 +20,7 @@ use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use reth_primitives_traits::RecoveredBlock;
 use tempo_alloy::TempoNetwork;
+use tempo_precompiles::dispatch::abi_decoder_config;
 use tempo_primitives::{Block, TempoHeader};
 use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -642,10 +643,13 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                     "Zone block {} contains multiple advanceTempo calls",
                     header.number()
                 );
-                let call = ZoneInbox::advanceTempoCall::abi_decode(transaction.input())
-                    .wrap_err_with(|| {
-                        format!("decode advanceTempo in Zone block {}", header.number())
-                    })?;
+                let call = ZoneInbox::advanceTempoCall::abi_decode_with_config(
+                    transaction.input(),
+                    abi_decoder_config(),
+                )
+                .wrap_err_with(|| {
+                    format!("decode advanceTempo in Zone block {}", header.number())
+                })?;
                 decode_tempo_header(&call.header).wrap_err_with(|| {
                     format!("decode Tempo checkpoint in Zone block {}", header.number())
                 })?;
@@ -660,13 +664,16 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                     "Zone block {} contains multiple finalizeWithdrawalBatch calls",
                     header.number()
                 );
-                let call = ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(transaction.input())
-                    .wrap_err_with(|| {
-                        format!(
-                            "decode finalizeWithdrawalBatch in Zone block {}",
-                            header.number()
-                        )
-                    })?;
+                let call = ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode_with_config(
+                    transaction.input(),
+                    abi_decoder_config(),
+                )
+                .wrap_err_with(|| {
+                    format!(
+                        "decode finalizeWithdrawalBatch in Zone block {}",
+                        header.number()
+                    )
+                })?;
                 ensure!(
                     call.blockNumber == header.number(),
                     "finalization in Zone block {} declares block {}",
