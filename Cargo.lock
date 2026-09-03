@@ -13947,7 +13947,6 @@ version = "0.2.2"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
- "bytes",
  "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",

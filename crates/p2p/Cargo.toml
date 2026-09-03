@@ -21,7 +21,6 @@ commonware-p2p.workspace = true
 commonware-runtime = { workspace = true, features = ["external"] }
 commonware-utils.workspace = true
 
-bytes.workspace = true
 const-hex.workspace = true
 derive_more.workspace = true
 eyre.workspace = true

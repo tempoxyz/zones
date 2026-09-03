@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bytes::Bytes;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Recipients, Sender as _, authenticated::lookup};
 use tokio::sync::mpsc;
@@ -59,7 +58,7 @@ pub struct BackfillRequest {
 /// A response accepted for the active follower generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackfillResponse {
-    Block { peer: P2pPeerId, block: Bytes },
+    Block { peer: P2pPeerId, block: Vec<u8> },
     Completed { peer: P2pPeerId, tip: PeerTip },
 }
 
@@ -259,7 +258,7 @@ where
                 }
                 result = self.response_receiver.recv() => {
                     let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill response receive failed: {err}"))?;
-                    self.handle_response(peer, bytes.into()).await?;
+                    self.handle_response(peer, bytes.as_ref()).await?;
                 }
             }
         }
@@ -280,11 +279,7 @@ where
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill block addressed to an unknown peer");
                     return Ok(());
                 }
-                let response = ResponseFrame::Block {
-                    request_id,
-                    block: block.into(),
-                };
-                let frame = match response.encode() {
+                let frame = match (ResponseFrame::Block { request_id, block }).encode() {
                     Ok(frame) => frame,
                     Err(err) => {
                         error!(target: "zone::p2p", %peer, %err, "Backfill block exceeds the P2P response frame size limit");
@@ -413,12 +408,11 @@ where
             .map_err(|_| eyre::eyre!("backfill request event channel closed"))
     }
 
-    async fn handle_response(&mut self, peer: PublicKey, bytes: Bytes) -> eyre::Result<()> {
-        let size = bytes.len();
+    async fn handle_response(&mut self, peer: PublicKey, bytes: &[u8]) -> eyre::Result<()> {
         let frame = match ResponseFrame::decode(bytes) {
             Ok(frame) => frame,
             Err(err) => {
-                warn!(target: "zone::p2p", %peer, size, %err, "Ignoring malformed backfill response");
+                warn!(target: "zone::p2p", %peer, size = bytes.len(), %err, "Ignoring malformed backfill response");
                 return Ok(());
             }
         };
@@ -576,18 +570,17 @@ mod tests {
         let mut malformed = vec![1];
         malformed.extend_from_slice(&request_id.to_be_bytes());
         malformed.extend_from_slice(&[0; PeerTip::ENCODED_LEN - 1]);
-        assert!(ResponseFrame::decode(malformed.into()).is_err());
+        assert!(ResponseFrame::decode(&malformed).is_err());
         assert!(job.accepts(&peer, request_id, now));
         assert_eq!(job.complete(&peer, request_id, now), Some(7));
         assert_eq!(
             ResponseFrame::decode(
-                ResponseFrame::Complete {
+                &ResponseFrame::Complete {
                     request_id,
                     tip: tip()
                 }
                 .encode()
                 .unwrap()
-                .into()
             ),
             Ok(ResponseFrame::Complete {
                 request_id,

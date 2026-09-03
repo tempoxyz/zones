@@ -1,7 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address as EthereumAddress, B256};
-use bytes::Bytes;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{AddressableManager as _, Recipients, Sender as _, authenticated::lookup};
 use commonware_runtime::{IoBuf, Runner as _, Spawner as _};
@@ -34,10 +33,7 @@ const EVENT_BACKLOG: usize = 128;
 type CommonwareSender = lookup::Sender<PublicKey, commonware_runtime::tokio::Context>;
 type CommonwareReceiver = lookup::Receiver<PublicKey>;
 
-/// Takes ownership of one received frame, rejecting oversized frames before the event is built.
-///
-/// `IoBuf` into [`Bytes`] shares the pooled receive buffer; `IoBuf` into `Vec<u8>` would copy it.
-fn into_bounded_payload(bytes: IoBuf, max_size: usize) -> Result<Bytes, usize> {
+fn into_bounded_payload(bytes: IoBuf, max_size: usize) -> Result<Vec<u8>, usize> {
     let size = bytes.len();
     if size > max_size {
         return Err(size);
@@ -232,19 +228,22 @@ pub enum P2pEvent {
     /// A follower received an encoded sealed block from its configured leader.
     BlockReceived {
         leader_ed25519_public_key: PublicKey,
-        block: Bytes,
+        block: Vec<u8>,
     },
     /// A follower received a proposed settlement statement from the leader.
-    SettlementProposalReceived { leader: PublicKey, proposal: Bytes },
+    SettlementProposalReceived {
+        leader: PublicKey,
+        proposal: Vec<u8>,
+    },
     /// The leader received a settlement signature from a follower.
     SettlementSignatureReceived {
         follower: PublicKey,
-        signature: Bytes,
+        signature: Vec<u8>,
     },
     /// A quorum member received a raw transaction from an authenticated follower.
     TransactionReceived {
         follower_ed25519_public_key: PublicKey,
-        transaction: Bytes,
+        transaction: Vec<u8>,
     },
 }
 
