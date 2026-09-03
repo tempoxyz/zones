@@ -430,6 +430,11 @@ impl DepositQueue {
         self.notify.notified().await
     }
 
+    /// Wake the queue consumer after external state makes a queued block processable.
+    pub(crate) fn notify_consumer(&self) {
+        self.notify.notify_one();
+    }
+
     /// Returns the most recently enqueued L1 block (number + hash), if any.
     ///
     /// This is a high-water mark that survives `confirm` / `drain`, so it

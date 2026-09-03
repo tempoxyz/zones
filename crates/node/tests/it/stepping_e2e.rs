@@ -9,9 +9,12 @@ use crate::utils::{
     L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_config,
 };
 use alloy::providers::Provider;
+use alloy_rpc_types_eth::BlockId;
 use alloy_sol_types::SolCall;
 use std::time::Duration;
-use tempo_zone_contracts::{ZonePortal, submitBatchCall};
+use tempo_zone_contracts::{
+    IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZonePortal, submitBatchCall,
+};
 use zone_sequencer::BatchAnchorConfig;
 
 /// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
@@ -471,24 +474,70 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
     )
     .await?;
 
-    // Let the zone replay far enough to have multiple valid split boundaries.
-    let multi_step_tempo =
-        genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW * SHORT_MULTI_BOUNDARY_BATCH_COUNT;
-    zone.wait_for_tempo_block_number(multi_step_tempo, SHORT_STEPPING_TIMEOUT)
-        .await?;
+    // Wait for the actual finalized boundaries. Checkpoint-only catch-up blocks can advance across
+    // many Tempo blocks without finalizing a batch, so fixed offsets from genesis are not reliable
+    // boundary anchors.
+    let zone_provider = zone.provider();
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &zone_provider);
+    let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, &zone_provider);
+    let boundary_tempo_block_numbers = poll_until(
+        SHORT_STEPPING_TIMEOUT,
+        Duration::from_millis(50),
+        "multiple finalized zone batch boundaries",
+        || {
+            let outbox = &outbox;
+            let tempo_state = &tempo_state;
+            async move {
+                let events = outbox.BatchFinalized_filter().from_block(0).query().await?;
+                if events.len() < SHORT_MULTI_BOUNDARY_BATCH_COUNT as usize {
+                    return Ok(None);
+                }
 
-    // Assert the first submitted boundary is genuinely outside the configured history window.
-    let first_step_tempo = genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW;
-    let l1_tip = l1.provider().get_block_number().await?;
-    eyre::ensure!(
-        l1_tip.saturating_sub(first_step_tempo) > SHORT_EIP2935_HISTORY_WINDOW,
-        "test precondition not met: first configured boundary tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
-        l1_tip.saturating_sub(first_step_tempo),
-    );
-    eyre::ensure!(
-        multi_step_tempo < l1_tip.saturating_sub(SHORT_EIP2935_SAFETY_MARGIN),
-        "test precondition not met: multi-boundary tempo {multi_step_tempo} is not below the safe L1 anchor tip {l1_tip}",
-    );
+                let mut tempo_block_numbers =
+                    Vec::with_capacity(SHORT_MULTI_BOUNDARY_BATCH_COUNT as usize);
+                for (_, log) in events
+                    .iter()
+                    .take(SHORT_MULTI_BOUNDARY_BATCH_COUNT as usize)
+                {
+                    let zone_block = log
+                        .block_number
+                        .ok_or_else(|| eyre::eyre!("BatchFinalized log missing block number"))?;
+                    let tempo_block_number = tempo_state
+                        .tempoBlockNumber()
+                        .block(BlockId::number(zone_block))
+                        .call()
+                        .await?;
+                    tempo_block_numbers.push(tempo_block_number);
+                }
+
+                Ok(Some(tempo_block_numbers))
+            }
+        },
+    )
+    .await?;
+
+    // Age even the newest selected boundary beyond the configured history window before starting
+    // the sequencer, making ancestry mode independent of zone catch-up speed.
+    let newest_boundary_tempo = *boundary_tempo_block_numbers
+        .last()
+        .ok_or_else(|| eyre::eyre!("expected at least one finalized batch boundary"))?;
+    poll_until(
+        SHORT_STEPPING_TIMEOUT,
+        Duration::from_millis(50),
+        "finalized zone batch boundaries aged past configured history window",
+        || {
+            let provider = l1.provider();
+            async move {
+                let current = provider.get_block_number().await?;
+                if current.saturating_sub(newest_boundary_tempo) > SHORT_EIP2935_HISTORY_WINDOW {
+                    Ok(Some(current))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
 
     // Start the sequencer only after the backlog has accumulated.
     let seq = spawn_sequencer_with_config(
@@ -550,6 +599,10 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
         .iter()
         .map(|call| call.tempoBlockNumber)
         .collect::<Vec<_>>();
+    eyre::ensure!(
+        tempo_block_numbers == boundary_tempo_block_numbers,
+        "submitted boundaries did not match the aged zone boundaries: submitted={tempo_block_numbers:?}, expected={boundary_tempo_block_numbers:?}"
+    );
     // Each boundary submission should move the portal anchor forward.
     eyre::ensure!(
         tempo_block_numbers
