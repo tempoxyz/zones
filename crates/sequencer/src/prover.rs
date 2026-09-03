@@ -195,20 +195,35 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
                 Ok((stats, proof_bundle)) => {
                     metrics.validation_success_total.increment(1);
                     metrics.witness_bytes.record(stats.witness_bytes as f64);
+                    metrics.witness_bytes_last.set(stats.witness_bytes as f64);
                     metrics.batch_size_blocks.record(stats.blocks as f64);
+                    metrics.batch_size_blocks_last.set(stats.blocks as f64);
                     metrics.deposits_per_batch.record(stats.deposits as f64);
+                    metrics.deposits_per_batch_last.set(stats.deposits as f64);
                     metrics
                         .withdrawals_per_batch
                         .record(stats.withdrawals as f64);
                     metrics
+                        .withdrawals_per_batch_last
+                        .set(stats.withdrawals as f64);
+                    metrics
                         .transactions_per_batch
                         .record(stats.transactions as f64);
+                    metrics
+                        .transactions_per_batch_last
+                        .set(stats.transactions as f64);
                     metrics
                         .zone_state_nodes
                         .record(stats.zone_state_nodes as f64);
                     metrics
+                        .zone_state_nodes_last
+                        .set(stats.zone_state_nodes as f64);
+                    metrics
                         .tempo_state_nodes
                         .record(stats.tempo_state_nodes as f64);
+                    metrics
+                        .tempo_state_nodes_last
+                        .set(stats.tempo_state_nodes as f64);
                     info!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
