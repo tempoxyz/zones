@@ -423,6 +423,68 @@ pub(crate) struct PendingPeerBlock {
     live_sender: Option<P2pPeerId>,
 }
 
+/// Bounded, height-ordered peer blocks awaiting canonical import.
+#[derive(Default)]
+struct PendingBlocks {
+    blocks: BTreeMap<u64, PendingPeerBlock>,
+}
+
+impl PendingBlocks {
+    /// Adds a block unless its height is already present. When full, retains blocks closest to
+    /// the local head and returns the height that was dropped.
+    fn insert(&mut self, number: u64, block: PendingPeerBlock) -> Option<u64> {
+        if self.blocks.contains_key(&number) {
+            return None;
+        }
+        if self.blocks.len() < MAX_PENDING_BLOCKS {
+            self.blocks.insert(number, block);
+            return None;
+        }
+
+        let Some((&farthest, _)) = self.blocks.last_key_value() else {
+            self.blocks.insert(number, block);
+            return None;
+        };
+        if number < farthest {
+            self.blocks.pop_last();
+            self.blocks.insert(number, block);
+            Some(farthest)
+        } else {
+            Some(number)
+        }
+    }
+
+    fn first_number(&self) -> Option<u64> {
+        self.blocks.first_key_value().map(|(&number, _)| number)
+    }
+
+    fn take_next_after(&mut self, head: u64) -> Option<PendingPeerBlock> {
+        self.blocks.remove(&head.saturating_add(1))
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, number: u64) -> bool {
+        self.blocks.contains_key(&number)
+    }
+}
+
+fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
+    let mut input = encoded;
+    let block = Block::decode(&mut input)
+        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
+    eyre::ensure!(
+        input.is_empty(),
+        "encoded zone block has {} trailing bytes",
+        input.len()
+    );
+    Ok(block.header.number())
+}
+
 /// Latest tip evidence advertised by each peer, with observation time.
 ///
 /// Fed by backfill completions on the follower sync loop and consumed by the status RPC.
@@ -447,44 +509,6 @@ impl PeerTipRegistry {
             .map(|(peer, (tip, at))| (peer.clone(), *tip, *at))
             .collect()
     }
-}
-
-fn buffer_pending_block(
-    pending: &mut BTreeMap<u64, PendingPeerBlock>,
-    number: u64,
-    block: PendingPeerBlock,
-) -> Option<u64> {
-    if pending.contains_key(&number) {
-        return None;
-    }
-    if pending.len() < MAX_PENDING_BLOCKS {
-        pending.insert(number, block);
-        return None;
-    }
-
-    let Some((&farthest, _)) = pending.last_key_value() else {
-        pending.insert(number, block);
-        return None;
-    };
-    if number < farthest {
-        pending.pop_last();
-        pending.insert(number, block);
-        Some(farthest)
-    } else {
-        Some(number)
-    }
-}
-
-fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
-    let mut input = encoded;
-    let block = Block::decode(&mut input)
-        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
-    eyre::ensure!(
-        input.is_empty(),
-        "encoded zone block has {} trailing bytes",
-        input.len()
-    );
-    Ok(block.header.number())
 }
 
 fn serve_backfill_page<P>(
@@ -700,6 +724,27 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
     }
 }
 
+/// State and channels owned by one follower block-sync generation.
+///
+/// A role transition drops this value only after cancelling [`Self::stop`], so no dependency of
+/// the import loop escapes the generation that owns it.
+pub(crate) struct FollowerBlockSync<P> {
+    provider: P,
+    engine: ConsensusEngineHandle<ZonePayloadTypes>,
+    events: mpsc::Receiver<P2pEvent>,
+    commands: mpsc::Sender<P2pCommand>,
+    backfill_commands: mpsc::Sender<BackfillCommand>,
+    backfill_responses: mpsc::Receiver<BackfillResponse>,
+    l1_block_tracker: L1BlockTracker,
+    deposit_queue: DepositQueue,
+    attestation: AttestationContext,
+    schedule: LeadershipSchedule,
+    peer_tips: PeerTipRegistry,
+    stop: sync::CancellationToken,
+    pending: PendingBlocks,
+    backfill: BackfillProgress,
+}
+
 /// Import live/backfilled blocks in canonical order on a follower.
 ///
 /// Live blocks are only imported from the leader when the sender equals
@@ -708,256 +753,7 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 ///
 /// Backfilled blocks carry no producer claim and are judged by
 /// parent/anchor/execution/conflict validation alone. The loop exits when `stop` fires.
-pub(crate) async fn run_follower_block_sync<P>(
-    provider: P,
-    engine: ConsensusEngineHandle<ZonePayloadTypes>,
-    mut events: mpsc::Receiver<P2pEvent>,
-    commands: mpsc::Sender<P2pCommand>,
-    backfill_commands: mpsc::Sender<BackfillCommand>,
-    mut backfill_responses: mpsc::Receiver<BackfillResponse>,
-    l1_block_tracker: L1BlockTracker,
-    deposit_queue: DepositQueue,
-    attestation: AttestationContext,
-    schedule: LeadershipSchedule,
-    peer_tips: PeerTipRegistry,
-    stop: sync::CancellationToken,
-) where
-    P: BlockNumReader
-        + BlockReader<Block = Block>
-        + HeaderProvider<Header = TempoHeader>
-        + StateProviderFactory
-        + ReceiptProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    // Keep track of all live blocks if we end up needing a backfill, so we can immediately catchup
-    // This is capped to `MAX_PENDING_BLOCKS`.
-    let mut pending = BTreeMap::<u64, PendingPeerBlock>::new();
-    let mut backfill = BackfillProgress::new();
-
-    // Always probe on startup to see if we're behind
-    let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
-    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    // If we don't get blocks after 30s, probe to get the next block
-    let inactivity = tokio::time::sleep(BLOCK_INACTIVITY_TIMEOUT);
-    tokio::pin!(inactivity);
-
-    loop {
-        tokio::select! {
-        biased;
-            () = stop.cancelled() => {
-                debug!(target: "zone::p2p", "Follower block sync stopped");
-                return;
-            }
-            response = backfill_responses.recv() => {
-                let Some(response) = response else {
-                    debug!(target: "zone::p2p", "Backfill response channel closed");
-                    return;
-                };
-                match response {
-                    BackfillResponse::Block { block, .. } => {
-                        let number = match encoded_block_number(&block) {
-                            Ok(number) => number,
-                            Err(err) => {
-                                tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
-                                continue;
-                            }
-                        };
-                        inactivity
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                        if !process_follower_block(
-                            &provider,
-                            &engine,
-                            &l1_block_tracker,
-                            &deposit_queue,
-                            &schedule,
-                            &mut pending,
-                            &mut backfill,
-                            number,
-                            block,
-                            None,
-                            &stop,
-                        )
-                        .await
-                        {
-                            return;
-                        }
-                    }
-                    BackfillResponse::Completed { peer, tip } => {
-                        peer_tips.record(peer.clone(), tip);
-                        let best = match provider.best_block_number() {
-                            Ok(best) => best,
-                            Err(err) => {
-                                tracing::error!(target: "zone::p2p", %err, "Failed reading local head after backfill response");
-                                continue;
-                            }
-                        };
-                        backfill.complete(
-                            tip.zone_height,
-                            best,
-                            pending.first_key_value().map(|(&number, _)| number),
-                        );
-                        debug!(target: "zone::p2p", %peer, best, tip_height = tip.zone_height, tip_hash = ?tip.zone_hash, backfill_needed = backfill.needed, "Completed block backfill response page");
-                    }
-                }
-            }
-            event = events.recv() => {
-                let Some(event) = event else {
-                    debug!(target: "zone::p2p", "P2P event channel closed");
-                    return;
-                };
-                match event {
-                    P2pEvent::Started { .. } => {}
-                    P2pEvent::SettlementProposalReceived { leader, proposal } => {
-                        let result = async {
-                            let proposal = SettlementAttestation::decode(&proposal)?;
-                            let height: u64 = proposal
-                                .zoneHeight
-                                .try_into()
-                                .wrap_err("settlement height does not fit in u64")?;
-                            let persisted_head = provider
-                                .last_block_number()
-                                .wrap_err("failed reading persisted zone head")?;
-                            eyre::ensure!(
-                                height <= persisted_head,
-                                "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
-                            );
-                            let expected = build_settlement_attestation(
-                                &provider,
-                                height,
-                                &attestation,
-                                Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
-                            ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
-                            eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
-
-                            // Unreachable on an rpc-only member: the P2P layer never routes a
-                            // proposal to one. Fails closed rather than panicking if it ever does.
-                            let signer = attestation.signer.as_ref().ok_or_eyre(
-                                "this node holds no individual secp256k1 key, so it cannot sign a settlement attestation",
-                            )?;
-                            let signed = SignedSettlementAttestation::sign(
-                                proposal,
-                                attestation.domain,
-                                signer,
-                            )?;
-
-                            // Return the signed settlement attestation to the peer that
-                            // proposed it. During a scheduled handoff that is the outgoing
-                            // leader, not the most recently observed one.
-                            commands.send(P2pCommand::SendSettlementSignature {
-                                leader: leader.clone(),
-                                signature: signed.encode(),
-                            })
-                                .await
-                                .wrap_err("P2P command channel closed")?;
-                            Ok::<_, eyre::Report>(height)
-                        }.await;
-                        match result {
-                            Ok(height) => info!(target: "zone::p2p", %leader, height, "Signed settlement proposal"),
-                            Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
-                        }
-                    }
-                    P2pEvent::BlockReceived { .. } => {
-                        let (block, live_sender) = match event {
-                            P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
-                                (block, Some(leader_ed25519_public_key))
-                            }
-                            _ => unreachable!("outer match arm restricts the event kind"),
-                        };
-                        let number = match encoded_block_number(&block) {
-                            Ok(number) => number,
-                            Err(err) => {
-                                tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
-                                continue;
-                            }
-                        };
-                        inactivity
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                        if !process_follower_block(
-                            &provider,
-                            &engine,
-                            &l1_block_tracker,
-                            &deposit_queue,
-                            &schedule,
-                            &mut pending,
-                            &mut backfill,
-                            number,
-                            block,
-                            live_sender,
-                            &stop,
-                        )
-                        .await
-                        {
-                            return;
-                        }
-                    }
-                    P2pEvent::TransactionReceived { .. } => {
-                        debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
-                    }
-                    P2pEvent::SettlementSignatureReceived { .. } => {
-                        debug!(target: "zone::p2p", "Ignoring leader-only attestation event on follower");
-                    }
-                }
-            }
-            _ = retry.tick(), if backfill.needed => {
-                let best = match provider.best_block_number() {
-                    Ok(best) => best,
-                    Err(err) => {
-                        tracing::error!(target: "zone::p2p", %err, "Failed reading local head for backfill request");
-                        continue;
-                    }
-                };
-
-                // retry the backfill
-                if let Some(command) = backfill.request(best)
-                    && backfill_commands.send(command).await.is_err()
-                {
-                    debug!(target: "zone::p2p", "P2P command channel closed");
-                    return;
-                }
-            }
-            _ = &mut inactivity, if !backfill.needed => {
-                // Reset before reading the provider so a transient provider error cannot leave an
-                // elapsed sleep continuously ready and spin this loop.
-                inactivity
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                let best = match provider.best_block_number() {
-                    Ok(best) => best,
-                    Err(err) => {
-                        tracing::error!(target: "zone::p2p", %err, "Failed reading local head for inactivity backfill probe");
-                        continue;
-                    }
-                };
-                let command = backfill.probe_after_inactivity(best);
-                info!(target: "zone::p2p", best, "No peer block received recently; probing for backfill");
-                if backfill_commands.send(command).await.is_err() {
-                    debug!(target: "zone::p2p", "P2P command channel closed");
-                    return;
-                }
-            }
-        }
-    }
-}
-
-async fn process_follower_block<P>(
-    provider: &P,
-    engine: &ConsensusEngineHandle<ZonePayloadTypes>,
-    l1_block_tracker: &L1BlockTracker,
-    deposit_queue: &DepositQueue,
-    schedule: &LeadershipSchedule,
-    pending: &mut BTreeMap<u64, PendingPeerBlock>,
-    backfill: &mut BackfillProgress,
-    number: u64,
-    block: Vec<u8>,
-    live_sender: Option<P2pPeerId>,
-    stop: &sync::CancellationToken,
-) -> bool
+impl<P> FollowerBlockSync<P>
 where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -969,332 +765,508 @@ where
         + Sync
         + 'static,
 {
-    let best = match provider.best_block_number() {
-        Ok(best) => best,
-        Err(err) => {
-            tracing::error!(target: "zone::p2p", %err, "Failed reading local head");
-            return true;
-        }
-    };
-    let peer_block = PendingPeerBlock {
-        encoded: block,
-        live_sender,
-    };
-    if number <= best {
-        match import_peer_block(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        provider: P,
+        engine: ConsensusEngineHandle<ZonePayloadTypes>,
+        events: mpsc::Receiver<P2pEvent>,
+        commands: mpsc::Sender<P2pCommand>,
+        backfill_commands: mpsc::Sender<BackfillCommand>,
+        backfill_responses: mpsc::Receiver<BackfillResponse>,
+        l1_block_tracker: L1BlockTracker,
+        deposit_queue: DepositQueue,
+        attestation: AttestationContext,
+        schedule: LeadershipSchedule,
+        peer_tips: PeerTipRegistry,
+        stop: sync::CancellationToken,
+    ) -> Self {
+        Self {
             provider,
             engine,
+            events,
+            commands,
+            backfill_commands,
+            backfill_responses,
             l1_block_tracker,
             deposit_queue,
+            attestation,
             schedule,
-            &peer_block,
+            peer_tips,
             stop,
+            pending: PendingBlocks::default(),
+            backfill: BackfillProgress::new(),
+        }
+    }
+
+    pub(crate) async fn run(mut self) {
+        // Always probe on startup to see if we're behind
+        let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // If we don't get blocks after 30s, probe to get the next block
+        let inactivity = tokio::time::sleep(BLOCK_INACTIVITY_TIMEOUT);
+        tokio::pin!(inactivity);
+
+        loop {
+            tokio::select! {
+            biased;
+                () = self.stop.cancelled() => {
+                    debug!(target: "zone::p2p", "Follower block sync stopped");
+                    return;
+                }
+                response = self.backfill_responses.recv() => {
+                    let Some(response) = response else {
+                        debug!(target: "zone::p2p", "Backfill response channel closed");
+                        return;
+                    };
+                    match response {
+                        BackfillResponse::Block { block, .. } => {
+                            let number = match encoded_block_number(&block) {
+                                Ok(number) => number,
+                                Err(err) => {
+                                    tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
+                                    continue;
+                                }
+                            };
+                            inactivity
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
+                            if !self.process_follower_block(number, block, None).await
+                            {
+                                return;
+                            }
+                        }
+                        BackfillResponse::Completed { peer, tip } => {
+                            self.peer_tips.record(peer.clone(), tip);
+                            let best = match self.provider.best_block_number() {
+                                Ok(best) => best,
+                                Err(err) => {
+                                    tracing::error!(target: "zone::p2p", %err, "Failed reading local head after backfill response");
+                                    continue;
+                                }
+                            };
+                            self.backfill.complete(
+                                tip.zone_height,
+                                best,
+                                self.pending.first_number(),
+                            );
+                            debug!(target: "zone::p2p", %peer, best, tip_height = tip.zone_height, tip_hash = ?tip.zone_hash, backfill_needed = self.backfill.needed, "Completed block backfill response page");
+                        }
+                    }
+                }
+                event = self.events.recv() => {
+                    let Some(event) = event else {
+                        debug!(target: "zone::p2p", "P2P event channel closed");
+                        return;
+                    };
+                    match event {
+                        P2pEvent::Started { .. } => {}
+                        P2pEvent::SettlementProposalReceived { leader, proposal } => {
+                            match self.handle_settlement_proposal(&leader, proposal).await {
+                                Ok(height) => info!(target: "zone::p2p", %leader, height, "Signed settlement proposal"),
+                                Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
+                            }
+                        }
+                        P2pEvent::BlockReceived { .. } => {
+                            let (block, live_sender) = match event {
+                                P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
+                                    (block, Some(leader_ed25519_public_key))
+                                }
+                                _ => unreachable!("outer match arm restricts the event kind"),
+                            };
+                            let number = match encoded_block_number(&block) {
+                                Ok(number) => number,
+                                Err(err) => {
+                                    tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
+                                    continue;
+                                }
+                            };
+                            inactivity
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
+                            if !self.process_follower_block(number, block, live_sender).await
+                            {
+                                return;
+                            }
+                        }
+                        P2pEvent::TransactionReceived { .. } => {
+                            debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
+                        }
+                        P2pEvent::SettlementSignatureReceived { .. } => {
+                            debug!(target: "zone::p2p", "Ignoring leader-only attestation event on follower");
+                        }
+                    }
+                }
+                _ = retry.tick(), if self.backfill.needed => {
+                    let best = match self.provider.best_block_number() {
+                        Ok(best) => best,
+                        Err(err) => {
+                            tracing::error!(target: "zone::p2p", %err, "Failed reading local head for backfill request");
+                            continue;
+                        }
+                    };
+
+                    // retry the backfill
+                    if let Some(command) = self.backfill.request(best)
+                        && self.backfill_commands.send(command).await.is_err()
+                    {
+                        debug!(target: "zone::p2p", "P2P command channel closed");
+                        return;
+                    }
+                }
+                _ = &mut inactivity, if !self.backfill.needed => {
+                    // Reset before reading the provider so a transient provider error cannot leave an
+                    // elapsed sleep continuously ready and spin this loop.
+                    inactivity
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
+                    let best = match self.provider.best_block_number() {
+                        Ok(best) => best,
+                        Err(err) => {
+                            tracing::error!(target: "zone::p2p", %err, "Failed reading local head for inactivity backfill probe");
+                            continue;
+                        }
+                    };
+                    let command = self.backfill.probe_after_inactivity(best);
+                    info!(target: "zone::p2p", best, "No peer block received recently; probing for backfill");
+                    if self.backfill_commands.send(command).await.is_err() {
+                        debug!(target: "zone::p2p", "P2P command channel closed");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_settlement_proposal(
+        &self,
+        leader: &P2pPeerId,
+        proposal: Vec<u8>,
+    ) -> eyre::Result<u64> {
+        let proposal = SettlementAttestation::decode(&proposal)?;
+        let height: u64 = proposal
+            .zoneHeight
+            .try_into()
+            .wrap_err("settlement height does not fit in u64")?;
+        let persisted_head = self
+            .provider
+            .last_block_number()
+            .wrap_err("failed reading persisted zone head")?;
+        eyre::ensure!(
+            height <= persisted_head,
+            "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
+        );
+        let expected = build_settlement_attestation(
+            &self.provider,
+            height,
+            &self.attestation,
+            Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
+        )
+        .await?
+        .ok_or_eyre("proposed block is not a batch boundary")?;
+        eyre::ensure!(
+            proposal == expected,
+            "settlement proposal does not match follower state"
+        );
+
+        // Unreachable on an rpc-only member: the P2P layer never routes a proposal to one.
+        // Fails closed rather than panicking if it ever does.
+        let signer = self.attestation.signer.as_ref().ok_or_eyre(
+            "this node holds no individual secp256k1 key, so it cannot sign a settlement attestation",
+        )?;
+        let signed = SignedSettlementAttestation::sign(proposal, self.attestation.domain, signer)?;
+
+        // During a scheduled handoff, return the attestation to the outgoing leader that
+        // proposed it, rather than the most recently observed leader.
+        self.commands
+            .send(P2pCommand::SendSettlementSignature {
+                leader: leader.clone(),
+                signature: signed.encode(),
+            })
+            .await
+            .wrap_err("P2P command channel closed")?;
+        Ok(height)
+    }
+
+    async fn process_follower_block(
+        &mut self,
+        number: u64,
+        block: Vec<u8>,
+        live_sender: Option<P2pPeerId>,
+    ) -> bool {
+        let best = match self.provider.best_block_number() {
+            Ok(best) => best,
+            Err(err) => {
+                tracing::error!(target: "zone::p2p", %err, "Failed reading local head");
+                return true;
+            }
+        };
+        let peer_block = PendingPeerBlock {
+            encoded: block,
+            live_sender,
+        };
+        if number <= best {
+            match self.import_peer_block(&peer_block).await {
+                Ok(PeerBlockImportOutcome::Cancelled) => return false,
+                Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
+                    tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
+                }
+                Ok(PeerBlockImportOutcome::Imported) => {}
+                Err(err) => {
+                    tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
+                }
+            }
+            return true;
+        }
+        self.backfill.observe_block(number, best);
+        if let Some(dropped) = self.pending.insert(number, peer_block) {
+            tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
+        }
+        if number > best.saturating_add(1) {
+            info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
+        }
+        match self.import_pending_blocks().await {
+            Ok(PeerBlockImportOutcome::Cancelled) => return false,
+            Ok(PeerBlockImportOutcome::TimedOut {
+                block_number,
+                anchor,
+            }) => {
+                tracing::warn!(target: "zone::p2p", block_number, anchor_number = anchor.number, anchor_hash = ?anchor.hash, "Dropping peer block whose L1 anchor was not observed before the import deadline");
+                self.backfill.needed = true;
+            }
+            Ok(PeerBlockImportOutcome::Imported) => {
+                let best = match self.provider.best_block_number() {
+                    Ok(best) => best,
+                    Err(err) => {
+                        tracing::error!(target: "zone::p2p", %err, "Failed reading local head after importing peer blocks");
+                        return true;
+                    }
+                };
+                self.backfill
+                    .refresh_after_import(best, self.pending.first_number());
+            }
+            Err(err) => {
+                tracing::error!(target: "zone::p2p", %err, "Rejected peer block while importing pending blocks");
+                self.backfill.needed = true;
+            }
+        }
+        true
+    }
+
+    async fn import_pending_blocks(&mut self) -> eyre::Result<PeerBlockImportOutcome> {
+        loop {
+            let head = self.provider.best_block_number()?;
+            let Some(block) = self.pending.take_next_after(head) else {
+                return Ok(PeerBlockImportOutcome::Imported);
+            };
+            self.import_peer_block(&block).await?;
+        }
+    }
+
+    async fn import_peer_block(
+        &self,
+        peer_block: &PendingPeerBlock,
+    ) -> eyre::Result<PeerBlockImportOutcome> {
+        // Check the received block
+        let mut input = peer_block.encoded.as_slice();
+        let block = Block::decode(&mut input)
+            .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
+        if !input.is_empty() {
+            eyre::bail!("encoded zone block has {} trailing bytes", input.len());
+        }
+
+        let block = SealedBlock::seal_slow(block);
+        let block_number = block.number();
+        let hash = block.hash();
+        let best_block = self.provider.best_block_number()?;
+
+        // 1. Block number is correct
+        if block_number <= best_block {
+            let existing = self.provider.sealed_header(block_number)?.ok_or_else(|| {
+                eyre::eyre!("missing local canonical header at height {block_number}")
+            })?;
+            if existing.hash() == hash {
+                debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate peer block");
+                return Ok(PeerBlockImportOutcome::Imported);
+            }
+            eyre::bail!(
+                "peer block conflicts with canonical block at height {block_number}: local={}, received={hash}",
+                existing.hash()
+            );
+        }
+
+        let expected_number = best_block.saturating_add(1);
+        if block_number != expected_number {
+            eyre::bail!(
+                "peer block gap: local head is {best_block}, received height {block_number}, expected {expected_number}"
+            );
+        }
+
+        // 2. Block's parent hash is correct
+        let parent = self
+            .provider
+            .sealed_header(best_block)?
+            .ok_or_else(|| eyre::eyre!("missing local canonical head at height {best_block}"))?;
+        if block.parent_hash() != parent.hash() {
+            eyre::bail!(
+                "peer block parent mismatch at height {block_number}: local={}, received={}",
+                parent.hash(),
+                block.parent_hash()
+            );
+        }
+
+        // 3. Require the block to advance the local Tempo checkpoint by exactly
+        // one independently observed L1 block.
+        let (l1_header, portal_inputs) = Self::decode_advance_tempo(&block)?;
+        let local = self
+            .provider
+            .state_by_block_hash(parent.hash())?
+            .tempo_num_hash()?;
+        validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
+        let anchor = l1_header.num_hash();
+
+        // Anchor-aware fence for live blocks: the sender must
+        // be the scheduled leader of the block's anchor. This stops an honest stale
+        // leader's broadcast from splitting followers.
+        // Backfilled blocks carry no producer claim and are judged by parent/anchor/execution/conflict
+        // validation only.
+        //
+        // Check once before waiting to reject an already-known invalid sender without blocking the
+        // import loop. `wait_for_validated_peer_anchor` checks again after observing the anchor:
+        // the anchor itself may finalize a leadership transition that changes its assigned producer.
+        Self::validate_live_block_sender(
+            &self.schedule,
+            peer_block.live_sender.as_ref(),
+            anchor.number,
+            block_number,
+        )?;
+        let observed = match Self::wait_for_validated_peer_anchor(
+            &self.l1_block_tracker,
+            &self.schedule,
+            &portal_inputs,
+            peer_block.live_sender.as_ref(),
+            anchor,
+            block_number,
+            &self.stop,
+            PEER_ANCHOR_WAIT_TIMEOUT,
         )
         .await
         {
-            Ok(PeerBlockImportOutcome::Cancelled) => return false,
-            Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
-                tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
+            Ok(observed) => observed,
+            Err(PeerAnchorWaitError::Cancelled) => return Ok(PeerBlockImportOutcome::Cancelled),
+            Err(PeerAnchorWaitError::TimedOut {
+                block_number,
+                anchor,
+            }) => {
+                return Ok(PeerBlockImportOutcome::TimedOut {
+                    block_number,
+                    anchor,
+                });
             }
-            Ok(PeerBlockImportOutcome::Imported) => {}
-            Err(err) => {
-                tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
-            }
-        }
-        return true;
-    }
-    backfill.observe_block(number, best);
-    if let Some(dropped) = buffer_pending_block(pending, number, peer_block) {
-        tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
-    }
-    if number > best.saturating_add(1) {
-        info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
-    }
-    match drain_pending_blocks(
-        provider,
-        engine,
-        l1_block_tracker,
-        deposit_queue,
-        schedule,
-        pending,
-        stop,
-    )
-    .await
-    {
-        Ok(PeerBlockImportOutcome::Cancelled) => return false,
-        Ok(PeerBlockImportOutcome::TimedOut {
-            block_number,
-            anchor,
-        }) => {
-            tracing::warn!(target: "zone::p2p", block_number, anchor_number = anchor.number, anchor_hash = ?anchor.hash, "Dropping peer block whose L1 anchor was not observed before the import deadline");
-            backfill.needed = true;
-        }
-        Ok(PeerBlockImportOutcome::Imported) => {
-            let best = match provider.best_block_number() {
-                Ok(best) => best,
-                Err(err) => {
-                    tracing::error!(target: "zone::p2p", %err, "Failed reading local head after importing peer blocks");
-                    return true;
-                }
-            };
-            backfill
-                .refresh_after_import(best, pending.first_key_value().map(|(&number, _)| number));
-        }
-        Err(err) => {
-            tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
-            backfill.needed = true;
-        }
-    }
-    true
-}
-
-async fn drain_pending_blocks<P>(
-    provider: &P,
-    engine: &ConsensusEngineHandle<ZonePayloadTypes>,
-    l1_block_tracker: &L1BlockTracker,
-    deposit_queue: &DepositQueue,
-    schedule: &LeadershipSchedule,
-    pending: &mut BTreeMap<u64, PendingPeerBlock>,
-    stop: &sync::CancellationToken,
-) -> eyre::Result<PeerBlockImportOutcome>
-where
-    P: reth_storage_api::BlockNumReader
-        + reth_storage_api::HeaderProvider<Header = TempoHeader>
-        + StateProviderFactory
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    loop {
-        let next = provider.best_block_number()?.saturating_add(1);
-        let Some(block) = pending.remove(&next) else {
-            return Ok(PeerBlockImportOutcome::Imported);
+            Err(PeerAnchorWaitError::Other(error)) => return Err(error),
         };
-        import_peer_block(
-            provider,
-            engine,
-            l1_block_tracker,
-            deposit_queue,
-            schedule,
-            &block,
-            stop,
-        )
-        .await?;
+
+        // The subscriber normally enqueues immediately after recording this observation. Enqueueing
+        // here as well closes that small scheduling window and makes follower import self-contained;
+        // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
+        // gap must surface as a rejected block rather than aborting the node.
+        self.deposit_queue
+            .try_enqueue_sealed(l1_header, observed)
+            .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
+
+        // 4. All txns in the block execute properly
+        let payload = ZonePayloadTypes::block_to_payload(block, None);
+        let status = self.engine.new_payload(payload).await?;
+        if !status.is_valid() {
+            eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
+        }
+
+        // 5. Forkchoice
+        let forkchoice = ForkchoiceState::same_hash(hash);
+        let result = self.engine.fork_choice_updated(forkchoice, None).await?;
+        if !result.is_valid() {
+            eyre::bail!(
+                "execution engine rejected forkchoice for block {block_number} ({hash}): {result:?}"
+            );
+        }
+
+        // Mirror the leader engine only after the block is canonical locally. The block cannot be
+        // un-imported at this point, so the observation must be released unconditionally — leaving it
+        // behind would stall the subscriber once the lookahead window fills. Advancing the queue is
+        // likewise tolerant of drift; it fails only on a genuine hash conflict.
+        self.l1_block_tracker.prune_through(anchor.number);
+        self.deposit_queue
+            .confirm_through(anchor)
+            .wrap_err_with(|| {
+                format!("cannot advance the deposit queue past block {block_number}")
+            })?;
+        self.schedule.record_applied_anchor(anchor.number);
+
+        info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
+        Ok(PeerBlockImportOutcome::Imported)
     }
 }
 
-async fn import_peer_block<P>(
-    provider: &P,
-    engine: &ConsensusEngineHandle<ZonePayloadTypes>,
-    l1_block_tracker: &L1BlockTracker,
-    deposit_queue: &DepositQueue,
-    schedule: &LeadershipSchedule,
-    peer_block: &PendingPeerBlock,
-    stop: &sync::CancellationToken,
-) -> eyre::Result<PeerBlockImportOutcome>
-where
-    P: BlockNumReader
-        + HeaderProvider<Header = TempoHeader>
-        + StateProviderFactory
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    // Check the received block
-    let mut input = peer_block.encoded.as_slice();
-    let block = Block::decode(&mut input)
-        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
-    if !input.is_empty() {
-        eyre::bail!("encoded zone block has {} trailing bytes", input.len());
-    }
-
-    let block = SealedBlock::seal_slow(block);
-    let block_number = block.number();
-    let hash = block.hash();
-    let best_block = provider.best_block_number()?;
-
-    // 1. Block number is correct
-    if block_number <= best_block {
-        let existing = provider.sealed_header(block_number)?.ok_or_else(|| {
-            eyre::eyre!("missing local canonical header at height {block_number}")
-        })?;
-        if existing.hash() == hash {
-            debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate peer block");
-            return Ok(PeerBlockImportOutcome::Imported);
-        }
-        eyre::bail!(
-            "peer block conflicts with canonical block at height {block_number}: local={}, received={hash}",
-            existing.hash()
-        );
-    }
-
-    let expected_number = best_block.saturating_add(1);
-    if block_number != expected_number {
-        eyre::bail!(
-            "peer block gap: local head is {best_block}, received height {block_number}, expected {expected_number}"
-        );
-    }
-
-    // 2. Block's parent hash is correct
-    let parent = provider
-        .sealed_header(best_block)?
-        .ok_or_else(|| eyre::eyre!("missing local canonical head at height {best_block}"))?;
-    if block.parent_hash() != parent.hash() {
-        eyre::bail!(
-            "peer block parent mismatch at height {block_number}: local={}, received={}",
-            parent.hash(),
-            block.parent_hash()
-        );
-    }
-
-    // 3. Require the block to advance the local Tempo checkpoint by exactly
-    // one independently observed L1 block.
-    let (l1_header, portal_inputs) = decode_advance_tempo(&block)?;
-    let local = provider
-        .state_by_block_hash(parent.hash())?
-        .tempo_num_hash()?;
-    validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
-    let anchor = l1_header.num_hash();
-
-    // Anchor-aware fence for live blocks: the sender must
-    // be the scheduled leader of the block's anchor. This stops an honest stale
-    // leader's broadcast from splitting followers.
-    // Backfilled blocks carry no producer claim and are judged by parent/anchor/execution/conflict
-    // validation only.
-    //
-    // Check once before waiting to reject an already-known invalid sender without blocking the
-    // import loop. `wait_for_validated_peer_anchor` checks again after observing the anchor:
-    // the anchor itself may finalize a leadership transition that changes its assigned producer.
-    validate_live_block_sender(
-        schedule,
-        peer_block.live_sender.as_ref(),
-        anchor.number,
-        block_number,
-    )?;
-    let observed = match wait_for_validated_peer_anchor(
-        l1_block_tracker,
-        schedule,
-        &portal_inputs,
-        peer_block.live_sender.as_ref(),
-        anchor,
-        block_number,
-        stop,
-        PEER_ANCHOR_WAIT_TIMEOUT,
-    )
-    .await
-    {
-        Ok(observed) => observed,
-        Err(PeerAnchorWaitError::Cancelled) => return Ok(PeerBlockImportOutcome::Cancelled),
-        Err(PeerAnchorWaitError::TimedOut {
-            block_number,
-            anchor,
-        }) => {
-            return Ok(PeerBlockImportOutcome::TimedOut {
-                block_number,
-                anchor,
-            });
-        }
-        Err(PeerAnchorWaitError::Other(error)) => return Err(error),
-    };
-
-    // The subscriber normally enqueues immediately after recording this observation. Enqueueing
-    // here as well closes that small scheduling window and makes follower import self-contained;
-    // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
-    // gap must surface as a rejected block rather than aborting the node.
-    deposit_queue
-        .try_enqueue_sealed(l1_header, observed)
-        .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
-
-    // 4. All txns in the block execute properly
-    let payload = ZonePayloadTypes::block_to_payload(block, None);
-    let status = engine.new_payload(payload).await?;
-    if !status.is_valid() {
-        eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
-    }
-
-    // 5. Forkchoice
-    let forkchoice = ForkchoiceState::same_hash(hash);
-    let result = engine.fork_choice_updated(forkchoice, None).await?;
-    if !result.is_valid() {
-        eyre::bail!(
-            "execution engine rejected forkchoice for block {block_number} ({hash}): {result:?}"
-        );
-    }
-
-    // Mirror the leader engine only after the block is canonical locally. The block cannot be
-    // un-imported at this point, so the observation must be released unconditionally — leaving it
-    // behind would stall the subscriber once the lookahead window fills. Advancing the queue is
-    // likewise tolerant of drift; it fails only on a genuine hash conflict.
-    l1_block_tracker.prune_through(anchor.number);
-    deposit_queue
-        .confirm_through(anchor)
-        .wrap_err_with(|| format!("cannot advance the deposit queue past block {block_number}"))?;
-    schedule.record_applied_anchor(anchor.number);
-
-    info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
-    Ok(PeerBlockImportOutcome::Imported)
-}
-
-fn validate_live_block_sender(
-    schedule: &LeadershipSchedule,
-    live_sender: Option<&P2pPeerId>,
-    anchor_number: u64,
-    block_number: u64,
-) -> eyre::Result<()> {
-    let Some(sender) = live_sender else {
-        return Ok(());
-    };
-    match schedule.leader_for(anchor_number) {
-        Some(record) if &record.leader == sender => Ok(()),
-        Some(record) => eyre::bail!(
-            "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
+impl<P> FollowerBlockSync<P> {
+    fn validate_live_block_sender(
+        schedule: &LeadershipSchedule,
+        live_sender: Option<&P2pPeerId>,
+        anchor_number: u64,
+        block_number: u64,
+    ) -> eyre::Result<()> {
+        let Some(sender) = live_sender else {
+            return Ok(());
+        };
+        match schedule.leader_for(anchor_number) {
+            Some(record) if &record.leader == sender => Ok(()),
+            Some(record) => eyre::bail!(
+                "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
              the schedule assigns that anchor to {} (epoch {})",
-            record.leader,
-            record.epoch,
-        ),
-        None => eyre::bail!(
-            "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
+                record.leader,
+                record.epoch,
+            ),
+            None => eyre::bail!(
+                "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
              record governs",
-        ),
+            ),
+        }
     }
-}
 
-async fn wait_for_validated_peer_anchor(
-    l1_block_tracker: &L1BlockTracker,
-    schedule: &LeadershipSchedule,
-    portal_inputs: &AdvanceTempoPortalInputs,
-    live_sender: Option<&P2pPeerId>,
-    anchor: NumHash,
-    block_number: u64,
-    stop: &sync::CancellationToken,
-    wait_timeout: Duration,
-) -> Result<L1PortalEvents, PeerAnchorWaitError> {
-    let observed = tokio::select! {
-        biased;
-        () = stop.cancelled() => return Err(PeerAnchorWaitError::Cancelled),
-        observed = tokio::time::timeout(
-            wait_timeout,
-            l1_block_tracker.wait_for_portal_events(anchor),
-        ) => match observed {
-            Ok(observed) => observed.map_err(PeerAnchorWaitError::Other)?,
-            Err(_) => return Err(PeerAnchorWaitError::TimedOut {
-                block_number,
-                anchor,
-            }),
-        },
-    };
-    portal_inputs
-        .validate(&observed)
-        .map_err(PeerAnchorWaitError::Other)?;
+    async fn wait_for_validated_peer_anchor(
+        l1_block_tracker: &L1BlockTracker,
+        schedule: &LeadershipSchedule,
+        portal_inputs: &AdvanceTempoPortalInputs,
+        live_sender: Option<&P2pPeerId>,
+        anchor: NumHash,
+        block_number: u64,
+        stop: &sync::CancellationToken,
+        wait_timeout: Duration,
+    ) -> Result<L1PortalEvents, PeerAnchorWaitError> {
+        let observed = tokio::select! {
+            biased;
+            () = stop.cancelled() => return Err(PeerAnchorWaitError::Cancelled),
+            observed = tokio::time::timeout(
+                wait_timeout,
+                l1_block_tracker.wait_for_portal_events(anchor),
+            ) => match observed {
+                Ok(observed) => observed.map_err(PeerAnchorWaitError::Other)?,
+                Err(_) => return Err(PeerAnchorWaitError::TimedOut {
+                    block_number,
+                    anchor,
+                }),
+            },
+        };
+        portal_inputs
+            .validate(&observed)
+            .map_err(PeerAnchorWaitError::Other)?;
 
-    // The L1 subscriber publishes any transition finalized by this anchor before recording the
-    // anchor in the tracker. Re-read the schedule now so the pre-wait decision cannot authorize a
-    // sender that this anchor demoted.
-    validate_live_block_sender(schedule, live_sender, anchor.number, block_number)
-        .map_err(PeerAnchorWaitError::Other)?;
-    Ok(observed)
+        // The L1 subscriber publishes any transition finalized by this anchor before recording the
+        // anchor in the tracker. Re-read the schedule now so the pre-wait decision cannot authorize a
+        // sender that this anchor demoted.
+        Self::validate_live_block_sender(schedule, live_sender, anchor.number, block_number)
+            .map_err(PeerAnchorWaitError::Other)?;
+        Ok(observed)
+    }
 }
 
 #[derive(Debug)]
@@ -1347,54 +1319,57 @@ fn validate_l1_checkpoint_transition(
     Ok(())
 }
 
-/// Decode the L1 header embedded in the first `IZoneInbox.advanceTempo` system transaction.
-#[cfg(test)]
-fn decode_advance_tempo_header(
-    block: &SealedBlock<Block>,
-) -> eyre::Result<SealedHeader<TempoHeader>> {
-    decode_advance_tempo(block).map(|(header, _)| header)
-}
-
-fn decode_advance_tempo(
-    block: &SealedBlock<Block>,
-) -> eyre::Result<(SealedHeader<TempoHeader>, AdvanceTempoPortalInputs)> {
-    // Do some basic checks
-
-    // 1. `advanceTempo` is the first tx
-    let first_tx = block.body().transactions().next().ok_or_else(|| {
-        eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
-    })?;
-    let TempoTxEnvelope::Legacy(signed) = first_tx else {
-        eyre::bail!("first transaction in peer block is not a legacy system transaction")
-    };
-    if !first_tx.is_system_tx() {
-        eyre::bail!("first transaction in peer block is not a Tempo system transaction")
+impl<P> FollowerBlockSync<P> {
+    /// Decode the L1 header embedded in the first `IZoneInbox.advanceTempo` system transaction.
+    #[cfg(test)]
+    fn decode_advance_tempo_header(
+        block: &SealedBlock<Block>,
+    ) -> eyre::Result<SealedHeader<TempoHeader>> {
+        Self::decode_advance_tempo(block).map(|(header, _)| header)
     }
 
-    // 2. Address is correct
-    if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
-        eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
-    }
-    let call = IZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref())
-        .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
+    fn decode_advance_tempo(
+        block: &SealedBlock<Block>,
+    ) -> eyre::Result<(SealedHeader<TempoHeader>, AdvanceTempoPortalInputs)> {
+        // Do some basic checks
 
-    // 3. the system tx is valid.
-    let mut header_rlp = call.header.as_ref();
-    let header = TempoHeader::decode(&mut header_rlp)
-        .map_err(|err| eyre::eyre!("invalid RLP-encoded L1 header in advanceTempo: {err}"))?;
-    if !header_rlp.is_empty() {
-        eyre::bail!(
-            "advanceTempo L1 header has {} trailing bytes",
-            header_rlp.len()
-        )
+        // 1. `advanceTempo` is the first tx
+        let first_tx = block.body().transactions().next().ok_or_else(|| {
+            eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
+        })?;
+        let TempoTxEnvelope::Legacy(signed) = first_tx else {
+            eyre::bail!("first transaction in peer block is not a legacy system transaction")
+        };
+        if !first_tx.is_system_tx() {
+            eyre::bail!("first transaction in peer block is not a Tempo system transaction")
+        }
+
+        // 2. Address is correct
+        if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
+            eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
+        }
+        let call = IZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref()).map_err(
+            |err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"),
+        )?;
+
+        // 3. the system tx is valid.
+        let mut header_rlp = call.header.as_ref();
+        let header = TempoHeader::decode(&mut header_rlp)
+            .map_err(|err| eyre::eyre!("invalid RLP-encoded L1 header in advanceTempo: {err}"))?;
+        if !header_rlp.is_empty() {
+            eyre::bail!(
+                "advanceTempo L1 header has {} trailing bytes",
+                header_rlp.len()
+            )
+        }
+        Ok((
+            SealedHeader::seal_slow(header),
+            AdvanceTempoPortalInputs {
+                deposits: call.deposits,
+                enabled_tokens: call.enabledTokens,
+            },
+        ))
     }
-    Ok((
-        SealedHeader::seal_slow(header),
-        AdvanceTempoPortalInputs {
-            deposits: call.deposits,
-            enabled_tokens: call.enabledTokens,
-        },
-    ))
 }
 
 #[cfg(test)]
@@ -1412,11 +1387,12 @@ mod tests {
     use tokio::sync::{oneshot, watch};
     use tokio_util::sync;
 
+    use crate::replication::FollowerBlockSync;
+
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
-        MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PersistedBlockSource, PersistedTip,
-        broadcast_persisted_blocks, buffer_pending_block, validate_live_block_sender,
-        wait_for_validated_peer_anchor,
+        MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PendingBlocks, PersistedBlockSource,
+        PersistedTip, broadcast_persisted_blocks, validate_l1_checkpoint_transition,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
@@ -1535,7 +1511,7 @@ mod tests {
             },
         });
 
-        let decoded = super::decode_advance_tempo_header(&block).unwrap();
+        let decoded = FollowerBlockSync::<()>::decode_advance_tempo_header(&block).unwrap();
         assert_eq!(decoded.number(), 7);
         assert_eq!(decoded.parent_hash(), B256::repeat_byte(0x42));
         assert_eq!(decoded.hash(), prepared.header.hash());
@@ -1582,7 +1558,7 @@ mod tests {
             },
         });
 
-        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        let error = FollowerBlockSync::<()>::decode_advance_tempo_header(&block).unwrap_err();
         assert!(error.to_string().contains("IZoneInbox"));
     }
 
@@ -1600,7 +1576,7 @@ mod tests {
             },
         });
 
-        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        let error = FollowerBlockSync::<()>::decode_advance_tempo_header(&block).unwrap_err();
         assert!(error.to_string().contains("no transactions"));
     }
 
@@ -1634,7 +1610,7 @@ mod tests {
             },
         });
 
-        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        let error = FollowerBlockSync::<()>::decode_advance_tempo_header(&block).unwrap_err();
         assert!(error.to_string().contains("not a Tempo system transaction"));
     }
 
@@ -1665,7 +1641,7 @@ mod tests {
             },
         });
 
-        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        let error = FollowerBlockSync::<()>::decode_advance_tempo_header(&block).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1711,13 +1687,13 @@ mod tests {
         };
 
         let malformed = make_block(vec![0xff]);
-        let error = super::decode_advance_tempo_header(&malformed).unwrap_err();
+        let error = FollowerBlockSync::<()>::decode_advance_tempo_header(&malformed).unwrap_err();
         assert!(error.to_string().contains("invalid RLP-encoded L1 header"));
 
         let mut trailing = alloy_rlp::encode(TempoHeader::default());
         trailing.push(0x00);
         let trailing = make_block(trailing);
-        let error = super::decode_advance_tempo_header(&trailing).unwrap_err();
+        let error = FollowerBlockSync::<()>::decode_advance_tempo_header(&trailing).unwrap_err();
         assert!(error.to_string().contains("trailing bytes"));
     }
 
@@ -1735,15 +1711,13 @@ mod tests {
             },
             ..Default::default()
         });
-        super::validate_l1_checkpoint_transition(&header, 10, local_hash, 7).unwrap();
+        validate_l1_checkpoint_transition(&header, 10, local_hash, 7).unwrap();
 
-        let skipped =
-            super::validate_l1_checkpoint_transition(&header, 9, local_hash, 7).unwrap_err();
+        let skipped = validate_l1_checkpoint_transition(&header, 9, local_hash, 7).unwrap_err();
         assert!(skipped.to_string().contains("expected 10"));
 
         let wrong_parent =
-            super::validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7)
-                .unwrap_err();
+            validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7).unwrap_err();
         assert!(wrong_parent.to_string().contains("does not extend"));
     }
 
@@ -1761,8 +1735,13 @@ mod tests {
         let anchor = NumHash::new(ANCHOR_NUMBER, B256::repeat_byte(0x10));
 
         // The sender is valid under the pre-observation schedule.
-        validate_live_block_sender(&schedule, Some(&outgoing), ANCHOR_NUMBER, ZONE_BLOCK_NUMBER)
-            .unwrap();
+        FollowerBlockSync::<()>::validate_live_block_sender(
+            &schedule,
+            Some(&outgoing),
+            ANCHOR_NUMBER,
+            ZONE_BLOCK_NUMBER,
+        )
+        .unwrap();
 
         let waiter = {
             let schedule = schedule.clone();
@@ -1773,7 +1752,7 @@ mod tests {
                     deposits: vec![],
                     enabled_tokens: vec![],
                 };
-                wait_for_validated_peer_anchor(
+                FollowerBlockSync::<()>::wait_for_validated_peer_anchor(
                     &tracker,
                     &schedule,
                     &portal_inputs,
@@ -1819,7 +1798,7 @@ mod tests {
         let stop = sync::CancellationToken::new();
         stop.cancel();
 
-        let error = wait_for_validated_peer_anchor(
+        let error = FollowerBlockSync::<()>::wait_for_validated_peer_anchor(
             &tracker,
             &schedule,
             &AdvanceTempoPortalInputs {
@@ -1846,7 +1825,7 @@ mod tests {
         let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, leader, 0));
         let tracker = L1BlockTracker::default();
 
-        let error = wait_for_validated_peer_anchor(
+        let error = FollowerBlockSync::<()>::wait_for_validated_peer_anchor(
             &tracker,
             &schedule,
             &AdvanceTempoPortalInputs {
@@ -1879,9 +1858,13 @@ mod tests {
             .publish(LeadershipState::new(8, incoming.clone(), 60))
             .unwrap();
 
-        validate_live_block_sender(&schedule, Some(&incoming), 51, 11).unwrap();
-        let error = validate_live_block_sender(&schedule, Some(&outgoing), 51, 11)
-            .expect_err("the crashed leader must not remain authoritative in the recovery window");
+        FollowerBlockSync::<()>::validate_live_block_sender(&schedule, Some(&incoming), 51, 11)
+            .unwrap();
+        let error =
+            FollowerBlockSync::<()>::validate_live_block_sender(&schedule, Some(&outgoing), 51, 11)
+                .expect_err(
+                    "the crashed leader must not remain authoritative in the recovery window",
+                );
         assert!(error.to_string().contains(&incoming.to_string()));
     }
 
@@ -2077,30 +2060,31 @@ mod tests {
 
     #[test]
     fn pending_block_limit_keeps_blocks_closest_to_local_head() {
-        let mut pending = std::collections::BTreeMap::new();
+        let mut pending = PendingBlocks::default();
         for number in 100..100 + MAX_PENDING_BLOCKS as u64 {
-            assert_eq!(
-                buffer_pending_block(&mut pending, number, pending_block(number)),
-                None
-            );
+            assert_eq!(pending.insert(number, pending_block(number)), None);
         }
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);
+        assert_eq!(pending.first_number(), Some(100));
 
         let farthest = 100 + MAX_PENDING_BLOCKS as u64 - 1;
-        assert_eq!(
-            buffer_pending_block(&mut pending, 99, pending_block(99)),
-            Some(farthest)
-        );
+        assert_eq!(pending.insert(99, pending_block(99)), Some(farthest));
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);
-        assert!(pending.contains_key(&99));
-        assert!(!pending.contains_key(&farthest));
+        assert!(pending.contains(99));
+        assert!(!pending.contains(farthest));
 
         let farther = farthest + 1;
         assert_eq!(
-            buffer_pending_block(&mut pending, farther, pending_block(farther)),
+            pending.insert(farther, pending_block(farther)),
             Some(farther)
         );
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);
-        assert!(!pending.contains_key(&farther));
+        assert!(!pending.contains(farther));
+
+        let next = pending
+            .take_next_after(98)
+            .expect("the immediately next pending block must be available");
+        assert_eq!(next.encoded, vec![99]);
+        assert_eq!(pending.first_number(), Some(100));
     }
 }
