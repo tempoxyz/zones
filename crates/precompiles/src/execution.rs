@@ -22,7 +22,10 @@ use core::cell::RefCell;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
-use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::{
+    context_interface::cfg::GasParams,
+    precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult},
+};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
@@ -38,9 +41,20 @@ use tempo_precompiles::{
 use zone_hardfork::ZoneHardfork;
 
 /// Shared EVM configuration and accounting state installed for every Zone precompile wrapper.
+///
+/// The dynamic precompile lookup builds a fresh wrapper for every call frame that targets a Zone
+/// precompile, so this is a single [`Rc`] handle: cloning it costs one refcount bump instead of a
+/// full [`CfgEnv`](revm::context::CfgEnv) copy.
 #[derive(Clone)]
 pub struct ZonePrecompileEnv {
-    cfg: revm::context::CfgEnv<TempoHardfork>,
+    inner: Rc<ZonePrecompileEnvInner>,
+}
+
+/// The parts of the EVM configuration and transaction-local state the wrappers actually read.
+struct ZonePrecompileEnvInner {
+    spec: TempoHardfork,
+    enable_amsterdam_eip8037: bool,
+    gas_params: GasParams,
     zone_hardfork: ZoneHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
@@ -55,16 +69,20 @@ impl ZonePrecompileEnv {
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
-            cfg: cfg.clone(),
-            zone_hardfork,
-            actions,
-            non_creditable_slots,
+            inner: Rc::new(ZonePrecompileEnvInner {
+                spec: cfg.spec,
+                enable_amsterdam_eip8037: cfg.enable_amsterdam_eip8037,
+                gas_params: cfg.gas_params.clone(),
+                zone_hardfork,
+                actions,
+                non_creditable_slots,
+            }),
         }
     }
 
     /// Returns the active Zone-owned protocol revision.
-    pub const fn zone_hardfork(&self) -> ZoneHardfork {
-        self.zone_hardfork
+    pub fn zone_hardfork(&self) -> ZoneHardfork {
+        self.inner.zone_hardfork
     }
 }
 
@@ -104,7 +122,7 @@ pub(crate) fn create_precompile(
     rules: impl CallRules,
     execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
 ) -> DynPrecompile {
-    let env = env.clone();
+    let env = env.inner.clone();
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
         if !input.is_direct_call() {
             return Ok(PrecompileOutput::revert(
@@ -134,10 +152,10 @@ pub(crate) fn create_precompile(
             input.internals,
             fixed_gas.map_or(input.gas, |_| u64::MAX),
             input.reservoir,
-            env.cfg.spec,
-            env.cfg.enable_amsterdam_eip8037,
+            env.spec,
+            env.enable_amsterdam_eip8037,
             input.is_static,
-            env.cfg.gas_params.clone(),
+            env.gas_params.clone(),
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());

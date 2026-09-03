@@ -90,29 +90,22 @@ pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
-use alloc::rc::Rc;
-use core::cell::RefCell;
-
 use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
-use revm::context::CfgEnv;
-use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _,
     RECEIVE_POLICY_GUARD_ADDRESS, STORAGE_CREDITS_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
-    storage::actions::StorageActions,
-    storage_credits::{NonCreditableSlots, StorageCredits},
+    storage_credits::StorageCredits,
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token, is_tip20_prefix},
     tip403_registry::TIP403Registry,
 };
 #[cfg(feature = "std")]
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
-use zone_hardfork::ZoneHardfork;
 
 /// Registers every precompile that is available to a Zone EVM.
 ///
@@ -123,16 +116,11 @@ use zone_hardfork::ZoneHardfork;
 /// Existing Tempo precompiles that are not supported by Zones are explicitly removed here.
 pub fn extend_zone_precompiles<P>(
     precompiles: &mut PrecompilesMap,
-    cfg: &CfgEnv<TempoHardfork>,
-    zone_hardfork: ZoneHardfork,
+    env: ZonePrecompileEnv,
     l1: L1State<P>,
-    actions: StorageActions,
-    non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 ) where
     P: L1StorageReader,
 {
-    let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
-
     precompiles.set_precompile_lookup(move |address: &Address| {
         #[cfg(feature = "std")]
         if *address == ZONE_OUTBOX_ADDRESS {
@@ -224,3 +212,59 @@ pub fn create_tip20_precompile(address: Address, env: &ZonePrecompileEnv) -> Dyn
 #[cfg(any(test, feature = "test-utils"))]
 #[doc(hidden)]
 pub mod test_utils;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::rc::Rc;
+    use alloy_primitives::{address, map::AddressSet};
+    use core::cell::RefCell;
+    use revm::{context::CfgEnv, handler::PrecompileProvider, precompile::Precompiles};
+    use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_precompiles::{
+        storage::actions::StorageActions, storage_credits::NonCreditableSlots,
+    };
+
+    use crate::test_utils::{MockL1Reader, TestContext};
+
+    /// Zone precompiles must stay out of the warm address set: revm warms
+    /// [`PrecompileProvider::warm_addresses`] at the start of every transaction, so registering
+    /// them there would turn cold CALLs into warm ones and change consensus gas.
+    #[test]
+    fn zone_precompiles_are_resolved_without_warming_their_addresses() {
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::latest());
+        let before: AddressSet =
+            PrecompileProvider::<TestContext>::warm_addresses(&precompiles).clone();
+
+        let env = ZonePrecompileEnv::new(
+            &CfgEnv::<TempoHardfork>::default(),
+            zone_hardfork::ZoneHardfork::Z0,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        extend_zone_precompiles(
+            &mut precompiles,
+            env,
+            L1State::new(MockL1Reader::default(), Address::ZERO),
+        );
+
+        let after = PrecompileProvider::<TestContext>::warm_addresses(&precompiles);
+        assert_eq!(&before, after);
+
+        for address in [
+            TEMPO_STATE_ADDRESS,
+            ZONE_INBOX_ADDRESS,
+            ZONE_OUTBOX_ADDRESS,
+            ZONE_FEE_MANAGER_ADDRESS,
+            TIP403_REGISTRY_ADDRESS,
+            NONCE_PRECOMPILE_ADDRESS,
+            ACCOUNT_KEYCHAIN_ADDRESS,
+            RECEIVE_POLICY_GUARD_ADDRESS,
+            STORAGE_CREDITS_ADDRESS,
+            address!("0x20C0000000000000000000000000000000000001"),
+        ] {
+            assert!(precompiles.get(&address).is_some(), "{address} unresolved");
+            assert!(!after.contains(&address), "{address} became warm");
+        }
+    }
+}

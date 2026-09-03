@@ -19,7 +19,7 @@ pub use zone_evm::{ZoneEvm, validate_transaction};
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
-    precompiles::{L1State, L1StorageReader, extend_zone_precompiles},
+    precompiles::{L1State, L1StorageReader, ZonePrecompileEnv, extend_zone_precompiles},
 };
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
@@ -89,18 +89,14 @@ where
         zone_hardfork: zone_hardfork::ZoneHardfork,
     ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
         let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new());
-        let cfg = evm.ctx().cfg.clone();
-        let actions = StorageActions::disabled();
-        let non_creditable_slots = evm.non_creditable_slots();
-        let (_, _, precompiles) = evm.components_mut();
-        extend_zone_precompiles(
-            precompiles,
-            &cfg,
+        let env = ZonePrecompileEnv::new(
+            &evm.ctx().cfg,
             zone_hardfork,
-            l1,
-            actions,
-            non_creditable_slots,
+            StorageActions::disabled(),
+            evm.non_creditable_slots(),
         );
+        let (_, _, precompiles) = evm.components_mut();
+        extend_zone_precompiles(precompiles, env, l1);
         evm
     }
 }

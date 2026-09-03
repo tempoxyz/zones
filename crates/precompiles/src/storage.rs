@@ -60,53 +60,69 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// Clones share the selected anchor and provider handle so the Zone database adapter, `TempoState`,
 /// and other L1-backed precompiles enforce one view of L1 state. A new `L1State` must be created
 /// for each EVM execution context; it must not be shared across independent EVMs.
-#[derive(Clone)]
+///
+/// The Zone precompile lookup clones this handle for every call frame that resolves an L1-backed
+/// precompile, so the shared state sits behind a single [`Rc`]: cloning is one refcount bump.
 pub struct L1State<P> {
+    inner: Rc<L1StateInner<P>>,
+}
+
+struct L1StateInner<P> {
     /// Tempo block number selected for the current transaction attempt.
-    anchor: Rc<Cell<Option<u64>>>,
+    anchor: Cell<Option<u64>>,
     /// `(account, slot)` keys successfully accessed during the current transaction attempt.
     ///
     /// Used for cold/warm gas accounting. Unlike REVM's journal, this access set is not rolled back
     /// when a subcall reverts, preserving charges for potentially incurred L1 fetch work and
     /// simplifying the accounting model.
-    access_set: Rc<RefCell<HashSet<(Address, B256)>>>,
+    access_set: RefCell<HashSet<(Address, B256)>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
     /// ZonePortal read through the L1 provider by explicit storage operations.
     portal_address: Address,
 }
 
+impl<P> Clone for L1State<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+        }
+    }
+}
+
 impl<P> L1State<P> {
     /// Creates execution-local L1 state backed by `provider` for `portal_address`.
     pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
-            anchor: Rc::new(Cell::new(None)),
-            access_set: Rc::new(RefCell::new(HashSet::default())),
-            provider,
-            portal_address,
+            inner: Rc::new(L1StateInner {
+                anchor: Cell::new(None),
+                access_set: RefCell::new(HashSet::default()),
+                provider,
+                portal_address,
+            }),
         }
     }
 
     /// Clears bookkeeping after the current transaction attempt completes.
     pub fn reset_transaction_state(&self) {
-        self.anchor.set(None);
-        self.access_set.borrow_mut().clear();
+        self.inner.anchor.set(None);
+        self.inner.access_set.borrow_mut().clear();
     }
 
     /// Returns the anchor selected for the current transaction, if any.
     pub fn get_anchor(&self) -> Option<u64> {
-        self.anchor.get()
+        self.inner.anchor.get()
     }
 
     /// Returns the configured ZonePortal address.
-    pub const fn portal(&self) -> Address {
-        self.portal_address
+    pub fn portal(&self) -> Address {
+        self.inner.portal_address
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
         match self.get_anchor() {
             None => {
-                self.anchor.set(Some(new));
+                self.inner.anchor.set(Some(new));
                 Ok(())
             }
             Some(current) if current == new => Ok(()),
@@ -125,7 +141,7 @@ impl<P> L1State<P> {
             return Err(L1StateError::AnchorConflict { current, new: to });
         }
 
-        self.anchor.set(Some(to));
+        self.inner.anchor.set(Some(to));
         Ok(())
     }
 }
@@ -143,7 +159,9 @@ impl<P: L1StorageReader> L1State<P> {
         block_number: u64,
     ) -> Result<B256, L1StateError> {
         self.set_anchor(block_number)?;
-        self.provider.read_l1_storage(account, slot, block_number)
+        self.inner
+            .provider
+            .read_l1_storage(account, slot, block_number)
     }
 
     /// Reads L1 storage, with gas metering, after selecting or validating `block_number` as this
@@ -155,7 +173,7 @@ impl<P: L1StorageReader> L1State<P> {
         block_number: u64,
     ) -> tempo_precompiles::Result<B256> {
         let key = (account, slot);
-        let gas_cost = if self.access_set.borrow().contains(&key) {
+        let gas_cost = if self.inner.access_set.borrow().contains(&key) {
             WARM_STORAGE_READ_COST
         } else {
             COLD_SLOAD_COST
@@ -164,7 +182,7 @@ impl<P: L1StorageReader> L1State<P> {
         let value = self
             .read_l1_storage_unmetered(account, slot, block_number)
             .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))?;
-        self.access_set.borrow_mut().insert(key);
+        self.inner.access_set.borrow_mut().insert(key);
         Ok(value)
     }
 
@@ -185,7 +203,7 @@ impl<P: L1StorageReader> L1State<P> {
         &self,
         select_slot: impl for<'a> FnOnce(&'a ZonePortal) -> &'a Slot<T>,
     ) -> tempo_precompiles::Result<T> {
-        let portal = ZonePortal::new(self.portal_address);
+        let portal = ZonePortal::new(self.portal());
         self.read_l1(select_slot(&portal))
     }
 
@@ -203,8 +221,8 @@ impl<P> fmt::Debug for L1State<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("L1State")
             .field("anchor", &self.get_anchor())
-            .field("warm_l1_slots", &self.access_set.borrow().len())
-            .field("portal_address", &self.portal_address)
+            .field("warm_l1_slots", &self.inner.access_set.borrow().len())
+            .field("portal_address", &self.portal())
             .finish_non_exhaustive()
     }
 }
