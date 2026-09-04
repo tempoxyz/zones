@@ -76,6 +76,7 @@ alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 
 # misc
+bytes.workspace = true
 clap = { workspace = true, optional = true }
 eyre.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
