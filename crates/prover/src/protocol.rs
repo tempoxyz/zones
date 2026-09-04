@@ -1,5 +1,5 @@
 use alloy_primitives::{B256, Bytes, keccak256};
-use alloy_sol_types::SolValue as _;
+use alloy_sol_types::{SolStruct as _, sol};
 use serde::{Deserialize, Serialize};
 use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 use zone_spf::{BatchOutput, BatchWitness, PublicInputs};
@@ -10,8 +10,30 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Canonical verifier configuration for the first Nitro-backed verifier policy.
 pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
 
-/// Type hash for the data placed in the Nitro attestation document's `user_data` field.
-pub const NITRO_BATCH_ATTESTATION_TYPE: &str = "NitroBatchAttestation(uint256 parentChainId,address verifier,address portal,uint32 zoneId,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,uint64 expectedWithdrawalBatchIndex,bytes32 prevBlockHash,bytes32 nextBlockHash,bytes32 prevProcessedHash,bytes32 nextProcessedHash,uint64 prevDepositNumber,uint64 nextDepositNumber,uint64 prevProcessedTokenCount,uint64 nextProcessedTokenCount,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
+sol! {
+    /// Data placed in the Nitro attestation document's `user_data` field.
+    #[derive(Debug, PartialEq, Eq)]
+    struct NitroBatchAttestation {
+        uint256 parentChainId;
+        address verifier;
+        address portal;
+        uint32 zoneId;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        uint64 expectedWithdrawalBatchIndex;
+        bytes32 prevBlockHash;
+        bytes32 nextBlockHash;
+        bytes32 prevProcessedHash;
+        bytes32 nextProcessedHash;
+        uint64 prevDepositNumber;
+        uint64 nextDepositNumber;
+        uint64 prevProcessedTokenCount;
+        uint64 nextProcessedTokenCount;
+        bytes32 withdrawalQueueHash;
+        bytes32 verifierConfigHash;
+    }
+}
 
 /// Proof material returned by an attesting prover.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -97,32 +119,27 @@ pub enum ErrorCode {
 /// same fixed verifier. The parent chain, verifier, and portal prevent cross-domain replay; every
 /// portal-facing commitment prevents reuse for a different batch.
 pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &BatchOutput) -> B256 {
-    let type_hash = keccak256(NITRO_BATCH_ATTESTATION_TYPE);
-    let verifier_config_hash = keccak256(NITRO_VERIFIER_CONFIG_V1);
-    keccak256(
-        (
-            type_hash,
-            alloy_primitives::U256::from(public_inputs.parent_chain_id),
-            ZONE_VERIFIER_ADDRESS,
-            public_inputs.portal,
-            public_inputs.zone_id,
-            public_inputs.tempo_block_number,
-            public_inputs.anchor_block_number,
-            public_inputs.anchor_block_hash,
-            public_inputs.expected_withdrawal_batch_index,
-            output.block_transition.prevBlockHash,
-            output.block_transition.nextBlockHash,
-            output.deposit_queue_transition.prevProcessedHash,
-            output.deposit_queue_transition.nextProcessedHash,
-            output.deposit_queue_transition.prevDepositNumber,
-            output.deposit_queue_transition.nextDepositNumber,
-            output.token_enablement_transition.prevProcessedTokenCount,
-            output.token_enablement_transition.nextProcessedTokenCount,
-            output.withdrawal_queue_hash,
-            verifier_config_hash,
-        )
-            .abi_encode(),
-    )
+    let attestation = NitroBatchAttestation {
+        parentChainId: alloy_primitives::U256::from(public_inputs.parent_chain_id),
+        verifier: ZONE_VERIFIER_ADDRESS,
+        portal: public_inputs.portal,
+        zoneId: public_inputs.zone_id,
+        tempoBlockNumber: public_inputs.tempo_block_number,
+        anchorBlockNumber: public_inputs.anchor_block_number,
+        anchorBlockHash: public_inputs.anchor_block_hash,
+        expectedWithdrawalBatchIndex: public_inputs.expected_withdrawal_batch_index,
+        prevBlockHash: output.block_transition.prevBlockHash,
+        nextBlockHash: output.block_transition.nextBlockHash,
+        prevProcessedHash: output.deposit_queue_transition.prevProcessedHash,
+        nextProcessedHash: output.deposit_queue_transition.nextProcessedHash,
+        prevDepositNumber: output.deposit_queue_transition.prevDepositNumber,
+        nextDepositNumber: output.deposit_queue_transition.nextDepositNumber,
+        prevProcessedTokenCount: output.token_enablement_transition.prevProcessedTokenCount,
+        nextProcessedTokenCount: output.token_enablement_transition.nextProcessedTokenCount,
+        withdrawalQueueHash: output.withdrawal_queue_hash,
+        verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
+    };
+    attestation.eip712_hash_struct()
 }
 
 #[cfg(test)]
@@ -191,7 +208,7 @@ mod tests {
         assert_eq!(
             nitro_batch_attestation_hash(&public_inputs, &output),
             alloy_primitives::b256!(
-                "0x764c1f24b00b253ae1a06fe31ba8858a2352e9350e09a6c6028bea47233c0cb9"
+                "0xdf555b114bb028244692775b994c6a766999bd3f68307c9985fcf0122c449b01"
             ),
         );
     }
