@@ -1,5 +1,11 @@
 use super::*;
-use crate::{abi::DepositType, subscriber::L1SubscriberError};
+use crate::{
+    abi::DepositType,
+    subscriber::{
+        L1SubscriberError, collect_portal_logs, collect_state_cache_invalidations,
+        decode_portal_events,
+    },
+};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
@@ -1683,16 +1689,17 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 }
 
 #[test]
-fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
-    let mut subscriber = test_subscriber(9);
-    subscriber.config.retain_portal_evidence = true;
+fn decode_portal_events_fails_closed_on_corrupt_recognized_log() {
+    let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
 
     // A recognized topic0 with garbage payload must reject the whole block, never be skipped.
     let corrupt = corrupt_recognized_portal_log(portal);
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
 
-    let err = subscriber.extract_events(10, &[receipt]).unwrap_err();
+    let receipts = [receipt];
+    let portal_logs = collect_portal_logs(&receipts, portal);
+    let err = decode_portal_events(10, &portal_logs).unwrap_err();
     assert!(
         err.to_string()
             .contains("failed to decode a portal event in L1 block 10")
@@ -1710,10 +1717,12 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let receipts = [receipt];
+    let portal_logs = collect_portal_logs(&receipts, portal);
+    let events = decode_portal_events(10, &portal_logs).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
-    assert_eq!(portal_logs.unwrap().len(), 1);
+    assert_eq!(portal_logs.len(), 1);
 }
 
 #[test]
@@ -1748,9 +1757,13 @@ fn pause_events_invalidate_cached_portal_storage() {
     ];
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
-    let (_, invalidated, _) = subscriber.extract_events(1, &[receipt]).unwrap();
-    assert!(invalidated.contains(&portal));
-    subscriber.update_l1_state_anchor(1, &invalidated);
+    let receipts = [receipt];
+    let portal_logs = collect_portal_logs(&receipts, portal);
+    let portal_events = decode_portal_events(1, &portal_logs).unwrap();
+    let state_cache_invalidations =
+        collect_state_cache_invalidations(&receipts, portal, &portal_events);
+    assert!(state_cache_invalidations.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &state_cache_invalidations);
     assert_eq!(
         subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
