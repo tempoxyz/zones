@@ -1,5 +1,11 @@
 use super::*;
-use crate::{abi::DepositType, subscriber::L1SubscriberError};
+use crate::{
+    abi::DepositType,
+    subscriber::{
+        L1SubscriberError, collect_portal_logs, collect_state_cache_invalidations,
+        decode_portal_events,
+    },
+};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
@@ -746,7 +752,7 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 }
 
 #[tokio::test]
-async fn test_sync_finalized_ingests_missing_finalized_range() {
+async fn test_sync_finalized_blocks_ingests_missing_finalized_range() {
     let subscriber = test_subscriber(9);
     let asserter = Asserter::new();
     let l1_provider =
@@ -769,11 +775,11 @@ async fn test_sync_finalized_ingests_missing_finalized_range() {
 
     let mut next_block = 10;
     subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap();
     subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap();
     assert_eq!(next_block, 13);
@@ -818,7 +824,7 @@ async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
 }
 
 #[tokio::test]
-async fn test_sync_finalized_does_not_refetch_current_cursor() {
+async fn test_sync_finalized_blocks_does_not_refetch_current_cursor() {
     let subscriber = test_subscriber(10);
     let asserter = Asserter::new();
     let l1_provider =
@@ -827,7 +833,7 @@ async fn test_sync_finalized_does_not_refetch_current_cursor() {
 
     let mut next_block = 11;
     subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap();
 
@@ -837,7 +843,7 @@ async fn test_sync_finalized_does_not_refetch_current_cursor() {
 }
 
 #[tokio::test]
-async fn test_sync_finalized_preserves_progress_after_partial_failure() {
+async fn test_sync_finalized_blocks_preserves_progress_after_partial_failure() {
     let subscriber = test_subscriber(9);
     let asserter = Asserter::new();
     let l1_provider =
@@ -851,7 +857,7 @@ async fn test_sync_finalized_preserves_progress_after_partial_failure() {
 
     let mut next_block = 10;
     subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .expect_err("the first attempt should fail while fetching block 11");
     assert_eq!(next_block, 11);
@@ -859,7 +865,7 @@ async fn test_sync_finalized_preserves_progress_after_partial_failure() {
     asserter.push_success(&Some(header_response(header_11.clone())));
     push_header_and_empty_receipts(&asserter, header_11);
     subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap();
 
@@ -1683,16 +1689,17 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 }
 
 #[test]
-fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
-    let mut subscriber = test_subscriber(9);
-    subscriber.config.retain_portal_evidence = true;
+fn decode_portal_events_fails_closed_on_corrupt_recognized_log() {
+    let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
 
     // A recognized topic0 with garbage payload must reject the whole block, never be skipped.
     let corrupt = corrupt_recognized_portal_log(portal);
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
 
-    let err = subscriber.extract_events(10, &[receipt]).unwrap_err();
+    let receipts = [receipt];
+    let portal_logs = collect_portal_logs(&receipts, portal);
+    let err = decode_portal_events(10, &portal_logs).unwrap_err();
     assert!(
         err.to_string()
             .contains("failed to decode a portal event in L1 block 10")
@@ -1710,10 +1717,12 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let receipts = [receipt];
+    let portal_logs = collect_portal_logs(&receipts, portal);
+    let events = decode_portal_events(10, &portal_logs).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
-    assert_eq!(portal_logs.unwrap().len(), 1);
+    assert_eq!(portal_logs.len(), 1);
 }
 
 #[test]
@@ -1748,9 +1757,13 @@ fn pause_events_invalidate_cached_portal_storage() {
     ];
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
-    let (_, invalidated, _) = subscriber.extract_events(1, &[receipt]).unwrap();
-    assert!(invalidated.contains(&portal));
-    subscriber.update_l1_state_anchor(1, &invalidated);
+    let receipts = [receipt];
+    let portal_logs = collect_portal_logs(&receipts, portal);
+    let portal_events = decode_portal_events(1, &portal_logs).unwrap();
+    let state_cache_invalidations =
+        collect_state_cache_invalidations(&receipts, portal, &portal_events);
+    assert!(state_cache_invalidations.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &state_cache_invalidations);
     assert_eq!(
         subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
@@ -1778,7 +1791,7 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
 
     let mut next_block = 10;
     let err = subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1846,7 +1859,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
 
     let mut next_block = 10;
     subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap();
     assert_eq!(next_block, 11);
@@ -1891,7 +1904,7 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
 
     let mut next_block = 10;
     let err = subscriber
-        .sync_finalized(&l1_provider, &mut next_block)
+        .sync_finalized_blocks(&l1_provider, &mut next_block)
         .await
         .unwrap_err();
     assert!(matches!(
