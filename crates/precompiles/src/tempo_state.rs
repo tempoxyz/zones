@@ -22,7 +22,9 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
-use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+use zone_primitives::constants::{
+    MAX_TEMPO_HEADERS_PER_ZONE_BLOCK, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
+};
 
 alloy_sol_types::sol! {
     error StaticCallNotAllowed();
@@ -65,19 +67,18 @@ impl TempoState {
                 "invalid Tempo genesis header RLP: trailing bytes after header".into(),
             ));
         }
-        self.write_checkpoint(header_rlp, header.number())?;
+        self.write_checkpoint(keccak256(header_rlp), header.number())?;
         Ok(())
     }
 
     fn write_checkpoint(
         &mut self,
-        header_rlp: &[u8],
+        block_hash: B256,
         block_number: u64,
-    ) -> tempo_precompiles::Result<B256> {
-        let block_hash = keccak256(header_rlp);
+    ) -> tempo_precompiles::Result<()> {
         self.tempo_block_hash.write(block_hash)?;
         self.tempo_block_number.write(block_number)?;
-        Ok(block_hash)
+        Ok(())
     }
 
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
@@ -86,57 +87,80 @@ impl TempoState {
 
     /// Validate and apply a finalized Tempo checkpoint transition.
     ///
-    /// IMPORTANT: this operation only enforces local continuity and Zone-time alignment: the
-    /// decoded block number must increment by one, its parent hash must match the previously stored
-    /// Tempo hash, and its timestamp must not exceed the executing Zone block's timestamp.
+    /// IMPORTANT: this operation only enforces local continuity and Zone-time alignment. The
+    /// first header must directly extend the stored Tempo checkpoint, and every subsequent header
+    /// must directly extend the preceding header. The final Tempo timestamp is a lower bound for
+    /// the Zone block timestamp.
     ///
     /// Canonicality is a separate proof obligation: the batch proof must bind the imported header
     /// hash and state root to the canonical settlement anchor and authenticate every Tempo storage
     /// read against that exact root.
     ///
     /// This typed operation is shared by the public `finalizeTempo` ABI and the native Inbox.
-    pub(crate) fn finalize_checkpoint<P>(
+    pub(crate) fn finalize_checkpoints<P>(
         &mut self,
         l1: &L1State<P>,
-        header_rlp: Bytes,
+        headers: &[Bytes],
     ) -> ZoneResult<()> {
-        let prev_block_hash = self.tempo_block_hash.read()?;
-        let prev_block_number = self.tempo_block_number.read()?;
-
-        let mut header_cursor = header_rlp.as_ref();
-        let header = TempoHeader::decode(&mut header_cursor)
-            .map_err(|_| TempoStateError::invalid_rlp_data())?;
-        if !header_cursor.is_empty() {
+        if headers.is_empty() || headers.len() > MAX_TEMPO_HEADERS_PER_ZONE_BLOCK {
             return Err(TempoStateError::invalid_rlp_data().into());
         }
+
+        let initial_block_number = self.tempo_block_number.read()?;
+        let mut previous_block_number = initial_block_number;
+        let mut previous_block_hash = self.tempo_block_hash.read()?;
+        if previous_block_hash.is_zero() {
+            return Err(TempoStateError::invalid_parent_hash().into());
+        }
+        let mut final_state_root = B256::ZERO;
+        let mut final_timestamp = 0;
+        let mut final_timestamp_millis_part = 0;
+
+        for header_rlp in headers {
+            let mut header_cursor = header_rlp.as_ref();
+            let header = TempoHeader::decode(&mut header_cursor)
+                .map_err(|_| TempoStateError::invalid_rlp_data())?;
+            if !header_cursor.is_empty() {
+                return Err(TempoStateError::invalid_rlp_data().into());
+            }
+            if header.parent_hash() != previous_block_hash {
+                return Err(TempoStateError::invalid_parent_hash().into());
+            }
+            if previous_block_number.checked_add(1) != Some(header.number()) {
+                return Err(TempoStateError::invalid_block_number().into());
+            }
+            previous_block_hash = keccak256(header_rlp);
+            previous_block_number = header.number();
+            final_state_root = header.state_root();
+            final_timestamp = header.timestamp();
+            final_timestamp_millis_part = header.timestamp_millis_part;
+        }
+
         self.storage.with_block_env(|zone_block| {
-            if zone_block.timestamp_millis() < U256::from(header.timestamp_millis()) {
+            let final_timestamp_millis = U256::from(final_timestamp)
+                .saturating_mul(U256::from(1000))
+                .saturating_add(U256::from(final_timestamp_millis_part));
+            if zone_block.timestamp_millis() < final_timestamp_millis {
                 return Err(TempoStateError::invalid_timestamp());
             }
             Ok(())
         })?;
-        if header.parent_hash() != prev_block_hash {
-            return Err(TempoStateError::invalid_parent_hash().into());
-        }
-        if prev_block_number.checked_add(1) != Some(header.number()) {
-            return Err(TempoStateError::invalid_block_number().into());
-        }
 
-        l1.advance_anchor(prev_block_number, header.number())?;
-        let tempo_block_hash = self.write_checkpoint(&header_rlp, header.number())?;
+        l1.advance_anchor(initial_block_number, previous_block_number)?;
+        self.write_checkpoint(previous_block_hash, previous_block_number)?;
         self.emit_event(TempoStateAbi::TempoBlockFinalized {
-            blockHash: tempo_block_hash,
-            blockNumber: header.number(),
-            stateRoot: header.state_root(),
+            blockHash: previous_block_hash,
+            blockNumber: previous_block_number,
+            stateRoot: final_state_root,
         })?;
         Ok(())
     }
 
-    fn apply_checkpoint<P>(
+    fn apply_checkpoints<P>(
         &mut self,
         l1: &L1State<P>,
         sender: Address,
-        call: TempoStateAbi::finalizeTempoCall,
+        headers: &[Bytes],
     ) -> PrecompileResult {
         if self.storage.is_static() {
             return self.revert_error(StaticCallNotAllowed {});
@@ -145,7 +169,7 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::OnlyZoneInbox {});
         }
 
-        self.finalize_checkpoint(l1, call.header)
+        self.finalize_checkpoints(l1, headers)
             .encode_precompile_result(0, 0, |()| Bytes::new())
     }
 
@@ -176,7 +200,14 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
-                    finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
+                    #[schedule(until = T12)]
+                    finalizeTempo_0(call) => {
+                        self.apply_checkpoints(l1, msg_sender, core::slice::from_ref(&call.header))
+                    },
+                    #[schedule(since = T12)]
+                    finalizeTempo_1(call) => {
+                        self.apply_checkpoints(l1, msg_sender, &call.headers)
+                    },
                 }
             },
         )
@@ -188,14 +219,17 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context, test_context_with_hardfork,
+        test_env, test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::storage::StorageCtx;
+    use tempo_zone_contracts::{finalizeTempoCall, legacyFinalizeTempoCall};
 
     struct TempoStateHarness {
         ctx: TestContext,
@@ -205,7 +239,14 @@ mod tests {
 
     impl TempoStateHarness {
         fn new(header: &TempoHeader) -> eyre::Result<Self> {
-            let mut ctx = test_context();
+            Self::new_with_context(header, test_context())
+        }
+
+        fn new_with_hardfork(header: &TempoHeader, hardfork: TempoHardfork) -> eyre::Result<Self> {
+            Self::new_with_context(header, test_context_with_hardfork(hardfork))
+        }
+
+        fn new_with_context(header: &TempoHeader, mut ctx: TestContext) -> eyre::Result<Self> {
             let encoded = encode_header(header);
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -267,8 +308,32 @@ mod tests {
             header: Bytes,
             is_static: bool,
         ) -> PrecompileResult {
-            let data = TempoStateAbi::finalizeTempoCall { header }.abi_encode();
+            let data = finalizeTempoCall {
+                headers: vec![header],
+            }
+            .abi_encode();
             self.call(caller, data, is_static)
+        }
+
+        fn finalize_many(&mut self, caller: Address, headers: Vec<Bytes>) -> PrecompileResult {
+            let data = finalizeTempoCall { headers }.abi_encode();
+            self.call(caller, data, false)
+        }
+
+        fn finalize_legacy(
+            &mut self,
+            caller: Address,
+            header: &TempoHeader,
+            is_static: bool,
+        ) -> PrecompileResult {
+            self.call(
+                caller,
+                legacyFinalizeTempoCall {
+                    header: encode_header(header),
+                }
+                .abi_encode(),
+                is_static,
+            )
         }
 
         fn finalize(
@@ -359,7 +424,40 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_accepts_zone_timestamp_after_anchor() -> eyre::Result<()> {
+    fn legacy_finalize_tempo_works_before_t12() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new_with_hardfork(&genesis, TempoHardfork::T11)?;
+        let child = child_header(genesis_hash, 1);
+        harness.set_block_timestamp(&child);
+
+        let output = harness.finalize_legacy(ZONE_INBOX_ADDRESS, &child, false)?;
+        assert!(output.is_success());
+        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+    }
+
+    #[test]
+    fn finalize_tempo_accepts_consecutive_header_range() -> eyre::Result<()> {
+        let genesis = TempoHeader::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut first = child_header(genesis_hash, 1);
+        let first_hash = keccak256(encode_header(&first));
+        let second = child_header(first_hash, 2);
+        first.inner.timestamp = second.inner.timestamp;
+        first.timestamp_millis_part = second.timestamp_millis_part;
+
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        harness.set_block_timestamp(&second);
+        let output = harness.finalize_many(
+            ZONE_INBOX_ADDRESS,
+            vec![encode_header(&first), encode_header(&second)],
+        )?;
+        assert!(output.is_success());
+        harness.assert_checkpoint(keccak256(encode_header(&second)), 2)
+    }
+
+    #[test]
+    fn finalize_tempo_accepts_later_zone_timestamp() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
@@ -373,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_when_zone_timestamp_precedes_anchor_seconds() -> eyre::Result<()> {
+    fn finalize_tempo_reverts_on_earlier_zone_timestamp_seconds() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;
@@ -392,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_when_zone_timestamp_precedes_anchor_millis() -> eyre::Result<()> {
+    fn finalize_tempo_reverts_on_earlier_zone_timestamp_millis() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
         let mut harness = TempoStateHarness::new(&genesis)?;

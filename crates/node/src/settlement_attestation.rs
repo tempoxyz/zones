@@ -14,14 +14,18 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
-    IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+    IZoneOutbox, LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 use zone_p2p::P2pCommand;
 
 use crate::replication::AttestationContext;
-use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
+use zone_sequencer::{
+    SettlementAbi,
+    attestation::{SettlementAttestation, SignedSettlementAttestation},
+};
 
 /// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
 const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -119,11 +123,12 @@ struct BlockCommitments {
     tempo_block_number: u64,
     processed_deposit_hash: B256,
     processed_deposit_number: u64,
+    processed_token_count: u64,
     withdrawal: Option<(B256, u64)>,
 }
 
 /// Extract commitments produced by the deterministic system transactions in a zone block.
-fn block_commitments<P>(provider: &P, number: u64) -> eyre::Result<BlockCommitments>
+fn block_commitments<P>(provider: &P, number: u64) -> eyre::Result<Option<BlockCommitments>>
 where
     P: ReceiptProvider,
 {
@@ -136,19 +141,35 @@ where
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
     let mut processed_deposit_number = None;
+    let mut processed_token_count = None;
     let mut withdrawal = None;
 
     for receipt in receipts {
         for log in receipt.logs() {
-            if log.address == ZONE_INBOX_ADDRESS
-                && log.topics().first() == Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
-            {
-                let event = IZoneInbox::TempoAdvanced::decode_log(log)
-                    .wrap_err_with(|| format!("invalid TempoAdvanced log in block {number}"))?;
-                anchor_hash = Some(event.tempoBlockHash);
-                tempo_block_number = Some(event.tempoBlockNumber);
-                processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
-                processed_deposit_number = Some(event.lastProcessedDepositNumber);
+            if log.address == ZONE_INBOX_ADDRESS {
+                match log.topics().first().copied() {
+                    Some(TempoAdvanced::SIGNATURE_HASH) => {
+                        let event = TempoAdvanced::decode_log(log).wrap_err_with(|| {
+                            format!("invalid post-T12 TempoAdvanced log in block {number}")
+                        })?;
+                        anchor_hash = Some(event.tempoBlockHash);
+                        tempo_block_number = Some(event.tempoBlockNumber);
+                        processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
+                        processed_deposit_number = Some(event.lastProcessedDepositNumber);
+                        processed_token_count = Some(event.lastProcessedEnabledTokenCount);
+                    }
+                    Some(LegacyTempoAdvanced::SIGNATURE_HASH) => {
+                        let event = LegacyTempoAdvanced::decode_log(log).wrap_err_with(|| {
+                            format!("invalid legacy TempoAdvanced log in block {number}")
+                        })?;
+                        anchor_hash = Some(event.tempoBlockHash);
+                        tempo_block_number = Some(event.tempoBlockNumber);
+                        processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
+                        processed_deposit_number = Some(event.lastProcessedDepositNumber);
+                        processed_token_count = Some(0);
+                    }
+                    _ => {}
+                }
             } else if log.address == ZONE_OUTBOX_ADDRESS
                 && log.topics().first() == Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
             {
@@ -159,7 +180,13 @@ where
         }
     }
 
-    Ok(BlockCommitments {
+    // Checkpoint-only blocks have no BatchFinalized or TempoAdvanced event. They are not
+    // settlement boundaries and must remain transparent to the previous-boundary scan.
+    let Some(withdrawal) = withdrawal else {
+        return Ok(None);
+    };
+
+    Ok(Some(BlockCommitments {
         tempo_block_hash: anchor_hash
             .ok_or_eyre(format!("block {number} is missing TempoAdvanced"))?,
         tempo_block_number: tempo_block_number
@@ -168,20 +195,21 @@ where
             .ok_or_eyre(format!("block {number} is missing its deposit commitment"))?,
         processed_deposit_number: processed_deposit_number
             .ok_or_eyre(format!("block {number} is missing its deposit number"))?,
-        withdrawal,
-    })
+        processed_token_count: processed_token_count
+            .ok_or_eyre(format!("block {number} is missing its token cursor"))?,
+        withdrawal: Some(withdrawal),
+    }))
 }
 
 /// Get the previous batch's (i.e the last block in the previous batch) block_hash,
-/// deposit_hash and processed deposit number. These values
+/// deposit_hash, processed_deposit_number, and processed_token_count. These values
 /// are used to identify the previous batch while submitting the current batch.
-fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64)>
+fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64, u64)>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
     for candidate in (1..number).rev() {
-        let commitments = block_commitments(provider, candidate)?;
-        if commitments.withdrawal.is_some() {
+        if let Some(commitments) = block_commitments(provider, candidate)? {
             let hash = provider
                 .sealed_header(candidate)?
                 .map(|header| header.hash())
@@ -190,12 +218,13 @@ where
                 hash,
                 commitments.processed_deposit_hash,
                 commitments.processed_deposit_number,
+                commitments.processed_token_count,
             ));
         }
     }
     // A fresh ZonePortal has not accepted any zone tip yet, so its blockHash is zero. The first
     // batch must extend that on-chain value rather than the local zone genesis hash.
-    Ok((B256::ZERO, B256::ZERO, 0))
+    Ok((B256::ZERO, B256::ZERO, 0, 0))
 }
 
 /// Build the settlement attestation at a batch boundary in the exact format ZonePortal expects.
@@ -203,21 +232,24 @@ pub(crate) async fn build_settlement_attestation<P>(
     provider: &P,
     number: u64,
     context: &AttestationContext,
-    proposed_anchor: Option<(u64, B256)>,
+    anchor: (u64, B256),
 ) -> eyre::Result<Option<SettlementAttestation>>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
-    let commitments = block_commitments(provider, number)?;
-    let Some((withdrawal_queue_hash, withdrawal_batch_index)) = commitments.withdrawal else {
+    let Some(commitments) = block_commitments(provider, number)? else {
         return Ok(None);
     };
+    let (withdrawal_queue_hash, withdrawal_batch_index) = commitments
+        .withdrawal
+        .expect("boundary commitments include withdrawal finalization");
     let next_tip = provider
         .sealed_header(number)?
         .ok_or_eyre(format!("missing batch-tip header {number}"))?
         .hash();
-    let (previous_tip, previous_deposit_hash, previous_deposit_number) =
+    let (previous_tip, previous_deposit_hash, previous_deposit_number, previous_token_count) =
         previous_batch(provider, number)?;
+    let settlement_abi = SettlementAbi::from_l1(&context.l1_provider).await?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
     let (set_version, portal_batch_index, verifier, portal_tip) = context
@@ -239,25 +271,7 @@ where
         "zone withdrawal batch index {withdrawal_batch_index} does not follow portal index {portal_batch_index}"
     );
 
-    let (anchor_block_number, anchor_block_hash) = if let Some(anchor) = proposed_anchor {
-        anchor
-    } else {
-        let l1_tip = context.l1_provider.get_block_number().await?;
-        let gap = l1_tip.saturating_sub(commitments.tempo_block_number);
-        if gap < context.anchor_config.effective_window() {
-            (commitments.tempo_block_number, commitments.tempo_block_hash)
-        } else {
-            let anchor_number = l1_tip.saturating_sub(context.anchor_config.safety_margin());
-            let header = context
-                .l1_provider
-                .get_header_by_number(anchor_number.into())
-                .await?
-                .ok_or_eyre(format!("missing L1 anchor header {anchor_number}"))?
-                .inner
-                .inner;
-            (anchor_number, header.hash_slow())
-        }
-    };
+    let (anchor_block_number, anchor_block_hash) = anchor;
     validate_settlement_anchor(
         context,
         commitments.tempo_block_number,
@@ -286,6 +300,8 @@ where
             )
                 .abi_encode(),
         ),
+        tokenEnablementTransitionHash: settlement_abi
+            .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
         verifierConfigHash: alloy_primitives::keccak256(Bytes::new()),
     }))
@@ -581,7 +597,26 @@ async fn propose_settlement<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
-    let Some(attestation) = build_settlement_attestation(provider, number, context, None).await?
+    let Some(commitments) = block_commitments(provider, number)? else {
+        return Ok(false);
+    };
+    if commitments.withdrawal.is_none() {
+        return Ok(false);
+    }
+    let anchor = context
+        .store
+        .prepared_anchor(number)
+        .ok_or_else(|| eyre::eyre!("zone monitor has not prepared settlement boundary {number}"))?;
+    let Some(attestation) = build_settlement_attestation(
+        provider,
+        number,
+        context,
+        (
+            anchor.block_number(commitments.tempo_block_number),
+            anchor.block_hash(),
+        ),
+    )
+    .await?
     else {
         return Ok(false);
     };
@@ -608,13 +643,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Log;
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use reth_provider::test_utils::MockEthProvider;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
     use tempo_alloy::TempoNetwork;
+    use tempo_primitives::{TempoPrimitives, TempoReceipt, TempoTxType};
     use zone_p2p::ZoneManifest;
     use zone_sequencer::attestation::AttestationStore;
 
@@ -626,6 +664,141 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("proposed L1 anchor is ahead of the current L1 tip")
+        );
+    }
+
+    #[test]
+    fn checkpoint_only_block_is_not_a_settlement_boundary() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        provider.add_receipts(1, Vec::new());
+        assert!(block_commitments(&provider, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_tempo_advanced_preserves_zero_token_cursor() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let tempo_advanced = LegacyTempoAdvanced {
+            tempoBlockHash: B256::repeat_byte(0x21),
+            tempoBlockNumber: 101,
+            depositsProcessed: U256::ZERO,
+            newProcessedDepositQueueHash: B256::ZERO,
+            lastProcessedDepositNumber: 0,
+        };
+        let batch_finalized = IZoneOutbox::BatchFinalized {
+            withdrawalQueueHash: B256::ZERO,
+            withdrawalBatchIndex: 1,
+        };
+        provider.add_receipts(
+            1,
+            vec![TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs: vec![
+                    Log {
+                        address: ZONE_INBOX_ADDRESS,
+                        data: tempo_advanced.encode_log_data(),
+                    },
+                    Log {
+                        address: ZONE_OUTBOX_ADDRESS,
+                        data: batch_finalized.encode_log_data(),
+                    },
+                ],
+            }],
+        );
+
+        let commitments = block_commitments(&provider, 1).unwrap().unwrap();
+        assert_eq!(commitments.processed_token_count, 0);
+    }
+
+    #[test]
+    fn previous_batch_skips_checkpoint_only_blocks_across_t12() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+
+        let mut first_boundary_header = TempoHeader::default();
+        first_boundary_header.inner.number = 1;
+        let first_boundary_hash = first_boundary_header.hash_slow();
+        provider.add_header(first_boundary_hash, first_boundary_header);
+
+        let first_deposit_hash = B256::repeat_byte(0x11);
+        let first_tempo_advanced = LegacyTempoAdvanced {
+            tempoBlockHash: B256::repeat_byte(0x21),
+            tempoBlockNumber: 101,
+            depositsProcessed: U256::from(3),
+            newProcessedDepositQueueHash: first_deposit_hash,
+            lastProcessedDepositNumber: 7,
+        };
+        let first_batch_finalized = IZoneOutbox::BatchFinalized {
+            withdrawalQueueHash: B256::repeat_byte(0x31),
+            withdrawalBatchIndex: 1,
+        };
+        provider.add_receipts(
+            1,
+            vec![TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs: vec![
+                    Log {
+                        address: ZONE_INBOX_ADDRESS,
+                        data: first_tempo_advanced.encode_log_data(),
+                    },
+                    Log {
+                        address: ZONE_OUTBOX_ADDRESS,
+                        data: first_batch_finalized.encode_log_data(),
+                    },
+                ],
+            }],
+        );
+
+        for number in [2, 3] {
+            let mut header = TempoHeader::default();
+            header.inner.number = number;
+            provider.add_header(header.hash_slow(), header);
+            provider.add_receipts(number, Vec::new());
+        }
+
+        let mut current_boundary_header = TempoHeader::default();
+        current_boundary_header.inner.number = 4;
+        provider.add_header(current_boundary_header.hash_slow(), current_boundary_header);
+        let current_tempo_advanced = TempoAdvanced {
+            tempoBlockHash: B256::repeat_byte(0x24),
+            tempoBlockNumber: 104,
+            depositsProcessed: U256::from(5),
+            newProcessedDepositQueueHash: B256::repeat_byte(0x14),
+            lastProcessedDepositNumber: 12,
+            lastProcessedEnabledTokenCount: 15,
+        };
+        let current_batch_finalized = IZoneOutbox::BatchFinalized {
+            withdrawalQueueHash: B256::repeat_byte(0x34),
+            withdrawalBatchIndex: 2,
+        };
+        provider.add_receipts(
+            4,
+            vec![TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs: vec![
+                    Log {
+                        address: ZONE_INBOX_ADDRESS,
+                        data: current_tempo_advanced.encode_log_data(),
+                    },
+                    Log {
+                        address: ZONE_OUTBOX_ADDRESS,
+                        data: current_batch_finalized.encode_log_data(),
+                    },
+                ],
+            }],
+        );
+
+        let commitments = block_commitments(&provider, 4).unwrap().unwrap();
+        assert_eq!(commitments.processed_token_count, 15);
+        let previous = previous_batch(&provider, 4).unwrap();
+        assert_eq!(previous, (first_boundary_hash, first_deposit_hash, 7, 0));
+        assert_eq!(
+            SettlementAbi::T12.token_transition_hash(previous.3, commitments.processed_token_count),
+            alloy_primitives::keccak256((0_u64, 15_u64).abi_encode())
         );
     }
 

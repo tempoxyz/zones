@@ -39,6 +39,10 @@ impl ZoneInbox {
                     processedTokenEnablementHash(call) => {
                         view(call, |_| self.processed_token_enablement_hash.read())
                     },
+                    #[schedule(since = T12)]
+                    processedEnabledTokenCount(call) => {
+                        view(call, |_| self.processed_enabled_token_count.read())
+                    },
                     tempoPortal(call) => view(call, |_| Ok(l1.portal())),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     refunds(call) => typed::view(call, |call| {
@@ -52,6 +56,15 @@ impl ZoneInbox {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
                             self.advance_tempo(l1, l1.portal(), msg_sender, call)
+                                .encode_precompile_result(0, 0, |()| Bytes::new())
+                        }
+                    },
+                    #[schedule(since = T12)]
+                    advanceTempoHeaders(call) => {
+                        if self.storage.is_static() {
+                            Ok(self.storage.revert_output(Bytes::new()))
+                        } else {
+                            self.advance_tempo_headers(l1, msg_sender, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },

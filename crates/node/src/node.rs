@@ -20,11 +20,12 @@ use crate::{
     },
 };
 use alloy_chains::Chain;
-use alloy_consensus::BlockHeader as _;
-use alloy_eips::BlockNumberOrTag;
+use alloy_consensus::{BlockHeader as _, TxReceipt as _};
+use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag};
 use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::SolEvent as _;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
@@ -49,7 +50,8 @@ use reth_rpc_api::Web3ApiServer as _;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
-    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
+    BlockNumReader, EmptyBodyStorage, HeaderProvider, ReceiptProvider, StateProvider,
+    StateProviderFactory,
 };
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
@@ -77,7 +79,10 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal::{self},
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
@@ -262,6 +267,7 @@ impl ZoneNode {
             l1_fetch_concurrency,
             retry_connection_interval,
             retain_portal_evidence: false,
+            deferred_work_start: None,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -545,6 +551,11 @@ where
         );
 
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
+        let last_operational_tempo_block = latest_operational_tempo_block(ctx.node.provider())?;
+        if last_operational_tempo_block < tempo_block_number {
+            self.l1_config.deferred_work_start =
+                Some(last_operational_tempo_block.saturating_add(1));
+        }
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
@@ -1387,9 +1398,17 @@ where
                 .call()
                 .await?;
             eyre::ensure!(
-                !validity.valid,
-                "missing private decryption key for grace-valid Portal key index {key_index} at \
-                 L1 block {block_number}"
+                !validity.valid
+                // A key that has expired at the persisted checkpoint may still be needed by a deposit in the
+                // deferred Portal-work range.
+                    && self
+                        .l1_config
+                        .deferred_work_start.is_none_or(|from| validity.expiresAtBlock <= from),
+                "missing private decryption key for Portal key index {key_index} required at L1 \
+                 checkpoint {block_number} or by deferred work starting at {:?} (expires at L1 \
+                 block {})",
+                self.l1_config.deferred_work_start,
+                validity.expiresAtBlock,
             );
         }
 
@@ -1885,6 +1904,49 @@ where
 
         Ok(transaction_pool)
     }
+}
+
+/// Returns the latest Tempo block whose portal work was processed by a full `advanceTempo` import.
+///
+/// Checkpoint-only `advanceTempoHeaders` imports move the Zone's Tempo checkpoint without consuming
+/// their deposits, withdrawals, token updates, key rotations, or leader transitions. On restart,
+/// the caller uses the block after this operational boundary as the beginning of the deferred-work
+/// recovery range. If no operational import exists after genesis, the genesis Tempo anchor is the
+/// boundary.
+fn latest_operational_tempo_block<P>(provider: &P) -> eyre::Result<u64>
+where
+    P: BlockNumReader + ReceiptProvider + StateProviderFactory,
+{
+    let best = provider.best_block_number()?;
+    for number in (1..=best).rev() {
+        let Some(receipts) = provider.receipts_by_block(BlockHashOrNumber::Number(number))? else {
+            continue;
+        };
+        for receipt in receipts {
+            for log in receipt.logs() {
+                if log.address != ZONE_INBOX_ADDRESS {
+                    continue;
+                }
+                match log.topics().first() {
+                    Some(topic) if topic == &TempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(TempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    Some(topic) if topic == &LegacyTempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(LegacyTempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let genesis_hash = provider
+        .block_hash(0)?
+        .ok_or_else(|| eyre::eyre!("zone genesis block hash is unavailable"))?;
+    Ok(provider
+        .state_by_block_hash(genesis_hash)?
+        .tempo_num_hash()?
+        .number)
 }
 
 #[cfg(test)]

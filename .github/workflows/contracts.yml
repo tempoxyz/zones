@@ -216,6 +216,7 @@ jobs:
       - name: Forge coverage (zone specs)
         working-directory: crates/contracts
         run: |
+          set -o pipefail
           "$GITHUB_WORKSPACE/foundry/target/release/forge" coverage \
             --ir-minimum --match-path "test/**" --exclude-tests --report summary | tee coverage.txt
           {

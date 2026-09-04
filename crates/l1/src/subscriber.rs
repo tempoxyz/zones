@@ -1,3 +1,5 @@
+use crate::queue::DeferredPortalWork;
+
 use super::*;
 use crate::{
     EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
@@ -19,6 +21,15 @@ struct L1BlockTrackerState {
     recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
+    finalized_target: Option<FinalizedTarget>,
+}
+
+/// Highest finalized L1 height announced by the subscriber and whether catch-up has verified that
+/// no newer finalized block remains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizedTarget {
+    pub number: u64,
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +82,52 @@ impl Default for L1BlockTracker {
 }
 
 impl L1BlockTracker {
+    /// Record the highest finalized L1 height the subscriber has been asked to ingest.
+    ///
+    /// This is published before backfill starts so the Zone engine does not mistake a partially
+    /// filled queue for the end of the finalized range.
+    pub fn record_finalized_target(&self, number: u64) {
+        let mut state = self.state.write();
+        let advanced = state
+            .finalized_target
+            .is_none_or(|target| number > target.number);
+        if !advanced {
+            return;
+        }
+        state.finalized_target = Some(FinalizedTarget {
+            number,
+            ready: false,
+        });
+        drop(state);
+        self.changed.send_replace(());
+    }
+
+    /// Mark an announced target ready after a second finalized read observes no remaining delta.
+    pub fn mark_finalized_target_ready(&self, number: u64) -> eyre::Result<()> {
+        let mut state = self.state.write();
+        let target = state
+            .finalized_target
+            .as_mut()
+            .ok_or_else(|| eyre::eyre!("cannot mark an unannounced finalized target ready"))?;
+        eyre::ensure!(
+            target.number == number,
+            "cannot mark finalized target {number} ready; latest announced target is {}",
+            target.number
+        );
+        if target.ready {
+            return Ok(());
+        }
+        target.ready = true;
+        drop(state);
+        self.changed.send_replace(());
+        Ok(())
+    }
+
+    /// Return the highest finalized L1 height announced by the subscriber and its sync status.
+    pub fn finalized_target(&self) -> Option<FinalizedTarget> {
+        self.state.read().finalized_target
+    }
+
     /// Initialize the last L1 height already represented by canonical local zone state.
     pub fn initialize_consumed_through(&self, number: u64) {
         let mut state = self.state.write();
@@ -127,19 +184,31 @@ impl L1BlockTracker {
     }
 
     /// Wait until the exact L1 block has been validated and applied locally.
+    ///
+    /// Queue-backed subscribers enqueue each block before publishing its observation, so success
+    /// also guarantees that the deposit queue is caught up through `block`.
     pub async fn wait_for(&self, block: NumHash) -> eyre::Result<()> {
-        self.wait_for_portal_events(block).await.map(|_| ())
+        self.wait_for_observation(block, |_| ()).await
     }
 
     /// Wait for an exact L1 block and return its receipt-authenticated portal events.
     pub async fn wait_for_portal_events(&self, block: NumHash) -> eyre::Result<L1PortalEvents> {
+        self.wait_for_observation(block, |observation| observation.portal_events.clone())
+            .await
+    }
+
+    async fn wait_for_observation<T>(
+        &self,
+        block: NumHash,
+        project: impl Fn(&L1BlockObservation) -> T,
+    ) -> eyre::Result<T> {
         let mut changed = self.changed.subscribe();
         loop {
             {
                 let state = self.state.read();
                 match state.observed.get(&block.number) {
                     Some(observation) if observation.hash == block.hash => {
-                        return Ok(observation.portal_events.clone());
+                        return Ok(project(observation));
                     }
                     Some(observation) => {
                         eyre::bail!(
@@ -374,6 +443,9 @@ pub struct L1SubscriberConfig {
     pub retry_connection_interval: std::time::Duration,
     /// Whether to retain authenticated Portal logs for external observers.
     pub retain_portal_evidence: bool,
+    /// First L1 block whose portal work was crossed by canonical checkpoint-only Zone blocks.
+    /// Startup reconstructs this suffix before following new finalized blocks.
+    pub deferred_work_start: Option<u64>,
 }
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
@@ -571,41 +643,63 @@ where
 
     /// Synchronize all missing blocks through the current finalized L1 head.
     ///
+    /// The finalized L1 head is continuously updated on every iteration,
+    /// so the loop will terminate when `next_block` reaches or exceeds the finalized height.
+    ///
     /// Callers provide the next block number and receive the next cursor after
     /// a successful sync.
-    pub(crate) async fn sync_finalized_once(
+    pub(crate) async fn sync_to_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        next_block: u64,
+        mut next_block: u64,
     ) -> Result<u64, L1SubscriberError> {
-        let finalized = self.finalized_block_number(l1_provider).await?;
-        if next_block > finalized {
-            self.record_seen_block(finalized, 0);
-            return Ok(next_block);
+        let mut finalized = self.finalized_block_number(l1_provider).await?;
+        loop {
+            self.config.block_tracker.record_finalized_target(finalized);
+            if next_block <= finalized {
+                let blocks = finalized - next_block + 1;
+                self.record_seen_block(finalized, blocks);
+                info!(
+                    from = next_block,
+                    to = finalized,
+                    blocks,
+                    "Synchronizing finalized L1 blocks"
+                );
+
+                let start = std::time::Instant::now();
+                self.backfill(l1_provider, next_block, finalized).await?;
+                self.subscriber_metrics
+                    .backfill_duration_seconds
+                    .record(start.elapsed().as_secs_f64());
+                next_block = finalized.saturating_add(1);
+            } else {
+                self.record_seen_block(finalized, 0);
+            }
+
+            let refreshed = self.finalized_block_number(l1_provider).await?;
+            if refreshed < finalized {
+                return Err(eyre::eyre!(
+                    "finalized L1 target regressed from {finalized} to {refreshed}"
+                )
+                .into());
+            }
+            self.config.block_tracker.record_finalized_target(refreshed);
+            if refreshed == finalized {
+                self.config
+                    .block_tracker
+                    .mark_finalized_target_ready(refreshed)?;
+                self.deposit_queue.notify_consumer();
+                self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
+                return Ok(next_block);
+            }
+            finalized = refreshed;
         }
-
-        let blocks = finalized - next_block + 1;
-        self.record_seen_block(finalized, blocks);
-        info!(
-            from = next_block,
-            to = finalized,
-            blocks,
-            "Synchronizing finalized L1 blocks"
-        );
-
-        let start = std::time::Instant::now();
-        self.backfill(l1_provider, next_block, finalized).await?;
-        self.subscriber_metrics
-            .backfill_duration_seconds
-            .record(start.elapsed().as_secs_f64());
-        self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
-        Ok(finalized.saturating_add(1))
     }
 
     /// Follow finalized L1 using transport-specific head notifications as wakeups.
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
-    /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
+    /// always based on the `finalized` tag read by [`Self::sync_to_finalized`].
     pub(crate) async fn follow_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
@@ -615,10 +709,10 @@ where
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued in the stream.
-        next_block = self.sync_finalized_once(l1_provider, next_block).await?;
+        next_block = self.sync_to_finalized(l1_provider, next_block).await?;
 
         while stream.next().await.is_some() {
-            next_block = self.sync_finalized_once(l1_provider, next_block).await?;
+            next_block = self.sync_to_finalized(l1_provider, next_block).await?;
         }
 
         Err(eyre::eyre!("L1 head notification stream ended").into())
@@ -808,6 +902,7 @@ where
         loop {
             let result = async {
                 let provider = self.connect().await?;
+                self.recover_deferred_work(&provider).await?;
                 let header_stream = self.subscribe_block_headers(&provider).await?;
                 info!(
                     portal = %self.config.portal_address,
@@ -833,6 +928,61 @@ where
                 }
             }
         }
+    }
+
+    async fn recover_deferred_work(
+        &self,
+        l1_provider: &impl Provider<TempoNetwork>,
+    ) -> eyre::Result<()> {
+        let Some(from) = self.config.deferred_work_start else {
+            return Ok(());
+        };
+        if self.deposit_queue.last_enqueued().is_some() {
+            return Ok(());
+        }
+        let checkpoint = self.local_state.latest_tempo_checkpoint()?;
+        if from > checkpoint.number {
+            return Ok(());
+        }
+
+        let mut deferred: Option<DeferredPortalWork> = None;
+        for block_number in from..=checkpoint.number {
+            let header = l1_provider
+                .get_header_by_number(block_number.into())
+                .await?
+                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+            let block_hash = header.hash();
+            let receipts = fetch_and_verify_receipts_for_header(
+                l1_provider,
+                NumHash::new(block_number, block_hash),
+                header.receipts_root(),
+                header.logs_bloom(),
+            )
+            .await?;
+            let (events, _, _) = self.extract_events(block_number, &receipts)?;
+            let block = L1BlockDeposits {
+                header: SealedHeader::seal_slow(header.inner.inner),
+                events,
+            };
+            if let Some(deferred) = &mut deferred {
+                deferred.push(block);
+            } else {
+                deferred = Some(DeferredPortalWork::new(block));
+            }
+        }
+        let deferred = deferred.expect("the recovered deferred range is nonempty");
+        eyre::ensure!(
+            deferred.last_num_hash() == checkpoint,
+            "recovered deferred L1 range ends at {:?}, but the local checkpoint is {checkpoint:?}",
+            deferred.last_num_hash()
+        );
+        self.deposit_queue.restore_deferred(deferred)?;
+        info!(
+            from,
+            to = checkpoint.number,
+            "Recovered portal work crossed by checkpoint-only Zone blocks"
+        );
+        Ok(())
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.

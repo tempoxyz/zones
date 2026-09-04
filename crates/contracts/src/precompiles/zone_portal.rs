@@ -1,18 +1,20 @@
 //! `ZonePortal` — deployed on Tempo L1.
 
 pub use ZonePortal::{
-    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, Withdrawal,
-    ZonePortalErrors as ZonePortalError,
+    BatchSubmitted_0 as LegacyBatchSubmitted, BatchSubmitted_1 as BatchSubmitted, BlockTransition,
+    Deposit, DepositPayload, DepositQueueTransition, TokenEnablementTransition, Withdrawal,
+    ZonePortalErrors as ZonePortalError, submitBatch_0Call as legacySubmitBatchCall,
+    submitBatch_1Call as submitBatchCall,
 };
 
 use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 
-/// Maximum number of deposits accepted by a portal in one Tempo block.
-pub const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
-/// Maximum number of token enablements imported from one Tempo block.
-pub const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
+/// Maximum deposits that may remain outstanding in portal.
+pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+/// Maximum token enablements that may remain outstanding in portal.
+pub const MAX_UNPROCESSED_TOKEN_ENABLEMENTS: usize = 8;
 /// Maximum UTF-8 byte length of each enabled token metadata string.
 pub const MAX_TOKEN_METADATA_BYTES: usize = 31;
 
@@ -88,6 +90,12 @@ crate::sol! {
             uint64 nextDepositNumber;
         }
 
+        /// Processed prefix transition for the portal's append-only enabled-token array.
+        struct TokenEnablementTransition {
+            uint64 prevProcessedTokenCount;
+            uint64 nextProcessedTokenCount;
+        }
+
         // -- Events --
 
         event DepositMade(
@@ -134,6 +142,17 @@ crate::sol! {
             bytes32 nextBlockHash,
             bytes32 withdrawalQueueHash,
             uint64 lastProcessedDepositNumber
+        );
+
+        /// T12 batch event with the processed enabled-token cursor.
+        event BatchSubmitted(
+            uint64 indexed withdrawalBatchIndex,
+            uint256 indexed withdrawalQueueIndex,
+            bytes32 nextProcessedDepositQueueHash,
+            bytes32 nextBlockHash,
+            bytes32 withdrawalQueueHash,
+            uint64 lastProcessedDepositNumber,
+            uint64 lastProcessedEnabledTokenCount
         );
 
         event WithdrawalProcessed(
@@ -227,7 +246,9 @@ crate::sol! {
         error DepositsNotActive();
         error TokenAlreadyEnabled();
         error TokenTransferPolicyNotSet();
+        error TokenEnablementCursorNotInitialized();
         error InvalidDepositTransition();
+        error InvalidTokenEnablementTransition();
         error InvalidSequencerSet();
         error SequencerConfigurationUnchanged();
         error InvalidQuorumCertificate();
@@ -287,6 +308,8 @@ crate::sol! {
         function initialize(uint32 zoneId, address initialToken, bool accessMode, bool gatewayMode, address[] calldata allowedAccounts, address[] calldata zoneGateways, address admin, address messenger, address[] calldata sequencers, uint8 threshold, address verifier, string calldata rpcUrl) external;
         function deliverWithdrawal(address to, address token, uint128 amount, bytes32 memo, uint64 gasLimit, bytes calldata callbackData) external;
         function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+        function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
+        function MAX_UNPROCESSED_TOKEN_ENABLEMENTS() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
         function paused() external view returns (bool);
         function pauseExpiry() external view returns (uint64);
@@ -304,6 +327,20 @@ crate::sol! {
             uint64 recentTempoBlockNumber,
             BlockTransition calldata blockTransition,
             DepositQueueTransition calldata depositQueueTransition,
+            bytes32 withdrawalQueueHash,
+            bytes calldata verifierConfig,
+            bytes calldata proof,
+            uint256 nextZoneHeight,
+            bytes[] calldata signatures
+        ) external;
+
+        /// Submit a batch with the enabled-token transition. Active from T12.
+        function submitBatch(
+            uint64 tempoBlockNumber,
+            uint64 recentTempoBlockNumber,
+            BlockTransition calldata blockTransition,
+            DepositQueueTransition calldata depositQueueTransition,
+            TokenEnablementTransition calldata tokenEnablementTransition,
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
             bytes calldata proof,
@@ -353,6 +390,8 @@ crate::sol! {
 
         function isTokenEnabled(address token) external view returns (bool);
         function enabledTokenCount() external view returns (uint256);
+        function lastProcessedEnabledTokenCount() external view returns (uint64);
+        function tokenEnablementCursorInitialized() external view returns (bool);
         function enabledTokenAt(uint256 index) external view returns (address);
         function tokenEnablementHash() external view returns (bytes32);
         function zoneGasRate() external view returns (uint128);
@@ -376,6 +415,53 @@ crate::sol! {
         function claimRefund(address token) external returns (uint128 amount);
     }
 }
+
+/// ZonePortal entries retired by the T12 hardfork.
+mod pre_t12_retired {
+    crate::sol! {
+        #[sol(abi)]
+        contract ZonePortalPreT12Retired {
+            struct BlockTransition {
+                bytes32 prevBlockHash;
+                bytes32 nextBlockHash;
+            }
+
+            struct DepositQueueTransition {
+                bytes32 prevProcessedHash;
+                bytes32 nextProcessedHash;
+                uint64 prevDepositNumber;
+                uint64 nextDepositNumber;
+            }
+
+            event BatchSubmitted(
+                uint64 indexed withdrawalBatchIndex,
+                uint256 indexed withdrawalQueueIndex,
+                bytes32 nextProcessedDepositQueueHash,
+                bytes32 nextBlockHash,
+                bytes32 withdrawalQueueHash,
+                uint64 lastProcessedDepositNumber
+            );
+
+            function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+            function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+
+            function submitBatch(
+                uint64 tempoBlockNumber,
+                uint64 recentTempoBlockNumber,
+                BlockTransition blockTransition,
+                DepositQueueTransition depositQueueTransition,
+                bytes32 withdrawalQueueHash,
+                bytes verifierConfig,
+                bytes proof,
+                uint256 nextZoneHeight,
+                bytes[] signatures
+            ) external;
+        }
+    }
+}
+
+#[doc(hidden)]
+pub use pre_t12_retired::ZonePortalPreT12Retired;
 
 #[cfg(feature = "rpc")]
 impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
@@ -622,6 +708,9 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
+            Self::InvalidTokenEnablementTransition(_) => {
+                f.write_str("InvalidTokenEnablementTransition")
+            }
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),

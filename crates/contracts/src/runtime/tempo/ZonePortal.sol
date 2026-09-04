@@ -17,6 +17,7 @@ import {
     QueuedDeposit,
     Role,
     TokenConfig,
+    TokenEnablementTransition,
     Withdrawal,
     WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
@@ -56,20 +57,27 @@ contract ZonePortal is IZonePortal {
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
     ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
     ///      below the buffered 200,000,000 gas ceiling.
-    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 230;
+    uint64 public constant MAX_UNPROCESSED_DEPOSITS = 230;
 
-    /// @notice Maximum tokens that may be enabled for this portal in one Tempo block.
+    /// @notice Maximum enabled tokens that may remain unprocessed by the Zone.
     /// @dev Under T9, processing 230 worst-case deposits plus 8 token enablements with maximum
     ///      metadata uses 214,832,282 gas, below the buffered 225,000,000 gas ceiling.
-    uint64 public constant MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK = 8;
+    uint64 public constant MAX_UNPROCESSED_TOKEN_ENABLEMENTS = 8;
 
     /// @notice Maximum byte length of each token metadata string copied into the zone.
     /// @dev Keeps name, symbol, and currency in Solidity's one-slot short-string representation.
     uint256 public constant MAX_TOKEN_METADATA_BYTES = 31;
 
-    /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
-    ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
-    uint64 internal constant WITHDRAWAL_BOUNCEBACK_RESERVE = 20;
+    /// @dev Reserves deposit-queue capacity for one maximum-size withdrawal batch.
+    ///      Each withdrawal can append at most one deposit: either a callback-triggered
+    ///      deposit on success or a bounce-back deposit on failure.
+    ///      The 20M batch gas ceiling fits at most 19 withdrawals, plus one slot of margin.
+    uint64 internal constant WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE = 20;
+
+    uint256 internal constant WITHDRAWAL_NOT_ENTERED = 0;
+    uint256 internal constant WITHDRAWAL_PROCESSING = 1;
+    uint256 internal constant CALLBACK_DEPOSIT_AVAILABLE = 2;
+    uint256 internal constant CALLBACK_DEPOSIT_CONSUMED = 3;
 
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
@@ -97,7 +105,7 @@ contract ZonePortal is IZonePortal {
     bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
     bytes32 internal constant VERSION_HASH = keccak256("1");
     bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
-        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -208,7 +216,7 @@ contract ZonePortal is IZonePortal {
     uint64 internal _depositCountBlock;
     uint64 internal _depositsInCurrentBlock;
 
-    /// @dev Per-Tempo-block token-enablement admission counter. Appended for upgrade safety.
+    /// @dev Retired per-Tempo-block token-enablement counters, retained for storage compatibility.
     uint64 internal _tokenEnableCountBlock;
     uint64 internal _tokensEnabledInCurrentBlock;
 
@@ -222,6 +230,13 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Time after which the corresponding configuration surface is permanently closed.
     mapping(Capability => uint64) public abdicationEffectiveAt;
+
+    /// @notice Enabled-token prefix confirmed by accepted Zone proofs.
+    /// @dev Appended after all T10 storage for upgrade safety.
+    uint64 public lastProcessedEnabledTokenCount;
+
+    /// @notice Whether the T12 token cursor has been authenticated by an operational batch.
+    bool public tokenEnablementCursorInitialized;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -277,7 +292,8 @@ contract ZonePortal is IZonePortal {
             emit RoleUpdated(account, Role.None, Role.Account);
         }
 
-        // Enable the initial token
+        // Enable the initial token. Operational token enablement remains frozen until a Zone batch
+        // authenticates a nonzero enabled-token prefix and initializes the cursor.
         _enableTokenInternal(_initialToken);
     }
 
@@ -317,10 +333,12 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier nonReentrantWithdrawal() {
-        if (_withdrawalReentrancyStatus != 0) revert ReentrantWithdrawal();
-        _withdrawalReentrancyStatus = 1;
+        if (_withdrawalReentrancyStatus != WITHDRAWAL_NOT_ENTERED) {
+            revert ReentrantWithdrawal();
+        }
+        _withdrawalReentrancyStatus = WITHDRAWAL_PROCESSING;
         _;
-        _withdrawalReentrancyStatus = 0;
+        _withdrawalReentrancyStatus = WITHDRAWAL_NOT_ENTERED;
     }
 
     /// @inheritdoc IZonePortal
@@ -643,11 +661,19 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
-    /// @dev Irreversible: once enabled, a token cannot be disabled.
+    /// @dev Irreversible: once enabled, a token cannot be disabled. Frozen until the first Zone
+    ///      batch authenticates the enabled-token cursor.
     function enableToken(address _token) external onlyAdmin {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
             revert TokenNotEnabled();
+        }
+        if (!tokenEnablementCursorInitialized) revert TokenEnablementCursorNotInitialized();
+        if (
+            _enabledTokens.length - lastProcessedEnabledTokenCount
+                >= MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+        ) {
+            revert TokenEnablementBlockCapacityExceeded(MAX_UNPROCESSED_TOKEN_ENABLEMENTS);
         }
         _enableTokenInternal(_token);
     }
@@ -669,8 +695,6 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
-        _recordTokenEnablement();
-
         // Bound the metadata copied into the zone before mutating portal or policy state. The zone
         // must initialize every token emitted in this block inside advanceTempo's fixed gas budget.
         string memory name = ITIP20(_token).name();
@@ -702,20 +726,6 @@ contract ZonePortal is IZonePortal {
         _enabledTokens.push(_token);
 
         emit TokenEnabled(_token, name, symbol, currency);
-    }
-
-    function _recordTokenEnablement() internal {
-        uint64 currentBlock = uint64(block.number);
-        if (_tokenEnableCountBlock != currentBlock) {
-            _tokenEnableCountBlock = currentBlock;
-            _tokensEnabledInCurrentBlock = 0;
-        }
-        if (_tokensEnabledInCurrentBlock >= MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK) {
-            revert TokenEnablementBlockCapacityExceeded(MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK);
-        }
-        unchecked {
-            ++_tokensEnabledInCurrentBlock;
-        }
     }
 
     /// @notice Update the zone's operator RPC endpoint.
@@ -932,16 +942,8 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
-        uint64 currentBlock = uint64(block.number);
-        if (_depositCountBlock != currentBlock) {
-            _depositCountBlock = currentBlock;
-            _depositsInCurrentBlock = 0;
-        }
-        if (_depositsInCurrentBlock >= maximum) {
+        if (depositCount - lastProcessedDepositNumber >= maximum) {
             revert DepositBlockCapacityExceeded(maximum);
-        }
-        unchecked {
-            ++_depositsInCurrentBlock;
         }
 
         currentDepositQueueHash = newCurrentDepositQueueHash;
@@ -1053,9 +1055,16 @@ contract ZonePortal is IZonePortal {
         // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(
-            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
-        );
+        uint64 maximum = MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE;
+
+        // A withdrawal callback may return one deposit through the capacity reserved from
+        // public deposits. Further deposits remain subject to the public cap.
+        if (_withdrawalReentrancyStatus == CALLBACK_DEPOSIT_AVAILABLE) {
+            _withdrawalReentrancyStatus = CALLBACK_DEPOSIT_CONSUMED;
+            maximum = MAX_UNPROCESSED_DEPOSITS;
+        }
+
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash, maximum);
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -1091,6 +1100,13 @@ contract ZonePortal is IZonePortal {
         whenNotPaused
         nonReentrantWithdrawal
     {
+        uint256 unprocessed = depositCount - lastProcessedDepositNumber;
+        if (
+            unprocessed > MAX_UNPROCESSED_DEPOSITS
+                || withdrawals.length > MAX_UNPROCESSED_DEPOSITS - unprocessed
+        ) {
+            revert DepositBlockCapacityExceeded(MAX_UNPROCESSED_DEPOSITS);
+        }
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
         bytes32 nextQueue = remainingQueue;
 
@@ -1176,9 +1192,15 @@ contract ZonePortal is IZonePortal {
 
         bytes32 depositQueueHashBefore = currentDepositQueueHash;
 
+        _withdrawalReentrancyStatus = CALLBACK_DEPOSIT_AVAILABLE;
+
         // We copy whatever the messenger reverts with, so keep its errors small.
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
+
+        // Return to the normal withdrawal-processing state. If relayMessage reverts, this write
+        // and any callback deposit are reverted together.
+        _withdrawalReentrancyStatus = WITHDRAWAL_PROCESSING;
 
         // In closed access, this proves only that some deposit was appended to this portal; it does
         // not bind that deposit to the callback's token, amount, or recipient. Callback data is
@@ -1276,8 +1298,7 @@ contract ZonePortal is IZonePortal {
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit =
-            _recordDeposit(newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK);
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS);
 
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
@@ -1294,6 +1315,7 @@ contract ZonePortal is IZonePortal {
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
+        TokenEnablementTransition calldata tokenEnablementTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof,
@@ -1344,6 +1366,7 @@ contract ZonePortal is IZonePortal {
                 anchorBlockHash,
                 blockTransition,
                 depositQueueTransition,
+                tokenEnablementTransition,
                 withdrawalQueueHash,
                 verifierConfig,
                 signatures
@@ -1363,6 +1386,29 @@ contract ZonePortal is IZonePortal {
             revert InvalidDepositTransition();
         }
 
+        uint64 enabledCount = uint64(_enabledTokens.length);
+        //   - bootstrap:   before initialization, legacy Z0 and the first Z1 transition start at 0
+        //   - continuity:  once initialized, prevProcessedTokenCount must equal where we last left off
+        //   - monotonic:   the processed prefix can only advance
+        //   - in-range:    cannot process more tokens than have been enabled
+        uint64 expectedPrev = tokenEnablementCursorInitialized ? lastProcessedEnabledTokenCount : 0;
+        if (
+            tokenEnablementTransition.prevProcessedTokenCount != expectedPrev
+                || tokenEnablementTransition.nextProcessedTokenCount
+                    < tokenEnablementTransition.prevProcessedTokenCount
+                || tokenEnablementTransition.nextProcessedTokenCount > enabledCount
+        ) {
+            revert InvalidTokenEnablementTransition();
+        }
+        if (
+            !tokenEnablementCursorInitialized
+                && tokenEnablementTransition.nextProcessedTokenCount != 0
+                && enabledCount - tokenEnablementTransition.nextProcessedTokenCount
+                    > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+        ) {
+            revert InvalidTokenEnablementTransition();
+        }
+
         // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
             .verify(
@@ -1373,6 +1419,7 @@ contract ZonePortal is IZonePortal {
                 withdrawalBatchIndex + 1,
                 blockTransition,
                 depositQueueTransition,
+                tokenEnablementTransition,
                 withdrawalQueueHash,
                 verifierConfig,
                 proof
@@ -1384,6 +1431,13 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
+        if (
+            tokenEnablementCursorInitialized
+                || tokenEnablementTransition.nextProcessedTokenCount != 0
+        ) {
+            lastProcessedEnabledTokenCount = tokenEnablementTransition.nextProcessedTokenCount;
+            tokenEnablementCursorInitialized = true;
+        }
         zoneHeight = nextZoneHeight;
 
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
@@ -1395,7 +1449,8 @@ contract ZonePortal is IZonePortal {
             depositQueueTransition.nextProcessedHash,
             blockHash,
             withdrawalQueueHash,
-            lastProcessedDepositNumber
+            lastProcessedDepositNumber,
+            lastProcessedEnabledTokenCount
         );
     }
 
@@ -1406,6 +1461,7 @@ contract ZonePortal is IZonePortal {
         bytes32 anchorBlockHash,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
+        TokenEnablementTransition calldata tokenEnablementTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes[] memory signatures
@@ -1435,6 +1491,7 @@ contract ZonePortal is IZonePortal {
                 anchorBlockHash,
                 keccak256(abi.encode(blockTransition)),
                 keccak256(abi.encode(depositQueueTransition)),
+                keccak256(abi.encode(tokenEnablementTransition)),
                 withdrawalQueueHash,
                 keccak256(verifierConfig)
             )

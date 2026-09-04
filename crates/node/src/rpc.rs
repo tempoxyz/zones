@@ -37,7 +37,7 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
-use reth_trie_common::{ExecutionWitnessMode, HashedPostState};
+use reth_trie_common::{ExecutionWitnessMode, HashedPostState, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
     provider::ext::TempoProviderExt as _,
@@ -286,15 +286,13 @@ where
                 let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
                 let block_executor = evm_config.executor(&mut db);
                 let mode = ExecutionWitnessMode::default();
-                let mut witness = None;
 
+                let mut witness = None;
                 let _ = block_executor
                     .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        let mut additional_state = HashedPostState::default();
-                        record_block_hash_storage_proofs(&mut additional_state, statedb);
                         witness = Some(
                             ExecutionWitnessRecord::new(statedb)
-                                .with_additional_state(additional_state)
+                                .with_additional_state(block_hash_storage_targets(statedb))
                                 .into_execution_witness(
                                     &statedb.database.database.0,
                                     eth_api.provider(),
@@ -304,7 +302,6 @@ where
                         );
                     })
                     .map_err(|error| EthApiError::Internal(error.into()))?;
-
                 let witness = witness
                     .expect("state closure is called after successful execution")
                     .map_err(EthApiError::from)?;
@@ -325,21 +322,18 @@ where
     }
 }
 
-/// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.
+/// Build EIP-2935 history-contract storage targets for every BLOCKHASH value read during replay.
 ///
 /// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
 /// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
 /// storage targets lets the SPF authenticate the same values against the parent state root.
-fn record_block_hash_storage_proofs<DB>(additional_state: &mut HashedPostState, state: &State<DB>) {
+fn block_hash_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
     let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
     if block_hashes.is_empty() {
-        return;
+        return HashedPostState::default();
     }
 
-    let history_storage = additional_state
-        .storages
-        .entry(keccak256(HISTORY_STORAGE_ADDRESS))
-        .or_default();
+    let mut history_storage = HashedStorage::default();
     for (number, hash) in block_hashes {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         history_storage.storage.insert(
@@ -347,6 +341,7 @@ fn record_block_hash_storage_proofs<DB>(additional_state: &mut HashedPostState, 
             U256::from_be_bytes(hash.0),
         );
     }
+    HashedPostState::from_hashed_storage(keccak256(HISTORY_STORAGE_ADDRESS), history_storage)
 }
 
 fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
@@ -1195,8 +1190,8 @@ where
 
     fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
-            let provider = self.eth.api.provider().clone();
             let api = self.eth.api.clone();
+            let provider = self.eth.api.provider().clone();
             let caller = auth.caller;
 
             let zone_tokens = self.zone_tokens();
@@ -1230,9 +1225,11 @@ where
                             removed,
                         ) {
                             Ok(logs) => all_logs.extend(logs),
-                            Err(error) => {
-                                tracing::error!(target: "rpc", %error, "Failed to convert logs");
-                            }
+                            Err(error) => tracing::error!(
+                                target: "rpc",
+                                %error,
+                                "Failed to convert subscription logs"
+                            ),
                         }
                     }
                     futures::stream::iter(all_logs)
@@ -1512,11 +1509,9 @@ mod tests {
             .with_database(revm::database::EmptyDB::default())
             .build();
         state.block_hashes.insert(number, hash);
-        let mut additional_state = HashedPostState::default();
+        let targets = block_hash_storage_targets(&state);
 
-        record_block_hash_storage_proofs(&mut additional_state, &state);
-
-        let storage = additional_state
+        let storage = targets
             .storages
             .get(&keccak256(HISTORY_STORAGE_ADDRESS))
             .unwrap();

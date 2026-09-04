@@ -151,6 +151,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
             retain_portal_evidence: false,
+            deferred_work_start: None,
         },
         zone_provider,
         deposit_queue: DepositQueue::default(),
@@ -354,6 +355,41 @@ async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
     tracker.prune_through(consumed + 1);
     waiter.await.unwrap().unwrap();
     assert!(tracker.has_capacity_for(blocked_number));
+}
+
+#[test]
+fn l1_block_tracker_finalized_target_is_monotonic() {
+    let tracker = L1BlockTracker::default();
+    assert_eq!(tracker.finalized_target(), None);
+
+    tracker.record_finalized_target(200);
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 200,
+            ready: false,
+        })
+    );
+    tracker.mark_finalized_target_ready(200).unwrap();
+    tracker.record_finalized_target(199);
+    tracker.record_finalized_target(200);
+
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 200,
+            ready: true,
+        })
+    );
+
+    tracker.record_finalized_target(201);
+    assert_eq!(
+        tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 201,
+            ready: false,
+        })
+    );
 }
 
 #[test]
@@ -760,12 +796,14 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
     push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(make_test_header(10))));
 
     // One newHeads notification wakes the subscriber. The finalized tag has
     // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
     push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
+    push_header_and_empty_receipts(&asserter, header_12.clone());
+    asserter.push_success(&Some(header_response(header_12)));
 
     let err = subscriber
         .follow_finalized(&l1_provider, Box::pin(futures::stream::iter([()])))
@@ -819,14 +857,65 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(make_test_header(10))));
+    asserter.push_success(&Some(header_response(make_test_header(10))));
 
     let next = subscriber
-        .sync_finalized_once(&l1_provider, 11)
+        .sync_to_finalized(&l1_provider, 11)
         .await
         .unwrap();
 
     assert_eq!(next, 11);
+    assert_eq!(
+        subscriber.config.block_tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 10,
+            ready: true,
+        })
+    );
     assert!(subscriber.deposit_queue.drain().is_empty());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let header_12 = make_chained_header(12, header_hash(&header_11));
+
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_11);
+    push_header_and_empty_receipts(&asserter, header_12.clone());
+    asserter.push_success(&Some(header_response(header_12)));
+
+    let next = subscriber
+        .sync_to_finalized(&l1_provider, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(next, 13);
+    assert_eq!(
+        subscriber
+            .deposit_queue
+            .drain()
+            .iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.finalized_target(),
+        Some(FinalizedTarget {
+            number: 12,
+            ready: true,
+        })
+    );
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1280,7 +1369,7 @@ fn external_enqueue_accepts_duplicate_producers() {
 }
 
 #[test]
-fn confirm_through_is_idempotent_and_drains_stale_entries() {
+fn confirm_operational_through_is_idempotent_and_drains_stale_entries() {
     let queue = DepositQueue::new();
     let h10 = make_test_header(10);
     let h11 = make_chained_header(11, header_hash(&h10));
@@ -1292,20 +1381,139 @@ fn confirm_through_is_idempotent_and_drains_stale_entries() {
             .unwrap();
     }
 
-    queue.confirm_through(anchor).unwrap();
+    queue.confirm_operational_through(anchor).unwrap();
     assert!(queue.peek().is_none());
-    queue.confirm_through(anchor).unwrap();
+    queue.confirm_operational_through(anchor).unwrap();
 }
 
 #[test]
-fn confirm_through_rejects_a_conflicting_anchor() {
+fn canonical_import_reconciliation_is_idempotent_across_checkpoint_and_full_blocks() {
+    let queue = DepositQueue::new();
+    let first = SealedHeader::seal_slow(make_test_header(1));
+    let second = SealedHeader::seal_slow(make_chained_header(2, first.hash()));
+    let third = SealedHeader::seal_slow(make_chained_header(3, second.hash()));
+    for header in [&first, &second, &third] {
+        queue
+            .try_enqueue_sealed(header.clone(), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    queue.defer_through(second.num_hash()).unwrap();
+    queue.defer_through(second.num_hash()).unwrap();
+    assert_eq!(queue.peek().unwrap().header.num_hash(), third.num_hash());
+    assert_eq!(queue.operational_work(third.num_hash()).unwrap().len(), 2);
+
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    assert!(queue.peek().is_none());
+
+    let fourth = SealedHeader::seal_slow(make_chained_header(4, third.hash()));
+    let fifth = SealedHeader::seal_slow(make_chained_header(5, fourth.hash()));
+    queue
+        .try_enqueue_sealed(fourth.clone(), L1PortalEvents::default())
+        .unwrap();
+    queue.defer_through(fourth.num_hash()).unwrap();
+    queue
+        .try_enqueue_sealed(fifth, L1PortalEvents::default())
+        .unwrap();
+
+    // A late replay of block 3 must preserve block 4's newer deferred work.
+    queue.confirm_operational_through(third.num_hash()).unwrap();
+    let fifth = queue.peek().unwrap().header.num_hash();
+    assert_eq!(queue.operational_work(fifth).unwrap().len(), 2);
+}
+
+#[test]
+fn deferred_checkpoint_work_survives_until_operational_confirmation() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let h12 = make_chained_header(12, header_hash(&h11));
+    for header in [h10, h11, h12] {
+        queue
+            .try_enqueue_sealed(seal(header), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    let first = queue.peek().unwrap();
+    queue.defer_through(first.header.num_hash()).unwrap();
+    let second = queue.peek().unwrap();
+    queue.defer_through(second.header.num_hash()).unwrap();
+    let current = queue.peek().unwrap();
+    let work = queue.operational_work(current.header.num_hash()).unwrap();
+    assert_eq!(
+        work.iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![11, 12]
+    );
+
+    queue
+        .confirm_operational(current.header.num_hash())
+        .unwrap();
+    assert!(queue.peek().is_none());
+}
+
+#[test]
+fn restart_can_seed_deferred_checkpoint_work() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let mut deferred = crate::queue::DeferredPortalWork::new(L1BlockDeposits {
+        header: seal(h10),
+        events: L1PortalEvents::default(),
+    });
+    deferred.push(L1BlockDeposits {
+        header: seal(h11),
+        events: L1PortalEvents::default(),
+    });
+    queue.restore_deferred(deferred).unwrap();
+
+    let h12 = make_chained_header(12, queue.last_enqueued().unwrap().hash);
+    queue
+        .try_enqueue_sealed(seal(h12), L1PortalEvents::default())
+        .unwrap();
+    let current = queue.peek().unwrap();
+    assert_eq!(
+        queue
+            .operational_work(current.header.num_hash())
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn deferred_empty_blocks_use_constant_space() {
+    let mut queue = PendingDeposits::default();
+    let mut parent_hash = B256::ZERO;
+    for number in 1..=10_000 {
+        let header = if number == 1 {
+            make_test_header(number)
+        } else {
+            make_chained_header(number, parent_hash)
+        };
+        let header = seal(header);
+        let anchor = header.num_hash();
+        parent_hash = anchor.hash;
+        queue
+            .try_enqueue(header, L1PortalEvents::default())
+            .unwrap();
+        queue.defer_through(anchor).unwrap();
+    }
+
+    assert_eq!(queue.deferred_event_block_len(), 0);
+}
+
+#[test]
+fn confirm_operational_through_rejects_a_conflicting_anchor() {
     let queue = DepositQueue::new();
     queue
         .try_enqueue_sealed(seal(make_test_header(10)), L1PortalEvents::default())
         .unwrap();
 
     let err = queue
-        .confirm_through(NumHash::new(10, B256::repeat_byte(0xab)))
+        .confirm_operational_through(NumHash::new(10, B256::repeat_byte(0xab)))
         .expect_err("a different hash at the same height must fail");
     assert!(err.to_string().contains("deposit queue holds L1 block 10"));
     assert_eq!(queue.peek().unwrap().header.number(), 10);
@@ -1731,7 +1939,7 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_to_finalized(&l1_provider, 10)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1796,10 +2004,11 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(header_response(header_10)));
 
     assert_eq!(
         subscriber
-            .sync_finalized_once(&l1_provider, 10)
+            .sync_to_finalized(&l1_provider, 10)
             .await
             .unwrap(),
         11
@@ -1844,7 +2053,7 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_to_finalized(&l1_provider, 10)
         .await
         .unwrap_err();
     assert!(matches!(

@@ -32,8 +32,9 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
-    DecryptionData, Deposit, DepositType, EnabledToken, IZoneInbox, IZoneOutbox, QueuedDeposit,
-    WithdrawalBounceBackDeposit, ZoneInboxError, ZoneInboxEvent,
+    DecryptionData, Deposit, DepositType, EnabledToken, IZoneInbox, IZoneOutbox,
+    LegacyTempoAdvanced, QueuedDeposit, TempoAdvanced, WithdrawalBounceBackDeposit, ZoneInboxError,
+    ZoneInboxEvent,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -48,6 +49,8 @@ use crate::{
 
 /// ABI selector for the block-opening `advanceTempo` system call.
 pub const ADVANCE_TEMPO_SELECTOR: [u8; 4] = IZoneInbox::advanceTempoCall::SELECTOR;
+/// ABI selector for the checkpoint-only `advanceTempoHeaders` system call.
+pub const ADVANCE_TEMPO_HEADERS_SELECTOR: [u8; 4] = IZoneInbox::advanceTempoHeadersCall::SELECTOR;
 
 /// Zone-side bridge Inbox state and deposit-processing logic.
 #[contract(addr = ZONE_INBOX_ADDRESS)]
@@ -60,6 +63,8 @@ pub struct ZoneInbox {
     withdrawal_bounce_backs: Mapping<Address, Mapping<Address, u128>>,
     /// Append-only token-enablement commitment already applied by this zone.
     processed_token_enablement_hash: B256,
+    /// Number of entries from the portal's append-only enabled-token array applied by this zone.
+    processed_enabled_token_count: u64,
 }
 
 impl ZoneInbox {
@@ -96,26 +101,60 @@ impl ZoneInbox {
         let mut tempo_state = TempoState::new();
 
         // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
-        tempo_state.finalize_checkpoint(l1, call.header)?;
+        tempo_state.finalize_checkpoints(l1, &[call.header])?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
 
         let has_token_enablements = !call.enabledTokens.is_empty();
+        let enabled_token_count = call.enabledTokens.len();
+        let previous_token_count = StorageCtx
+            .spec()
+            .is_t12()
+            .then(|| self.processed_enabled_token_count.read())
+            .transpose()?;
         let mut next_token_enablement_hash = self.processed_token_enablement_hash.read()?;
         for enabled in &call.enabledTokens {
             next_token_enablement_hash = enabled.hash_with_previous(next_token_enablement_hash);
         }
 
-        if !portal.is_zero()
-            && l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
-        {
-            return Err(ZoneInboxError::invalid_token_enablement_hash().into());
-        }
+        let portal_enabled_token_count = if !portal.is_zero() {
+            if l1.read_portal(|portal| &portal.token_enablement_hash)? != next_token_enablement_hash
+            {
+                return Err(ZoneInboxError::invalid_token_enablement_hash().into());
+            }
+            // T12 adds the count cursor after zones may already have applied a historical token
+            // prefix. Bootstrap that prefix once; afterward the hash check authenticates the
+            // supplied suffix, so the stored count can advance locally.
+            if previous_token_count == Some(0) {
+                Some(l1.read_portal_vec_len(|portal| &portal.enabled_tokens)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         self.enable_tokens(call.enabledTokens)?;
         if has_token_enablements {
             self.processed_token_enablement_hash
                 .write(next_token_enablement_hash)?;
         }
+        let processed_enabled_token_count = if let Some(previous_token_count) = previous_token_count
+        {
+            let next_token_count = if let Some(portal_count) = portal_enabled_token_count {
+                u64::try_from(portal_count).map_err(|_| TempoPrecompileError::under_overflow())?
+            } else {
+                previous_token_count
+                    .checked_add(
+                        u64::try_from(enabled_token_count)
+                            .map_err(|_| TempoPrecompileError::under_overflow())?,
+                    )
+                    .ok_or_else(TempoPrecompileError::under_overflow)?
+            };
+            self.processed_enabled_token_count.write(next_token_count)?;
+            next_token_count
+        } else {
+            0
+        };
 
         // Step 2: Process deposits and build hash chain
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
@@ -175,15 +214,41 @@ impl ZoneInbox {
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.processed_deposit_number.write(processed_number)?;
 
-        self.emit_event(ZoneInboxEvent::tempo_advanced(
-            tempo_block_hash,
-            tempo_block_number,
-            U256::from(deposit_count),
-            current_hash,
-            processed_number,
-        ))?;
+        if StorageCtx.spec().is_t12() {
+            self.emit_event(TempoAdvanced {
+                tempoBlockHash: tempo_block_hash,
+                tempoBlockNumber: tempo_block_number,
+                depositsProcessed: U256::from(deposit_count),
+                newProcessedDepositQueueHash: current_hash,
+                lastProcessedDepositNumber: processed_number,
+                lastProcessedEnabledTokenCount: processed_enabled_token_count,
+            })?;
+        } else {
+            self.emit_event(LegacyTempoAdvanced {
+                tempoBlockHash: tempo_block_hash,
+                tempoBlockNumber: tempo_block_number,
+                depositsProcessed: U256::from(deposit_count),
+                newProcessedDepositQueueHash: current_hash,
+                lastProcessedDepositNumber: processed_number,
+            })?;
+        }
 
         Ok(())
+    }
+
+    /// Authenticate a bounded consecutive header range without observing Tempo state or applying
+    /// any portal work. Transaction ordering makes this the only transaction in its Zone block.
+    fn advance_tempo_headers<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        call: IZoneInbox::advanceTempoHeadersCall,
+    ) -> ZoneResult<()> {
+        if !caller.is_zero() {
+            return Err(ZoneInboxError::only_sequencer().into());
+        }
+        let mut tempo_state = TempoState::new();
+        tempo_state.finalize_checkpoints(l1, &call.headers)
     }
 
     fn enable_tokens(&mut self, tokens: Vec<EnabledToken>) -> ZoneResult<()> {

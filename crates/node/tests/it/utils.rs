@@ -46,6 +46,7 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
+    t12_zone_factory_state,
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -60,7 +61,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -211,58 +212,22 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
     ))
 }
 
-fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
-    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
-    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in crates/contracts")
-    })?;
-    let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let hex_str = artifact["deployedBytecode"]["object"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?;
-    Ok(alloy_primitives::Bytes::from(
-        alloy_primitives::hex::decode(hex_str)?,
-    ))
-}
-
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    use tempo_zone_contracts::{
-        ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
-    };
-
-    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot 0 packs
-    // `uint32 nextZoneId`, `address owner`, and the implementation lock flag.
-    let packed_factory_config: U256 = U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32);
-    let mut factory_storage = BTreeMap::new();
-    factory_storage.insert(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()));
-
-    genesis.alloc.insert(
-        ZONE_FACTORY_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(vec![0xef].into()))
-            .with_storage(Some(factory_storage)),
-    );
-    genesis.alloc.insert(
-        ZONE_VERIFIER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("Verifier")?)),
-    );
-    genesis.alloc.insert(
-        ZONE_PORTAL_IMPL_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("ZonePortal")?)),
-    );
-    genesis.alloc.insert(
-        ZONE_MESSENGER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
-    );
+    for account in t12_zone_factory_state(owner) {
+        let storage = account.storage.map(|(slot, value)| {
+            BTreeMap::from([(
+                B256::from(slot.to_be_bytes()),
+                B256::from(value.to_be_bytes()),
+            )])
+        });
+        genesis.alloc.insert(
+            account.address,
+            GenesisAccount::default()
+                .with_nonce(Some(1))
+                .with_code(Some(account.code))
+                .with_storage(storage),
+        );
+    }
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
     let token_policy_slot = keccak256(
@@ -1686,7 +1651,11 @@ impl L1TestNode {
     pub(crate) async fn assert_batch_submitted(&self, portal_address: Address) -> eyre::Result<()> {
         use tempo_zone_contracts::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
-        let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+        let events = portal
+            .BatchSubmitted_1_filter()
+            .from_block(0)
+            .query()
+            .await?;
         eyre::ensure!(
             !events.is_empty(),
             "expected at least one BatchSubmitted event on L1"
@@ -3713,14 +3682,14 @@ impl P2pCluster {
         let block = self.fixture.next_block();
         let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
         let events = self.fixture.portal_events_from_deposits(&deposits);
+        for node in &self.nodes {
+            self.fixture
+                .enqueue(&block, node.deposit_queue(), deposits.clone());
+        }
         for index in observers {
             self.nodes[*index]
                 .l1_block_tracker()
                 .record_with_portal_events(anchor, events.clone())?;
-        }
-        for node in &self.nodes {
-            self.fixture
-                .enqueue(&block, node.deposit_queue(), deposits.clone());
         }
         Ok(anchor)
     }
@@ -3831,8 +3800,8 @@ impl RealP2pCluster {
 }
 
 /// Start a three-member P2P quorum against a real Tempo L1 and a Portal registered with the
-/// exact per-node attestation keys. The short interval keeps tests focused on the first real
-/// batch boundary instead of ordinary long-running block production.
+/// exact per-node attestation keys. The short interval bounds how long the tests wait for an
+/// empty batch boundary. A full import following checkpoint-only blocks may close a batch sooner.
 pub(crate) async fn start_real_p2p_cluster(
     withdrawal_batch_interval_blocks: u64,
 ) -> eyre::Result<RealP2pCluster> {
@@ -5302,11 +5271,37 @@ impl L1Fixture {
         anchor
     }
 
+    /// Inject the same empty L1 block into multiple queues.
+    pub(crate) fn inject_empty_block_into(&mut self, queues: &[&DepositQueue]) -> NumHash {
+        let block = self.next_block();
+        let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
+        for queue in queues {
+            self.enqueue(&block, queue, vec![]);
+        }
+        anchor
+    }
+
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
     pub(crate) fn inject_empty_blocks(&mut self, queue: &DepositQueue, n: u64) {
         for _ in 0..n {
             self.inject_empty_block(queue);
         }
+    }
+
+    /// Produce empty Zone blocks one at a time so each injected Tempo block is the current
+    /// operational import rather than part of a checkpoint-only catch-up range.
+    pub(crate) async fn produce_empty_zone_blocks(
+        &mut self,
+        zone: &ZoneTestNode,
+        count: u64,
+    ) -> eyre::Result<u64> {
+        let mut height = zone.provider().get_block_number().await?;
+        for _ in 0..count {
+            self.inject_empty_block(zone.deposit_queue());
+            height += 1;
+            zone.wait_for_block_number(height, DEFAULT_TIMEOUT).await?;
+        }
+        Ok(height)
     }
 
     /// Inject an L1 block with the given deposits into the queue.
@@ -5320,6 +5315,20 @@ impl L1Fixture {
         let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
         let events = self.portal_events_from_deposits(&deposits);
         queue.enqueue(header, events);
+        anchor
+    }
+
+    /// Inject the same L1 block and deposits into multiple queues.
+    pub(crate) fn inject_deposits_into(
+        &mut self,
+        queues: &[&DepositQueue],
+        deposits: Vec<DepositFixture>,
+    ) -> NumHash {
+        let block = self.next_block();
+        let anchor = SealedHeader::seal_slow(block.header.clone()).num_hash();
+        for queue in queues {
+            self.enqueue(&block, queue, deposits.clone());
+        }
         anchor
     }
 

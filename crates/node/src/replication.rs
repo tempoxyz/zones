@@ -24,7 +24,9 @@ use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
 use tracing::{debug, info};
-use zone_l1::{DepositQueue, L1BlockTracker, L1PortalEvents, TempoStateExt as _};
+#[cfg(test)]
+use zone_l1::L1PortalEvents;
+use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
 use zone_p2p::{
     BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
     P2pPeerId, PeerTip,
@@ -33,6 +35,7 @@ use zone_payload::{
     ZonePayloadTypes,
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
 };
+use zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK;
 use zone_sequencer::{
     BatchAnchorConfig,
     attestation::{
@@ -628,10 +631,10 @@ where
         provider,
         height,
         attestation,
-        Some((
+        (
             signed.attestation.anchorBlockNumber,
             signed.attestation.anchorBlockHash,
-        )),
+        ),
     )
     .await?
     .ok_or_eyre("signed block is not a batch boundary")?;
@@ -704,9 +707,9 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 
 /// Import live/backfilled blocks in canonical order on a follower.
 ///
-/// Live blocks are only imported from the leader when the sender equals
-/// `schedule.leader_for(the block's embedded anchor)`. We do this because if there are accidentally
-/// two leaders (split brain) for a block, we need to decide to import the correct one.
+/// Live blocks are only imported when the sender equals the leader at their first imported Tempo
+/// header. For checkpoint-only blocks this is the historical L1 block they anchor to. This check
+/// resolves accidental split brain using the finalized schedule.
 ///
 /// Backfilled blocks carry no producer claim and are judged by
 /// parent/anchor/execution/conflict validation alone. The loop exits when `stop` fires.
@@ -832,7 +835,7 @@ pub(crate) async fn run_follower_block_sync<P>(
                                 &provider,
                                 height,
                                 &attestation,
-                                Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
+                                (proposal.anchorBlockNumber, proposal.anchorBlockHash),
                             ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
                             eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
 
@@ -1116,6 +1119,7 @@ where
     let block_number = block.number();
     let hash = block.hash();
     let best_block = provider.best_block_number()?;
+    let tempo_import = decode_advance_tempo(&block)?;
 
     // 1. Block number is correct
     if block_number <= best_block {
@@ -1123,6 +1127,12 @@ where
             eyre::eyre!("missing local canonical header at height {block_number}")
         })?;
         if existing.hash() == hash {
+            // This path bypasses `new_payload`, so verify the peer-supplied body against the
+            // canonical header before deriving queue mutations from it.
+            block.ensure_transaction_root_valid()?;
+            reconcile_canonical_import(deposit_queue, &tempo_import).wrap_err_with(|| {
+                format!("cannot reconcile duplicate canonical peer block {block_number}")
+            })?;
             debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate peer block");
             return Ok(PeerBlockImportOutcome::Imported);
         }
@@ -1151,35 +1161,21 @@ where
         );
     }
 
-    // 3. Require the block to advance the local Tempo checkpoint by exactly
-    // one independently observed L1 block.
-    let (l1_header, portal_inputs) = decode_advance_tempo(&block)?;
+    // 3. Require the block to import a non-empty contiguous L1 header range
+    // beginning immediately after the local Tempo checkpoint.
     let local = provider
         .state_by_block_hash(parent.hash())?
         .tempo_num_hash()?;
-    validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
-    let anchor = l1_header.num_hash();
+    let headers = tempo_import.headers();
+    validate_l1_checkpoint_range(headers, local.number, local.hash, block_number)?;
+    let anchor = headers.last().expect("validated nonempty range").num_hash();
+    let leader_anchor = tempo_import.leader_anchor();
 
-    // Anchor-aware fence for live blocks: the sender must
-    // be the scheduled leader of the block's anchor. This stops an honest stale
-    // leader's broadcast from splitting followers.
-    // Backfilled blocks carry no producer claim and are judged by parent/anchor/execution/conflict
-    // validation only.
-    //
-    // Check once before waiting to reject an already-known invalid sender without blocking the
-    // import loop. `wait_for_validated_peer_anchor` checks again after observing the anchor:
-    // the anchor itself may finalize a leadership transition that changes its assigned producer.
-    validate_live_block_sender(
-        schedule,
-        peer_block.live_sender.as_ref(),
-        anchor.number,
-        block_number,
-    )?;
-    let observed = match wait_for_validated_peer_anchor(
+    // The subscriber enqueues each L1 block before publishing its observation, and observations
+    // are contiguous. Seeing the final anchor therefore guarantees that the queue contains the
+    // complete imported range.
+    match wait_for_peer_anchor(
         l1_block_tracker,
-        schedule,
-        &portal_inputs,
-        peer_block.live_sender.as_ref(),
         anchor,
         block_number,
         stop,
@@ -1187,8 +1183,10 @@ where
     )
     .await
     {
-        Ok(observed) => observed,
-        Err(PeerAnchorWaitError::Cancelled) => return Ok(PeerBlockImportOutcome::Cancelled),
+        Ok(()) => {}
+        Err(PeerAnchorWaitError::Cancelled) => {
+            return Ok(PeerBlockImportOutcome::Cancelled);
+        }
         Err(PeerAnchorWaitError::TimedOut {
             block_number,
             anchor,
@@ -1199,15 +1197,30 @@ where
             });
         }
         Err(PeerAnchorWaitError::Other(error)) => return Err(error),
-    };
+    }
 
-    // The subscriber normally enqueues immediately after recording this observation. Enqueueing
-    // here as well closes that small scheduling window and makes follower import self-contained;
-    // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
-    // gap must surface as a rejected block rather than aborting the node.
-    deposit_queue
-        .try_enqueue_sealed(l1_header, observed)
-        .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
+    // Resolve live production authority only after observing the complete imported range. The
+    // range may publish a leadership transition governing its final anchor. Checkpoint-only blocks
+    // use the leader at that final historical anchor; full blocks follow the same rule with their
+    // single header. Backfilled blocks carry no producer claim and bypass this check.
+    validate_live_import_sender(
+        schedule,
+        peer_block.live_sender.as_ref(),
+        leader_anchor,
+        block_number,
+    )?;
+
+    if let DecodedTempoImport::Full {
+        deposits,
+        enabled_tokens,
+        ..
+    } = &tempo_import
+    {
+        validate_full_portal_inputs(deposit_queue, anchor, deposits, enabled_tokens)
+            .wrap_err_with(|| {
+                format!("peer block {block_number} does not match observed portal events")
+            })?;
+    }
 
     // 4. All txns in the block execute properly
     let payload = ZonePayloadTypes::block_to_payload(block, None);
@@ -1230,12 +1243,19 @@ where
     // behind would stall the subscriber once the lookahead window fills. Advancing the queue is
     // likewise tolerant of drift; it fails only on a genuine hash conflict.
     l1_block_tracker.prune_through(anchor.number);
-    deposit_queue
-        .confirm_through(anchor)
-        .wrap_err_with(|| format!("cannot advance the deposit queue past block {block_number}"))?;
+    match &tempo_import {
+        DecodedTempoImport::CheckpointOnly { .. } => deposit_queue
+            .defer_through(anchor)
+            .wrap_err_with(|| format!("cannot defer checkpoint work from block {block_number}"))?,
+        DecodedTempoImport::Full { .. } => deposit_queue
+            .confirm_operational_through(anchor)
+            .wrap_err_with(|| {
+                format!("cannot advance the deposit queue past block {block_number}")
+            })?,
+    }
     schedule.record_applied_anchor(anchor.number);
 
-    info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
+    info!(target: "zone::p2p", block_number, ?hash, "Imported canonical peer block");
     Ok(PeerBlockImportOutcome::Imported)
 }
 
@@ -1263,6 +1283,97 @@ fn validate_live_block_sender(
     }
 }
 
+fn validate_live_import_sender(
+    schedule: &LeadershipSchedule,
+    live_sender: Option<&P2pPeerId>,
+    leader_anchor: Option<u64>,
+    block_number: u64,
+) -> eyre::Result<()> {
+    let Some(anchor_number) = leader_anchor else {
+        return Ok(());
+    };
+    validate_live_block_sender(schedule, live_sender, anchor_number, block_number)
+}
+
+fn reconcile_canonical_import(
+    deposit_queue: &DepositQueue,
+    tempo_import: &DecodedTempoImport,
+) -> eyre::Result<()> {
+    let anchor = tempo_import
+        .headers()
+        .last()
+        .expect("decoded Tempo imports are nonempty")
+        .num_hash();
+    match tempo_import {
+        DecodedTempoImport::CheckpointOnly { .. } => deposit_queue.defer_through(anchor),
+        DecodedTempoImport::Full { .. } => deposit_queue.confirm_operational_through(anchor),
+    }
+}
+
+fn validate_full_portal_inputs(
+    deposit_queue: &DepositQueue,
+    anchor: NumHash,
+    deposits: &[zone_payload::abi::QueuedDeposit],
+    enabled_tokens: &[zone_payload::abi::EnabledToken],
+) -> eyre::Result<()> {
+    let work = deposit_queue.operational_work(anchor)?;
+    let mut deposit_offset = 0usize;
+    let mut token_offset = 0usize;
+    for block in work {
+        let next_deposit_offset = deposit_offset
+            .checked_add(block.events.deposits.len())
+            .ok_or_else(|| eyre::eyre!("advanceTempo deposit count overflow"))?;
+        let next_token_offset = token_offset
+            .checked_add(block.events.enabled_tokens.len())
+            .ok_or_else(|| eyre::eyre!("advanceTempo token count overflow"))?;
+        eyre::ensure!(
+            next_deposit_offset <= deposits.len() && next_token_offset <= enabled_tokens.len(),
+            "advanceTempo calldata is shorter than the deferred portal event range"
+        );
+        block.events.validate_advance_tempo_inputs(
+            &deposits[deposit_offset..next_deposit_offset],
+            &enabled_tokens[token_offset..next_token_offset],
+        )?;
+        deposit_offset = next_deposit_offset;
+        token_offset = next_token_offset;
+    }
+    eyre::ensure!(
+        deposit_offset == deposits.len(),
+        "advanceTempo contains {} deposits, but observed portal events contain {deposit_offset}",
+        deposits.len()
+    );
+    eyre::ensure!(
+        token_offset == enabled_tokens.len(),
+        "advanceTempo contains {} token enables, but observed portal events contain {token_offset}",
+        enabled_tokens.len()
+    );
+    Ok(())
+}
+
+async fn wait_for_peer_anchor(
+    l1_block_tracker: &L1BlockTracker,
+    anchor: NumHash,
+    block_number: u64,
+    stop: &sync::CancellationToken,
+    wait_timeout: Duration,
+) -> Result<(), PeerAnchorWaitError> {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => Err(PeerAnchorWaitError::Cancelled),
+        observed = tokio::time::timeout(
+            wait_timeout,
+            l1_block_tracker.wait_for(anchor),
+        ) => match observed {
+            Ok(observed) => observed.map_err(PeerAnchorWaitError::Other),
+            Err(_) => Err(PeerAnchorWaitError::TimedOut {
+                block_number,
+                anchor,
+            }),
+        },
+    }
+}
+
+#[cfg(test)]
 async fn wait_for_validated_peer_anchor(
     l1_block_tracker: &L1BlockTracker,
     schedule: &LeadershipSchedule,
@@ -1273,20 +1384,11 @@ async fn wait_for_validated_peer_anchor(
     stop: &sync::CancellationToken,
     wait_timeout: Duration,
 ) -> Result<L1PortalEvents, PeerAnchorWaitError> {
-    let observed = tokio::select! {
-        biased;
-        () = stop.cancelled() => return Err(PeerAnchorWaitError::Cancelled),
-        observed = tokio::time::timeout(
-            wait_timeout,
-            l1_block_tracker.wait_for_portal_events(anchor),
-        ) => match observed {
-            Ok(observed) => observed.map_err(PeerAnchorWaitError::Other)?,
-            Err(_) => return Err(PeerAnchorWaitError::TimedOut {
-                block_number,
-                anchor,
-            }),
-        },
-    };
+    wait_for_peer_anchor(l1_block_tracker, anchor, block_number, stop, wait_timeout).await?;
+    let observed = l1_block_tracker
+        .wait_for_portal_events(anchor)
+        .await
+        .map_err(PeerAnchorWaitError::Other)?;
     portal_inputs
         .validate(&observed)
         .map_err(PeerAnchorWaitError::Other)?;
@@ -1313,40 +1415,66 @@ enum PeerAnchorWaitError {
     Other(eyre::Report),
 }
 
+#[cfg(test)]
 struct AdvanceTempoPortalInputs {
     deposits: Vec<zone_payload::abi::QueuedDeposit>,
     enabled_tokens: Vec<zone_payload::abi::EnabledToken>,
 }
 
+#[cfg(test)]
 impl AdvanceTempoPortalInputs {
     fn validate(&self, observed: &L1PortalEvents) -> eyre::Result<()> {
         observed.validate_advance_tempo_inputs(&self.deposits, &self.enabled_tokens)
     }
 }
 
-fn validate_l1_checkpoint_transition(
-    l1_header: &SealedHeader<TempoHeader>,
+fn validate_l1_checkpoint_range(
+    headers: &[SealedHeader<TempoHeader>],
     local_number: u64,
     local_hash: B256,
     zone_block_number: u64,
 ) -> eyre::Result<()> {
-    if l1_header.number() != local_number.saturating_add(1) {
-        eyre::bail!(
-            "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
-            l1_header.number(),
-            local_number,
-            local_number.saturating_add(1)
-        );
+    if headers.is_empty() {
+        eyre::bail!("peer block imports no Tempo headers");
     }
-    if l1_header.parent_hash() != local_hash {
-        eyre::bail!(
-            "advanceTempo L1 header {} does not extend the local Tempo checkpoint: embedded parent {}, local hash {}",
-            l1_header.number(),
-            l1_header.parent_hash(),
-            local_hash
-        );
+    let mut previous_number = local_number;
+    let mut previous_hash = local_hash;
+    for l1_header in headers {
+        if l1_header.number() != previous_number.saturating_add(1) {
+            eyre::bail!(
+                "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
+                l1_header.number(),
+                previous_number,
+                previous_number.saturating_add(1)
+            );
+        }
+        if l1_header.parent_hash() != previous_hash {
+            eyre::bail!(
+                "advanceTempo L1 header {} does not extend the local Tempo checkpoint: embedded parent {}, local hash {}",
+                l1_header.number(),
+                l1_header.parent_hash(),
+                previous_hash
+            );
+        }
+        previous_number = l1_header.number();
+        previous_hash = l1_header.hash();
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn validate_l1_checkpoint_transition(
+    header: &SealedHeader<TempoHeader>,
+    local_number: u64,
+    local_hash: B256,
+    zone_block_number: u64,
+) -> eyre::Result<()> {
+    validate_l1_checkpoint_range(
+        core::slice::from_ref(header),
+        local_number,
+        local_hash,
+        zone_block_number,
+    )
 }
 
 /// Decode the L1 header embedded in the first `IZoneInbox.advanceTempo` system transaction.
@@ -1354,12 +1482,37 @@ fn validate_l1_checkpoint_transition(
 fn decode_advance_tempo_header(
     block: &SealedBlock<Block>,
 ) -> eyre::Result<SealedHeader<TempoHeader>> {
-    decode_advance_tempo(block).map(|(header, _)| header)
+    decode_advance_tempo(block).map(|import| import.headers().last().unwrap().clone())
 }
 
-fn decode_advance_tempo(
-    block: &SealedBlock<Block>,
-) -> eyre::Result<(SealedHeader<TempoHeader>, AdvanceTempoPortalInputs)> {
+enum DecodedTempoImport {
+    Full {
+        header: Box<SealedHeader<TempoHeader>>,
+        deposits: Vec<zone_payload::abi::QueuedDeposit>,
+        enabled_tokens: Vec<zone_payload::abi::EnabledToken>,
+    },
+    CheckpointOnly {
+        headers: Vec<SealedHeader<TempoHeader>>,
+    },
+}
+
+impl DecodedTempoImport {
+    fn headers(&self) -> &[SealedHeader<TempoHeader>] {
+        match self {
+            Self::Full { header, .. } => core::slice::from_ref(header),
+            Self::CheckpointOnly { headers } => headers,
+        }
+    }
+
+    /// Tempo anchor whose leader must produce this Zone block.
+    ///
+    /// Checkpoint-only blocks use their first imported header. A full block imports exactly one header.
+    fn leader_anchor(&self) -> Option<u64> {
+        self.headers().first().map(|header| header.number())
+    }
+}
+
+fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempoImport> {
     // Do some basic checks
 
     // 1. `advanceTempo` is the first tx
@@ -1369,13 +1522,40 @@ fn decode_advance_tempo(
     let TempoTxEnvelope::Legacy(signed) = first_tx else {
         eyre::bail!("first transaction in peer block is not a legacy system transaction")
     };
-    if !first_tx.is_system_tx() {
-        eyre::bail!("first transaction in peer block is not a Tempo system transaction")
-    }
+    eyre::ensure!(
+        first_tx.is_system_tx(),
+        "first transaction in peer block is not a Tempo system transaction"
+    );
 
     // 2. Address is correct
-    if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
-        eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
+    eyre::ensure!(
+        signed.tx().to == ZONE_INBOX_ADDRESS.into(),
+        "first Tempo system transaction is not sent to IZoneInbox"
+    );
+    if signed
+        .tx()
+        .input
+        .starts_with(&IZoneInbox::advanceTempoHeadersCall::SELECTOR)
+    {
+        eyre::ensure!(
+            block.body().transactions.len() == 1,
+            "advanceTempoHeaders must be the only transaction in its block"
+        );
+        let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(signed.tx().input.as_ref())?;
+        eyre::ensure!(
+            call.headers.len() <= MAX_TEMPO_HEADERS_PER_ZONE_BLOCK,
+            "advanceTempoHeaders has too many headers"
+        );
+        let mut headers = Vec::with_capacity(call.headers.len());
+        for encoded in call.headers {
+            let mut input = encoded.as_ref();
+            let header = TempoHeader::decode(&mut input)?;
+            if !input.is_empty() {
+                eyre::bail!("advanceTempoHeaders header has trailing bytes");
+            }
+            headers.push(SealedHeader::seal_slow(header));
+        }
+        return Ok(DecodedTempoImport::CheckpointOnly { headers });
     }
     let call = IZoneInbox::advanceTempoCall::abi_decode_with_config(
         signed.tx().input.as_ref(),
@@ -1387,19 +1567,16 @@ fn decode_advance_tempo(
     let mut header_rlp = call.header.as_ref();
     let header = TempoHeader::decode(&mut header_rlp)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded L1 header in advanceTempo: {err}"))?;
-    if !header_rlp.is_empty() {
-        eyre::bail!(
-            "advanceTempo L1 header has {} trailing bytes",
-            header_rlp.len()
-        )
-    }
-    Ok((
-        SealedHeader::seal_slow(header),
-        AdvanceTempoPortalInputs {
-            deposits: call.deposits,
-            enabled_tokens: call.enabledTokens,
-        },
-    ))
+    eyre::ensure!(
+        header_rlp.is_empty(),
+        "advanceTempo L1 header has {} trailing bytes",
+        header_rlp.len()
+    );
+    Ok(DecodedTempoImport::Full {
+        header: Box::new(SealedHeader::seal_slow(header)),
+        deposits: call.deposits,
+        enabled_tokens: call.enabledTokens,
+    })
 }
 
 #[cfg(test)]
@@ -1414,23 +1591,83 @@ mod tests {
 
     use alloy_eips::NumHash;
     use futures::{StreamExt as _, stream};
+    use reth_primitives_traits::SealedHeader;
+    use tempo_primitives::TempoHeader;
     use tokio::sync::{oneshot, watch};
     use tokio_util::sync;
 
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, BroadcasterShutdown, EncodedPersistedBlock,
         MAX_PENDING_BLOCKS, PEER_ANCHOR_WAIT_TIMEOUT, PersistedBlockSource, PersistedTip,
-        broadcast_persisted_blocks, buffer_pending_block, validate_live_block_sender,
-        wait_for_validated_peer_anchor,
+        broadcast_persisted_blocks, buffer_pending_block, validate_full_portal_inputs,
+        validate_live_block_sender, wait_for_validated_peer_anchor,
     };
-    use alloy_primitives::B256;
-    use zone_l1::{L1BlockTracker, L1PortalEvents};
+    use alloy_primitives::{Address, B256};
+    use zone_l1::{DepositQueue, EnabledToken, L1BlockDeposits, L1BlockTracker, L1PortalEvents};
     use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState, P2pCommand};
 
     #[derive(Clone)]
     struct StartupRaceSource {
         reads: Arc<AtomicUsize>,
         tip: PersistedTip,
+    }
+
+    #[test]
+    fn full_import_validates_deferred_and_current_portal_events() {
+        let queue = DepositQueue::new();
+        let first = SealedHeader::seal_slow(TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let second = SealedHeader::seal_slow(TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 2,
+                parent_hash: first.hash(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let alpha = EnabledToken {
+            token: Address::repeat_byte(0x11),
+            name: "Alpha".into(),
+            symbol: "A".into(),
+            currency: "USD".into(),
+        };
+        let beta = EnabledToken {
+            token: Address::repeat_byte(0x22),
+            name: "Beta".into(),
+            symbol: "B".into(),
+            currency: "EUR".into(),
+        };
+        queue
+            .try_enqueue_sealed(
+                first.clone(),
+                L1PortalEvents {
+                    enabled_tokens: vec![alpha.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        queue.defer_through(first.num_hash()).unwrap();
+        let current = L1BlockDeposits {
+            header: second,
+            events: L1PortalEvents {
+                enabled_tokens: vec![beta.clone()],
+                ..Default::default()
+            },
+        };
+        queue
+            .try_enqueue_sealed(current.header.clone(), current.events.clone())
+            .unwrap();
+
+        let expected = vec![alpha.to_abi(), beta.to_abi()];
+        let anchor = current.header.num_hash();
+        validate_full_portal_inputs(&queue, anchor, &[], &expected).unwrap();
+        let err = validate_full_portal_inputs(&queue, anchor, &[], &expected[..1]).unwrap_err();
+        assert!(err.to_string().contains("shorter"));
     }
 
     impl PersistedBlockSource for StartupRaceSource {
@@ -1529,6 +1766,7 @@ mod tests {
             queued_deposits: vec![],
             decryptions: vec![],
             enabled_tokens: vec![],
+            follows_checkpoint_blocks: false,
         };
         let tx = zone_payload::build_advance_tempo_tx(&prepared, 1337);
         let block = SealedBlock::seal_slow(Block {
@@ -1621,6 +1859,7 @@ mod tests {
             queued_deposits: vec![],
             decryptions: vec![],
             enabled_tokens: vec![],
+            follows_checkpoint_blocks: false,
         };
         let TempoTxEnvelope::Legacy(system_tx) =
             zone_payload::build_advance_tempo_tx(&prepared, 1337).into_inner()
@@ -1750,6 +1989,67 @@ mod tests {
             super::validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7)
                 .unwrap_err();
         assert!(wrong_parent.to_string().contains("does not extend"));
+    }
+
+    #[test]
+    fn checkpoint_live_producer_is_leader_at_first_imported_anchor() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+        use reth_primitives_traits::SealedHeader;
+        use tempo_primitives::TempoHeader;
+
+        let outgoing = PrivateKey::from_seed(1).public_key();
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let current = PrivateKey::from_seed(3).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, outgoing.clone(), 0));
+        schedule
+            .publish(LeadershipState::new(2, incoming.clone(), 100))
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(3, current.clone(), 120))
+            .unwrap();
+
+        let headers = [90, 110]
+            .map(|number| {
+                SealedHeader::seal_slow(TempoHeader {
+                    inner: alloy_consensus::Header {
+                        number,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            })
+            .to_vec();
+        let tempo_import = super::DecodedTempoImport::CheckpointOnly { headers };
+
+        let leader_anchor = tempo_import.leader_anchor();
+        assert_eq!(leader_anchor, Some(90));
+        super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 7).unwrap();
+        let error =
+            super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 7)
+                .expect_err("the checkpoint producer must lead at its first imported anchor");
+        assert!(error.to_string().contains(&outgoing.to_string()));
+        let error = super::validate_live_import_sender(&schedule, Some(&current), leader_anchor, 7)
+            .expect_err("the current leader must not own an earlier historical anchor");
+        assert!(error.to_string().contains(&outgoing.to_string()));
+
+        let full_import = super::DecodedTempoImport::Full {
+            header: Box::new(SealedHeader::seal_slow(TempoHeader {
+                inner: alloy_consensus::Header {
+                    number: 110,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })),
+            deposits: Vec::new(),
+            enabled_tokens: Vec::new(),
+        };
+        let leader_anchor = full_import.leader_anchor();
+        assert_eq!(leader_anchor, Some(110));
+        super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 8).unwrap();
+        let error =
+            super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 8)
+                .expect_err("the final full block must be produced by its effective leader");
+        assert!(error.to_string().contains(&incoming.to_string()));
     }
 
     #[tokio::test]
