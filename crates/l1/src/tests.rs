@@ -1639,8 +1639,8 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 
 #[test]
 fn extracts_finalized_batch_submission_for_observer() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
-    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut subscriber = test_subscriber(9);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
     subscriber.finalized_batch_submissions = Some(sender);
     let portal = subscriber.config.portal_address;
     let event = crate::abi::ZonePortal::BatchSubmitted {
@@ -1673,8 +1673,8 @@ fn extracts_finalized_batch_submission_for_observer() {
 
 #[test]
 fn finalized_batch_observer_ignores_rpc_log_metadata() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
-    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut subscriber = test_subscriber(9);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
     subscriber.finalized_batch_submissions = Some(sender);
     let portal = subscriber.config.portal_address;
     let malformed = Log {
@@ -1833,8 +1833,8 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
 
 #[tokio::test]
 async fn sync_fails_fatally_when_finalized_batch_observer_is_closed() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut subscriber = test_subscriber(9);
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
     drop(receiver);
     subscriber.finalized_batch_submissions = Some(sender);
     let portal = subscriber.config.portal_address;

@@ -443,7 +443,7 @@ pub struct L1Subscriber<P> {
     pub(crate) leadership_sink: Option<Arc<dyn LeadershipSink>>,
     /// Optional observational channel for finalized accepted batch submissions.
     pub(crate) finalized_batch_submissions:
-        Option<tokio::sync::mpsc::UnboundedSender<FinalizedBatchSubmission>>,
+        Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub(crate) encryption_keys: Option<EncryptionKeyRing>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -495,9 +495,7 @@ where
         l1_state_cache: L1StateCache,
         block_tracker: L1BlockTracker,
         leadership_sink: Option<Arc<dyn LeadershipSink>>,
-        finalized_batch_submissions: Option<
-            tokio::sync::mpsc::UnboundedSender<FinalizedBatchSubmission>,
-        >,
+        finalized_batch_submissions: Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
         encryption_keys: Option<EncryptionKeyRing>,
     ) -> Self {
         Self {
@@ -824,6 +822,7 @@ where
                 for submission in finalized_batches {
                     sender
                         .send(submission)
+                        .await
                         .map_err(|_| L1SubscriberError::Fatal {
                             block_number,
                             stage: "finalized batch observer delivery",

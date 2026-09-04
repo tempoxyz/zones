@@ -1,37 +1,29 @@
 //! Finalized L1 batch observation for RPC-only shadow provers.
 
-use std::{
-    collections::{BTreeSet, HashSet},
-    time::Duration,
-};
+use std::time::Duration;
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, proofs::calculate_transaction_root};
-use alloy_eips::{BlockId, BlockNumberOrTag, NumHash};
 use alloy_primitives::{Address, TxKind};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_sol_types::SolCall as _;
+use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoTxEnvelope;
 use tempo_zone_contracts::ZonePortal;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{info, warn};
-use zone_l1::{
-    FinalizedBatchSubmission, extract_finalized_batch_submissions, verify_receipts_against_header,
-};
-use zone_sequencer::{
-    BatchAnchorConfig, BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider,
-};
+use tokio::sync::mpsc::Receiver;
+use tracing::{error, info, warn};
+use zone_l1::FinalizedBatchSubmission;
+use zone_sequencer::{BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const RECOVERY_LOG_QUERY_BLOCKS: u64 = 1_000;
+const MAX_CONNECTION_ATTEMPTS: u32 = 5;
 
 /// Feeds finalized RPC-follower submissions and their exact settlement inputs to the detached
 /// shadow prover.
 #[derive(Clone)]
 pub(crate) struct RpcFollowerShadowProver<P> {
     portal_address: Address,
-    anchor_config: BatchAnchorConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
     prover: ShadowProver,
@@ -40,14 +32,12 @@ pub(crate) struct RpcFollowerShadowProver<P> {
 impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     pub(crate) fn new(
         portal_address: Address,
-        anchor_config: BatchAnchorConfig,
         zone_provider: P,
         l1_provider: DynProvider<TempoNetwork>,
         prover: ShadowProver,
     ) -> Self {
         Self {
             portal_address,
-            anchor_config,
             zone_provider,
             l1_provider,
             prover,
@@ -57,156 +47,56 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     /// Observe finalized `submitBatch` calls. The Portal has already verified the included quorum
     /// certificate before emitting the event; decoding the call binds each proof job to that
     /// accepted certificate.
-    pub(crate) async fn run(
-        self,
-        mut submissions: UnboundedReceiver<FinalizedBatchSubmission>,
-        recovery_sender: UnboundedSender<FinalizedBatchSubmission>,
-    ) {
-        self.spawn_recovery(recovery_sender);
-
-        let mut observed = HashSet::new();
+    pub(crate) async fn run(self, mut submissions: Receiver<FinalizedBatchSubmission>) {
         while let Some(submission) = submissions.recv().await {
-            let observation_id = (
-                submission.block.hash,
-                submission.transaction_index,
-                submission.log_index,
-            );
-            if observed.insert(observation_id) {
-                self.spawn_submission_retry(submission);
-            }
+            self.process_submission_with_retry(&submission).await;
         }
     }
 
-    fn spawn_recovery(&self, recovery_sender: UnboundedSender<FinalizedBatchSubmission>) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            loop {
-                if recovery_sender.is_closed() {
-                    return;
-                }
-                match this.recover_recent_submissions(&recovery_sender).await {
-                    Ok(()) => return,
-                    Err(err) => {
-                        warn!(
+    async fn process_submission_with_retry(&self, submission: &FinalizedBatchSubmission) {
+        for attempt in 1..=MAX_CONNECTION_ATTEMPTS {
+            match self.process_submission(submission).await {
+                Ok(()) => return,
+                Err(err) if is_retryable_connection_error(&err) => {
+                    if attempt == MAX_CONNECTION_ATTEMPTS {
+                        error!(
                             target: "zone::node::shadow_prover",
+                            l1_block_hash = %submission.block.hash,
+                            transaction_index = submission.transaction_index,
+                            log_index = submission.log_index,
                             error = ?err,
-                            "Failed to recover recent finalized batch submissions; retrying"
+                            attempts = attempt,
+                            "Failed to process finalized batch submission; retry budget exhausted"
                         );
-                        tokio::time::sleep(POLL_INTERVAL).await;
+                        return;
                     }
-                }
-            }
-        });
-    }
-
-    async fn recover_recent_submissions(
-        &self,
-        recovery_sender: &UnboundedSender<FinalizedBatchSubmission>,
-    ) -> Result<()> {
-        let finalized = self
-            .l1_provider
-            .get_header_by_number(BlockNumberOrTag::Finalized)
-            .await?
-            .ok_or_eyre("L1 finalized block is not available")?
-            .number();
-        let from = finalized.saturating_sub(self.anchor_config.history_window().saturating_sub(1));
-
-        let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
-        let mut page_from = from;
-        while page_from <= finalized {
-            let page_to = page_from
-                .saturating_add(RECOVERY_LOG_QUERY_BLOCKS - 1)
-                .min(finalized);
-            let events = portal
-                .BatchSubmitted_filter()
-                .from_block(page_from)
-                .to_block(page_to)
-                .query()
-                .await
-                .wrap_err_with(|| {
-                    format!("query BatchSubmitted logs in finalized range {page_from}..={page_to}")
-                })?;
-
-            let candidate_blocks = events
-                .into_iter()
-                .map(|(_, log)| {
-                    log.block_number
-                        .ok_or_eyre("finalized BatchSubmitted log has no block number")
-                })
-                .collect::<Result<BTreeSet<_>>>()?;
-            for block_number in candidate_blocks {
-                for submission in self
-                    .fetch_verified_submissions(block_number)
-                    .await
-                    .wrap_err_with(|| {
-                        format!("authenticate recovered submissions in block {block_number}")
-                    })?
-                {
-                    if recovery_sender.send(submission).is_err() {
-                        return Ok(());
-                    }
-                }
-            }
-            if page_to == finalized {
-                break;
-            }
-            page_from = page_to + 1;
-        }
-        Ok(())
-    }
-
-    async fn fetch_verified_submissions(
-        &self,
-        block_number: u64,
-    ) -> Result<Vec<FinalizedBatchSubmission>> {
-        let header = self
-            .l1_provider
-            .get_header_by_number(block_number.into())
-            .await?
-            .ok_or_eyre(format!("L1 block {block_number} is not available"))?;
-        ensure!(
-            header.number() == block_number,
-            "requested L1 block {block_number}, received {}",
-            header.number()
-        );
-        let block = NumHash::new(block_number, header.as_ref().hash_slow());
-        let receipts = self
-            .l1_provider
-            .get_block_receipts(BlockId::hash(block.hash))
-            .await?
-            .ok_or_eyre(format!("L1 block {} has no receipts", block.hash))?;
-        verify_receipts_against_header(
-            block,
-            header.receipts_root(),
-            header.logs_bloom(),
-            &receipts,
-        )?;
-        Ok(extract_finalized_batch_submissions(
-            block,
-            self.portal_address,
-            &receipts,
-        ))
-    }
-
-    fn spawn_submission_retry(&self, submission: FinalizedBatchSubmission) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Err(err) = this.process_submission(&submission).await {
+                    let retry_delay = POLL_INTERVAL * 2_u32.pow(attempt - 1);
                     warn!(
                         target: "zone::node::shadow_prover",
                         l1_block_hash = %submission.block.hash,
                         transaction_index = submission.transaction_index,
                         log_index = submission.log_index,
                         error = ?err,
-                        "Failed to process finalized batch submission; retrying"
+                        attempt,
+                        max_attempts = MAX_CONNECTION_ATTEMPTS,
+                        retry_delay_secs = retry_delay.as_secs(),
+                        "Connection error processing finalized batch submission; retrying"
                     );
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                    continue;
+                    tokio::time::sleep(retry_delay).await;
                 }
-                return;
+                Err(err) => {
+                    error!(
+                        target: "zone::node::shadow_prover",
+                        l1_block_hash = %submission.block.hash,
+                        transaction_index = submission.transaction_index,
+                        log_index = submission.log_index,
+                        error = ?err,
+                        "Rejected finalized batch submission"
+                    );
+                    return;
+                }
             }
-        });
+        }
     }
 
     async fn process_submission(&self, submission: &FinalizedBatchSubmission) -> Result<()> {
@@ -352,6 +242,22 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         batch: BatchData,
         anchor: ShadowProofAnchor,
     ) -> Result<()> {
+        let from = self.wait_for_local_range(to, &batch).await?;
+
+        info!(
+            target: "zone::node::shadow_prover",
+            zone_from = from,
+            zone_to = to,
+            anchor_number = anchor.number,
+            anchor_hash = %anchor.hash,
+            "Queueing finalized quorum-certified batch for shadow proving"
+        );
+        self.prover
+            .enqueue_with_anchor(from, to, batch, anchor)
+            .await
+    }
+
+    async fn wait_for_local_range(&self, to: u64, batch: &BatchData) -> Result<u64> {
         let from = loop {
             if batch.prev_block_hash.is_zero() {
                 break 1;
@@ -384,17 +290,27 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
             );
         }
 
-        info!(
-            target: "zone::node::shadow_prover",
-            zone_from = from,
-            zone_to = to,
-            anchor_number = anchor.number,
-            anchor_hash = %anchor.hash,
-            "Queueing finalized quorum-certified batch for shadow proving"
-        );
-        self.prover
-            .enqueue_with_anchor(from, to, batch, anchor)
-            .await
+        Ok(from)
+    }
+}
+
+fn is_retryable_connection_error(error: &eyre::Report) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<TransportError>()
+            .is_some_and(is_retryable_rpc_error)
+    })
+}
+
+fn is_retryable_rpc_error(error: &TransportError) -> bool {
+    match error {
+        RpcError::ErrorResp(error) => error.is_retry_err(),
+        RpcError::UnsupportedFeature(_)
+        | RpcError::LocalUsageError(_)
+        | RpcError::SerError(_)
+        | RpcError::DeserError { .. }
+        | RpcError::Transport(TransportErrorKind::NonRetryable(_)) => false,
+        _ => true,
     }
 }
 
@@ -466,5 +382,19 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn retries_only_retryable_transport_errors() {
+        let retryable = Err::<(), _>(TransportErrorKind::backend_gone())
+            .wrap_err("fetch finalized block")
+            .unwrap_err();
+        assert!(is_retryable_connection_error(&retryable));
+
+        let terminal = eyre::Report::new(TransportErrorKind::non_retryable_str("invalid request"));
+        assert!(!is_retryable_connection_error(&terminal));
+        assert!(!is_retryable_connection_error(&eyre::eyre!(
+            "invalid settlement"
+        )));
     }
 }

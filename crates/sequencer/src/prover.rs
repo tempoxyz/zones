@@ -44,8 +44,8 @@ use zone_spf::{
 
 use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
 
-/// Number of candidates allowed to wait behind the active validation.
-const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
+/// Number of shadow proof candidates allowed to wait behind the active validation.
+pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
 
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;

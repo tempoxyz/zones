@@ -661,9 +661,10 @@ where
         let mut finalized_batch_submission_sender = None;
         let mut finalized_batch_submissions = None;
         if rpc_only && effective_shadow_prover_config.is_some() {
-            let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-            finalized_batch_submission_sender = Some(sender.clone());
-            finalized_batch_submissions = Some((sender, receiver));
+            let (sender, receiver) =
+                tokio::sync::mpsc::channel(zone_sequencer::SHADOW_PROVER_QUEUE_CAPACITY);
+            finalized_batch_submission_sender = Some(sender);
+            finalized_batch_submissions = Some(receiver);
         }
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
@@ -835,7 +836,7 @@ where
                         .map(ToOwned::to_owned),
                 });
 
-        if let (Some(config), Some(runtime_config), Some((recovery_sender, submissions))) = (
+        if let (Some(config), Some(runtime_config), Some(submissions)) = (
             effective_shadow_prover_config.as_ref(),
             prover_config.clone(),
             finalized_batch_submissions,
@@ -851,12 +852,11 @@ where
                 "rpc-follower-shadow-prover",
                 RpcFollowerShadowProver::new(
                     self.portal_address,
-                    config.batch_anchor_config,
                     provider.clone(),
                     l1_provider.clone(),
                     prover,
                 )
-                .run(submissions, recovery_sender),
+                .run(submissions),
             );
         }
 

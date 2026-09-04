@@ -13895,6 +13895,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
+ "alloy-transport",
  "base64 0.22.1",
  "clap",
  "commonware-codec",
