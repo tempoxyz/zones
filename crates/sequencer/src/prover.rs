@@ -48,14 +48,14 @@ use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::Prover
 const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
 const RPC_CONCURRENCY: usize = 8;
 
+type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
+
 /// Typed error context for an SPF rejection or a mismatch in its output.
 /// Errors without this context mean validation could not complete and must not
 /// count as a rejected candidate (for example, when the remote prover restarts).
 #[derive(Debug, thiserror::Error)]
 #[error("prover validation failed")]
 struct ValidationFailure;
-
-type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
