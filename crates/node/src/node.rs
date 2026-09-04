@@ -719,7 +719,6 @@ where
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
-        let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
@@ -824,7 +823,8 @@ where
                 provider.clone(),
                 l1_provider.clone(),
             );
-            tokio::spawn(
+            task_executor.spawn_critical_task(
+                "rpc-follower-shadow-prover",
                 RpcFollowerShadowProver::new(
                     self.portal_address,
                     config.batch_anchor_config,

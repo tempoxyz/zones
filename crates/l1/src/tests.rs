@@ -1835,6 +1835,54 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
     assert_eq!(subscriber.block_tracker.latest(), None);
 }
 
+#[tokio::test]
+async fn sync_fails_fatally_when_finalized_batch_observer_is_closed() {
+    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    drop(receiver);
+    subscriber.finalized_batch_submissions = Some(sender);
+    let portal = subscriber.config.portal_address;
+    let event = crate::abi::ZonePortal::BatchSubmitted {
+        withdrawalBatchIndex: 7,
+        withdrawalQueueIndex: U256::from(3),
+        nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+        nextBlockHash: B256::repeat_byte(0x22),
+        withdrawalQueueHash: B256::repeat_byte(0x33),
+        lastProcessedDepositNumber: 9,
+    };
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::ZERO, vec![log]);
+    let mut header_10 = make_test_header(10);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10)));
+    asserter.push_success(&Some(vec![receipt]));
+
+    let err = subscriber
+        .sync_finalized_once(&l1_provider, 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        L1SubscriberError::Fatal {
+            block_number: 10,
+            stage: "finalized batch observer delivery",
+            ..
+        }
+    ));
+}
+
 #[test]
 fn ordinary_subscriber_errors_remain_retryable() {
     let error = L1SubscriberError::Other(eyre::eyre!("transient L1 RPC failure"));

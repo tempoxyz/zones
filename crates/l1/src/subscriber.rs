@@ -822,13 +822,15 @@ where
             }
             if let Some(sender) = &self.finalized_batch_submissions {
                 for submission in finalized_batches {
-                    if sender.send(submission).is_err() {
-                        warn!(
-                            target: "zone::l1::subscriber",
-                            "Finalized batch submission observer is unavailable"
-                        );
-                        break;
-                    }
+                    sender
+                        .send(submission)
+                        .map_err(|_| L1SubscriberError::Fatal {
+                            block_number,
+                            stage: "finalized batch observer delivery",
+                            source: eyre::eyre!(
+                                "finalized batch submission observer is unavailable"
+                            ),
+                        })?;
                 }
             }
             // Publish derived L1 state only after the header has been admitted to every
@@ -918,11 +920,11 @@ where
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
         let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
-        let finalized_batches = self
-            .finalized_batch_submissions
-            .is_some()
-            .then(|| extract_finalized_batch_submissions(block, portal_address, receipts))
-            .unwrap_or_default();
+        let finalized_batches = if self.finalized_batch_submissions.is_some() {
+            extract_finalized_batch_submissions(block, portal_address, receipts)
+        } else {
+            Vec::new()
+        };
 
         for receipt in receipts {
             let retain_receipt_logs = portal_logs.is_some() && receipt.status();
