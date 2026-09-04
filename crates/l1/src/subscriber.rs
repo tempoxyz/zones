@@ -1,6 +1,9 @@
 use crate::queue::DeferredPortalWork;
 
 use super::*;
+use crate::{
+    EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
+};
 use eyre::{OptionExt as _, WrapErr as _};
 use std::collections::HashSet;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
@@ -433,23 +436,11 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
-    /// Shared registry of tokens enabled for this zone.
-    pub enabled_tokens: crate::state::EnabledTokenRegistry,
-    /// Shared L1 state cache. The subscriber updates the cache anchor on each
-    /// finalized block.
-    pub l1_state_cache: crate::state::cache::L1StateCache,
-    /// Validated and applied L1 anchors shared with follower block import.
-    pub block_tracker: L1BlockTracker,
     /// Maximum number of concurrent header and receipt fetches while syncing a
     /// finalized L1 range.
     pub l1_fetch_concurrency: usize,
     /// Interval between L1 connection attempts.
     pub retry_connection_interval: std::time::Duration,
-    /// Optional sink that receives leadership transitions before the block that
-    /// recorded them is enqueued.
-    pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
-    /// Private encryption keys bound by finalized Portal rotation events.
-    pub encryption_keys: Option<crate::EncryptionKeyRing>,
     /// Whether to retain authenticated Portal logs for external observers.
     pub retain_portal_evidence: bool,
     /// First L1 block whose portal work was crossed by canonical checkpoint-only Zone blocks.
@@ -457,33 +448,25 @@ pub struct L1SubscriberConfig {
     pub deferred_work_start: Option<u64>,
 }
 
-pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
-    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash>;
-}
-
-struct ProviderLocalTempoCheckpointReader<P> {
-    provider: P,
-}
-
-impl<P> LocalTempoCheckpointReader for ProviderLocalTempoCheckpointReader<P>
-where
-    P: StateProviderFactory + Clone + Send + Sync + 'static,
-{
-    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
-        let state = self.provider.latest()?;
-        Ok(state.tempo_num_hash()?)
-    }
-}
-
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
-pub struct L1Subscriber {
+pub struct L1Subscriber<P> {
     pub(crate) config: L1SubscriberConfig,
-    pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
+    pub(crate) zone_provider: P,
     /// Finalized L1 blocks retained until a Zone consumer processes them.
     pub(crate) deposit_queue: DepositQueue,
+    /// Shared registry of tokens enabled for this zone.
+    pub(crate) enabled_tokens: EnabledTokenRegistry,
+    /// Shared L1 state cache updated after each finalized block.
+    pub(crate) l1_state_cache: L1StateCache,
+    /// Validated and applied L1 anchors shared with follower block import.
+    pub(crate) block_tracker: L1BlockTracker,
+    /// Optional sink for leadership transitions.
+    pub(crate) leadership_sink: Option<Arc<dyn LeadershipSink>>,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    pub(crate) encryption_keys: Option<EncryptionKeyRing>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
-    pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
+    pub(crate) subscriber_metrics: L1SubscriberMetrics,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -517,22 +500,31 @@ impl L1SubscriberError {
 
 type HeaderStream = Pin<Box<dyn Stream<Item = ()> + Send>>;
 
-impl L1Subscriber {
+impl<P> L1Subscriber<P>
+where
+    P: StateProviderFactory + Sync,
+{
     /// Create an L1 subscriber.
-    pub fn new<P>(
+    #[expect(clippy::too_many_arguments)]
+    pub fn new(
         config: L1SubscriberConfig,
-        local_state_provider: P,
+        zone_provider: P,
         deposit_queue: DepositQueue,
-    ) -> Self
-    where
-        P: StateProviderFactory + Clone + Send + Sync + 'static,
-    {
+        enabled_tokens: EnabledTokenRegistry,
+        l1_state_cache: L1StateCache,
+        block_tracker: L1BlockTracker,
+        leadership_sink: Option<Arc<dyn LeadershipSink>>,
+        encryption_keys: Option<EncryptionKeyRing>,
+    ) -> Self {
         Self {
             config,
-            local_state: Arc::new(ProviderLocalTempoCheckpointReader {
-                provider: local_state_provider,
-            }),
+            zone_provider,
             deposit_queue,
+            enabled_tokens,
+            l1_state_cache,
+            block_tracker,
+            leadership_sink,
+            encryption_keys,
             subscriber_metrics: Default::default(),
         }
     }
@@ -601,7 +593,8 @@ impl L1Subscriber {
     /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
     /// block-zero genesis from the unanchored template.
     pub(crate) fn resolve_start_block(&self) -> Result<u64, L1SubscriberError> {
-        let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
+        let state = self.zone_provider.latest().map_err(eyre::Report::from)?;
+        let local_checkpoint = state.tempo_num_hash().map_err(eyre::Report::from)?;
         if local_checkpoint.hash == B256::ZERO {
             return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
         }
@@ -618,7 +611,6 @@ impl L1Subscriber {
             .last_enqueued()
             .map(|last| last.number.saturating_add(1));
         let observed = self
-            .config
             .block_tracker
             .latest()
             .map(|last| last.number.saturating_add(1));
@@ -631,8 +623,7 @@ impl L1Subscriber {
 
         // Only the persisted zone checkpoint proves consumption.
         // Queue and observation cursors are fetch high-water marks.
-        self.config
-            .block_tracker
+        self.block_tracker
             .initialize_consumed_through(resolved.saturating_sub(1));
         Ok(next)
     }
@@ -664,7 +655,7 @@ impl L1Subscriber {
     ) -> Result<u64, L1SubscriberError> {
         let mut finalized = self.finalized_block_number(l1_provider).await?;
         loop {
-            self.config.block_tracker.record_finalized_target(finalized);
+            self.block_tracker.record_finalized_target(finalized);
             if next_block <= finalized {
                 let blocks = finalized - next_block + 1;
                 self.record_seen_block(finalized, blocks);
@@ -692,11 +683,9 @@ impl L1Subscriber {
                 )
                 .into());
             }
-            self.config.block_tracker.record_finalized_target(refreshed);
+            self.block_tracker.record_finalized_target(refreshed);
             if refreshed == finalized {
-                self.config
-                    .block_tracker
-                    .mark_finalized_target_ready(refreshed)?;
+                self.block_tracker.mark_finalized_target_ready(refreshed)?;
                 self.deposit_queue.notify_consumer();
                 self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
                 return Ok(next_block);
@@ -744,7 +733,7 @@ impl L1Subscriber {
 
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
-        let block_tracker = self.config.block_tracker.clone();
+        let block_tracker = self.block_tracker.clone();
 
         let mut fetched = stream::iter(from..=to)
             .map(move |block_number| {
@@ -818,7 +807,7 @@ impl L1Subscriber {
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
-            if let Some(sink) = &self.config.leadership_sink {
+            if let Some(sink) = &self.leadership_sink {
                 let transition =
                     events
                         .final_leader_transition()
@@ -839,7 +828,7 @@ impl L1Subscriber {
                         ))?;
                 }
             }
-            if let Some(keys) = &self.config.encryption_keys {
+            if let Some(keys) = &self.encryption_keys {
                 for rotation in &events.encryption_key_rotations {
                     keys.apply_rotation(rotation)
                         .map_err(L1SubscriberError::fatal_from_err(
@@ -855,15 +844,14 @@ impl L1Subscriber {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
             if let Some((parent_hash, logs)) = portal_evidence {
-                self.config.block_tracker.record_with_portal_evidence(
+                self.block_tracker.record_with_portal_evidence(
                     anchor,
                     parent_hash,
                     events.clone(),
                     logs,
                 )?;
             } else {
-                self.config
-                    .block_tracker
+                self.block_tracker
                     .record_with_portal_events(anchor, events.clone())?;
             }
             // Publish derived L1 state only after the header has been admitted to every
@@ -923,7 +911,7 @@ impl L1Subscriber {
             .await;
 
             if let Err(error) = result {
-                // Retry ordinary errors; finalized event decoding and application errors are fatal.
+                // Retry connection and sync errors, finalized event errors are fatal.
                 if error.should_retry() {
                     let retry_interval = self.config.retry_connection_interval;
                     self.subscriber_metrics.reconnects.increment(1);
@@ -950,7 +938,7 @@ impl L1Subscriber {
         if self.deposit_queue.last_enqueued().is_some() {
             return Ok(());
         }
-        let checkpoint = self.local_state.latest_tempo_checkpoint()?;
+        let checkpoint = self.zone_provider.latest()?.tempo_num_hash()?;
         if from > checkpoint.number {
             return Ok(());
         }
@@ -1087,7 +1075,7 @@ impl L1Subscriber {
             return;
         }
 
-        let mut enabled_tokens = self.config.enabled_tokens.write();
+        let mut enabled_tokens = self.enabled_tokens.write();
         for enabled in &portal_events.enabled_tokens {
             if enabled_tokens.insert(enabled.token) {
                 info!(token = %enabled.token, "New token enabled");
@@ -1101,8 +1089,7 @@ impl L1Subscriber {
         number: u64,
         invalidated_accounts: &HashSet<Address>,
     ) {
-        self.config
-            .l1_state_cache
+        self.l1_state_cache
             .lock()
             .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
