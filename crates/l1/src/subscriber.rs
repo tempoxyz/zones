@@ -517,18 +517,28 @@ where
 
     /// Determine the starting block number for backfill.
     ///
-    /// The zone's persisted Tempo checkpoint is the authoritative source for
-    /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
-    /// block-zero genesis from the unanchored template.
+    /// Resume after the furthest block represented by durable Zone state or
+    /// the subscriber's in-memory queue and tracker.
     pub(crate) fn resolve_start_block(&self) -> Result<u64, L1SubscriberError> {
         let state = self.zone_provider.latest().map_err(eyre::Report::from)?;
         let local_checkpoint = state.tempo_num_hash().map_err(eyre::Report::from)?;
         if local_checkpoint.hash == B256::ZERO {
             return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
         }
-        let local_tempo_block_number = local_checkpoint.number;
-        info!(local_tempo_block_number, "Resuming from local zone state");
-        Ok(local_tempo_block_number + 1)
+        let next_block = local_checkpoint
+            .number
+            .saturating_add(1)
+            .max(
+                self.deposit_queue
+                    .last_enqueued()
+                    .map_or(0, |block| block.number.saturating_add(1)),
+            )
+            .max(self.block_tracker.next_observation_number().unwrap_or(0));
+        info!(
+            local_tempo_block_number = local_checkpoint.number,
+            next_block, "Resuming L1 sync"
+        );
+        Ok(next_block)
     }
 
     /// Synchronize all missing blocks through the current finalized L1 head.

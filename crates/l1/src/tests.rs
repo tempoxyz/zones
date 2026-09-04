@@ -728,6 +728,22 @@ fn test_resolve_start_block_reads_live_local_state_each_time() {
 }
 
 #[test]
+fn test_resolve_start_block_does_not_rewind_in_memory_progress() {
+    let subscriber = test_subscriber(9);
+
+    subscriber
+        .deposit_queue
+        .enqueue(make_test_header(10), L1PortalEvents::default());
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
+
+    subscriber
+        .block_tracker
+        .record(NumHash::new(11, B256::with_last_byte(11)))
+        .unwrap();
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 12);
+}
+
+#[test]
 fn test_resolve_start_block_accepts_block_zero_with_nonzero_hash() {
     let subscriber = test_subscriber(0);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 1);
