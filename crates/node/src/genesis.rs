@@ -107,6 +107,20 @@ mod tests {
     }
 
     #[test]
+    fn template_activates_current_zone_rules_from_genesis() {
+        let genesis = genesis_template().unwrap();
+        assert_eq!(
+            genesis
+                .config
+                .extra_fields
+                .get_deserialized::<u64>("z1Time")
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn anchored_genesis_patches_state() {
         let l1_header = TempoHeader::default();
         let default_fee_token = address!("0x20c0000000000000000000000000000000001234");

@@ -128,7 +128,8 @@
     "pragueTime": 0,
     "shanghaiTime": 0,
     "terminalTotalDifficulty": 0,
-    "terminalTotalDifficultyPassed": true
+    "terminalTotalDifficultyPassed": true,
+    "z1Time": 0
   },
   "difficulty": "0x0",
   "extraData": "0x74656d706f2d7a6f6e652d67656e65736973",

@@ -160,12 +160,13 @@ mod tests {
         zone_factory::ZonePortalStorage as ZonePortal,
     };
     use tempo_zone_contracts::Unauthorized;
+    use zone_hardfork::ZoneHardfork;
     use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     use crate::{
         TempoState,
         test_utils::{
-            MockL1Reader, TestContext, call_precompile, test_context, test_env,
+            MockL1Reader, TestContext, call_precompile, test_context, test_env, test_env_at,
             test_storage_provider,
         },
     };
@@ -251,7 +252,12 @@ mod tests {
                 })?;
             }
 
-            let env = test_env(&ctx);
+            let zone_hardfork = if spec.is_t11() {
+                ZoneHardfork::Z1
+            } else {
+                ZoneHardfork::Z0
+            };
+            let env = test_env_at(&ctx, zone_hardfork);
             let precompile = crate::create_tip20_precompile(token, &env);
 
             Ok(Self {
