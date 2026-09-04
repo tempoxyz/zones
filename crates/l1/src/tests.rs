@@ -1639,8 +1639,6 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 
 #[test]
 fn extracts_finalized_batch_submission_for_observer() {
-    use alloy_sol_types::SolEvent as _;
-
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
     subscriber.finalized_batch_submissions = Some(sender);
@@ -1675,8 +1673,6 @@ fn extracts_finalized_batch_submission_for_observer() {
 
 #[test]
 fn finalized_batch_observer_ignores_rpc_log_metadata() {
-    use alloy_sol_types::SolEvent as _;
-
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
     subscriber.finalized_batch_submissions = Some(sender);

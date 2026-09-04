@@ -199,6 +199,24 @@ pub struct ZoneSequencerAddOnsConfig {
     pub prover_address: Option<String>,
 }
 
+/// Execution mode for the detached shadow prover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProverRuntime {
+    /// Execute the SPF in this process.
+    InProcess,
+    /// Send witnesses to the prover at the given `HOST:PORT` address.
+    Remote(String),
+}
+
+impl ProverRuntime {
+    fn remote_address(&self) -> Option<&str> {
+        match self {
+            Self::InProcess => None,
+            Self::Remote(address) => Some(address),
+        }
+    }
+}
+
 /// Configuration for detached shadow proving that does not require sequencer keys.
 #[derive(Debug, Clone)]
 pub struct ZoneShadowProverAddOnsConfig {
@@ -206,8 +224,8 @@ pub struct ZoneShadowProverAddOnsConfig {
     pub zone_id: u32,
     /// EIP-2935 history settings used to recover recently finalized submissions.
     pub batch_anchor_config: BatchAnchorConfig,
-    /// Remote prover TCP address. When absent, execute the SPF in-process.
-    pub prover_address: Option<String>,
+    /// Where to execute the SPF.
+    pub prover_runtime: ProverRuntime,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -633,7 +651,10 @@ where
                 .map(|config| ZoneShadowProverAddOnsConfig {
                     zone_id: config.zone_id,
                     batch_anchor_config: config.batch_anchor_config,
-                    prover_address: config.prover_address.clone(),
+                    prover_runtime: config
+                        .prover_address
+                        .clone()
+                        .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
                 })
         });
         let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
@@ -808,7 +829,10 @@ where
                     zone_id: config.zone_id,
                     chain_spec: evm_chain_spec,
                     debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
-                    prover_address: config.prover_address.clone(),
+                    prover_address: config
+                        .prover_runtime
+                        .remote_address()
+                        .map(ToOwned::to_owned),
                 });
 
         if let (Some(config), Some(runtime_config), Some((recovery_sender, submissions))) = (

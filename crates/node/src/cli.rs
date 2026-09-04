@@ -19,8 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, ZoneShadowProverAddOnsConfig,
-    dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -305,7 +305,10 @@ async fn configure_sequencing(
         node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
             zone_id,
             batch_anchor_config: BatchAnchorConfig::default(),
-            prover_address: args.prover_address.clone(),
+            prover_runtime: args
+                .prover_address
+                .clone()
+                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
         });
     }
     if let Some(config) = p2p_config {
