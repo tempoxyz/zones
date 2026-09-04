@@ -7,7 +7,7 @@ use tempo_primitives::TempoHeader;
 
 pub use tempo_zone_contracts::{
     BlockTransition, ChaumPedersenProof, DecryptionData, DepositQueueTransition, DepositType,
-    EnabledToken, QueuedDeposit,
+    EnabledToken, QueuedDeposit, TokenEnablementTransition,
 };
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -90,6 +90,38 @@ pub struct BatchWitness {
     pub tempo_ancestry_headers: Vec<Bytes>,
 }
 
+/// Typed inputs for the opening ZoneInbox system transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub enum TempoImport {
+    Full {
+        header_rlp: Bytes,
+        deposits: Vec<QueuedDeposit>,
+        decryptions: Vec<DecryptionData>,
+        enabled_tokens: Vec<EnabledToken>,
+    },
+    CheckpointOnly {
+        headers_rlp: Vec<Bytes>,
+    },
+}
+
+impl TempoImport {
+    pub fn headers_rlp(&self) -> &[Bytes] {
+        match self {
+            Self::Full { header_rlp, .. } => core::slice::from_ref(header_rlp),
+            Self::CheckpointOnly { headers_rlp } => headers_rlp,
+        }
+    }
+
+    pub fn deposits(&self) -> &[QueuedDeposit] {
+        match self {
+            Self::Full { deposits, .. } => deposits,
+            Self::CheckpointOnly { .. } => &[],
+        }
+    }
+}
+
 /// Zone block input, including its system-call inputs and raw user transactions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -100,14 +132,7 @@ pub struct ZoneBlock {
     pub timestamp: u64,
     pub timestamp_millis_part: u64,
     pub beneficiary: Address,
-    /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`.
-    pub tempo_header_rlp: Bytes,
-    /// Deposits processed by `ZoneInbox.advanceTempo`, in calldata order.
-    pub deposits: Vec<QueuedDeposit>,
-    /// Encrypted-deposit decryption data, in calldata order.
-    pub decryptions: Vec<DecryptionData>,
-    /// Tokens enabled by `ZoneInbox.advanceTempo`, in calldata order.
-    pub enabled_tokens: Vec<EnabledToken>,
+    pub tempo_import: TempoImport,
     /// Withdrawal count passed to finalization in this block, if any.
     pub finalize_withdrawal_batch_count: Option<U256>,
     /// Encrypted sender payloads passed to withdrawal finalization.
@@ -148,6 +173,8 @@ pub struct BatchOutput {
     pub block_transition: BlockTransition,
     /// Progress of the ZoneInbox deposit queue during the batch.
     pub deposit_queue_transition: DepositQueueTransition,
+    /// Progress of the append-only portal token-enablement prefix during the batch.
+    pub token_enablement_transition: TokenEnablementTransition,
     /// Hash chain created by finalizing the batch's withdrawals.
     pub withdrawal_queue_hash: B256,
     /// Batch index committed by `ZoneOutbox.lastBatch`.
