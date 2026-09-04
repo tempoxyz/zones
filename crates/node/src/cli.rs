@@ -124,7 +124,10 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
     let components = move |spec: Arc<ZoneChainSpec>| {
         let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
-        (evm_config, TempoConsensus::new(spec))
+        (
+            evm_config,
+            TempoConsensus::new(spec).with_allow_equal_timestamps(true),
+        )
     };
 
     cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {

@@ -1677,7 +1677,7 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(TempoConsensus::new(ctx.chain_spec()))
+        Ok(TempoConsensus::new(ctx.chain_spec()).with_allow_equal_timestamps(true))
     }
 }
 
