@@ -589,6 +589,22 @@ contract ZonePortalTest is BaseTest {
         bytes verifierConfig;
     }
 
+    struct SettlementAttestationHashData {
+        uint32 zoneId;
+        uint64 sequencerSetVersion;
+        uint256 zoneHeight;
+        uint256 withdrawalBatchIndex;
+        address verifier;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        bytes32 blockTransitionHash;
+        bytes32 depositQueueTransitionHash;
+        bytes32 tokenEnablementTransitionHash;
+        bytes32 withdrawalQueueHash;
+        bytes32 verifierConfigHash;
+    }
+
     struct PortalSettlementState {
         bytes32 blockHash;
         uint256 zoneHeight;
@@ -834,25 +850,24 @@ contract ZonePortalTest is BaseTest {
                 address(target)
             )
         );
-        bytes memory structHashPrefix = abi.encode(
-            SETTLEMENT_ATTESTATION_TYPEHASH,
-            attestation.zoneId,
-            attestation.sequencerSetVersion,
-            attestation.zoneHeight,
-            attestation.withdrawalBatchIndex,
-            attestation.verifier
-        );
-        bytes memory structHashSuffix = abi.encode(
-            attestation.tempoBlockNumber,
-            attestation.anchorBlockNumber,
-            attestation.anchorBlockHash,
-            keccak256(abi.encode(attestation.blockTransition)),
-            keccak256(abi.encode(attestation.depositQueueTransition)),
-            keccak256(abi.encode(attestation.tokenEnablementTransition)),
-            attestation.withdrawalQueueHash,
-            keccak256(attestation.verifierConfig)
-        );
-        bytes32 structHash = keccak256(bytes.concat(structHashPrefix, structHashSuffix));
+        SettlementAttestationHashData memory hashData;
+        hashData.zoneId = attestation.zoneId;
+        hashData.sequencerSetVersion = attestation.sequencerSetVersion;
+        hashData.zoneHeight = attestation.zoneHeight;
+        hashData.withdrawalBatchIndex = attestation.withdrawalBatchIndex;
+        hashData.verifier = attestation.verifier;
+        hashData.tempoBlockNumber = attestation.tempoBlockNumber;
+        hashData.anchorBlockNumber = attestation.anchorBlockNumber;
+        hashData.anchorBlockHash = attestation.anchorBlockHash;
+        hashData.blockTransitionHash = keccak256(abi.encode(attestation.blockTransition));
+        hashData.depositQueueTransitionHash =
+            keccak256(abi.encode(attestation.depositQueueTransition));
+        hashData.tokenEnablementTransitionHash =
+            keccak256(abi.encode(attestation.tokenEnablementTransition));
+        hashData.withdrawalQueueHash = attestation.withdrawalQueueHash;
+        hashData.verifierConfigHash = keccak256(attestation.verifierConfig);
+
+        bytes32 structHash = keccak256(abi.encode(SETTLEMENT_ATTESTATION_TYPEHASH, hashData));
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
