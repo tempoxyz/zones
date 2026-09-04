@@ -48,14 +48,19 @@ pub struct ZonePrecompileEnv {
 
 impl ZonePrecompileEnv {
     /// Captures the active EVM configuration and transaction-local storage accounting state.
+    /// Zone-wrapped Tempo precompiles retain T10 semantics until Z1 activates.
     pub fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
         zone_hardfork: ZoneHardfork,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
+        let mut cfg = cfg.clone();
+        if cfg.spec.is_t11() && !zone_hardfork.is_z1() {
+            cfg.spec = TempoHardfork::T10;
+        }
         Self {
-            cfg: cfg.clone(),
+            cfg,
             zone_hardfork,
             actions,
             non_creditable_slots,
@@ -425,15 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn input_gas_threshold_tracks_t11() {
+    fn input_gas_threshold_tracks_zone_hardfork() {
         let calldata = [0u8; 32];
 
-        for (spec, required_gas) in [(TempoHardfork::T10, 6), (TempoHardfork::T11, 30)] {
+        for (spec, zone_hardfork, required_gas) in [
+            (TempoHardfork::T10, ZoneHardfork::Z0, 6),
+            (TempoHardfork::T11, ZoneHardfork::Z0, 6),
+            (TempoHardfork::T11, ZoneHardfork::Z1, 30),
+        ] {
             let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
             cfg.spec = spec;
             let env = ZonePrecompileEnv::new(
                 &cfg,
-                zone_hardfork::ZoneHardfork::Z0,
+                zone_hardfork,
                 StorageActions::disabled(),
                 Rc::new(RefCell::new(NonCreditableSlots::empty())),
             );
@@ -448,13 +457,16 @@ mod tests {
             assert_eq!(
                 insufficient.halt_reason(),
                 Some(&PrecompileHalt::OutOfGas),
-                "{spec:?} must require {required_gas} input gas"
+                "{spec:?}/{zone_hardfork:?} must require {required_gas} input gas"
             );
 
             let sufficient = precompile
                 .call(input(&mut ctx, &calldata, Address::ZERO, required_gas))
                 .unwrap();
-            assert!(!sufficient.is_halt(), "{spec:?} must accept its exact cost");
+            assert!(
+                !sufficient.is_halt(),
+                "{spec:?}/{zone_hardfork:?} must accept its exact cost"
+            );
         }
     }
 
