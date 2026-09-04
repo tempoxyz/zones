@@ -5,6 +5,7 @@ use crate::{
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::stream;
 use std::collections::HashSet;
+use tempo_alloy::rpc::TempoTransactionReceipt;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
@@ -345,7 +346,7 @@ fn portal_state_cache_invalidation_address(topic0: Option<&B256>) -> Option<Addr
 }
 
 pub(crate) fn collect_portal_logs<'a>(
-    receipts: &'a [tempo_alloy::rpc::TempoTransactionReceipt],
+    receipts: &'a [TempoTransactionReceipt],
     portal_address: Address,
 ) -> Vec<&'a Log> {
     receipts
@@ -372,7 +373,7 @@ pub(crate) fn decode_portal_events(
 }
 
 pub(crate) fn collect_state_cache_invalidations(
-    receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+    receipts: &[TempoTransactionReceipt],
     portal_address: Address,
     portal_events: &L1PortalEvents,
 ) -> HashSet<Address> {
@@ -642,8 +643,7 @@ where
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
         block_number: u64,
-    ) -> Result<(TempoHeader, Vec<tempo_alloy::rpc::TempoTransactionReceipt>), L1SubscriberError>
-    {
+    ) -> Result<(TempoHeader, Vec<TempoTransactionReceipt>), L1SubscriberError> {
         self.block_tracker.wait_for_capacity(block_number).await?;
         let start = std::time::Instant::now();
         let fetch_failures = &self.subscriber_metrics.fetch_failures;
@@ -681,9 +681,11 @@ where
     fn apply_block(
         &self,
         header: TempoHeader,
-        receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+        receipts: &[TempoTransactionReceipt],
     ) -> Result<(), L1SubscriberError> {
         let block_number = header.number();
+
+        // Decode the Portal's receipt-authenticated logs.
         let portal_logs = collect_portal_logs(receipts, self.config.portal_address);
         let events = decode_portal_events(block_number, &portal_logs)
             .inspect_err(|_| self.subscriber_metrics.decode_fence_failures.increment(1))
@@ -692,14 +694,17 @@ where
                 "portal event decoding",
             ))?;
 
+        // Identify addresses whose cached L1 state may now be stale.
         let state_cache_invalidations =
             collect_state_cache_invalidations(receipts, self.config.portal_address, &events);
         self.record_portal_event_metrics(&events);
 
+        // Apply event-derived state before the block becomes observable.
         self.apply_leadership_transition(block_number, &events)?;
         self.apply_encryption_key_rotations(block_number, &events)?;
         self.apply_enabled_token_events(&events);
 
+        // Advance cache coverage, then publish the fully applied block.
         self.update_l1_state_anchor(block_number, &state_cache_invalidations);
         self.publish_block(header, &events, &portal_logs)?;
         Ok(())
@@ -909,7 +914,7 @@ async fn fetch_and_verify_receipts_for_header(
     block: NumHash,
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
-) -> Result<Vec<tempo_alloy::rpc::TempoTransactionReceipt>, L1SubscriberError> {
+) -> Result<Vec<TempoTransactionReceipt>, L1SubscriberError> {
     let block_number = block.number;
     let block_hash = block.hash;
     let receipts = provider
@@ -932,7 +937,7 @@ pub fn verify_receipts_against_header(
     block: NumHash,
     expected_receipts_root: B256,
     expected_logs_bloom: Bloom,
-    receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+    receipts: &[TempoTransactionReceipt],
 ) -> eyre::Result<()> {
     let block_number = block.number;
     let block_hash = block.hash;
