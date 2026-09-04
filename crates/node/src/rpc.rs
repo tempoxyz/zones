@@ -26,8 +26,7 @@ use eyre::WrapErr;
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_primitives_traits::SealedHeader;
-use reth_provider::{CanonStateSubscriptions, HeaderProvider, ProviderError};
+use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -753,23 +752,27 @@ where
     ///
     /// Redaction drops the entire body, so loading the recovered block (and evicting the block
     /// cache with it) only to hash every transaction and RLP-encode the body for `size` is wasted
-    /// work. The header is read through the eth state cache, which serves it from the cached
-    /// header or the cached full block and only loads it from the provider on a miss.
+    /// work. The requested block is usually cached, since clients poll `latest`, so the header
+    /// is taken from the cached block and only read from the provider on a miss.
     fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
         Box::pin(async move {
-            let Some(hash) = self
-                .eth
-                .api
-                .provider()
-                .block_hash_for_id(id)
-                .map_err(internal)?
-            else {
+            let provider = self.eth.api.provider();
+            let Some(hash) = provider.block_hash_for_id(id).map_err(internal)? else {
                 return Ok(raw_null());
             };
-            let header = match self.eth.api.cache().get_header(hash).await {
-                Ok(header) => SealedHeader::new(header, hash),
-                Err(ProviderError::HeaderNotFound(_)) => return Ok(raw_null()),
-                Err(err) => return Err(internal(err)),
+            let cached = self
+                .eth
+                .api
+                .cache()
+                .get_maybe_block(hash)
+                .await
+                .map_err(internal)?;
+            let header = match cached {
+                Some(block) => block.clone_sealed_header(),
+                None => match provider.sealed_header_by_hash(hash).map_err(internal)? {
+                    Some(header) => header,
+                    None => return Ok(raw_null()),
+                },
             };
 
             // A block carries withdrawals exactly when its header has a withdrawals root.
