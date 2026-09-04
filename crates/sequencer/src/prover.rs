@@ -1,4 +1,4 @@
-//! Detached, observational SPF validation for finalized batch candidates.
+//! Detached, observational SPF validation and Nitro proof generation for settlement batches.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,7 +33,8 @@ use tracing::{debug, error, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
+    ProverConnection, VerifyRequest, VerifyResponse,
 };
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
@@ -60,7 +61,7 @@ pub struct ShadowProverConfig {
     pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
-    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
     pub prover_address: Option<String>,
 }
 
@@ -403,10 +404,11 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
         let attempt = witness.clone();
-        tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
+        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
             .await
             .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")?
+            .context("SPF rejected generated witness")?;
+        output
     };
     metrics
         .spf_execution_duration_seconds
@@ -507,7 +509,7 @@ async fn verify_remotely(
             version,
             request_id,
             output,
-            proof_bundle: _,
+            proof_bundle,
         } => {
             ensure!(
                 version == PROTOCOL_VERSION,
@@ -518,6 +520,7 @@ async fn verify_remotely(
                 "remote prover response request ID {request_id:?} does not match {:?}",
                 request.request_id
             );
+            validate_proof_bundle(&proof_bundle)?;
             Ok(*output)
         }
         VerifyResponse::Error {
@@ -540,6 +543,20 @@ async fn verify_remotely(
             bail!("remote prover rejected request ({code:?}): {message}")
         }
     }
+}
+
+fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
+    ensure!(
+        proof_bundle.verifier_config.as_ref() == NITRO_VERIFIER_CONFIG_V1,
+        "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
+        alloy_primitives::hex::encode(&proof_bundle.verifier_config),
+        alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
+    );
+    ensure!(
+        !proof_bundle.proof.is_empty(),
+        "remote prover returned an empty Nitro proof"
+    );
+    Ok(())
 }
 
 fn build_zone_inputs<P: ZoneSequencerProvider>(
@@ -1032,6 +1049,7 @@ fn witness_size(witness: &BatchWitness) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+<<<<<<< HEAD
     use alloy_consensus::Header as ConsensusHeader;
     use zone_spf::{
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
@@ -1079,6 +1097,23 @@ mod tests {
         let error = validate_prepared_anchor(&anchor, checkpoint_number, checkpoint_hash)
             .expect_err("terminal anchor mismatch must fail proving");
         assert!(error.to_string().contains("not prepared anchor hash"));
+=======
+
+    #[test]
+    fn rejects_noncanonical_verifier_config() {
+        let bundle = ProofBundle {
+            verifier_config: Bytes::from_static(&[0x02]),
+            proof: Bytes::from_static(&[0xaa]),
+        };
+
+        let error = validate_proof_bundle(&bundle).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported verifier config 0x02; expected 0x01")
+        );
+>>>>>>> 0f60c4d7 (feat(settlement): prepare Nitro-attested batch proofs)
     }
 
     #[test]
