@@ -605,51 +605,53 @@ where
         // snapshot at the local Tempo anchor, and install the transition sink before
         // the subscriber starts so no block is ever consumed ahead of its
         // leadership transition.
-        let mut leadership_sink: Option<Arc<dyn LeadershipSink>> = None;
-        if let Some(p2p) = self.p2p_config.as_ref() {
-            let schedule = p2p.leadership();
-            let snapshot_anchor = tempo_block_number;
-            // Freeze the replay/live boundary before the subscriber starts. Historical identities
-            // may authenticate transitions that were already finalized when this process began,
-            // but must never authorize a leader selected later.
-            let finalized_replay_boundary = async {
-                l1_provider
-                    .get_header_by_number(BlockNumberOrTag::Finalized)
-                    .await
-                    .map_err(|err| {
-                        eyre::eyre!("failed reading finalized L1 replay boundary: {err}")
-                    })?
-                    .map(|header| header.number())
-                    .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
-            };
-            let (historical_replay_through, ()) = tokio::try_join!(
-                finalized_replay_boundary,
-                seed_leadership_schedule(
+        let leadership_sink: Option<Arc<dyn LeadershipSink>> =
+            if let Some(p2p) = self.p2p_config.as_ref() {
+                let schedule = p2p.leadership();
+                let snapshot_anchor = tempo_block_number;
+                // Freeze the replay/live boundary before the subscriber starts. Historical identities
+                // may authenticate transitions that were already finalized when this process began,
+                // but must never authorize a leader selected later.
+                let finalized_replay_boundary = async {
+                    l1_provider
+                        .get_header_by_number(BlockNumberOrTag::Finalized)
+                        .await
+                        .map_err(|err| {
+                            eyre::eyre!("failed reading finalized L1 replay boundary: {err}")
+                        })?
+                        .map(|header| header.number())
+                        .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
+                };
+                let (historical_replay_through, ()) = tokio::try_join!(
+                    finalized_replay_boundary,
+                    seed_leadership_schedule(
+                        &l1_provider,
+                        self.portal_address,
+                        snapshot_anchor,
+                        p2p.manifest(),
+                        &schedule,
+                    ),
+                )?;
+                // Seed the applied anchor from the persisted checkpoint so it targets the leader
+                // of the next anchor from the very start (and not after the first post-restart block)
+                schedule.record_applied_anchor(snapshot_anchor);
+                install_manifest_forced_recovery(
+                    ctx.node.provider(),
                     &l1_provider,
                     self.portal_address,
                     snapshot_anchor,
                     p2p.manifest(),
                     &schedule,
-                ),
-            )?;
-            // Seed the applied anchor from the persisted checkpoint so it targets the leader
-            // of the next anchor from the very start (and not after the first post-restart block)
-            schedule.record_applied_anchor(snapshot_anchor);
-            install_manifest_forced_recovery(
-                ctx.node.provider(),
-                &l1_provider,
-                self.portal_address,
-                snapshot_anchor,
-                p2p.manifest(),
-                &schedule,
-            )
-            .await?;
-            leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
-                schedule,
-                manifest: p2p.manifest().clone(),
-                historical_replay_through,
-            }));
-        }
+                )
+                .await?;
+                Some(Arc::new(ScheduleLeadershipSink {
+                    schedule,
+                    manifest: p2p.manifest().clone(),
+                    historical_replay_through,
+                }))
+            } else {
+                None
+            };
 
         let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
@@ -1707,7 +1709,9 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(TempoConsensus::new(ctx.chain_spec()))
+        Ok(TempoConsensus::new(ctx.chain_spec())
+            .with_allow_equal_timestamps(true)
+            .with_allowed_future_block_time_millis(100))
     }
 }
 

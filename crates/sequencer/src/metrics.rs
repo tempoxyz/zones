@@ -53,8 +53,11 @@ pub(crate) struct ProverMetrics {
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,
 
-    /// Number of finalized batch candidates that failed prover validation.
+    /// Number of finalized batch candidates rejected by the SPF or with mismatched SPF output.
     pub(crate) validation_failure_total: Counter,
+
+    /// Number of attempts that could not complete due to input, connectivity, protocol, or worker errors.
+    pub(crate) operational_failure_total: Counter,
 
     /// Number of finalized batch candidates that passed prover validation.
     pub(crate) validation_success_total: Counter,
@@ -62,23 +65,44 @@ pub(crate) struct ProverMetrics {
     /// Encoded witness size for a successfully validated batch candidate.
     pub(crate) witness_bytes: Histogram,
 
+    /// Encoded witness size for the latest successfully validated batch candidate.
+    pub(crate) witness_bytes_last: Gauge,
+
     /// Number of Zone blocks in a successfully validated batch witness.
     pub(crate) batch_size_blocks: Histogram,
+
+    /// Number of Zone blocks in the latest successfully validated batch witness.
+    pub(crate) batch_size_blocks_last: Gauge,
 
     /// Number of deposits in a successfully validated batch witness.
     pub(crate) deposits_per_batch: Histogram,
 
+    /// Number of deposits in the latest successfully validated batch witness.
+    pub(crate) deposits_per_batch_last: Gauge,
+
     /// Number of withdrawals in a successfully validated batch witness.
     pub(crate) withdrawals_per_batch: Histogram,
+
+    /// Number of withdrawals in the latest successfully validated batch witness.
+    pub(crate) withdrawals_per_batch_last: Gauge,
 
     /// Number of user transactions in a successfully validated batch witness.
     pub(crate) transactions_per_batch: Histogram,
 
+    /// Number of user transactions in the latest successfully validated batch witness.
+    pub(crate) transactions_per_batch_last: Gauge,
+
     /// Number of Zone state trie nodes in a successfully validated batch witness.
     pub(crate) zone_state_nodes: Histogram,
 
+    /// Number of Zone state trie nodes in the latest successfully validated batch witness.
+    pub(crate) zone_state_nodes_last: Gauge,
+
     /// Number of Tempo state trie nodes in a successfully validated batch witness.
     pub(crate) tempo_state_nodes: Histogram,
+
+    /// Number of Tempo state trie nodes in the latest successfully validated batch witness.
+    pub(crate) tempo_state_nodes_last: Gauge,
 }
 
 /// Metrics emitted by the withdrawal processor.

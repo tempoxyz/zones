@@ -11,7 +11,7 @@ variable "PROVER_EIF_CONTEXT" {
 }
 
 group "default" {
-  targets = ["tempo-zone", "tempo-zone-xtask"]
+  targets = ["tempo-zone", "tempo-zone-xtask", "tempo-zone-prover-utils"]
 }
 
 target "docker-metadata" {}
@@ -59,6 +59,20 @@ target "tempo-zone" {
 
 target "tempo-zone-prover-enclave" {
   dockerfile = "docker/Dockerfile.prover-enclave"
+  context = "."
+  contexts = {
+    chef = "target:prover-chef"
+  }
+  args = {
+    CHEF_IMAGE = "chef"
+    RUST_PROFILE = "release"
+  }
+  platforms = ["linux/amd64"]
+}
+
+target "tempo-zone-prover-utils" {
+  inherits = ["docker-metadata"]
+  dockerfile = "docker/Dockerfile.prover-utils"
   context = "."
   contexts = {
     chef = "target:prover-chef"
