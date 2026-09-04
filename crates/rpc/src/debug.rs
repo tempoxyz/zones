@@ -1,5 +1,6 @@
 //! Zone-specific debug RPC extensions.
 
+use alloy_primitives::B256;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 
@@ -13,6 +14,9 @@ pub trait ZoneDebugApi: Send + Sync {
         &self,
         block: BlockNumberOrTag,
     ) -> RpcResult<ZoneExecutionWitness>;
+
+    /// Replays an executed block selected by hash.
+    async fn zone_execution_witness_by_hash(&self, hash: B256) -> RpcResult<ZoneExecutionWitness>;
 }
 
 /// JSON-RPC transport adapter for [`ZoneDebugApi`].

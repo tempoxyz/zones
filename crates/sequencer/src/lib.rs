@@ -25,6 +25,7 @@ mod encryption_key;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
+mod proofs;
 mod prover;
 mod rpc;
 pub mod settlement;
@@ -36,6 +37,7 @@ pub use encryption_key::{
     register_encryption_key,
 };
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
+pub use proofs::{ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
     BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
@@ -120,6 +122,8 @@ pub struct ZoneSequencerHandle {
     pub withdrawal_handle: tokio::task::JoinHandle<()>,
     /// Join handle for the zone monitor task (which also handles batch submission).
     pub monitor_handle: tokio::task::JoinHandle<()>,
+    /// Join handle for the proactive proof collector, when configured.
+    pub proof_collector_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Spawn all zone sequencer background tasks.
@@ -143,6 +147,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
+    proof_collector: Option<ProofCollectorConfig>,
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
@@ -156,15 +161,40 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
-    let shadow_prover = prover_config.map(|prover_config| {
-        prover::spawn_shadow_prover(
-            prover_config,
-            config.portal_address,
-            config.batch_anchor_config,
+    let (proof_services, proof_collector_handle) = if let Some(collector_config) = proof_collector {
+        let portal_anchor =
+            resolve_portal_zone_anchor(&zone_provider, config.portal_address, &l1_provider)
+                .await
+                .expect("proof collector can resolve the portal-confirmed Zone anchor");
+        let (collector, collector_task) = proofs::spawn_proof_collector(
+            collector_config,
             zone_provider.clone(),
             l1_provider.clone(),
+            portal_anchor.block_number,
+            shutdown.clone(),
         )
-    });
+        .expect("proof collector store can be opened");
+        let shadow = prover_config.map(|prover_config| {
+            prover::spawn_shadow_prover(
+                prover_config,
+                collector.clone(),
+                config.portal_address,
+                config.batch_anchor_config,
+                zone_provider.clone(),
+                l1_provider.clone(),
+            )
+        });
+        (
+            Some(prover::ProofServices::new(collector, shadow)),
+            Some(collector_task),
+        )
+    } else {
+        assert!(
+            prover_config.is_none(),
+            "shadow prover requires a proof collector"
+        );
+        (None, None)
+    };
     let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
@@ -205,13 +235,14 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         l1_provider,
         signer,
         monitor_shared_state,
-        shadow_prover,
+        proof_services,
         shutdown,
     );
 
     ZoneSequencerHandle {
         withdrawal_handle,
         monitor_handle,
+        proof_collector_handle,
     }
 }
 

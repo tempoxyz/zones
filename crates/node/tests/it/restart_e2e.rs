@@ -191,6 +191,7 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     let zone_sequencer::ZoneSequencerHandle {
         withdrawal_handle,
         monitor_handle,
+        proof_collector_handle: _,
     } = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     // Keep batch submission running, but stop L1 processing so the portal queue
