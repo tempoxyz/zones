@@ -20,10 +20,11 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolValue, abi::AbiDecoderConfig};
+use alloy_sol_types::{SolCall, SolValue};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
-    dispatch::ABI_DECODER_MEMORY_LIMIT,
+    dispatch::abi_decoder_config_for_spec,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
@@ -379,9 +380,7 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
     type Error = ZonePrecompileError;
 
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
-        let config = AbiDecoderConfig::new()
-            .memory_limit(ABI_DECODER_MEMORY_LIMIT)
-            .strict(true);
+        let config = abi_decoder_config_for_spec(TempoHardfork::latest());
 
         match queued.depositType {
             DepositType::WithdrawalBounceBack => {
