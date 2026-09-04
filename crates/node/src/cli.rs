@@ -126,7 +126,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
         (
             evm_config,
-            TempoConsensus::new(spec).with_allow_equal_timestamps(true),
+            TempoConsensus::new(spec)
+                .with_allow_equal_timestamps(true)
+                .with_allowed_future_block_time_millis(100),
         )
     };
 
