@@ -589,6 +589,22 @@ contract ZonePortalTest is BaseTest {
         bytes verifierConfig;
     }
 
+    struct SettlementAttestationHashData {
+        uint32 zoneId;
+        uint64 sequencerSetVersion;
+        uint256 zoneHeight;
+        uint256 withdrawalBatchIndex;
+        address verifier;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        bytes32 blockTransitionHash;
+        bytes32 depositQueueTransitionHash;
+        bytes32 tokenEnablementTransitionHash;
+        bytes32 withdrawalQueueHash;
+        bytes32 verifierConfigHash;
+    }
+
     struct PortalSettlementState {
         bytes32 blockHash;
         uint256 zoneHeight;
@@ -597,6 +613,21 @@ contract ZonePortalTest is BaseTest {
         uint256 withdrawalQueueTail;
         uint64 lastProcessedDepositNumber;
         uint64 lastSyncedTempoBlockNumber;
+    }
+
+    struct WithdrawalCapacityTestState {
+        bytes32 processedDepositHash;
+        Withdrawal withdrawal;
+        uint256 reserve;
+        Withdrawal[] withdrawals;
+        Withdrawal successfulWithdrawal;
+        bytes32 withdrawalHash;
+        uint64 maximum;
+        uint64 maximumPublicDeposits;
+        bytes32 queueHashAtPublicCapacity;
+        uint256 bobBalanceBefore;
+        bytes32 successfulWithdrawalHash;
+        bytes32 queueHashAtCapacity;
     }
 
     function setUp() public override {
@@ -819,24 +850,24 @@ contract ZonePortalTest is BaseTest {
                 address(target)
             )
         );
-        bytes32 structHash = keccak256(
-            abi.encode(
-                SETTLEMENT_ATTESTATION_TYPEHASH,
-                attestation.zoneId,
-                attestation.sequencerSetVersion,
-                attestation.zoneHeight,
-                attestation.withdrawalBatchIndex,
-                attestation.verifier,
-                attestation.tempoBlockNumber,
-                attestation.anchorBlockNumber,
-                attestation.anchorBlockHash,
-                keccak256(abi.encode(attestation.blockTransition)),
-                keccak256(abi.encode(attestation.depositQueueTransition)),
-                keccak256(abi.encode(attestation.tokenEnablementTransition)),
-                attestation.withdrawalQueueHash,
-                keccak256(attestation.verifierConfig)
-            )
-        );
+        SettlementAttestationHashData memory hashData;
+        hashData.zoneId = attestation.zoneId;
+        hashData.sequencerSetVersion = attestation.sequencerSetVersion;
+        hashData.zoneHeight = attestation.zoneHeight;
+        hashData.withdrawalBatchIndex = attestation.withdrawalBatchIndex;
+        hashData.verifier = attestation.verifier;
+        hashData.tempoBlockNumber = attestation.tempoBlockNumber;
+        hashData.anchorBlockNumber = attestation.anchorBlockNumber;
+        hashData.anchorBlockHash = attestation.anchorBlockHash;
+        hashData.blockTransitionHash = keccak256(abi.encode(attestation.blockTransition));
+        hashData.depositQueueTransitionHash =
+            keccak256(abi.encode(attestation.depositQueueTransition));
+        hashData.tokenEnablementTransitionHash =
+            keccak256(abi.encode(attestation.tokenEnablementTransition));
+        hashData.withdrawalQueueHash = attestation.withdrawalQueueHash;
+        hashData.verifierConfigHash = keccak256(attestation.verifierConfig);
+
+        bytes32 structHash = keccak256(abi.encode(SETTLEMENT_ATTESTATION_TYPEHASH, hashData));
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
@@ -2510,13 +2541,15 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_processWithdrawals_preflightsRemainingDepositCapacity() public {
+        WithdrawalCapacityTestState memory state;
+
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
         _deposit(portal, address(pathUSD), alice, 1000e6, bytes32("escrow"), alice);
         vm.stopPrank();
 
-        bytes32 processedDepositHash = portal.currentDepositQueueHash();
-        Withdrawal memory withdrawal = _withdrawal(
+        state.processedDepositHash = portal.currentDepositQueueHash();
+        state.withdrawal = _withdrawal(
             address(pathUSD),
             alice,
             address(gasConsumingReceiver),
@@ -2526,18 +2559,18 @@ contract ZonePortalTest is BaseTest {
             bob,
             ""
         );
-        uint256 reserve = 20;
-        Withdrawal[] memory withdrawals = new Withdrawal[](reserve + 1);
-        for (uint256 i; i < reserve; ++i) {
-            withdrawals[i] = withdrawal;
+        state.reserve = 20;
+        state.withdrawals = new Withdrawal[](state.reserve + 1);
+        for (uint256 i; i < state.reserve; ++i) {
+            state.withdrawals[i] = state.withdrawal;
         }
-        Withdrawal memory successfulWithdrawal =
+        state.successfulWithdrawal =
             _withdrawal(address(pathUSD), alice, bob, 1, bytes32("success"), 0, alice, "");
-        withdrawals[reserve] = successfulWithdrawal;
+        state.withdrawals[state.reserve] = state.successfulWithdrawal;
 
-        bytes32 withdrawalHash = bytes32(0);
-        for (uint256 i = withdrawals.length; i > 0; --i) {
-            withdrawalHash = keccak256(abi.encode(withdrawals[i - 1], withdrawalHash));
+        for (uint256 i = state.withdrawals.length; i > 0; --i) {
+            state.withdrawalHash =
+                keccak256(abi.encode(state.withdrawals[i - 1], state.withdrawalHash));
         }
 
         vm.roll(block.number + 1);
@@ -2550,62 +2583,63 @@ contract ZonePortalTest is BaseTest {
             }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0),
-                nextProcessedHash: processedDepositHash,
+                nextProcessedHash: state.processedDepositHash,
                 prevDepositNumber: 0,
                 nextDepositNumber: 1
             }),
-            withdrawalHash,
+            state.withdrawalHash,
             "",
             ""
         );
 
-        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
-        uint64 maximumPublicDeposits = maximum - uint64(reserve);
+        state.maximum = portal.MAX_UNPROCESSED_DEPOSITS();
+        state.maximumPublicDeposits = state.maximum - uint64(state.reserve);
         vm.startPrank(alice);
-        pathUSD.approve(address(portal), maximum);
-        for (uint256 i; i < maximumPublicDeposits; ++i) {
+        pathUSD.approve(address(portal), state.maximum);
+        for (uint256 i; i < state.maximumPublicDeposits; ++i) {
             _deposit(portal, address(pathUSD), bob, 1, bytes32(i), bob);
         }
         vm.stopPrank();
 
-        bytes32 queueHashAtPublicCapacity = portal.currentDepositQueueHash();
-        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        state.queueHashAtPublicCapacity = portal.currentDepositQueueHash();
+        state.bobBalanceBefore = pathUSD.balanceOf(bob);
 
         vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, state.maximum)
         );
-        portal.processWithdrawals(withdrawals, bytes32(0));
+        portal.processWithdrawals(state.withdrawals, bytes32(0));
 
-        assertEq(portal.currentDepositQueueHash(), queueHashAtPublicCapacity);
-        assertEq(portal.depositCount(), maximumPublicDeposits + 1);
-        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(portal.currentDepositQueueHash(), state.queueHashAtPublicCapacity);
+        assertEq(portal.depositCount(), state.maximumPublicDeposits + 1);
+        assertEq(pathUSD.balanceOf(bob), state.bobBalanceBefore);
         assertEq(portal.withdrawalQueueHead(), 0);
-        assertEq(portal.withdrawalQueueSlot(0), withdrawalHash);
+        assertEq(portal.withdrawalQueueSlot(0), state.withdrawalHash);
 
-        Withdrawal[] memory bounceBacks = new Withdrawal[](reserve);
-        for (uint256 i; i < reserve; ++i) {
-            bounceBacks[i] = withdrawal;
+        Withdrawal[] memory bounceBacks = new Withdrawal[](state.reserve);
+        for (uint256 i; i < state.reserve; ++i) {
+            bounceBacks[i] = state.withdrawal;
         }
-        bytes32 successfulWithdrawalHash = keccak256(abi.encode(successfulWithdrawal, bytes32(0)));
-        portal.processWithdrawals(bounceBacks, successfulWithdrawalHash);
+        state.successfulWithdrawalHash =
+            keccak256(abi.encode(state.successfulWithdrawal, bytes32(0)));
+        portal.processWithdrawals(bounceBacks, state.successfulWithdrawalHash);
 
-        bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
-        assertTrue(queueHashAtCapacity != queueHashAtPublicCapacity);
-        assertEq(portal.depositCount(), maximum + 1);
-        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        state.queueHashAtCapacity = portal.currentDepositQueueHash();
+        assertTrue(state.queueHashAtCapacity != state.queueHashAtPublicCapacity);
+        assertEq(portal.depositCount(), state.maximum + 1);
+        assertEq(pathUSD.balanceOf(bob), state.bobBalanceBefore);
         assertEq(portal.withdrawalQueueHead(), 0);
-        assertEq(portal.withdrawalQueueSlot(0), successfulWithdrawalHash);
+        assertEq(portal.withdrawalQueueSlot(0), state.successfulWithdrawalHash);
 
         vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, state.maximum)
         );
-        portal.processWithdrawals(_singleWithdrawal(successfulWithdrawal), bytes32(0));
+        portal.processWithdrawals(_singleWithdrawal(state.successfulWithdrawal), bytes32(0));
 
-        assertEq(portal.currentDepositQueueHash(), queueHashAtCapacity);
-        assertEq(portal.depositCount(), maximum + 1);
-        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(portal.currentDepositQueueHash(), state.queueHashAtCapacity);
+        assertEq(portal.depositCount(), state.maximum + 1);
+        assertEq(pathUSD.balanceOf(bob), state.bobBalanceBefore);
         assertEq(portal.withdrawalQueueHead(), 0);
-        assertEq(portal.withdrawalQueueSlot(0), successfulWithdrawalHash);
+        assertEq(portal.withdrawalQueueSlot(0), state.successfulWithdrawalHash);
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -2616,19 +2650,19 @@ contract ZonePortalTest is BaseTest {
                 prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("capacity-reopened")
             }),
             DepositQueueTransition({
-                prevProcessedHash: processedDepositHash,
-                nextProcessedHash: queueHashAtCapacity,
+                prevProcessedHash: state.processedDepositHash,
+                nextProcessedHash: state.queueHashAtCapacity,
                 prevDepositNumber: 1,
-                nextDepositNumber: maximum + 1
+                nextDepositNumber: state.maximum + 1
             }),
             bytes32(0),
             "",
             ""
         );
 
-        portal.processWithdrawals(_singleWithdrawal(successfulWithdrawal), bytes32(0));
+        portal.processWithdrawals(_singleWithdrawal(state.successfulWithdrawal), bytes32(0));
 
-        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + successfulWithdrawal.amount);
+        assertEq(pathUSD.balanceOf(bob), state.bobBalanceBefore + state.successfulWithdrawal.amount);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
     }
