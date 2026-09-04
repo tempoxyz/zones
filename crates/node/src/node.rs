@@ -664,7 +664,15 @@ where
             self.encryption_keys.clone(),
         );
         let task_executor = ctx.node.task_executor().clone();
-        task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
+        task_executor.spawn_critical_task(
+            "l1-block-subscriber",
+            Box::pin(async move {
+                l1_subscriber
+                    .run()
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}"));
+            }),
+        );
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
         // Start the Commonware network and the long-lived event router

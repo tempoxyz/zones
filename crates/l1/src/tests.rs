@@ -728,6 +728,22 @@ fn test_resolve_start_block_reads_live_local_state_each_time() {
 }
 
 #[test]
+fn test_resolve_start_block_does_not_rewind_in_memory_progress() {
+    let subscriber = test_subscriber(9);
+
+    subscriber
+        .deposit_queue
+        .enqueue(make_test_header(10), L1PortalEvents::default());
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
+
+    subscriber
+        .block_tracker
+        .record(NumHash::new(11, B256::with_last_byte(11)))
+        .unwrap();
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 12);
+}
+
+#[test]
 fn test_resolve_start_block_accepts_block_zero_with_nonzero_hash() {
     let subscriber = test_subscriber(0);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 1);
@@ -746,7 +762,7 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 }
 
 #[tokio::test]
-async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
+async fn test_sync_finalized_ingests_missing_finalized_range() {
     let subscriber = test_subscriber(9);
     let asserter = Asserter::new();
     let l1_provider =
@@ -767,11 +783,16 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     push_header_and_empty_receipts(&asserter, header_11);
     push_header_and_empty_receipts(&asserter, header_12);
 
-    let err = subscriber
-        .follow_finalized(&l1_provider, Box::pin(futures::stream::iter([()])))
+    let mut next_block = 10;
+    subscriber
+        .sync_finalized(&l1_provider, &mut next_block)
         .await
-        .expect_err("finite header stream should end the subscriber");
-    assert!(err.to_string().contains("head notification stream ended"));
+        .unwrap();
+    subscriber
+        .sync_finalized(&l1_provider, &mut next_block)
+        .await
+        .unwrap();
+    assert_eq!(next_block, 13);
 
     let blocks = subscriber.deposit_queue.drain();
     assert_eq!(
@@ -813,20 +834,61 @@ async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
 }
 
 #[tokio::test]
-async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
+async fn test_sync_finalized_does_not_refetch_current_cursor() {
     let subscriber = test_subscriber(10);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(make_test_header(10))));
 
-    let next = subscriber
-        .sync_finalized_once(&l1_provider, 11)
+    let mut next_block = 11;
+    subscriber
+        .sync_finalized(&l1_provider, &mut next_block)
         .await
         .unwrap();
 
-    assert_eq!(next, 11);
+    assert_eq!(next_block, 11);
     assert!(subscriber.deposit_queue.drain().is_empty());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_sync_finalized_preserves_progress_after_partial_failure() {
+    let subscriber = test_subscriber(9);
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+
+    asserter.push_success(&Some(header_response(header_11.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_failure_msg("temporary block fetch failure");
+
+    let mut next_block = 10;
+    subscriber
+        .sync_finalized(&l1_provider, &mut next_block)
+        .await
+        .expect_err("the first attempt should fail while fetching block 11");
+    assert_eq!(next_block, 11);
+
+    asserter.push_success(&Some(header_response(header_11.clone())));
+    push_header_and_empty_receipts(&asserter, header_11);
+    subscriber
+        .sync_finalized(&l1_provider, &mut next_block)
+        .await
+        .unwrap();
+
+    assert_eq!(next_block, 12);
+    assert_eq!(
+        subscriber
+            .deposit_queue
+            .drain()
+            .iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11]
+    );
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1730,8 +1792,9 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
     asserter.push_success(&Some(header_response(header_10)));
     asserter.push_success(&Some(vec![receipt]));
 
+    let mut next_block = 10;
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_finalized(&l1_provider, &mut next_block)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1797,13 +1860,12 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
 
-    assert_eq!(
-        subscriber
-            .sync_finalized_once(&l1_provider, 10)
-            .await
-            .unwrap(),
-        11
-    );
+    let mut next_block = 10;
+    subscriber
+        .sync_finalized(&l1_provider, &mut next_block)
+        .await
+        .unwrap();
+    assert_eq!(next_block, 11);
 
     let seen = sink.seen.lock();
     assert_eq!(seen.len(), 1);
@@ -1843,8 +1905,9 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
 
+    let mut next_block = 10;
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .sync_finalized(&l1_provider, &mut next_block)
         .await
         .unwrap_err();
     assert!(matches!(
