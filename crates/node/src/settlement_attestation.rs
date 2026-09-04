@@ -644,11 +644,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-<<<<<<< HEAD
-    use alloy_primitives::Log;
-=======
-    use alloy_primitives::Bytes;
->>>>>>> 0f60c4d7 (feat(settlement): prepare Nitro-attested batch proofs)
+    use alloy_primitives::{Bytes, Log};
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_provider::test_utils::MockEthProvider;
