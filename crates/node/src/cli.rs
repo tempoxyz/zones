@@ -1,11 +1,19 @@
 //! Tempo Zone CLI.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use clap::{Args, CommandFactory, FromArgMatches};
+use clap::{Args, Parser as _};
+use eyre::WrapErr as _;
+use futures::future::BoxFuture;
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
@@ -19,7 +27,7 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
@@ -38,88 +46,29 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "rustls::client=warn"
 );
 
-/// Tempo Zone CLI entry point.
-pub enum ZoneCli {
-    Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
-    Dev(Box<DevCommand>),
-}
-
-impl ZoneCli {
-    fn command() -> clap::Command {
-        Cli::<ZoneChainSpecParser, ZoneArgs>::command()
-            .about("Tempo Zone")
-            .subcommand(DevCommand::command())
-    }
-
-    /// Parse CLI arguments from the environment.
-    pub fn parse() -> Self {
-        Self::parse_from(std::env::args_os())
-    }
-
-    /// Parse CLI arguments from an iterator. The first item is the binary name.
-    pub fn parse_from<I, T>(args: I) -> Self
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        Self::try_parse_from(args).unwrap_or_else(|err| err.exit())
-    }
-
-    /// Try to parse CLI arguments from an iterator.
-    pub fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        let matches = Self::command().try_get_matches_from(args)?;
-        if let Some(("dev", dev_matches)) = matches.subcommand() {
-            return DevCommand::from_arg_matches(dev_matches)
-                .map(Box::new)
-                .map(Self::Dev);
-        }
-        Cli::from_arg_matches(&matches)
-            .map(Box::new)
-            .map(Self::Node)
-    }
-
-    /// Run the Tempo Zone node.
-    ///
-    /// Configures the node builder, launches the zone node with all sequencer
-    /// background tasks, and blocks until exit.
-    pub fn run(self) -> eyre::Result<()> {
-        match self {
-            Self::Node(cli) => run_node(*cli),
-            Self::Dev(command) => (*command).run(),
-        }
-    }
-}
-
-/// Main entry point for the `node` command.
-fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+/// Runs the Tempo Zone CLI.
+pub fn run() -> eyre::Result<()> {
+    let mut cli = Cli::<ZoneChainSpecParser, ZoneArgs>::parse();
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
+    validate_node_options(&mut cli)?;
 
-    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
-        Ok(url) if !url.is_empty() => {
-            let url = url
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
-            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
-                .map_err(|error| {
-                    eyre::eyre!(
-                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
-                    )
-                })?
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
-            eyre::ensure!(
-                !portal_address.is_zero(),
-                "L1_PORTAL_ADDRESS must be nonzero"
-            );
-            Some((url, portal_address))
+    let (dev, external_l1) = match cli.as_node_command_mut() {
+        Some(command) if command.dev.dev => {
+            let datadir = command
+                .datadir
+                .clone()
+                .resolve_datadir(command.chain.chain());
+            crate::dev::prepare_datadir(datadir.data_dir())?;
+            (true, None)
         }
-        Ok(_) | Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+        Some(command) => (false, Some(external_l1_config(&command.ext)?)),
+        None => (false, None),
+    };
+    let l1_config = if dev {
+        None
+    } else {
+        l1_http_config_from_env()?
     };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
@@ -138,6 +87,25 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         if args.block_interval_ms.is_some() {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
+
+        let (l1_rpc_url, portal_address, sequencer_signer, l1_exit) = if builder.config().dev.dev {
+            eyre::ensure!(
+                args.sequencer_manifest.is_none(),
+                "--sequencer.manifest cannot be used with --dev"
+            );
+            let executor = builder.task_executor().clone();
+            let dev = crate::dev::init(builder.config_mut(), executor).await?;
+            (
+                dev.l1_rpc_url,
+                dev.portal,
+                Some(dev.signer),
+                Some(dev.l1_exit),
+            )
+        } else {
+            let (l1_rpc_url, portal_address) =
+                external_l1.expect("external L1 config resolved for non-dev node");
+            (l1_rpc_url, portal_address, None, None)
+        };
 
         let zone_id = builder.config().chain.zone_id();
         validate_deprecated_zone_id(args.zone_id, zone_id)?;
@@ -162,8 +130,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
         let mut node = ZoneNode::new(
-            args.l1_rpc_url.clone(),
-            args.portal_address,
+            l1_rpc_url.clone(),
+            portal_address,
             args.l1_fetch_concurrency,
             Duration::from_millis(args.l1_retry_connection_interval_ms),
         )
@@ -179,23 +147,19 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             node = node.with_deposit_decryption_keys(additional_decryption_keys);
         }
 
-        node = configure_sequencing(&args, zone_id, node).await?;
+        node = configure_sequencing(&args, zone_id, node, sequencer_signer).await?;
 
         // Install or skip the checker ExEx based on the configured mode.
-        match args.checker_mode {
+        let handle = match args.checker_mode {
             CheckerMode::Off => {
-                let handle = builder
-                    .node(node)
-                    .launch_with_debug_capabilities()
-                    .await?;
-                handle.wait_for_node_exit().await
+                builder.node(node).launch().await?
             }
             CheckerMode::Observe => {
                 info!(target: "reth::cli", "Checker ExEx enabled (observe mode)");
                 let node = node.with_portal_evidence_retention();
                 let checker = CheckerExEx::new(CheckerConfig {
-                    l1_rpc_url: args.l1_rpc_url.clone(),
-                    portal_address: args.portal_address,
+                    l1_rpc_url: l1_rpc_url.clone(),
+                    portal_address,
                     zone_id,
                     zone_chain_id: builder.config().chain.chain().id(),
                     database_path: builder.config().datadir().data_dir().join("checker"),
@@ -204,13 +168,118 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 builder
                     .node(node)
                     .install_exex("zone-checker", async move |ctx| Ok(checker.run(ctx)))
-                    .launch_with_debug_capabilities()
+                    .launch()
                     .await?
-                    .wait_for_node_exit()
-                    .await
             }
-        }
+        };
+        wait_for_exit(handle.wait_for_node_exit(), l1_exit).await
     })
+}
+
+async fn wait_for_exit(
+    zone_exit: impl Future<Output = eyre::Result<()>>,
+    l1_exit: Option<BoxFuture<'static, eyre::Result<()>>>,
+) -> eyre::Result<()> {
+    let Some(l1_exit) = l1_exit else {
+        return zone_exit.await;
+    };
+
+    tokio::select! {
+        result = zone_exit => result,
+        result = l1_exit => {
+            result.wrap_err("embedded Tempo L1 failed")?;
+            Err(eyre::eyre!("embedded Tempo L1 exited unexpectedly"))
+        }
+    }
+}
+
+fn validate_node_options(cli: &mut Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+    let Some(command) = cli.as_node_command_mut() else {
+        return Ok(());
+    };
+
+    eyre::ensure!(
+        command.debug.rpc_consensus_url.is_none() && command.debug.etherscan.is_none(),
+        "--debug.rpc-consensus-url and --debug.etherscan are not supported"
+    );
+    if !command.dev.dev {
+        return Ok(());
+    }
+
+    eyre::ensure!(
+        command.chain.as_ref() == ZoneChainSpecParser::dev_chain_spec()?.as_ref(),
+        "--chain must be `dev` when --dev is enabled"
+    );
+    eyre::ensure!(
+        !command.with_unused_ports,
+        "--with-unused-ports cannot be used with --dev because provisioning requires a stable RPC port"
+    );
+    eyre::ensure!(
+        command.dev.block_max_transactions.is_none(),
+        "--dev.block-max-transactions is not supported"
+    );
+
+    let mut rpc = command.rpc.clone();
+    rpc.adjust_instance_ports(command.instance);
+    eyre::ensure!(rpc.http_port != 0, "--http.port must not resolve to zero");
+    if let Some(instance) = command.instance {
+        command.ext.redacted_rpc_port = command
+            .ext
+            .redacted_rpc_port
+            .checked_sub(instance - 1)
+            .ok_or_else(|| eyre::eyre!("--redacted-rpc.port must not resolve to zero"))?;
+    }
+    eyre::ensure!(
+        command.ext.redacted_rpc_port == 0 || command.ext.redacted_rpc_port != rpc.http_port,
+        "operator and redacted RPC ports must be different"
+    );
+    Ok(())
+}
+
+fn external_l1_config(args: &ZoneArgs) -> eyre::Result<(String, Address)> {
+    let l1_rpc_url = match args.l1_rpc_url.as_ref() {
+        Some(url) => url.clone(),
+        None => {
+            let url = std::env::var("L1_RPC_URL")
+                .map_err(|_| eyre::eyre!("--l1.rpc-url or L1_RPC_URL is required without --dev"))?;
+            parse_l1_rpc_url(&url).map_err(eyre::Report::msg)?
+        }
+    };
+    let portal_address = match args.portal_address {
+        Some(address) => address,
+        None => {
+            let address = std::env::var("L1_PORTAL_ADDRESS").map_err(|_| {
+                eyre::eyre!("--l1.portal-address or L1_PORTAL_ADDRESS is required without --dev")
+            })?;
+            parse_portal_address(&address).map_err(eyre::Report::msg)?
+        }
+    };
+    Ok((l1_rpc_url, portal_address))
+}
+
+fn l1_http_config_from_env() -> eyre::Result<Option<(url::Url, Address)>> {
+    match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
+                    )
+                })?
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
+            eyre::ensure!(
+                !portal_address.is_zero(),
+                "L1_PORTAL_ADDRESS must be nonzero"
+            );
+            Ok(Some((url, portal_address)))
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    }
 }
 
 /// Creates the EVM config used by CLI subcommands.
@@ -237,6 +306,7 @@ async fn configure_sequencing(
     args: &ZoneArgs,
     zone_id: u32,
     mut node: ZoneNode,
+    signer: Option<PrivateKeySigner>,
 ) -> eyre::Result<ZoneNode> {
     let p2p_config =
         args.sequencer_manifest
@@ -267,7 +337,8 @@ async fn configure_sequencing(
     }
 
     let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
-    let should_sequence_blocks = args.enable_sequencer
+    let sequencing = signer.is_some()
+        || args.sequencer
         || p2p_config
             .as_ref()
             .is_some_and(|config| !config.is_rpc_only());
@@ -277,12 +348,15 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
+        !args.enable_prover || sequencing,
         "--sequencer.enable-prover requires a promotable sequencer node"
     );
 
-    if should_sequence_blocks {
-        let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
+    if sequencing {
+        let sequencer_signer = match signer {
+            Some(signer) => signer,
+            None => load_sequencer_signer(args.sequencer_key_file.as_deref()).await?,
+        };
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
@@ -308,9 +382,7 @@ async fn configure_sequencing(
     Ok(node)
 }
 
-async fn load_sequencer_signer(
-    key_file: Option<&std::path::Path>,
-) -> eyre::Result<PrivateKeySigner> {
+async fn load_sequencer_signer(key_file: Option<&Path>) -> eyre::Result<PrivateKeySigner> {
     let path = key_file.ok_or_else(|| {
         eyre::eyre!("--sequencer-key-file is required when sequencing is enabled")
     })?;
@@ -328,9 +400,7 @@ async fn load_sequencer_signer(
         .map_err(|_| eyre::eyre!("invalid sequencer key from {source}"))
 }
 
-async fn load_decryption_keys(
-    key_file: Option<&std::path::Path>,
-) -> eyre::Result<Vec<k256::SecretKey>> {
+async fn load_decryption_keys(key_file: Option<&Path>) -> eyre::Result<Vec<k256::SecretKey>> {
     let Some(path) = key_file else {
         return Ok(Vec::new());
     };
@@ -368,18 +438,18 @@ pub struct ZoneArgs {
     /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
     #[arg(
         long = "l1.rpc-url",
-        env = "L1_RPC_URL",
+        conflicts_with = "dev",
         value_parser = parse_l1_rpc_url
     )]
-    pub l1_rpc_url: String,
+    pub l1_rpc_url: Option<String>,
 
     /// ZonePortal contract address on L1.
     #[arg(
         long = "l1.portal-address",
-        env = "L1_PORTAL_ADDRESS",
+        conflicts_with = "dev",
         value_parser = parse_portal_address
     )]
-    pub portal_address: Address,
+    pub portal_address: Option<Address>,
 
     /// Deprecated compatibility flag. Ignored.
     #[arg(
@@ -416,7 +486,7 @@ pub struct ZoneArgs {
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
         requires = "p2p_key",
-        conflicts_with = "enable_sequencer"
+        conflicts_with = "sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
 
@@ -552,14 +622,13 @@ pub struct ZoneArgs {
     )]
     pub redacted_rpc_max_auth_token_validity_secs: u64,
 
-    /// Enable the Zone node in sequencer mode. This advances block production and submits
-    /// withdrawal batches.
+    /// Enable legacy single-sequencer mode without a multi-sequencer manifest.
     #[arg(
         long = "sequencer",
         env = "SEQUENCER",
         conflicts_with = "sequencer_manifest"
     )]
-    pub enable_sequencer: bool,
+    pub sequencer: bool,
 
     /// Checker ExEx mode: `off` (default) or `observe`.
     #[arg(
@@ -640,20 +709,39 @@ fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::R
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write as _, process::Command, thread, time::Duration};
+    use std::{io::Write as _, path::Path, process::Command, thread, time::Duration};
 
     use clap::Parser as _;
+    use futures::future::{self, BoxFuture};
+    use reth_chainspec::EthChainSpec as _;
+    use reth_node_core::args::DevArgs;
+    use tempo_chainspec::spec::DEV;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
-        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
+        Role, ZoneArgs, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
+        parse_portal_address, validate_deprecated_zone_id, validate_node_options,
+        validate_p2p_transaction_size_limit, wait_for_exit,
     };
+    use reth_ethereum::cli::Cli;
+    use zone_chainspec::ZoneChainSpecParser;
+    use zone_primitives::constants::zone_chain_id;
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
     struct ZoneArgsParser {
         #[command(flatten)]
+        _dev: DevArgs,
+
+        #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    fn validate_node(args: &[&str]) -> eyre::Result<Cli<ZoneChainSpecParser, ZoneArgs>> {
+        let mut argv = vec!["tempo-zone", "node"];
+        argv.extend_from_slice(args);
+        let mut cli = Cli::try_parse_from(argv).unwrap();
+        validate_node_options(&mut cli)?;
+        Ok(cli)
     }
 
     #[test]
@@ -701,17 +789,119 @@ mod tests {
     }
 
     #[test]
-    fn top_level_help_lists_dev_subcommand() {
-        let result = ZoneCli::try_parse_from(["tempo-zone", "--help"]);
-        let error = result.err().expect("--help exits through clap");
-        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
-        assert!(error.to_string().contains("  dev"));
+    fn node_dev_uses_the_standard_reth_flag() {
+        let mut parsed =
+            Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(["tempo-zone", "node", "--dev"])
+                .unwrap();
+        assert!(parsed.as_node_command_mut().unwrap().dev.dev);
     }
 
     #[test]
-    fn dev_is_parsed_by_the_top_level_cli() {
-        let parsed = ZoneCli::try_parse_from(["tempo-zone", "dev"]).unwrap();
-        assert!(matches!(parsed, ZoneCli::Dev(_)));
+    fn node_requires_chain_without_dev() {
+        let error = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from(["tempo-zone", "node"])
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn node_dev_rejects_external_l1_arguments() {
+        let error = Cli::<ZoneChainSpecParser, ZoneArgs>::try_parse_from([
+            "tempo-zone",
+            "node",
+            "--dev",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn node_dev_rejects_a_custom_chain() {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain = serde_json::to_string(&genesis).unwrap();
+        let error = validate_node(&["--dev", "--chain", &chain]).unwrap_err();
+        assert!(error.to_string().contains("--chain must be `dev`"));
+    }
+
+    #[test]
+    fn node_dev_rejects_unstable_reth_options() {
+        for (args, message) in [
+            (&["--dev", "--with-unused-ports"][..], "--with-unused-ports"),
+            (&["--dev", "--http.port", "0"][..], "--http.port"),
+            (
+                &["--dev", "--dev.block-max-transactions", "2"][..],
+                "--dev.block-max-transactions",
+            ),
+        ] {
+            let error = validate_node(args).unwrap_err();
+            assert!(error.to_string().contains(message));
+        }
+    }
+
+    #[test]
+    fn node_dev_adjusts_the_redacted_rpc_port_for_instances() {
+        let mut cli = validate_node(&["--dev", "--instance", "2"]).unwrap();
+        assert_eq!(
+            cli.as_node_command_mut().unwrap().ext.redacted_rpc_port,
+            8543
+        );
+    }
+
+    #[test]
+    fn node_dev_rejects_an_rpc_port_collision() {
+        let error = validate_node(&[
+            "--dev",
+            "--http.port",
+            "9544",
+            "--redacted-rpc.port",
+            "9544",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("must be different"));
+    }
+
+    #[test]
+    fn node_rejects_debug_consensus_options() {
+        let cases: &[&[&str]] = &[
+            &[
+                "--chain",
+                "dev",
+                "--debug.rpc-consensus-url",
+                "ws://localhost:8546",
+            ],
+            &["--chain", "dev", "--debug.etherscan"],
+        ];
+
+        for args in cases {
+            let error = validate_node(args).unwrap_err();
+            assert!(error.to_string().contains("not supported"));
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_l1_exit_terminates_the_dev_stack() {
+        let l1_exit: BoxFuture<'static, eyre::Result<()>> = Box::pin(async { Ok(()) });
+        let error = wait_for_exit(future::pending(), Some(l1_exit))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exited unexpectedly"));
+    }
+
+    #[tokio::test]
+    async fn embedded_l1_error_terminates_the_dev_stack() {
+        let l1_exit: BoxFuture<'static, eyre::Result<()>> =
+            Box::pin(async { Err(eyre::eyre!("test failure")) });
+        let error = wait_for_exit(future::pending(), Some(l1_exit))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("embedded Tempo L1 failed"));
     }
 
     #[test]
@@ -777,7 +967,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             parsed.zone.sequencer_key_file.as_deref(),
-            Some(std::path::Path::new("/run/secrets/sequencer-key"))
+            Some(Path::new("/run/secrets/sequencer-key"))
         );
         let error =
             ZoneArgsParser::try_parse_from(common.into_iter().chain(["--sequencer-key", "0x01"]))
@@ -934,7 +1124,7 @@ mod tests {
             "--sequencer",
         ])
         .unwrap();
-        assert!(parsed.zone.enable_sequencer);
+        assert!(parsed.zone.sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
     }
 
