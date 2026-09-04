@@ -127,10 +127,10 @@ pub struct ZoneSequencerHandle {
 /// This is the top-level POC entrypoint that starts:
 /// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
 ///   events into the shared store, builds [`crate::BatchData`], and submits each batch
-///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
-///   submission.
+///   synchronously to the ZonePortal on Tempo L1. An eligible withdrawal slot is processed in the
+///   same L1 transaction as its batch. Local state only advances on successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
-///   `processWithdrawals` for each pending withdrawal.
+///   `processWithdrawals` for pending withdrawals the batch submitter left behind.
 /// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates
 ///   observationally without delaying or changing settlement.
 ///
@@ -184,6 +184,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         poll_interval: config.zone_poll_interval,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
+        withdrawal_batch_limits: config.withdrawal_batch_limits,
         attestation_store: config.attestation_store,
     };
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
