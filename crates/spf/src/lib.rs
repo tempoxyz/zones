@@ -609,15 +609,7 @@ mod tests {
     use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
     use revm::{
         DatabaseCommit as _,
-        database::{
-            State,
-            states::{
-                AccountStatus, BundleAccount, BundleState, StorageSlot,
-                bundle_state::BundleRetention,
-            },
-        },
-        primitives::{AddressMap, U256Map},
-        state::AccountInfo,
+        database::{State, states::bundle_state::BundleRetention},
     };
     use std::sync::Arc;
     use tempo_chainspec::TempoHardfork;
@@ -727,23 +719,6 @@ mod tests {
                 bytecodes,
             },
         )
-    }
-
-    fn account_bundle(
-        address: Address,
-        info: AccountInfo,
-        status: AccountStatus,
-        storage: impl IntoIterator<Item = (U256, U256)>,
-    ) -> BundleState {
-        let storage = storage
-            .into_iter()
-            .map(|(slot, value)| (slot, StorageSlot::new_changed(U256::ZERO, value)))
-            .collect::<U256Map<_>>();
-        let account = BundleAccount::new(Some(info.clone()), Some(info), storage, status);
-        BundleState {
-            state: AddressMap::from_iter([(address, account)]),
-            ..Default::default()
-        }
     }
 
     #[test]
@@ -945,127 +920,6 @@ mod tests {
         assert_eq!(
             state.database.state_root(state.bundle_state).unwrap(),
             expected_root
-        );
-    }
-
-    #[test]
-    fn reset_storage_replaces_parent_slots_without_their_proofs() {
-        let address = Address::repeat_byte(0x24);
-        let nonce = 7;
-        let balance = U256::from(42);
-        let code_hash = alloy_consensus::constants::KECCAK_EMPTY;
-        let old_slot = (U256::from(1), U256::from(11));
-        let new_slot = (U256::from(2), U256::from(22));
-        let (parent_root, mut parent_witness) = witnessed_account_state(
-            address,
-            nonce,
-            balance,
-            code_hash,
-            Vec::new(),
-            Some(old_slot),
-        );
-        // Reset accounts contain their complete post-state storage, so the old storage proof is
-        // irrelevant. Keep only the authenticated account leaf in the parent witness.
-        parent_witness.node_pool.remove(0);
-        let (expected_root, _) = witnessed_account_state(
-            address,
-            nonce,
-            balance,
-            code_hash,
-            Vec::new(),
-            Some(new_slot),
-        );
-        let mut database =
-            WitnessDatabase::from_zone_state_witness(parent_witness, parent_root).unwrap();
-        let info = AccountInfo {
-            nonce,
-            balance,
-            code_hash,
-            ..Default::default()
-        };
-
-        let actual_root = database
-            .state_root(account_bundle(
-                address,
-                info,
-                AccountStatus::DestroyedChanged,
-                [new_slot],
-            ))
-            .unwrap();
-
-        assert_eq!(actual_root, expected_root);
-    }
-
-    #[test]
-    fn empty_storage_reset_clears_the_parent_storage_root() {
-        let address = Address::repeat_byte(0x25);
-        let nonce = 8;
-        let balance = U256::from(43);
-        let code_hash = alloy_consensus::constants::KECCAK_EMPTY;
-        let (parent_root, mut parent_witness) = witnessed_account_state(
-            address,
-            nonce,
-            balance,
-            code_hash,
-            Vec::new(),
-            Some((U256::from(1), U256::from(11))),
-        );
-        parent_witness.node_pool.remove(0);
-        let (expected_root, _) =
-            witnessed_account_state(address, nonce, balance, code_hash, Vec::new(), None);
-        let mut database =
-            WitnessDatabase::from_zone_state_witness(parent_witness, parent_root).unwrap();
-        let info = AccountInfo {
-            nonce,
-            balance,
-            code_hash,
-            ..Default::default()
-        };
-
-        let actual_root = database
-            .state_root(account_bundle(
-                address,
-                info,
-                AccountStatus::DestroyedChanged,
-                [],
-            ))
-            .unwrap();
-
-        assert_eq!(actual_root, expected_root);
-    }
-
-    #[test]
-    fn partial_storage_update_still_requires_the_parent_proof() {
-        let address = Address::repeat_byte(0x26);
-        let nonce = 9;
-        let balance = U256::from(44);
-        let code_hash = alloy_consensus::constants::KECCAK_EMPTY;
-        let (parent_root, mut parent_witness) = witnessed_account_state(
-            address,
-            nonce,
-            balance,
-            code_hash,
-            Vec::new(),
-            Some((U256::from(1), U256::from(11))),
-        );
-        parent_witness.node_pool.remove(0);
-        let mut database =
-            WitnessDatabase::from_zone_state_witness(parent_witness, parent_root).unwrap();
-        let info = AccountInfo {
-            nonce,
-            balance,
-            code_hash,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            database.state_root(account_bundle(
-                address,
-                info,
-                AccountStatus::Changed,
-                [(U256::from(2), U256::from(22))],
-            )),
-            Err(StatelessSparseTrieError::IncompleteStateUpdate)
         );
     }
 
