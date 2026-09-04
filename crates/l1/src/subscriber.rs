@@ -751,12 +751,12 @@ where
     /// Transport and ordinary failures reconnect after the configured retry interval.
     /// Deterministic failures while applying a receipt-verified finalized block are fatal.
     pub async fn run(self) -> Result<(), L1SubscriberError> {
-        let mut next_block = self.resolve_start_block()?;
-        self.block_tracker
-            .initialize_consumed_through(next_block.saturating_sub(1));
-
         loop {
             let result: Result<(), L1SubscriberError> = async {
+                let mut next_block = self.resolve_start_block()?;
+                self.block_tracker
+                    .initialize_consumed_through(next_block.saturating_sub(1));
+
                 let provider = self.connect().await?;
                 let mut header_stream = self.subscribe_block_headers(&provider).await?;
                 info!(
