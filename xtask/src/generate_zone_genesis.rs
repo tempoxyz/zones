@@ -251,7 +251,7 @@ impl GenerateZoneGenesis {
             );
         }
 
-        let chain_config = ChainConfig {
+        let mut chain_config = ChainConfig {
             chain_id: self.chain_id,
             homestead_block: Some(0),
             eip150_block: Some(0),
@@ -273,6 +273,13 @@ impl GenerateZoneGenesis {
             deposit_contract_address: Some(Address::ZERO),
             ..Default::default()
         };
+        // Newly generated chains can use the current T11-derived Zone precompile behavior from
+        // genesis. Existing chains without this field remain on their historical Z0 behavior
+        // until operators schedule Z1 explicitly.
+        chain_config
+            .extra_fields
+            .insert_value("z1Time".into(), 0)
+            .wrap_err("failed setting the Zone hardfork activation")?;
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)

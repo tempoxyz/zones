@@ -109,7 +109,7 @@ zone_hardfork!(
     ZoneHardfork {
         /// The original Zone state transition function.
         Z0,
-        /// The first independently scheduled Zone transition.
+        /// Activates T11-derived behavior in Zone precompiles without rewriting Zone history.
         Z1,
     }
 );
