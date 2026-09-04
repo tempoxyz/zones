@@ -1,18 +1,24 @@
 //! Finalized L1 batch observation for RPC-only shadow provers.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 
-use alloy_consensus::{BlockHeader as _, Sealable as _};
-use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Address, B256, TxKind};
+use alloy_consensus::{BlockHeader as _, Sealable as _, proofs::calculate_transaction_root};
+use alloy_eips::{BlockId, BlockNumberOrTag, NumHash};
+use alloy_primitives::{Address, TxKind};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_sol_types::SolCall as _;
 use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
+use tempo_primitives::TempoTxEnvelope;
 use tempo_zone_contracts::ZonePortal;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
-use zone_l1::FinalizedBatchSubmission;
+use zone_l1::{
+    FinalizedBatchSubmission, extract_finalized_batch_submissions, verify_receipts_against_header,
+};
 use zone_sequencer::{
     BatchAnchorConfig, BatchData, ShadowProofAnchor, ShadowProver, ZoneSequencerProvider,
 };
@@ -60,7 +66,11 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
 
         let mut observed = HashSet::new();
         while let Some(submission) = submissions.recv().await {
-            let observation_id = (submission.transaction_hash, submission.log_index);
+            let observation_id = (
+                submission.block.hash,
+                submission.transaction_index,
+                submission.log_index,
+            );
             if observed.insert(observation_id) {
                 self.spawn_submission_retry(submission);
             }
@@ -117,23 +127,24 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                     format!("query BatchSubmitted logs in finalized range {page_from}..={page_to}")
                 })?;
 
-            for (event, log) in events {
-                let tx_hash = log
-                    .transaction_hash
-                    .ok_or_eyre("finalized BatchSubmitted log has no transaction hash")?;
-                let log_index = log
-                    .log_index
-                    .ok_or_eyre("finalized BatchSubmitted log has no log index")?;
-                let submission = FinalizedBatchSubmission {
-                    block_number: log
-                        .block_number
-                        .ok_or_eyre("finalized BatchSubmitted log has no block number")?,
-                    transaction_hash: tx_hash,
-                    log_index,
-                    event,
-                };
-                if recovery_sender.send(submission).is_err() {
-                    return Ok(());
+            let candidate_blocks = events
+                .into_iter()
+                .map(|(_, log)| {
+                    log.block_number
+                        .ok_or_eyre("finalized BatchSubmitted log has no block number")
+                })
+                .collect::<Result<BTreeSet<_>>>()?;
+            for block_number in candidate_blocks {
+                for submission in self
+                    .fetch_verified_submissions(block_number)
+                    .await
+                    .wrap_err_with(|| {
+                        format!("authenticate recovered submissions in block {block_number}")
+                    })?
+                {
+                    if recovery_sender.send(submission).is_err() {
+                        return Ok(());
+                    }
                 }
             }
             if page_to == finalized {
@@ -144,6 +155,39 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
         Ok(())
     }
 
+    async fn fetch_verified_submissions(
+        &self,
+        block_number: u64,
+    ) -> Result<Vec<FinalizedBatchSubmission>> {
+        let header = self
+            .l1_provider
+            .get_header_by_number(block_number.into())
+            .await?
+            .ok_or_eyre(format!("L1 block {block_number} is not available"))?;
+        ensure!(
+            header.number() == block_number,
+            "requested L1 block {block_number}, received {}",
+            header.number()
+        );
+        let block = NumHash::new(block_number, header.as_ref().hash_slow());
+        let receipts = self
+            .l1_provider
+            .get_block_receipts(BlockId::hash(block.hash))
+            .await?
+            .ok_or_eyre(format!("L1 block {} has no receipts", block.hash))?;
+        verify_receipts_against_header(
+            block,
+            header.receipts_root(),
+            header.logs_bloom(),
+            &receipts,
+        )?;
+        Ok(extract_finalized_batch_submissions(
+            block,
+            self.portal_address,
+            &receipts,
+        ))
+    }
+
     fn spawn_submission_retry(&self, submission: FinalizedBatchSubmission) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -151,7 +195,8 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                 if let Err(err) = this.process_submission(&submission).await {
                     warn!(
                         target: "zone::node::shadow_prover",
-                        transaction_hash = %submission.transaction_hash,
+                        l1_block_hash = %submission.block.hash,
+                        transaction_index = submission.transaction_index,
                         log_index = submission.log_index,
                         error = ?err,
                         "Failed to process finalized batch submission; retrying"
@@ -166,21 +211,21 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
 
     async fn process_submission(&self, submission: &FinalizedBatchSubmission) -> Result<()> {
         let call = self
-            .fetch_submit_batch_calls(submission.transaction_hash)
+            .fetch_submit_batch_calls(submission)
             .await?
             .into_iter()
             .find(|call| call_matches_event(call, &submission.event))
             .ok_or_eyre(format!(
-                "submitBatch transaction {} contains no call matching log {}",
-                submission.transaction_hash, submission.log_index
+                "L1 block {} transaction {} contains no submitBatch call matching log {}",
+                submission.block.hash, submission.transaction_index, submission.log_index
             ))?;
         let (to, batch, anchor) = self
-            .submission_target(&call, &submission.event, submission.block_number)
+            .submission_target(&call, &submission.event, submission.block.number)
             .await
             .wrap_err_with(|| {
                 format!(
-                    "validate finalized submitBatch transaction {}",
-                    submission.transaction_hash
+                    "validate finalized submitBatch in L1 block {} transaction {}",
+                    submission.block.hash, submission.transaction_index
                 )
             })?;
 
@@ -189,17 +234,51 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
 
     async fn fetch_submit_batch_calls(
         &self,
-        tx_hash: B256,
+        submission: &FinalizedBatchSubmission,
     ) -> Result<Vec<ZonePortal::submitBatchCall>> {
-        let tx = self
+        let block = self
             .l1_provider
-            .get_transaction_by_hash(tx_hash)
+            .get_block_by_hash(submission.block.hash)
+            .full()
             .await?
-            .ok_or_eyre(format!("submitBatch transaction {tx_hash} was not found"))?;
+            .ok_or_eyre(format!("L1 block {} was not found", submission.block.hash))?;
+        ensure!(
+            block.header.number() == submission.block.number,
+            "L1 block {} has number {}, expected {}",
+            submission.block.hash,
+            block.header.number(),
+            submission.block.number
+        );
+        ensure!(
+            block.header.as_ref().hash_slow() == submission.block.hash,
+            "L1 block response does not match authenticated hash {}",
+            submission.block.hash
+        );
+        let expected_transactions_root = block.header.transactions_root();
+        let transactions = block
+            .try_into_transactions()
+            .map_err(|_| {
+                eyre::eyre!(
+                    "L1 block {} did not return full transactions",
+                    submission.block.hash
+                )
+            })?
+            .into_iter()
+            .map(|transaction| transaction.inner.into_inner())
+            .collect::<Vec<_>>();
+        verify_transactions_root(
+            &transactions,
+            expected_transactions_root,
+            submission.block.hash,
+        )?;
+        let transaction_index = usize::try_from(submission.transaction_index)
+            .wrap_err("L1 transaction index overflows usize")?;
+        let tx = transactions.get(transaction_index).ok_or_eyre(format!(
+            "L1 block {} has no transaction at authenticated receipt index {}",
+            submission.block.hash, submission.transaction_index
+        ))?;
 
         let calls = tx
-            .inner
-            .inner()
             .calls()
             .filter_map(|(kind, input)| {
                 if kind != TxKind::Call(self.portal_address) {
@@ -211,7 +290,9 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
 
         ensure!(
             !calls.is_empty(),
-            "transaction {tx_hash} contains no submitBatch call to Portal {}",
+            "L1 block {} transaction {} contains no submitBatch call to Portal {}",
+            submission.block.hash,
+            submission.transaction_index,
             self.portal_address
         );
         Ok(calls)
@@ -317,6 +398,19 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     }
 }
 
+fn verify_transactions_root(
+    transactions: &[TempoTxEnvelope],
+    expected: alloy_primitives::B256,
+    block_hash: alloy_primitives::B256,
+) -> Result<()> {
+    let computed = calculate_transaction_root(transactions);
+    ensure!(
+        computed == expected,
+        "transaction root mismatch for L1 block {block_hash}: expected {expected}, got {computed}"
+    );
+    Ok(())
+}
+
 fn call_matches_event(
     call: &ZonePortal::submitBatchCall,
     event: &ZonePortal::BatchSubmitted,
@@ -356,5 +450,21 @@ mod tests {
     fn ancestry_submission_must_follow_checkpoint() {
         assert!(submitted_anchor_number(42, 42).is_err());
         assert!(submitted_anchor_number(42, 41).is_err());
+    }
+
+    #[test]
+    fn transaction_root_authentication_rejects_mismatch() {
+        let transactions = Vec::<TempoTxEnvelope>::new();
+        let expected = calculate_transaction_root(&transactions);
+
+        verify_transactions_root(&transactions, expected, alloy_primitives::B256::ZERO).unwrap();
+        assert!(
+            verify_transactions_root(
+                &transactions,
+                alloy_primitives::B256::repeat_byte(0x42),
+                alloy_primitives::B256::ZERO,
+            )
+            .is_err()
+        );
     }
 }

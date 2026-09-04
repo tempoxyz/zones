@@ -1663,17 +1663,18 @@ fn extracts_finalized_batch_submission_for_observer() {
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
 
-    let (_, _, _, submissions) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
 
     assert_eq!(submissions.len(), 1);
-    assert_eq!(submissions[0].block_number, 10);
-    assert_eq!(submissions[0].transaction_hash, B256::with_last_byte(0xaa));
-    assert_eq!(submissions[0].log_index, 4);
+    assert_eq!(submissions[0].block, block);
+    assert_eq!(submissions[0].transaction_index, 0);
+    assert_eq!(submissions[0].log_index, 0);
     assert_eq!(submissions[0].event.nextBlockHash, B256::repeat_byte(0x22));
 }
 
 #[test]
-fn finalized_batch_observer_errors_do_not_fence_ingestion() {
+fn finalized_batch_observer_ignores_rpc_log_metadata() {
     use alloy_sol_types::SolEvent as _;
 
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
@@ -1713,9 +1714,13 @@ fn finalized_batch_observer_errors_do_not_fence_ingestion() {
         vec![malformed, missing_index],
     );
 
-    let (_, _, _, submissions) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
 
-    assert!(submissions.is_empty());
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].block, block);
+    assert_eq!(submissions[0].transaction_index, 0);
+    assert_eq!(submissions[0].log_index, 1);
 }
 
 #[test]
@@ -1728,7 +1733,8 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     let corrupt = corrupt_recognized_portal_log(portal);
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
 
-    let err = subscriber.extract_events(10, &[receipt]).unwrap_err();
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+    let err = subscriber.extract_events(block, &[receipt]).unwrap_err();
     assert!(
         err.to_string()
             .contains("failed to decode a portal event in L1 block 10")
@@ -1746,7 +1752,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs, _) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let (events, _, portal_logs, _) = subscriber.extract_events(block, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
     assert_eq!(portal_logs.unwrap().len(), 1);
@@ -1784,7 +1790,8 @@ fn pause_events_invalidate_cached_portal_storage() {
     ];
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
-    let (_, invalidated, _, _) = subscriber.extract_events(1, &[receipt]).unwrap();
+    let block = NumHash::new(1, B256::with_last_byte(0x10));
+    let (_, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(

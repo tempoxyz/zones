@@ -43,14 +43,49 @@ pub struct AuthenticatedPortalLogs {
 /// One `BatchSubmitted` event from a receipt-verified finalized Tempo block.
 #[derive(Debug, Clone)]
 pub struct FinalizedBatchSubmission {
-    /// Finalized Tempo block number containing the accepted submission.
-    pub block_number: u64,
-    /// Transaction whose calldata contains the accepted quorum certificate.
-    pub transaction_hash: B256,
-    /// Canonical log index used to distinguish multiple submissions in one transaction.
+    /// Finalized Tempo block containing the accepted submission.
+    pub block: NumHash,
+    /// Receipt-trie position of the transaction containing the accepted submission.
+    pub transaction_index: u64,
+    /// Receipt-local log position used to distinguish multiple submissions in one transaction.
     pub log_index: u64,
     /// Event emitted after the Portal accepted the submission.
     pub event: ZonePortal::BatchSubmitted,
+}
+
+/// Extract `BatchSubmitted` events using receipt ordering rather than RPC metadata.
+///
+/// Callers must verify `receipts` against the supplied block's receipt root first.
+pub fn extract_finalized_batch_submissions(
+    block: NumHash,
+    portal_address: Address,
+    receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+) -> Vec<FinalizedBatchSubmission> {
+    let mut submissions = Vec::new();
+    for (transaction_index, receipt) in receipts.iter().enumerate() {
+        for (log_index, log) in receipt.logs().iter().enumerate() {
+            if log.address() != portal_address
+                || log.topic0() != Some(&ZonePortal::BatchSubmitted::SIGNATURE_HASH)
+            {
+                continue;
+            }
+            match ZonePortal::BatchSubmitted::decode_log(&log.inner) {
+                Ok(event) => submissions.push(FinalizedBatchSubmission {
+                    block,
+                    transaction_index: transaction_index as u64,
+                    log_index: log_index as u64,
+                    event: event.data,
+                }),
+                Err(err) => warn!(
+                    target: "zone::l1::subscriber",
+                    block_number = block.number,
+                    error = ?err,
+                    "Could not decode finalized batch submission for observer"
+                ),
+            }
+        }
+    }
+    submissions
 }
 
 /// Number of consumed Tempo blocks whose authenticated Portal logs remain available to
@@ -718,10 +753,11 @@ where
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
+            let block_hash = header.hash_slow();
             // Decoding fails closed: a decode failure of a recognized portal log aborts this
             // block before anything is enqueued or any cache advances.
             let processed_events = self
-                .extract_events(block_number, &receipts)
+                .extract_events(NumHash::new(block_number, block_hash), &receipts)
                 .inspect_err(|_| {
                     self.subscriber_metrics.decode_fence_failures.increment(1);
                 })
@@ -874,14 +910,19 @@ where
     /// event would diverge this node from its peers.
     pub(crate) fn extract_events(
         &self,
-        block_number: u64,
+        block: NumHash,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> eyre::Result<L1ProcessedEvents> {
+        let block_number = block.number;
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
         let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
-        let mut finalized_batches = Vec::new();
+        let finalized_batches = self
+            .finalized_batch_submissions
+            .is_some()
+            .then(|| extract_finalized_batch_submissions(block, portal_address, receipts))
+            .unwrap_or_default();
 
         for receipt in receipts {
             let retain_receipt_logs = portal_logs.is_some() && receipt.status();
@@ -891,34 +932,6 @@ where
                 if address == portal_address {
                     if retain_receipt_logs && let Some(logs) = &mut portal_logs {
                         logs.push(log.inner.clone());
-                    }
-                    if self.finalized_batch_submissions.is_some()
-                        && log.topic0() == Some(&ZonePortal::BatchSubmitted::SIGNATURE_HASH)
-                    {
-                        match (
-                            ZonePortal::BatchSubmitted::decode_log(&log.inner),
-                            log.log_index,
-                        ) {
-                            (Ok(event), Some(log_index)) => {
-                                finalized_batches.push(FinalizedBatchSubmission {
-                                    block_number,
-                                    transaction_hash: receipt.transaction_hash(),
-                                    log_index,
-                                    event: event.data,
-                                });
-                            }
-                            (Err(err), _) => warn!(
-                                target: "zone::l1::subscriber",
-                                block_number,
-                                error = ?err,
-                                "Could not decode finalized batch submission for observer"
-                            ),
-                            (_, None) => warn!(
-                                target: "zone::l1::subscriber",
-                                block_number,
-                                "Finalized batch submission has no log index"
-                            ),
-                        }
                     }
                     invalidated.insert(address);
                     if let Some(address) =
