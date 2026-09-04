@@ -60,12 +60,11 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, FinalizedTarget, L1BlockDeposits,
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Per-anchor production permit backed by the effective leadership schedule.
+/// Full-block production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce a Zone block only if the portal schedule or a
-/// forced-recovery override assigns this node as leader for the block's first imported Tempo
-/// header. An optimistic override is open-ended until the next finalized portal transition
-/// supplies the ordinary-authority boundary.
+/// Full blocks require the leader assigned to their imported Tempo header. Checkpoint-only blocks
+/// are leader-neutral and bypass this permit. An optimistic override is open-ended until the next
+/// finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -81,7 +80,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the zone block embedding `tempo_anchor`.
+    /// Decide whether this node may produce the full zone block embedding `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -479,9 +478,11 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
-        self.production_permit
-            .as_ref()
-            .and_then(|permit| permit.check(block.leader_anchor()))
+        self.production_permit.as_ref().and_then(|permit| {
+            block
+                .leader_anchor()
+                .and_then(|anchor| permit.check(anchor))
+        })
     }
 
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -496,12 +497,14 @@ struct AvailableTempoImport {
 }
 
 impl AvailableTempoImport {
-    /// Historical Tempo anchor whose leader must produce this Zone block.
-    fn leader_anchor(&self) -> u64 {
+    /// Tempo anchor whose leader must produce this Zone block.
+    ///
+    /// Checkpoint-only blocks have no designated leader. A full block imports exactly one Tempo
+    /// header, whose effective leader supplies its production authority.
+    fn leader_anchor(&self) -> Option<u64> {
         self.checkpoint_headers
-            .first()
-            .unwrap_or(&self.l1_block.header)
-            .number()
+            .is_empty()
+            .then(|| self.l1_block.header.number())
     }
 }
 
@@ -608,7 +611,6 @@ mod tests {
     fn zone_timestamp_allows_parent_timestamp_when_catching_up_in_same_millisecond() {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
     }
-
     fn t12_spec(activation: u64) -> ZoneChainSpec {
         use reth_chainspec::EthChainSpec as _;
         let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
@@ -639,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_import_uses_first_header_as_leader_anchor() {
+    fn checkpoint_import_is_not_leader_restricted() {
         let available = AvailableTempoImport {
             l1_block: L1BlockDeposits {
                 header: header(90, 90),
@@ -648,7 +650,7 @@ mod tests {
             checkpoint_headers: vec![header(90, 90), header(110, 110)],
         };
 
-        assert_eq!(available.leader_anchor(), 90);
+        assert_eq!(available.leader_anchor(), None);
     }
 
     #[test]
