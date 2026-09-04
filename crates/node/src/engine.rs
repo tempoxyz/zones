@@ -505,19 +505,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paced_zone_timestamp_allows_parent_timestamp() {
-        let wall_clock_timestamp_millis: u64 = SystemTime::now()
+    async fn paced_zone_timestamp_stays_within_call_window() {
+        let before_timestamp_millis: u64 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis()
             .try_into()
             .unwrap();
 
-        let timestamp_millis = paced_zone_timestamp_millis(0, wall_clock_timestamp_millis)
+        let timestamp_millis = paced_zone_timestamp_millis(0, before_timestamp_millis)
             .await
             .unwrap();
+        let after_timestamp_millis: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap();
 
-        assert_eq!(timestamp_millis, wall_clock_timestamp_millis);
+        assert!(timestamp_millis >= before_timestamp_millis);
+        assert!(timestamp_millis <= after_timestamp_millis);
     }
 
     struct PausedDrain {

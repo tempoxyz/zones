@@ -58,17 +58,9 @@ pub(crate) fn test_storage_provider(
 
 /// Create the ordinary precompile environment for a local unit test.
 pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
-    test_env_at(ctx, zone_hardfork::ZoneHardfork::Z0)
-}
-
-/// Create a precompile environment at a specific Zone hardfork for a local unit test.
-pub(crate) fn test_env_at(
-    ctx: &TestContext,
-    zone_hardfork: zone_hardfork::ZoneHardfork,
-) -> ZonePrecompileEnv {
     ZonePrecompileEnv::new(
         &ctx.cfg,
-        zone_hardfork,
+        zone_hardfork::ZoneHardfork::Z0,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
     )
