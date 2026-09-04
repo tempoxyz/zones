@@ -6,7 +6,10 @@
 use std::{collections::HashSet, time::Duration};
 
 use alloy::{
-    consensus::BlockHeader as _, eips::BlockNumberOrTag, primitives::U256, providers::Provider as _,
+    consensus::BlockHeader as _,
+    eips::{BlockId, BlockNumberOrTag},
+    primitives::U256,
+    providers::Provider as _,
 };
 use alloy_network::ReceiptResponse as _;
 use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
@@ -54,7 +57,7 @@ impl FaultPlanes {
 #[derive(Clone, Copy, Debug)]
 enum ExpectedDuringFault {
     WaitForIncomingLeader,
-    WaitForOutgoingLeader,
+    ContinueIfActivated,
     ContinueAndSettle,
 }
 
@@ -280,16 +283,23 @@ async fn assert_batch_history_is_canonical(
         }
     }
 
+    // Read both Portal fields at the same L1 block. A new settlement can land while the Zone
+    // nodes are catching up; comparing a height captured before that settlement with the latest
+    // hash afterwards would report a false fork.
+    let l1_block = cluster.l1.provider().get_block_number().await?;
+    let block_id = BlockId::number(l1_block);
     let settled_height: u64 = portal
         .zoneHeight()
+        .block(block_id)
         .call()
         .await?
         .try_into()
         .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
+    let settled_hash = portal.blockHash().block(block_id).call().await?;
     cluster.wait_all_at(settled_height, NETWORK_TIMEOUT).await?;
     let canonical = cluster.assert_same_block(settled_height).await?;
     eyre::ensure!(
-        portal.blockHash().call().await? == canonical.hash,
+        settled_hash == canonical.hash,
         "Portal settled hash is not canonical at zone height {settled_height}"
     );
     Ok(settled_height)
@@ -351,14 +361,15 @@ async fn resume_leadership_case(
     Ok(())
 }
 
-async fn assert_handoff_stalls_without_incoming_leader(
+async fn assert_handoff_stalls_without_incoming_quorum(
     cluster: &RealP2pCluster,
+    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
 ) -> eyre::Result<()> {
     let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
         .provider()
         .get_block_number()
         .await?;
-    let b_height_before_fence = cluster.nodes[INCOMING_LEADER]
+    let follower_fenced_height = cluster.nodes[FOLLOWER]
         .provider()
         .get_block_number()
         .await?;
@@ -371,26 +382,36 @@ async fn assert_handoff_stalls_without_incoming_leader(
             == a_fenced_height,
         "outgoing leader A continued producing after finalized leadership moved to disconnected B"
     );
-    let b_height_after_fence = cluster.nodes[INCOMING_LEADER]
-        .provider()
-        .get_block_number()
-        .await?;
-    let b_producer = cluster.attestation_signers[INCOMING_LEADER].address();
-    for height in b_height_before_fence + 1..=b_height_after_fence {
-        let block = cluster.nodes[INCOMING_LEADER]
+
+    eyre::ensure!(
+        cluster.nodes[FOLLOWER]
             .provider()
-            .get_block_by_number(BlockNumberOrTag::Number(height))
+            .get_block_number()
             .await?
-            .ok_or_else(|| eyre::eyre!("B is missing block {height} from its local chain"))?;
-        eyre::ensure!(
-            block.header.beneficiary() != b_producer,
-            "incoming leader B produced block {height} before its requested links were restored"
-        );
-    }
+            == follower_fenced_height,
+        "healthy follower C advanced without a quorum connection to incoming leader B"
+    );
+
+    // Commonware may let B build local proposals while it is isolated. Those blocks are safe as
+    // long as the connected A/C side does not advance and L1 cannot settle beyond its fenced tip.
+    let settled_height: u64 = portal
+        .zoneHeight()
+        .call()
+        .await?
+        .try_into()
+        .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
+    eyre::ensure!(
+        settled_height <= a_fenced_height.max(follower_fenced_height),
+        "L1 settled isolated B's private proposal at zone height {settled_height}"
+    );
     Ok(())
 }
 
-async fn assert_handoff_waits_for_outgoing_leader(cluster: &RealP2pCluster) -> eyre::Result<()> {
+async fn handoff_activated_during_fault(cluster: &RealP2pCluster) -> eyre::Result<bool> {
+    let a_height_before_wait = cluster.nodes[OUTGOING_LEADER]
+        .provider()
+        .get_block_number()
+        .await?;
     let b_height_before_wait = cluster.nodes[INCOMING_LEADER]
         .provider()
         .get_block_number()
@@ -400,6 +421,14 @@ async fn assert_handoff_waits_for_outgoing_leader(cluster: &RealP2pCluster) -> e
         .provider()
         .get_block_number()
         .await?;
+    eyre::ensure!(
+        cluster.nodes[OUTGOING_LEADER]
+            .provider()
+            .get_block_number()
+            .await?
+            == a_height_before_wait,
+        "outgoing leader A continued producing while isolated from its quorum"
+    );
     let b_producer = cluster.attestation_signers[INCOMING_LEADER].address();
     for height in b_height_before_wait + 1..=b_height_after_wait {
         let block = cluster.nodes[INCOMING_LEADER]
@@ -407,12 +436,11 @@ async fn assert_handoff_waits_for_outgoing_leader(cluster: &RealP2pCluster) -> e
             .get_block_by_number(BlockNumberOrTag::Number(height))
             .await?
             .ok_or_else(|| eyre::eyre!("B is missing block {height} from its local chain"))?;
-        eyre::ensure!(
-            block.header.beneficiary() != b_producer,
-            "incoming leader B produced block {height} before outgoing A reached the activation boundary"
-        );
+        if block.header.beneficiary() == b_producer {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn assert_handoff_preserves_quorum(
@@ -584,12 +612,28 @@ async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()
 
     let settled_during_outage = match case.expected {
         ExpectedDuringFault::WaitForIncomingLeader => {
-            assert_handoff_stalls_without_incoming_leader(&cluster).await?;
+            assert_handoff_stalls_without_incoming_quorum(&cluster, &portal).await?;
             None
         }
-        ExpectedDuringFault::WaitForOutgoingLeader => {
-            assert_handoff_waits_for_outgoing_leader(&cluster).await?;
-            None
+        ExpectedDuringFault::ContinueIfActivated => {
+            if handoff_activated_during_fault(&cluster).await? {
+                Some(
+                    assert_handoff_preserves_quorum(
+                        &cluster,
+                        &portal,
+                        baseline,
+                        &healthy_nodes,
+                        if case.planes.disconnects_p2p() {
+                            case.disconnected_nodes
+                        } else {
+                            &[]
+                        },
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            }
         }
         ExpectedDuringFault::ContinueAndSettle => Some(
             assert_handoff_preserves_quorum(
@@ -682,13 +726,14 @@ leadership_fault_tests! {
         timing: FaultTiming::BeforeHandoff,
         expected: ExpectedDuringFault::WaitForIncomingLeader,
     },
-    /// A loses both network planes before it can consume the handoff activation block. B and C
-    /// must wait for A's boundary tip, then recover and settle under B after A reconnects.
+    /// A loses both network planes before it can consume the handoff activation block. If B and C
+    /// have already crossed the activation boundary they continue with quorum; otherwise they
+    /// recover and settle under B after A reconnects.
     test_handoff_waits_when_outgoing_leader_disconnects_before_activation => LeadershipFaultCase {
         disconnected_nodes: &[OUTGOING_LEADER],
         planes: FaultPlanes::Both,
         timing: FaultTiming::OutgoingLeaderBeforeActivation,
-        expected: ExpectedDuringFault::WaitForOutgoingLeader,
+        expected: ExpectedDuringFault::ContinueIfActivated,
     },
 }
 
@@ -749,13 +794,14 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     )
     .await?;
 
-    // The transaction remains only in B's local pool while every P2P path involving B is down.
-    // Its eventual inclusion under B creates the settlement boundary this test follows.
+    // The transaction remains private to B while every P2P path involving B is down. Commonware
+    // may include it in a local proposal, but that proposal must not reach A/C or settle on L1.
+    // Its canonical inclusion under B after reconnection creates the boundary this test follows.
     let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
         .provider()
         .get_block_number()
         .await?;
-    let b_fenced_height = cluster.nodes[INCOMING_LEADER]
+    let c_fenced_height = cluster.nodes[FOLLOWER]
         .provider()
         .get_block_number()
         .await?;
@@ -780,20 +826,30 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
         "outgoing leader A produced while incoming leader B was P2P-isolated"
     );
     eyre::ensure!(
-        cluster.nodes[INCOMING_LEADER]
+        cluster.nodes[FOLLOWER]
             .provider()
             .get_block_number()
             .await?
-            == b_fenced_height,
-        "incoming leader B produced a private block while P2P-isolated"
+            == c_fenced_height,
+        "healthy follower C advanced while incoming leader B was P2P-isolated"
     );
     eyre::ensure!(
-        cluster.nodes[INCOMING_LEADER]
+        cluster.nodes[FOLLOWER]
             .provider()
             .get_transaction_receipt(withdrawal_hash)
             .await?
             .is_none(),
-        "B included the withdrawal before its P2P links were restored"
+        "C observed B's withdrawal while their P2P links were disconnected"
+    );
+    let settled_height: u64 = portal
+        .zoneHeight()
+        .call()
+        .await?
+        .try_into()
+        .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
+    eyre::ensure!(
+        settled_height <= a_fenced_height.max(c_fenced_height),
+        "L1 settled isolated B's private proposal at zone height {settled_height}"
     );
     let batches_at_fence = batch_count(&portal).await?;
 

@@ -52,6 +52,7 @@ k256.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
 schnellru.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

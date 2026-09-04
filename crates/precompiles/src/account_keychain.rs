@@ -1,21 +1,51 @@
 //! Zone read-privacy rules for the upstream Tempo AccountKeychain precompile.
 
 use alloy_primitives::Address;
-use alloy_sol_types::SolInterface;
+use alloy_sol_types::{SolCall, SolInterface};
 use tempo_contracts::precompiles::IAccountKeychain;
+use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
 
 use crate::{
     execution::{CallCheck, CallRules},
     privacy::check_caller,
+    storage::StorageCtx,
 };
 
 /// Zone-specific rules applied before forwarding to upstream `AccountKeychain`.
 #[derive(Clone)]
 pub(crate) struct AccountKeychainRules;
 
+const UNRESTRICTED_SELECTORS: &[[u8; 4]] = &[
+    IAccountKeychain::authorizeKey_0Call::SELECTOR,
+    IAccountKeychain::authorizeKey_1Call::SELECTOR,
+    IAccountKeychain::authorizeKey_2Call::SELECTOR,
+    IAccountKeychain::authorizeAdminKeyCall::SELECTOR,
+    IAccountKeychain::burnKeyAuthorizationWitnessCall::SELECTOR,
+    IAccountKeychain::revokeKeyCall::SELECTOR,
+    IAccountKeychain::updateSpendingLimitCall::SELECTOR,
+    IAccountKeychain::setAllowedCallsCall::SELECTOR,
+    IAccountKeychain::removeAllowedCallsCall::SELECTOR,
+    IAccountKeychain::getTransactionKeyCall::SELECTOR,
+];
+
 impl CallRules for AccountKeychainRules {
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode(data) else {
+        let spec = StorageCtx::default().spec();
+
+        // These calls have no Zone-specific privacy policy. Defer directly to the upstream
+        // dispatcher for selector scheduling and ABI decoding.
+        if data.get(..4).is_some_and(|selector| {
+            UNRESTRICTED_SELECTORS
+                .iter()
+                .any(|allowed| selector == allowed.as_slice())
+        }) {
+            return CallCheck::Continue;
+        }
+
+        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode_with_config(
+            data,
+            abi_decoder_config_for_spec(spec),
+        ) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
         };
@@ -59,12 +89,25 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256};
     use alloy_sol_types::{SolCall, SolError};
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_zone_contracts::Unauthorized;
 
     use crate::{
         storage::StorageCtx,
         test_utils::{test_context, test_storage_provider},
     };
+
+    fn admit_at(
+        rules: &AccountKeychainRules,
+        data: &[u8],
+        caller: Address,
+        spec: TempoHardfork,
+    ) -> CallCheck {
+        let mut ctx = test_context();
+        ctx.cfg.spec = spec;
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || rules.admit(data, caller))
+    }
 
     fn assert_account_scoped<C: SolCall + Clone>(
         rules: &AccountKeychainRules,
@@ -167,22 +210,62 @@ mod tests {
         let caller = Address::repeat_byte(0x11);
         let rules = AccountKeychainRules;
 
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || {
+            assert!(matches!(
+                rules.admit(
+                    &IAccountKeychain::getTransactionKeyCall {}.abi_encode(),
+                    caller,
+                ),
+                CallCheck::Continue
+            ));
+            assert!(matches!(
+                rules.admit(
+                    &IAccountKeychain::revokeKeyCall {
+                        keyId: Address::repeat_byte(0x22),
+                    }
+                    .abi_encode(),
+                    caller,
+                ),
+                CallCheck::Continue
+            ));
+        });
+    }
+
+    #[test]
+    fn t11_defers_noncanonical_address_calldata_to_upstream() {
+        let owner = Address::repeat_byte(0x11);
+        let outsider = Address::repeat_byte(0x22);
+        let rules = AccountKeychainRules;
+        let mut data = IAccountKeychain::getKeyCall {
+            account: owner,
+            keyId: Address::repeat_byte(0x33),
+        }
+        .abi_encode();
+        data[4] = 1;
+
         assert!(matches!(
-            rules.admit(
-                &IAccountKeychain::getTransactionKeyCall {}.abi_encode(),
-                caller
-            ),
-            CallCheck::Continue
+            admit_at(&rules, &data, outsider, TempoHardfork::T8),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
         assert!(matches!(
-            rules.admit(
-                &IAccountKeychain::revokeKeyCall {
-                    keyId: Address::repeat_byte(0x22),
-                }
-                .abi_encode(),
-                caller
-            ),
+            admit_at(&rules, &data, outsider, TempoHardfork::T11),
             CallCheck::Continue
         ));
+    }
+
+    #[test]
+    fn malformed_unrestricted_calls_remain_deferred_to_upstream() {
+        let rules = AccountKeychainRules;
+
+        for data in UNRESTRICTED_SELECTORS {
+            for spec in [TempoHardfork::T10, TempoHardfork::T11] {
+                assert!(matches!(
+                    admit_at(&rules, data, Address::ZERO, spec),
+                    CallCheck::Continue
+                ));
+            }
+        }
     }
 }

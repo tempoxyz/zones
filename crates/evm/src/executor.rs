@@ -13,7 +13,7 @@ use alloy_evm::{
     },
     eth::{EthBlockExecutor, EthTxResult},
 };
-use alloy_sol_types::SolEvent as _;
+use alloy_sol_types::{SolCall as _, SolEvent as _};
 use reth_evm::block::StateDB;
 use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
@@ -22,10 +22,7 @@ use tempo_revm::evm::TempoContext;
 use tempo_zone_contracts::IZoneOutbox;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::{
-    ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader,
-    is_finalize_withdrawal_batch_calldata,
-};
+use zone_precompiles::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{L1OverlayDB, ZoneEvm};
@@ -127,7 +124,8 @@ impl ZoneTransactionKind {
         }
 
         if tx.calls().any(|(kind, input)| {
-            kind.to() == Some(&ZONE_OUTBOX_ADDRESS) && is_finalize_withdrawal_batch_calldata(input)
+            kind.to() == Some(&ZONE_OUTBOX_ADDRESS)
+                && input.starts_with(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR)
         }) {
             return Self::FinalizeWithdrawalBatch;
         }
@@ -306,7 +304,7 @@ mod tests {
     use reth_chainspec::EthChainSpec as _;
     use reth_primitives_traits::Recovered;
     use revm::database::{CacheDB, EmptyDB};
-    use tempo_chainspec::spec::DEV;
+    use tempo_chainspec::{hardfork::TempoHardfork, spec::DEV};
     use tempo_evm::TempoBlockExecutionCtx;
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
@@ -482,14 +480,74 @@ mod tests {
             ZONE_OUTBOX_ADDRESS,
             Bytes::copy_from_slice(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR),
         );
-        let error = ZoneBlockPhase::Executing
-            .validate_transaction(&malformed_finalize)
-            .unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "system transactions after advanceTempo must call \
-             ZoneOutbox.finalizeWithdrawalBatch"
+            ZoneBlockPhase::Executing
+                .validate_transaction(&malformed_finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
         );
+
+        let mut trailing_calldata = IZoneOutbox::finalizeWithdrawalBatchCall {
+            count: U256::ZERO,
+            blockNumber: 1,
+            encryptedSenders: vec![],
+        }
+        .abi_encode();
+        trailing_calldata.extend_from_slice(&[0; 32]);
+        let trailing_finalize = system_tx(ZONE_OUTBOX_ADDRESS, trailing_calldata.into());
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&trailing_finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
+        );
+    }
+
+    #[test]
+    fn malformed_t11_finalization_does_not_advance_block_phase() {
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+        let factory =
+            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let mut env = EvmEnv::default();
+        env.cfg_env.spec = TempoHardfork::T11;
+        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
+        let ctx = TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: None,
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(1),
+                slot_number: None,
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        executor.phase = ZoneBlockPhase::Executing;
+
+        let tx = Recovered::new_unchecked(
+            system_tx(
+                ZONE_OUTBOX_ADDRESS,
+                Bytes::copy_from_slice(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR),
+            ),
+            TEMPO_SYSTEM_TX_SENDER,
+        );
+        let error = executor.execute_transaction_without_commit(tx).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("system transaction execution failed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(executor.phase, ZoneBlockPhase::Executing);
     }
 
     #[test]

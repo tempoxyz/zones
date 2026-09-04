@@ -84,7 +84,7 @@ pub mod ztip20;
 pub use aes_gcm::AesGcmDecrypt;
 pub use chaum_pedersen::ChaumPedersenVerify;
 pub use inbox::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, ZoneInbox};
-pub use outbox::{ZoneOutbox, is_finalize_withdrawal_batch_calldata};
+pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;

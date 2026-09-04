@@ -36,7 +36,7 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, StateProofProvider, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use reth_trie_common::{ExecutionWitnessMode, HashedPostState, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
@@ -290,33 +290,16 @@ where
                 let mut witness = None;
                 let _ = block_executor
                     .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        let state_provider = &statedb.database.database.0;
-                        let result = ExecutionWitnessRecord::new(statedb)
-                            .into_execution_witness(
-                                state_provider,
-                                eth_api.provider(),
-                                block_number,
-                                mode,
-                            )
-                            .and_then(|mut witness| {
-                                let targets = block_hash_storage_targets(statedb);
-                                if !targets.is_empty() {
-                                    let supplemental = state_provider.witness(
-                                        Default::default(),
-                                        targets,
-                                        mode,
-                                    )?;
-                                    let mut seen =
-                                        witness.state.iter().map(keccak256).collect::<HashSet<_>>();
-                                    witness.state.extend(
-                                        supplemental
-                                            .into_iter()
-                                            .filter(|node| seen.insert(keccak256(node))),
-                                    );
-                                }
-                                Ok(witness)
-                            });
-                        witness = Some(result);
+                        witness = Some(
+                            ExecutionWitnessRecord::new(statedb)
+                                .with_additional_state(block_hash_storage_targets(statedb))
+                                .into_execution_witness(
+                                    &statedb.database.database.0,
+                                    eth_api.provider(),
+                                    block_number,
+                                    mode,
+                                ),
+                        );
                     })
                     .map_err(|error| EthApiError::Internal(error.into()))?;
                 let witness = witness
@@ -341,10 +324,9 @@ where
 
 /// Build EIP-2935 history-contract storage targets for every BLOCKHASH value read during replay.
 ///
-/// Reth's execution-witness record proves the REVM account cache and represents these reads with
-/// ancestor headers. Zones instead authenticate the same values against the EIP-2935 history
-/// contract committed in the parent state root, so the caller generates a supplemental trie
-/// witness for these targets and merges its unique nodes into the execution witness.
+/// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
+/// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
+/// storage targets lets the SPF authenticate the same values against the parent state root.
 fn block_hash_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
     let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
     if block_hashes.is_empty() {
