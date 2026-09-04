@@ -54,16 +54,18 @@ pub fn prove_encryption_key_possession(
     })
 }
 
-/// Registers `signer` as the sequencer encryption key on `portal`.
+/// Registers `encryption_signer` as the sequencer encryption key on `portal`.
 ///
 /// Derives the secp256k1 public key, signs a proof-of-possession over
-/// `(portal, x, yParity)`, and returns the registration transaction hash.
+/// `(portal, x, yParity)`, and returns the registration transaction hash. The provider must use
+/// the portal admin or an active sequencer as its transaction signer; that signer may differ from
+/// the shared encryption key in a multi-sequencer deployment.
 pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
     provider: &P,
     portal: Address,
-    signer: &PrivateKeySigner,
+    encryption_signer: &PrivateKeySigner,
 ) -> eyre::Result<B256> {
-    let proof = prove_encryption_key_possession(portal, signer)?;
+    let proof = prove_encryption_key_possession(portal, encryption_signer)?;
     let receipt = ZonePortal::new(portal, provider)
         .setSequencerEncryptionKey(
             proof.x,

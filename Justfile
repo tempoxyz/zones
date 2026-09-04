@@ -169,7 +169,7 @@ create-zone name token="" access_enforced="false" gateway_enforced="false":
     for gateway in "${GATEWAYS[@]}"; do
         [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
     done
-    ZONE_FACTORY_OWNER_KEY="$PK" cargo run -p tempo-xtask -- create-zone \
+    ZONE_FACTORY_OWNER_KEY="$PK" SEQUENCER_KEY="$SEQ_KEY" cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
@@ -891,7 +891,7 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     for gateway in "${GATEWAYS[@]}"; do
         [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
     done
-    ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone \
+    ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" SEQUENCER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
@@ -915,14 +915,7 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     ZONE_ID=$(jq -r '.zoneId' "$OUTPUT/zone.json")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$OUTPUT/zone.json")
 
-    # Step 5: Register sequencer encryption key on the portal
-    echo "Step 5: Registering sequencer encryption key on ZonePortal..."
-    PRIVATE_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- set-encryption-key \
-        --l1-rpc-url "$HTTP_RPC" \
-        --portal "$PORTAL"
-    echo ""
-
-    # Step 6: Display summary
+    # Step 5: Display summary
     echo "============================================"
     echo "  Zone Deployed Successfully!"
     echo "============================================"

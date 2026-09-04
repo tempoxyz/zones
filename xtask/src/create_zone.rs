@@ -20,6 +20,7 @@ use tempo_zone_contracts::{
     ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
 };
 use zone_primitives::constants::zone_chain_id;
+use zone_sequencer::register_encryption_key;
 
 use crate::{
     generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
@@ -90,6 +91,21 @@ pub(crate) struct CreateZone {
     #[arg(long, env = "ZONE_FACTORY_OWNER_KEY", hide_env_values = true)]
     private_key: String,
 
+    /// Optional shared sequencer private key (hex). When provided, registers its public key for
+    /// encrypted deposits after creating the zone.
+    #[arg(long, env = "SEQUENCER_KEY", hide_env_values = true)]
+    sequencer_key: Option<String>,
+
+    /// Optional portal admin or active sequencer private key that sends the encryption-key
+    /// registration transaction. Defaults to the encryption key when it has either role.
+    #[arg(
+        long,
+        env = "TRANSACTION_PRIVATE_KEY",
+        hide_env_values = true,
+        requires = "sequencer_key"
+    )]
+    transaction_private_key: Option<String>,
+
     /// Base fee per gas for the zone L2.
     #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
     base_fee_per_gas: u128,
@@ -143,6 +159,13 @@ impl CreateZone {
                 self.threshold
             ));
         }
+
+        let encryption_key_registration = parse_encryption_key_registration(
+            self.sequencer_key.as_deref(),
+            self.transaction_private_key.as_deref(),
+            self.admin,
+            &self.sequencers,
+        )?;
         if self.sequencers.len() > 1 && self.threshold < 2 {
             // With threshold 1 a leader can settle blocks no follower holds, so an
             // empty-disk leader recovery cannot reconstruct the settled chain from
@@ -337,6 +360,19 @@ impl CreateZone {
         )
         .wrap_err("failed writing zone.json")?;
 
+        if let Some((encryption_signer, portal_signer)) = encryption_key_registration {
+            let sequencer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .wallet(EthereumWallet::from(portal_signer))
+                .connect(&self.l1_rpc_url)
+                .await
+                .wrap_err("failed connecting to Tempo L1 RPC for encryption-key registration")?;
+            println!("Registering sequencer encryption key on ZonePortal...");
+            let tx_hash = register_encryption_key(&sequencer_provider, portal, &encryption_signer)
+                .await
+                .wrap_err("failed to register sequencer encryption key")?;
+            println!("Encryption key registered  [tx: {tx_hash}]");
+        }
+
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
         println!("  Chain ID: {chain_id}");
@@ -364,6 +400,44 @@ impl CreateZone {
     }
 }
 
+fn parse_private_key(key: &str) -> eyre::Result<PrivateKeySigner> {
+    key.strip_prefix("0x")
+        .unwrap_or(key)
+        .parse()
+        .map_err(Into::into)
+}
+
+fn parse_encryption_key_registration(
+    encryption_key: Option<&str>,
+    transaction_private_key: Option<&str>,
+    admin: Address,
+    sequencers: &[Address],
+) -> eyre::Result<Option<(PrivateKeySigner, PrivateKeySigner)>> {
+    let Some(encryption_key) = encryption_key else {
+        ensure!(
+            transaction_private_key.is_none(),
+            "TRANSACTION_PRIVATE_KEY requires SEQUENCER_KEY"
+        );
+        return Ok(None);
+    };
+    let encryption_signer =
+        parse_private_key(encryption_key).wrap_err("SEQUENCER_KEY is not a valid private key")?;
+    let (portal_signer, portal_signer_source) = match transaction_private_key {
+        Some(key) => (
+            parse_private_key(key)
+                .wrap_err("TRANSACTION_PRIVATE_KEY is not a valid private key")?,
+            "TRANSACTION_PRIVATE_KEY",
+        ),
+        None => (encryption_signer.clone(), "SEQUENCER_KEY"),
+    };
+    ensure!(
+        portal_signer.address() == admin || sequencers.contains(&portal_signer.address()),
+        "{portal_signer_source} resolves to {}, but that address is neither the portal admin nor in the configured sequencer set; set TRANSACTION_PRIVATE_KEY to an authorized portal signer",
+        portal_signer.address(),
+    );
+    Ok(Some((encryption_signer, portal_signer)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +463,8 @@ mod tests {
             admin: address!("0x5000000000000000000000000000000000000005"),
             rpc_url: String::new(),
             private_key: String::new(),
+            sequencer_key: None,
+            transaction_private_key: None,
             base_fee_per_gas: 1,
             gas_limit: 30_000_000,
         };
@@ -396,5 +472,70 @@ mod tests {
         let params = command.factory_params();
         assert_eq!(params.sequencers, sequencers);
         assert_eq!(params.threshold, 2);
+    }
+
+    #[test]
+    fn defaults_portal_signer_to_encryption_key() {
+        let key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let signer = parse_private_key(key).unwrap();
+        let (encryption_signer, portal_signer) =
+            parse_encryption_key_registration(Some(key), None, Address::ZERO, &[signer.address()])
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(encryption_signer.address(), signer.address());
+        assert_eq!(portal_signer.address(), signer.address());
+    }
+
+    #[test]
+    fn supports_distinct_encryption_and_portal_signers() {
+        let encryption_key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let portal_key = "0000000000000000000000000000000000000000000000000000000000000002";
+        let portal_signer = parse_private_key(portal_key).unwrap();
+        let (encryption_signer, parsed_portal_signer) = parse_encryption_key_registration(
+            Some(encryption_key),
+            Some(portal_key),
+            Address::ZERO,
+            &[portal_signer.address()],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(encryption_signer.address(), portal_signer.address());
+        assert_eq!(parsed_portal_signer.address(), portal_signer.address());
+    }
+
+    #[test]
+    fn accepts_portal_admin_as_transaction_signer() {
+        let encryption_key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let admin_key = "0000000000000000000000000000000000000000000000000000000000000002";
+        let admin = parse_private_key(admin_key).unwrap();
+        let (_, portal_signer) = parse_encryption_key_registration(
+            Some(encryption_key),
+            Some(admin_key),
+            admin.address(),
+            &[address!("0x2000000000000000000000000000000000000002")],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(portal_signer.address(), admin.address());
+    }
+
+    #[test]
+    fn rejects_portal_signer_outside_the_sequencer_set() {
+        let error = parse_encryption_key_registration(
+            Some("0000000000000000000000000000000000000000000000000000000000000001"),
+            Some("0000000000000000000000000000000000000000000000000000000000000002"),
+            address!("0x3000000000000000000000000000000000000003"),
+            &[address!("0x2000000000000000000000000000000000000002")],
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("TRANSACTION_PRIVATE_KEY resolves to")
+        );
     }
 }
