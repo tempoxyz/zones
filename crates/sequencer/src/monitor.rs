@@ -41,9 +41,9 @@ use crate::{
     prover::ShadowProver,
     resolve_portal_zone_anchor,
     settlement::{
-        BatchAnchorConfig, BatchData, BatchSubmission, BatchSubmitError, BatchSubmitter,
-        FinalizedBatchLog, WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch,
-        fetch_finalized_batch_boundaries, read_zone_block_snapshot,
+        AtomicWithdrawalSlot, BatchAnchorConfig, BatchData, BatchSubmission, BatchSubmitError,
+        BatchSubmitter, FinalizedBatchLog, WithdrawalPage, ZoneBlockSnapshot,
+        fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
     },
     withdrawals::{SharedWithdrawalStore, WithdrawalBatchLimits},
 };
@@ -570,15 +570,18 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 return Ok(());
             }
 
+            // Only the first attempt may drain the slot atomically. A combined transaction
+            // declares more gas than settlement alone, so after any failure, including bounded
+            // non-inclusion of that transaction, retries submit the batch by itself and leave
+            // the slot to the standalone processor.
+            let atomic_slot = (attempt == 1).then_some(AtomicWithdrawalSlot {
+                withdrawals: &withdrawals,
+                max_batch_gas: self.config.withdrawal_batch_limits.max_batch_gas,
+            });
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(
-                    batch_data,
-                    &withdrawals,
-                    self.config.withdrawal_batch_limits.max_batch_gas,
-                    shutdown,
-                )
+                .submit_batch(batch_data, atomic_slot, shutdown)
                 .await
             {
                 Ok(BatchSubmission {
@@ -633,8 +636,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
                     // Store withdrawals under the logical portal queue index assigned on-chain.
                     // A slot processed atomically with the submission is already consumed, so
-                    // there is nothing left for the standalone processor.
+                    // there is nothing left for the standalone processor: the combined call is
+                    // only sent against an empty portal queue, so it can only have drained the
+                    // slot this submission enqueued.
                     if withdrawals_processed {
+                        self.metrics.atomic_withdrawal_slots_total.increment(1);
+                        self.metrics
+                            .atomic_withdrawals_processed_total
+                            .increment(withdrawals.len() as u64);
                         info!(
                             count = withdrawals.len(),
                             "Withdrawals processed in the batch submission transaction"
