@@ -29,11 +29,12 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, ErrorCode, PROTOCOL_VERSION, ProverConnection, VerifyRequest,
+    VerifyResponse,
 };
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
@@ -46,6 +47,13 @@ use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::Prover
 /// Number of candidates allowed to wait behind the active validation.
 const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
 const RPC_CONCURRENCY: usize = 8;
+
+/// Typed error context for an SPF rejection or a mismatch in its output.
+/// Errors without this context mean validation could not complete and must not
+/// count as a rejected candidate (for example, when the remote prover restarts).
+#[derive(Debug, thiserror::Error)]
+#[error("prover validation failed")]
+struct ValidationFailure;
 
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
@@ -247,7 +255,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         "Shadow prover validated finalized batch candidate"
                     );
                 }
-                Err(err) => {
+                Err(err) if err.is::<ValidationFailure>() => {
                     metrics.validation_failure_total.increment(1);
                     error!(
                         target: "zone::sequencer::prover",
@@ -258,6 +266,19 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         elapsed_ms = started.elapsed().as_millis(),
                         error = ?err,
                         "Shadow prover failed to validate finalized batch candidate"
+                    );
+                }
+                Err(err) => {
+                    metrics.operational_failure_total.increment(1);
+                    warn!(
+                        target: "zone::sequencer::prover",
+                        zone_from = job.from,
+                        zone_to = job.to,
+                        prev_block_hash = %job.batch.prev_block_hash,
+                        next_block_hash = %job.batch.next_block_hash,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        error = ?err,
+                        "Shadow prover could not complete finalized batch candidate validation"
                     );
                 }
             }
@@ -415,14 +436,15 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
             .await
             .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")?
+            .context("SPF rejected generated witness")
+            .context(ValidationFailure)?
     };
     metrics
         .spf_execution_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    compare_output(&output, &job.batch, job.batch.prev_block_hash)?;
+    compare_output(&output, &job.batch, job.batch.prev_block_hash).context(ValidationFailure)?;
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -545,7 +567,12 @@ async fn verify_remotely(
                     request.request_id
                 );
             }
-            bail!("remote prover rejected request ({code:?}): {message}")
+            let error = eyre::eyre!("remote prover rejected request ({code:?}): {message}");
+            Err(if code == ErrorCode::VerificationFailed {
+                error.wrap_err(ValidationFailure)
+            } else {
+                error
+            })
         }
     }
 }

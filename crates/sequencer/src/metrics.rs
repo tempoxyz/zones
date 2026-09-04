@@ -53,8 +53,11 @@ pub(crate) struct ProverMetrics {
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,
 
-    /// Number of finalized batch candidates that failed prover validation.
+    /// Number of finalized batch candidates rejected by the SPF or with mismatched SPF output.
     pub(crate) validation_failure_total: Counter,
+
+    /// Number of attempts that could not complete due to input, connectivity, protocol, or worker errors.
+    pub(crate) operational_failure_total: Counter,
 
     /// Number of finalized batch candidates that passed prover validation.
     pub(crate) validation_success_total: Counter,
