@@ -2118,9 +2118,9 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A portal-wide pause rejects deposits and withdrawal processing while settlement continues.
+/// A finalized portal-wide pause stops Zone block production until the portal resumes.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyre::Result<()> {
+async fn test_global_pause_stops_and_resumes_block_production() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let l1 = L1TestNode::start().await?;
@@ -2128,76 +2128,85 @@ async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyr
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
 
-    let recipient_signer = l1.signer_at(2);
-    let recipient = recipient_signer.address();
     let mut depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
     let initial_deposit = 1_000_000u128;
     l1.fund_user(depositor.address(), initial_deposit).await?;
     depositor
-        .deposit_with_memo(initial_deposit, recipient, B256::ZERO, L1_TIMEOUT, &zone)
+        .deposit_with_memo(
+            initial_deposit,
+            depositor.address(),
+            B256::ZERO,
+            L1_TIMEOUT,
+            &zone,
+        )
         .await?;
 
     let admin_provider = l1.admin_provider();
     let portal = ZonePortal::new(portal_address, &admin_provider);
-    let initial_withdrawal_batch = portal.withdrawalBatchIndex().call().await?;
-    let zone_outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
-    let initial_zone_withdrawal_batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
-    let withdrawal_amount = 500_000u128;
-    let mut recipient_account =
-        ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
-    recipient_account.withdraw(withdrawal_amount).await?;
-
     let pause_receipt = portal.pause().send().await?.get_receipt().await?;
     eyre::ensure!(pause_receipt.status(), "global pause transaction failed");
     eyre::ensure!(portal.paused().call().await?, "portal should be paused");
+    let pause_block = pause_receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("pause receipt has no block number"))?;
 
     let _ = depositor
         .simulate_deposit(initial_deposit, depositor.address(), depositor.address())
         .await
         .expect_err("deposit simulation should revert while the portal is paused");
 
-    let withdrawal_start_block = l1.provider().get_block_number().await?;
-    let sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
-
+    let tracker = zone.l1_block_tracker().clone();
     poll_until(
         L1_TIMEOUT,
         Duration::from_millis(250),
-        "withdrawal to be finalized into a zone batch",
+        "pause block to be observed by the L1 subscriber",
         || {
-            let zone_outbox = &zone_outbox;
-            async move {
-                let batch = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
-                Ok((batch > initial_zone_withdrawal_batch).then_some(()))
-            }
+            let latest = tracker.latest().map(|block| block.number);
+            async move { Ok(latest.filter(|number| *number >= pause_block)) }
         },
     )
     .await?;
-    eyre::ensure!(
-        !sequencer.withdrawal_handle.is_finished(),
-        "withdrawal processor exited while the portal was paused"
+
+    // A block already in flight may finish. Require the head to remain unchanged for a full
+    // second, which spans multiple Tempo blocks in the dev chain.
+    let zone_provider = zone.provider();
+    let frozen_head = tokio::time::timeout(L1_TIMEOUT, async {
+        let mut head = zone_provider.get_block_number().await?;
+        let mut unchanged = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let current = zone_provider.get_block_number().await?;
+            if current == head {
+                unchanged += 1;
+                if unchanged == 10 {
+                    return Ok::<_, eyre::Report>(head);
+                }
+            } else {
+                head = current;
+                unchanged = 0;
+            }
+        }
+    })
+    .await
+    .map_err(|_| eyre::eyre!("Zone block production did not stop after the portal pause"))??;
+    let frozen_anchor = zone.tempo_block_number().await?;
+    assert!(
+        frozen_anchor < pause_block,
+        "the Zone imported the pause block instead of stopping before it"
     );
-    poll_until(
-        L1_TIMEOUT,
-        Duration::from_millis(250),
-        "withdrawal batch to settle while the portal is paused",
-        || {
-            let portal = &portal;
-            async move {
-                let batch = portal.withdrawalBatchIndex().call().await?;
-                Ok((batch > initial_withdrawal_batch).then_some(()))
-            }
-        },
-    )
-    .await?;
 
-    let processed_while_paused = portal
-        .WithdrawalProcessed_filter()
-        .from_block(withdrawal_start_block)
-        .query()
+    let resume_receipt = portal.resume().send().await?.get_receipt().await?;
+    eyre::ensure!(resume_receipt.status(), "global resume transaction failed");
+    eyre::ensure!(!portal.paused().call().await?, "portal should be resumed");
+    let resume_block = resume_receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("resume receipt has no block number"))?;
+
+    zone.wait_for_tempo_block_number(resume_block, L1_TIMEOUT)
         .await?;
     assert!(
-        processed_while_paused.is_empty(),
-        "withdrawal must remain queued while the portal is paused"
+        zone_provider.get_block_number().await? > frozen_head,
+        "Zone block production did not restart after the portal resumed"
     );
 
     Ok(())

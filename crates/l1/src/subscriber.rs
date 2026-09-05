@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    EncryptionKeyRing, L1StateCache, abi::ZonePortal, metrics::L1SubscriberMetrics,
-    state::EnabledTokenRegistry,
+    EncryptionKeyRing, L1StateCache, abi::ZonePortal, event::PortalPauseTransition,
+    metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
 };
 use eyre::{OptionExt as _, WrapErr as _};
 use std::collections::HashSet;
@@ -20,6 +20,7 @@ struct L1BlockTrackerState {
     recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
+    portal_pause: Option<(u64, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +141,33 @@ impl L1BlockTracker {
     /// Return the highest independently observed L1 anchor.
     pub fn latest(&self) -> Option<NumHash> {
         self.state.read().latest
+    }
+
+    /// Return whether finalized Portal state currently pauses block production.
+    pub fn portal_paused(&self) -> bool {
+        self.state
+            .read()
+            .portal_pause
+            .is_some_and(|(_, paused)| paused)
+    }
+
+    /// Apply a finalized Portal pause observation unless a newer block was already observed.
+    ///
+    /// Returns whether the effective pause value changed.
+    pub fn observe_portal_pause(&self, block_number: u64, paused: bool) -> bool {
+        let mut state = self.state.write();
+        if state
+            .portal_pause
+            .is_some_and(|(current, _)| current > block_number)
+        {
+            return false;
+        }
+
+        let changed = state
+            .portal_pause
+            .map_or(paused, |(_, current)| current != paused);
+        state.portal_pause = Some((block_number, paused));
+        changed
     }
 
     /// Return whether `number` fits inside the bounded subscriber lookahead window.
@@ -380,12 +408,14 @@ impl L1BlockTracker {
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-type L1ProcessedEvents = (
-    L1PortalEvents,
-    HashSet<Address>,
-    Option<Vec<alloy_primitives::Log>>,
-    Vec<FinalizedBatchSubmission>,
-);
+#[derive(Debug)]
+pub(crate) struct L1ProcessedEvents {
+    pub(crate) portal_events: L1PortalEvents,
+    pub(crate) invalidated: HashSet<Address>,
+    pub(crate) portal_logs: Option<Vec<alloy_primitives::Log>>,
+    pub(crate) finalized_batches: Vec<FinalizedBatchSubmission>,
+    pub(crate) portal_pause: Option<PortalPauseTransition>,
+}
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
     (address == TIP403_REGISTRY_ADDRESS
@@ -763,7 +793,13 @@ where
                     block_number,
                     "portal event decoding",
                 ))?;
-            let (events, invalidated, portal_logs, finalized_batches) = processed_events;
+            let L1ProcessedEvents {
+                portal_events: events,
+                invalidated,
+                portal_logs,
+                finalized_batches,
+                portal_pause,
+            } = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
@@ -800,6 +836,12 @@ where
                             "encryption key rotation application",
                         ))?;
                 }
+            }
+            // Publish a portal-wide pause before enqueueing this block. Enqueueing wakes the
+            // engine, so reversing this order could let it start the pause block first.
+            if let Some(transition) = portal_pause {
+                self.block_tracker
+                    .observe_portal_pause(block_number, transition.is_paused());
             }
             let appended = self
                 .deposit_queue
@@ -924,6 +966,7 @@ where
         } else {
             Vec::new()
         };
+        let mut portal_pause = None;
 
         for receipt in receipts {
             let retain_receipt_logs = portal_logs.is_some() && receipt.status();
@@ -940,11 +983,15 @@ where
                     {
                         invalidated.insert(address);
                     }
-                    portal_events
+                    if let Some(transition) = portal_events
                         .push_log(log, block_number)
                         .wrap_err_with(|| {
                             format!("failed to decode a portal event in L1 block {block_number}")
-                        })?;
+                        })?
+                    {
+                        // The last transition in canonical log order is the block's final state.
+                        portal_pause = Some(transition);
+                    }
                 } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
                     invalidated.extend([address, log.address()]);
                 }
@@ -956,7 +1003,13 @@ where
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs, finalized_batches))
+        Ok(L1ProcessedEvents {
+            portal_events,
+            invalidated,
+            portal_logs,
+            finalized_batches,
+            portal_pause,
+        })
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {

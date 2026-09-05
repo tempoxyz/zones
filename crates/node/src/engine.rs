@@ -120,6 +120,9 @@ trait AvailableBlockDrain {
     /// Returns the next available block without consuming it.
     fn next_available(&self) -> Option<Self::Block>;
 
+    /// Returns whether portal governance currently forbids producing another block.
+    fn production_paused(&self) -> bool;
+
     /// Checks the leadership permit for one available block.
     ///
     /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
@@ -145,6 +148,9 @@ where
     loop {
         if stop.is_cancelled() {
             return Ok(Some(EngineExit::Cancelled));
+        }
+        if drain.production_paused() {
+            return Ok(None);
         }
         let Some(block) = drain.next_available() else {
             return Ok(None);
@@ -427,6 +433,10 @@ impl AvailableBlockDrain for ZoneEngine {
         self.deposit_queue.peek()
     }
 
+    fn production_paused(&self) -> bool {
+        self.l1_block_tracker.portal_paused()
+    }
+
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
         // No permit is legacy single-sequencer mode: production is always authorized.
         self.production_permit
@@ -453,7 +463,13 @@ fn zone_timestamp_millis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
     use tokio::sync::oneshot;
 
     #[test]
@@ -476,6 +492,7 @@ mod tests {
         advanced: Vec<u64>,
         first_started: Option<oneshot::Sender<()>>,
         release_first: Option<oneshot::Receiver<()>>,
+        paused: Arc<AtomicBool>,
         /// Blocks (by value) the permit rejects, with the exit it produces.
         denied: Vec<(u64, EngineExit)>,
     }
@@ -485,6 +502,10 @@ mod tests {
 
         fn next_available(&self) -> Option<Self::Block> {
             self.pending.front().copied()
+        }
+
+        fn production_paused(&self) -> bool {
+            self.paused.load(Ordering::Relaxed)
         }
 
         fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
@@ -521,6 +542,7 @@ mod tests {
             advanced: Vec::new(),
             first_started: Some(first_started),
             release_first: Some(release_first),
+            paused: Arc::new(AtomicBool::new(false)),
             denied: Vec::new(),
         };
 
@@ -551,6 +573,7 @@ mod tests {
             advanced: Vec::new(),
             first_started: None,
             release_first: None,
+            paused: Arc::new(AtomicBool::new(false)),
             denied: vec![(
                 3,
                 EngineExit::Demoted {
@@ -583,6 +606,7 @@ mod tests {
             advanced: Vec::new(),
             first_started: None,
             release_first: None,
+            paused: Arc::new(AtomicBool::new(false)),
             denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
         };
 
@@ -592,6 +616,52 @@ mod tests {
         assert_eq!(exit, Some(EngineExit::Fenced { tempo_anchor: 5 }));
         assert!(drain.advanced.is_empty());
         assert_eq!(drain.pending, [5]);
+    }
+
+    #[tokio::test]
+    async fn portal_pause_leaves_the_entire_backlog_queued() {
+        let stop = CancellationToken::new();
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2]),
+            advanced: Vec::new(),
+            first_started: None,
+            release_first: None,
+            paused: Arc::new(AtomicBool::new(true)),
+            denied: Vec::new(),
+        };
+
+        assert_eq!(drain_all_available(&mut drain, &stop).await.unwrap(), None);
+        assert!(drain.advanced.is_empty());
+        assert_eq!(drain.pending, [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn portal_pause_finishes_the_in_flight_block_then_stops() {
+        let stop = CancellationToken::new();
+        let (first_started, started) = oneshot::channel();
+        let (release, release_first) = oneshot::channel();
+        let paused = Arc::new(AtomicBool::new(false));
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2, 3]),
+            advanced: Vec::new(),
+            first_started: Some(first_started),
+            release_first: Some(release_first),
+            paused: paused.clone(),
+            denied: Vec::new(),
+        };
+
+        let task = tokio::spawn(async move {
+            drain_all_available(&mut drain, &stop).await.unwrap();
+            drain
+        });
+
+        started.await.unwrap();
+        paused.store(true, Ordering::Relaxed);
+        release.send(()).unwrap();
+
+        let drain = task.await.unwrap();
+        assert_eq!(drain.advanced, [1]);
+        assert_eq!(drain.pending, [2, 3]);
     }
 
     #[test]

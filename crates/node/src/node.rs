@@ -103,6 +103,58 @@ use zone_sequencer::{
     ZoneSequencerConfig, attestation::AttestationDomain, spawn_shadow_prover, spawn_zone_sequencer,
 };
 
+const PORTAL_PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Refresh the production gate from the portal at the latest finalized Tempo block.
+async fn refresh_portal_pause(
+    l1_provider: &DynProvider<TempoNetwork>,
+    portal_address: Address,
+    l1_block_tracker: &L1BlockTracker,
+) -> eyre::Result<()> {
+    let header = l1_provider
+        .get_header_by_number(BlockNumberOrTag::Finalized)
+        .await?
+        .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
+    let block_number = header.number();
+    let paused = ZonePortal::new(portal_address, l1_provider)
+        .paused()
+        .block(alloy_rpc_types_eth::BlockId::number(block_number))
+        .call()
+        .await?;
+    let changed = l1_block_tracker.observe_portal_pause(block_number, paused);
+    if changed {
+        info!(
+            target: "zone::engine",
+            block_number,
+            paused,
+            "Finalized portal pause state changed"
+        );
+    }
+    Ok(())
+}
+
+/// Keep observing finalized portal state independently of the bounded L1 ingestion queue.
+async fn watch_portal_pause(
+    l1_provider: DynProvider<TempoNetwork>,
+    portal_address: Address,
+    l1_block_tracker: L1BlockTracker,
+) {
+    let mut interval = tokio::time::interval(PORTAL_PAUSE_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(err) =
+            refresh_portal_pause(&l1_provider, portal_address, &l1_block_tracker).await
+        {
+            warn!(
+                target: "zone::engine",
+                %err,
+                "Failed to refresh finalized portal pause state"
+            );
+        }
+    }
+}
+
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
     let expected = zone_chain_id(parent_chain_id, zone_id)?;
     eyre::ensure!(
@@ -667,6 +719,28 @@ where
             finalized_batch_submissions = Some(receiver);
         }
 
+        let task_executor = ctx.node.task_executor().clone();
+        if !self.portal_address.is_zero() {
+            // Initialize the gate before any producer starts. This makes restart during an active
+            // pause fail closed instead of waiting for historical receipt replay to catch up.
+            refresh_portal_pause(&l1_provider, self.portal_address, &self.l1_block_tracker)
+                .await
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to initialize finalized portal pause state for {}: {err}",
+                        self.portal_address
+                    )
+                })?;
+            task_executor.spawn_critical_task(
+                "portal-pause-watcher",
+                watch_portal_pause(
+                    l1_provider.clone(),
+                    self.portal_address,
+                    self.l1_block_tracker.clone(),
+                ),
+            );
+        }
+
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
         if let Some(keys) = self.encryption_keys.clone() {
@@ -737,7 +811,6 @@ where
             finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
-        let task_executor = ctx.node.task_executor().clone();
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
