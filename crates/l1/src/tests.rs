@@ -181,6 +181,21 @@ async fn l1_block_tracker_waits_for_exact_observation() {
     waiter.await.unwrap().unwrap();
 }
 
+#[test]
+fn l1_block_tracker_keeps_the_newest_portal_pause_state() {
+    let tracker = L1BlockTracker::default();
+
+    assert!(!tracker.portal_paused());
+    assert!(tracker.observe_portal_pause(11, true));
+    assert!(tracker.portal_paused());
+
+    assert!(!tracker.observe_portal_pause(10, false));
+    assert!(tracker.portal_paused());
+
+    assert!(tracker.observe_portal_pause(12, false));
+    assert!(!tracker.portal_paused());
+}
+
 #[tokio::test]
 async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
     let tracker = L1BlockTracker::default();
@@ -1662,7 +1677,10 @@ fn extracts_finalized_batch_submission_for_observer() {
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let submissions = subscriber
+        .extract_events(block, &[receipt])
+        .unwrap()
+        .finalized_batches;
 
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].block, block);
@@ -1711,7 +1729,10 @@ fn finalized_batch_observer_ignores_rpc_log_metadata() {
     );
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let submissions = subscriber
+        .extract_events(block, &[receipt])
+        .unwrap()
+        .finalized_batches;
 
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].block, block);
@@ -1748,10 +1769,11 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs, _) = subscriber.extract_events(block, &[receipt]).unwrap();
-    assert!(events.deposits.is_empty());
-    assert!(events.leader_transitions.is_empty());
-    assert_eq!(portal_logs.unwrap().len(), 1);
+    let processed = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert!(processed.portal_events.deposits.is_empty());
+    assert!(processed.portal_events.leader_transitions.is_empty());
+    assert_eq!(processed.portal_pause, None);
+    assert_eq!(processed.portal_logs.unwrap().len(), 1);
 }
 
 #[test]
@@ -1787,9 +1809,10 @@ fn pause_events_invalidate_cached_portal_storage() {
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
     let block = NumHash::new(1, B256::with_last_byte(0x10));
-    let (_, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
-    assert!(invalidated.contains(&portal));
-    subscriber.update_l1_state_anchor(1, &invalidated);
+    let processed = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert!(processed.portal_pause.unwrap().is_paused());
+    assert!(processed.invalidated.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &processed.invalidated);
     assert_eq!(
         subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
