@@ -13,6 +13,7 @@ use crate::{
     generate_p2p_key::GenerateP2pKey,
     generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory,
+    operator_agreement::OperatorAgreement,
     portal_access::{SetAccessMode, SetAllowedAccount, SetGateway, SetGatewayMode},
     portal_pause::PausePortal,
     set_encryption_key::SetEncryptionKey,
@@ -37,6 +38,7 @@ mod deposit;
 mod generate_p2p_key;
 mod generate_zone_genesis;
 mod install_reference_zone_factory;
+mod operator_agreement;
 mod portal_access;
 mod portal_pause;
 mod set_encryption_key;
@@ -80,6 +82,9 @@ async fn main() -> eyre::Result<()> {
         Action::InstallReferenceZoneFactory(args) => args
             .run()
             .wrap_err("failed to install reference ZoneFactory"),
+        Action::OperatorAgreement(args) => {
+            args.run().await.wrap_err("operator agreement check failed")
+        }
         Action::PausePortal(args) => args.run().await.wrap_err("failed to pause portal"),
         Action::SetAccessMode(args) => args.run().await.wrap_err("failed to set access mode"),
         Action::SetAllowedAccount(args) => {
@@ -125,6 +130,8 @@ enum Action {
     GenerateP2pKey(GenerateP2pKey),
     GenerateZoneGenesis(GenerateZoneGenesis),
     InstallReferenceZoneFactory(InstallReferenceZoneFactory),
+    /// Compare finalized block agreement across operator RPC endpoints and bisect divergence.
+    OperatorAgreement(OperatorAgreement),
     PausePortal(PausePortal),
     SetAccessMode(SetAccessMode),
     SetAllowedAccount(SetAllowedAccount),
