@@ -14204,6 +14204,7 @@ dependencies = [
  "tempo-revm",
  "tempo-zone-contracts",
  "thiserror 2.0.18",
+ "tracing",
  "zone-chainspec",
  "zone-evm",
  "zone-precompiles",
