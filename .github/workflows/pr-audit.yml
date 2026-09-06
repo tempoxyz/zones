@@ -55,7 +55,9 @@ jobs:
       github.event.issue.pull_request &&
       (
         startsWith(github.event.comment.body, 'cyclops audit') ||
+        startsWith(github.event.comment.body, 'cyclops private audit') ||
         startsWith(github.event.comment.body, '@decofe cyclops audit') ||
+        startsWith(github.event.comment.body, '@decofe cyclops private audit') ||
         startsWith(github.event.comment.body, 'derek audit')
       )
     runs-on: ubuntu-latest
@@ -64,9 +66,9 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: tempoxyz/gh-actions/actions/pr-audit-comment@7216a21c7e97d3f0c4d091ac5b894a407c600b91
+      - uses: tempoxyz/gh-actions/actions/pr-audit-comment@7741a8658354abd422dd1b941d07f809682ca96d
         with:
-          command-regex: '^(?:@decofe\s+)?(?:cyclops\s+audit|derek\s+audit)\b'
+          command-regex: '^(?:@decofe\s+)?(?:cyclops\s+(?:private\s+)?audit|derek\s+audit)\b'
           permission-check-mode: association
           organization: tempoxyz
           events-key: ${{ secrets.EVENTS_KEY }}
