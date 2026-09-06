@@ -146,17 +146,28 @@ pub fn decode_l1_chain_id(chain_id: u64) -> Result<u64, ZoneChainIdError> {
 }
 
 fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
-    if parent_chain_id == 0 || parent_chain_id > MAX_GENERIC_PARENT_CHAIN_ID {
-        return Err(ZoneChainIdError::InvalidParentChainId(parent_chain_id));
+    if parent_chain_id == MAINNET_CHAIN_ID {
+        if zone_id as u64 >= ZONE_CHAIN_ID_RANGE {
+            return Err(ZoneChainIdError::ZoneIdOutOfRange {
+                parent_chain_id,
+                zone_id,
+            });
+        }
+        return Ok(());
     }
 
-    if (parent_chain_id == MAINNET_CHAIN_ID && zone_id as u64 >= ZONE_CHAIN_ID_RANGE)
-        || (parent_chain_id == MODERATO_CHAIN_ID && zone_id as u64 >= ZONE_CHAIN_ID_RANGE_TESTNET)
-    {
-        return Err(ZoneChainIdError::ZoneIdOutOfRange {
-            parent_chain_id,
-            zone_id,
-        });
+    if parent_chain_id == MODERATO_CHAIN_ID {
+        if zone_id as u64 >= ZONE_CHAIN_ID_RANGE_TESTNET {
+            return Err(ZoneChainIdError::ZoneIdOutOfRange {
+                parent_chain_id,
+                zone_id,
+            });
+        }
+        return Ok(());
+    }
+
+    if parent_chain_id == 0 || parent_chain_id > MAX_GENERIC_PARENT_CHAIN_ID {
+        return Err(ZoneChainIdError::InvalidParentChainId(parent_chain_id));
     }
 
     Ok(())
