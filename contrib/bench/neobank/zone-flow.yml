@@ -56,7 +56,24 @@ templates:
   gateway_deposit:
     type: tempo
     from: { var: account.ref }
-    gas_limit: 10000000
+    # NOT the same knob as the requestWithdrawal() *argument* below
+    # (${ZONES_BENCH_CALLBACK_GAS_LIMIT}, the L1 callback's gas budget). This
+    # is the Zone tx envelope's own gas limit for executing requestWithdrawal
+    # itself, which only stores a pending withdrawal and emits an event -- no
+    # callback runs here. The zone's genesis block gas limit is 30,000,000,
+    # and reth's block builder reserves a tx's *declared* gas_limit against
+    # that budget before executing it (so it can pack deterministically
+    # without re-running a tx that turns out too big), not its actual gas
+    # used. At 10,000,000 declared here, only 3 of these txs could ever fit
+    # in one zone block regardless of how little gas requestWithdrawal
+    # actually burns, forcing any 4th+ concurrent submission to queue into
+    # later blocks -- observed adding multiple seconds of "Accepted"
+    # (request_result) latency under the UI's normal benchmark concurrency
+    # (up to 50). 1,000,000 keeps a >2x margin over approve_base_token's
+    # measured-safe 500,000 for a comparably simple TIP-20
+    # transferFrom+burn+storage-write+event call, while letting 30 of these
+    # coexist per block instead of 3.
+    gas_limit: 1000000
     fee_token: "${ZONES_BENCH_TOKEN}"
     expiring_nonce: true
     valid_for_secs: 25
@@ -77,7 +94,9 @@ templates:
   gateway_redeem:
     type: tempo
     from: { var: account.ref }
-    gas_limit: 10000000
+    # See gateway_deposit's gas_limit comment above -- same
+    # requestWithdrawal() call, same 3-per-block ceiling this avoids.
+    gas_limit: 1000000
     fee_token: "${ZONES_BENCH_TOKEN}"
     expiring_nonce: true
     valid_for_secs: 25
@@ -98,7 +117,9 @@ templates:
   offramp:
     type: tempo
     from: { var: account.ref }
-    gas_limit: 10000000
+    # See gateway_deposit's gas_limit comment above -- same
+    # requestWithdrawal() call, same 3-per-block ceiling this avoids.
+    gas_limit: 1000000
     fee_token: "${ZONES_BENCH_TOKEN}"
     expiring_nonce: true
     valid_for_secs: 25
