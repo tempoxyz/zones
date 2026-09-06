@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use super::cache::L1StateCache;
-use crate::rpc::rpc_connection_config;
+use crate::rpc::persistent_connection_config;
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -115,7 +115,7 @@ impl L1StateProvider {
         let retry_layer =
             RetryBackoffLayer::new(config.max_retries, config.initial_backoff_ms, u64::MAX);
 
-        let conn_config = rpc_connection_config(config.retry_connection_interval);
+        let conn_config = persistent_connection_config(config.retry_connection_interval);
 
         let client = RpcClient::builder()
             .layer(retry_layer)

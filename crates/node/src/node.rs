@@ -15,8 +15,7 @@ use crate::{
     },
     rpc::{
         NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi, SequencerRpcContext,
-        ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
-        start_redacted_rpc,
+        ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, start_redacted_rpc,
     },
     shadow_prover::RpcFollowerShadowProver,
 };
@@ -86,6 +85,7 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt, encryption_key_address,
+    rpc::persistent_connection_config,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
@@ -591,7 +591,7 @@ where
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
-                rpc_connection_config(self.l1_config.retry_connection_interval),
+                persistent_connection_config(self.l1_config.retry_connection_interval),
             )
             .await?
             .erased();
@@ -1244,7 +1244,7 @@ where
                     .wallet(alloy_network::EthereumWallet::from(signer))
                     .connect_with_config(
                         &l1_rpc_url,
-                        rpc_connection_config(retry_connection_interval),
+                        persistent_connection_config(retry_connection_interval),
                     )
                     .await?
                     .erased();
@@ -1546,7 +1546,7 @@ where
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &l1_rpc_url,
-                rpc_connection_config(retry_connection_interval),
+                persistent_connection_config(retry_connection_interval),
             )
             .await?
             .erased();
