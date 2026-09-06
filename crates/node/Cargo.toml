@@ -84,6 +84,7 @@ futures.workspace = true
 jsonrpsee.workspace = true
 k256.workspace = true
 metrics.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -138,6 +139,7 @@ cli = [
   "dep:clap",
   "dep:reth-ethereum",
   "dep:reth-tracing",
+  "dep:serde",
   "dep:url",
   "dep:zeroize",
   "dep:zone-checker",
