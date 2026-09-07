@@ -1,6 +1,8 @@
 //! Tempo Zone L2 Node.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod defaults;
+
 use zone_node::cli::ZoneCli;
 
 #[global_allocator]
@@ -18,6 +20,7 @@ fn main() {
     }
 
     zone_node::init_version_metadata();
+    defaults::init_defaults();
 
     if let Err(err) = ZoneCli::parse().run() {
         eprintln!("Error: {err:?}");

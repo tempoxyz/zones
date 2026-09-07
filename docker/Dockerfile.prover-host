@@ -9,6 +9,15 @@ FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:6d8e068b91f351df5bf6acd4
 # Keep these IDs in sync with the Pod security context and the Talos udev rule.
 ARG PROVER_UID=10001
 ARG PROVER_GID=10001
+ARG NITRO_HASH_ALGORITHM
+ARG NITRO_PCR0
+ARG NITRO_PCR1
+ARG NITRO_PCR2
+
+LABEL xyz.tempo.zone-prover.nitro.hash-algorithm="${NITRO_HASH_ALGORITHM}" \
+      xyz.tempo.zone-prover.nitro.pcr0="${NITRO_PCR0}" \
+      xyz.tempo.zone-prover.nitro.pcr1="${NITRO_PCR1}" \
+      xyz.tempo.zone-prover.nitro.pcr2="${NITRO_PCR2}"
 
 # Create the fixed runtime identity
 RUN dnf install -y shadow-utils

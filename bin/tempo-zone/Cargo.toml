@@ -18,6 +18,7 @@ zone-node = { workspace = true, features = ["cli"] }
 
 # reth
 reth-cli-util.workspace = true
+reth-node-core.workspace = true
 
 # tls
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

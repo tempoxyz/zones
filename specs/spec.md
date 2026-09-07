@@ -15,10 +15,11 @@
     - [Zone Predeploys](#zone-predeploys)
     - [Zone Token Model](#zone-token-model)
   - [Sequencer Operations](#sequencer-operations)
+    - [Multi-Sequencer Topology](#multi-sequencer-topology)
     - [Token Management](#token-management)
     - [Gas Rate Configuration](#gas-rate-configuration)
     - [Encryption Key Management](#encryption-key-management)
-    - [Sequencer Set Rotation](#sequencer-set-rotation)
+    - [Leadership and Sequencer Set Rotation](#leadership-and-sequencer-set-rotation)
     - [Admin Transfer](#admin-transfer)
   - [Deposits](#deposits)
     - [Deposit Fees](#deposit-fees)
@@ -95,7 +96,7 @@
 
 # Abstract
 
-A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo through a proof-agnostic verification system.
+A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a sequencer set with one active leader and zero or more followers. The leader is the sole block producer, while followers replicate and validate its blocks and attest to batch-boundary settlement commitments. Threshold-certified batches settle back to Tempo through a proof-agnostic verification system.
 
 Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Each portal has two independent, admin-mutable boolean flags: `accessMode` controls account allowlist enforcement for deposits, refunds, and plain withdrawals, while `gatewayMode` controls callback target registration. Disabling either flag disables only its corresponding checks without deleting the stored mapping.
 
@@ -112,7 +113,8 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | Portal | The contract on Tempo that locks deposited tokens and finalizes withdrawals for a zone. |
 | Batch | A sequencer-produced commitment covering one or more zone blocks, submitted to Tempo with a proof. |
 | Admin | The privileged governance role for a zone. Cold/mission-critical key. Controls token enablement. See [Access Control](#access-control). |
-| Sequencer | The privileged operational role for a zone. Hot/online key. Sole block producer; submits batches and processes withdrawals. See [Access Control](#access-control). |
+| Sequencer | A member of the zone's privileged operational set. The active leader produces blocks and submits batches; followers replicate and validate blocks and attest to settlement commitments. See [Access Control](#access-control). |
+| Settlement quorum | The configured threshold of distinct active-sequencer signatures required for `ZonePortal.submitBatch`. |
 | Enabled token | A TIP-20 token that the admin has activated for deposits and withdrawals on a zone. Enablement is permanent. |
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
@@ -124,7 +126,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## System Overview
 
-Each zone is operated by one or more **sequencers** that collect transactions, produce blocks, generate proofs, and submit batches to Tempo. Each zone also has an independent **admin** authority that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). The admin address may also be assigned a portal role, including `Sequencer`. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+Each zone is operated by a **sequencer set**. Exactly one active sequencer is the leader for a given Tempo anchor and produces blocks. The other quorum members are followers: they receive the leader's blocks over an authenticated static P2P network, re-execute and persist them, and sign settlement commitments. The leader collects enough distinct signatures to satisfy the portal's threshold before submitting a batch to Tempo. Each zone also has an independent **admin** authority that holds governance powers (enabling tokens, configuring deposit pause/resume); see [Access Control](#access-control). The admin address may also be assigned a portal role, including `Sequencer`. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
 
 The admin may also schedule permanent abdication of independently controlled portal capabilities.
 
@@ -132,9 +134,9 @@ On the Tempo side, an onchain **verifier** contract validates that each batch wa
 
 On Tempo, each zone has a **portal** that locks deposited tokens. All user deposits encrypt the zone recipient and memo to a registered sequencer encryption key. In closed access mode, only allowed accounts may initiate deposits and refund recipients must also be allowed; open access mode skips both membership checks. Decrypted zone recipients need not be allowed Tempo accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
-Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data, and data availability is entrusted to the sequencer. The sequencer has full visibility into zone activity. Privacy protects against public observers on Tempo, not against the sequencer.
+Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer nodes. The zone does not post transaction data, and data availability is entrusted to the sequencer fleet. Sequencers have full visibility into zone activity. Privacy protects against public observers on Tempo, not against sequencers.
 
-Zones rely on the following trust assumptions: the verifier must be sound for state transition integrity, the sequencer is trusted for liveness and data availability, and there is no forced inclusion or permissionless exit mechanism.
+Zones rely on the following trust assumptions: the verifier must be sound for state transition integrity, the sequencers are trusted for liveness and data availability, and there is no forced inclusion or permissionless exit mechanism.
 
 When a user wants to exit, they request a withdrawal on the zone. Their tokens are burned on the zone side, and the withdrawal is added to a pending list. At the end of a batch, the sequencer finalizes all pending withdrawals into a hash chain and generates a proof covering the full batch of zone blocks. The sequencer submits this batch and proof to the portal on Tempo, which verifies the proof and queues the withdrawals. The sequencer then processes each withdrawal, releasing tokens from the portal to the recipient.
 
@@ -183,15 +185,14 @@ Each zone has an **admin** authority and a set of **sequencers** registered on t
 - Expected to be a cold key, multisig, or governance contract.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
 - Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
-- Cannot be renounced. 
+- Cannot be renounced.
 
 **Sequencers.**
 
-- Operates the zone: collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs.
-- Are equal online operational keys; there is no primary sequencer.
-- Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero threshold no greater than the set size.
+- Operate the zone as a leader/follower fleet. The active leader collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs. Followers replicate and validate blocks and sign matching settlement attestations.
+- Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero settlement threshold no greater than the set size. The first address is installed as the initial leader.
 - May be replaced atomically by the admin together with the threshold. The configuration nonce starts at `0`; each later replacement increments `sequencerSetVersion` and invalidates certificates from earlier configurations.
-- Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
+- Any active sequencer may perform a sequencer-authorized portal operation or submit a batch transaction. In normal node operation, the leader performs these duties, and batch settlement additionally requires a threshold certificate containing distinct active-sequencer signatures.
 - Hold the encryption private keys corresponding to the portal's encryption public keys and used to decrypt [deposits](#deposits).
 
 The admin may also be a member of the sequencer set. Admin authorization remains independent of
@@ -217,6 +218,7 @@ The following table lists every privileged action and the role authorized to inv
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
 | `setSequencerSet(sequencers, threshold)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setLeader(newLeader, expectedEpoch)` | [`ZonePortal`](#izoneportal) | **admin or any active sequencer**; `newLeader` must be active |
 | `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setMaxTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -227,7 +229,7 @@ The following table lists every privileged action and the role authorized to inv
 | `setTempoGasRate(rate)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `setMaxWithdrawalsPerBlock(limit)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `finalizeWithdrawalBatch(...)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **zone system caller (`address(0)`) only** |
-| Block production / `beneficiary` | zone | **sequencer** |
+| Block production / `beneficiary` | zone | **active leader for the block's Tempo anchor** |
 
 Rationale notes:
 
@@ -252,7 +254,7 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | `allowedAccounts` | Optional addresses initially assigned the `Account` role. An empty closed configuration denies all accounts until the admin assigns one; open mode may pre-stage roles for a later close. Members MUST NOT be the messenger. |
 | `zoneGateways` | Optional addresses initially assigned the `CallbackGateway` role. Gateways MUST NOT also be allowed accounts. Roles are retained while gateway mode is open. |
 | `admin` | The nonzero address that holds the admin role for the zone. |
-| `sequencers` | One to eight unique, nonzero equal sequencer addresses. Creation-time order is not significant. |
+| `sequencers` | One to eight unique, nonzero sequencer addresses. The first address becomes the initial leader; otherwise order has no protocol meaning. |
 | `threshold` | The number of distinct active-sequencer signatures required for settlement. MUST be nonzero and no greater than `sequencers.length`. |
 | `rpcUrl` | The operator RPC endpoint advertised for the zone. |
 
@@ -342,6 +344,54 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 
 ## Sequencer Operations
 
+### Multi-Sequencer Topology
+
+Zones do not publish transaction data to Tempo, so a single-sequencer deployment would make one node the only durable copy of the zone chain. If this node crashed or its disk became corrupted, the zone could become unrecoverable. Followers independently execute and persist every block, providing redundant copies from which the zone can recover if the leader or its storage is lost. Operators SHOULD place sequencers in separate failure domains so a single machine, network, or storage failure does not eliminate that redundancy.
+
+When the settlement threshold is greater than one, a compromised sequencer's individual settlement key alone cannot certify a batch. Follower sequencers reconstruct the commitment from their own validated state and sign only an exact match.
+
+The sequencer nodes share a TOML manifest supplied with `--sequencer.manifest`. It lists each node's name, network address, Commonware Ed25519 public key, individual secp256k1 settlement address, and optional `rpc_only` status. The Ed25519 key authenticates P2P traffic; the secp256k1 key signs EIP-712 settlement attestations and its address must be registered in the portal's active sequencer set. These keys are independent.
+
+At startup, each node checks that its local keys identify the same manifest member, every quorum member is an active portal sequencer, and `sequencerThreshold` is nonzero and reachable by the manifest quorum. An `rpc_only` node replicates the chain and forwards transactions but has no settlement key, is not a portal sequencer, never signs an attestation, and does not count toward the threshold.
+
+#### RPC-Only Followers
+
+An RPC-only follower is a non-quorum replica intended to be the client-facing RPC endpoint. It imports, validates, and persists the same canonical blocks as the sequencers, applies the same RPC authorization and response-redaction rules, and serves reads from its local state. Transactions submitted to it are admitted to its local pool and forwarded over authenticated P2P to every quorum member, so clients do not need direct network access to the leader or quorum followers.
+
+The manifest marks this role with `rpc_only = true`. The node has a P2P Ed25519 key, but it has no individual secp256k1 settlement key and is not registered in the portal's sequencer set. It also MUST NOT hold the shared sequencer key used for block production and deposit decryption. Consequently, an RPC-only follower cannot produce blocks, become leader, sign a settlement attestation, submit sequencer-authorized portal transactions, or count toward the settlement threshold. Promoting it requires provisioning an individual settlement key, registering that address with the portal, removing `rpc_only` from the manifest, and restarting the node with the quorum-member configuration.
+
+The manifest's `leader_ed25519_public_key` is a bootstrap value. Live leadership comes from the
+finalized `ZonePortal.leader`, `leaderEpoch`, and `leaderActivationTempoBlock` state and
+`LeaderUpdated` events. Nodes change roles at the corresponding Tempo activation boundary. There
+is no automatic election: an admin or active sequencer must call `setLeader`, except during an
+explicit operator-configured forced-recovery procedure.
+
+For each zone block, the leader selects transactions, advances the Tempo anchor, executes the
+block, persists it, and broadcasts it over P2P. Followers accept live blocks only from the leader
+scheduled for the block's embedded Tempo anchor, then execute, validate, canonicalize, and persist
+the block locally. Missing blocks are recovered through bounded P2P backfill.
+
+At a batch boundary, settlement proceeds as follows:
+
+1. The leader derives the settlement attestation from its persisted chain and portal state, signs
+   it with its individual secp256k1 key, and broadcasts the proposal.
+2. Each quorum follower independently reconstructs the attestation from its own persisted and
+   validated state. It signs only if the full proposal matches, including the sequencer-set
+   version, zone height, withdrawal batch index, Tempo anchor, block transition, deposit
+   transition, withdrawal queue hash, verifier, and verifier configuration hash.
+3. The leader verifies returned signatures against the authenticated peer identities and the
+   manifest's settlement addresses, then waits until one identical attestation has at least
+   `sequencerThreshold` distinct signatures, including its own.
+4. The leader submits the proof and certificate to `ZonePortal.submitBatch`. The portal recovers
+   the signers, requires each signer to be active and unique, and rejects stale, malformed,
+   duplicate, or insufficient certificates.
+
+Followers therefore attest to settlement after validating leader-built blocks; they do not
+participate in transaction ordering or block production. A threshold of one remains valid, but a
+multi-sequencer deployment normally uses a threshold of at least two with three or more quorum
+members, so every settled batch includes a follower signature and remains recoverable from a
+follower after loss of the leader's disk.
+
 ### Token Management
 
 The admin manages which TIP-20 tokens are available on the zone (see [Access Control](#access-control)):
@@ -411,16 +461,13 @@ The portal stores all historical encryption keys in an append-only list. Users s
 
 When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_PERIOD` (86,400 blocks). After that, deposits using the old key are rejected. The current key never expires. Users can call `isEncryptionKeyValid(keyIndex)` before signing to check validity.
 
-### Sequencer Set Rotation
+### Leadership and Sequencer Set Rotation
 
-The admin atomically replaces the active sequencer set and threshold with
-`ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero,
-unique, and no more than eight; their order has no protocol meaning. A replacement
-increments `sequencerSetVersion`, including a threshold-only change, so certificates collected
-under the previous configuration cannot be replayed. The initial configuration uses nonce `0`.
+The admin atomically replaces the active sequencer set and threshold with `ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero, unique, and no more than eight; their order has no protocol meaning. The active leader cannot be removed from the set. To replace it, the admin first adds the replacement, transfers leadership, and then removes the previous leader. A replacement increments `sequencerSetVersion`, including a threshold-only change, so certificates collected under the previous configuration cannot be replayed.
 
-The active set has no distinguished lead. Zone-side components authorize sequencers exclusively
-through active-set membership.
+The initial configuration uses nonce `0`.
+
+Leadership is transferred with `ZonePortal.setLeader(newLeader, expectedEpoch)`. The new leader must be an active sequencer. `expectedEpoch` provides compare-and-set fencing against stale handoff transactions, and only one distinct leader change is allowed per Tempo block. A real change increments `leaderEpoch`, records the current Tempo block in `leaderActivationTempoBlock`, and emits `LeaderUpdated`; setting the current leader is idempotent. Zone nodes consume this state only after Tempo finalization and authorize block production for the leader scheduled at each block's embedded Tempo anchor.
 
 ### Admin Transfer
 
@@ -1744,6 +1791,10 @@ interface IZonePortal {
     );
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
+    event LeaderUpdated(
+        address indexed previousLeader, address indexed newLeader,
+        uint64 indexed epoch, uint64 activationTempoBlock
+    );
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(
@@ -1791,6 +1842,10 @@ interface IZonePortal {
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
     error InvalidQuorumCertificate();
+    error InvalidLeader();
+    error ActiveLeaderRemoved();
+    error LeaderAlreadyUpdatedThisBlock();
+    error StaleLeadershipEpoch(uint64 expected, uint64 actual);
 
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
     function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
@@ -1878,6 +1933,12 @@ interface IZonePortal {
     function sequencerCount() external view returns (uint256);
     function sequencerAt(uint256 index) external view returns (address);
 
+    // Active block-production leader
+    function leader() external view returns (address);
+    function leaderEpoch() external view returns (uint64);
+    function leaderActivationTempoBlock() external view returns (uint64);
+    function setLeader(address newLeader, uint64 expectedEpoch) external;
+
     // Admin management
     function transferAdmin(address newAdmin) external;
     function acceptAdmin() external;
@@ -1891,7 +1952,7 @@ interface IZonePortal {
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
     function sequencerEncryptionKey()
         external view returns (bytes32 x, uint8 yParity, address pubkey);
-    
+
     function encryptionKeyCount() external view returns (uint256);
     function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);
     function encryptionKeyAtBlock(uint64 tempoBlockNumber)
@@ -1903,7 +1964,7 @@ interface IZonePortal {
     function messenger() external view returns (address);
     function admin() external view returns (address);
     function pendingAdmin() external view returns (address);
-    
+
     function verifier() external view returns (address);
     function blockHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
