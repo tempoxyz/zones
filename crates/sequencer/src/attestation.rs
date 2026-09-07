@@ -53,7 +53,7 @@ sol! {
 
 mod legacy {
     alloy_sol_types::sol! {
-        /// Settlement statement used by the pre-T12 portal ABI.
+        /// Settlement statement used by the pre-T13 portal ABI.
         #[derive(Debug, PartialEq, Eq)]
         struct SettlementAttestation {
             uint32 zoneId;
@@ -70,7 +70,7 @@ mod legacy {
             bytes32 verifierConfigHash;
         }
 
-        /// Signed settlement statement used by the pre-T12 portal ABI.
+        /// Signed settlement statement used by the pre-T13 portal ABI.
         #[derive(Debug, PartialEq, Eq)]
         struct SignedSettlementAttestation {
             SettlementAttestation attestation;
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_settlement_uses_pre_t12_wire_format_and_digest() {
+    fn legacy_settlement_uses_pre_t13_wire_format_and_digest() {
         const LEGACY_PORTAL_TYPE: &str = "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
         assert_eq!(
             LegacySettlementAttestation::eip712_encode_type(),

@@ -39,7 +39,7 @@ impl ZoneInbox {
                     processedTokenEnablementHash(call) => {
                         view(call, |_| self.processed_token_enablement_hash.read())
                     },
-                    #[schedule(since = T12)]
+                    #[schedule(since = T13)]
                     processedEnabledTokenCount(call) => {
                         view(call, |_| self.processed_enabled_token_count.read())
                     },
@@ -59,7 +59,7 @@ impl ZoneInbox {
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },
-                    #[schedule(since = T12)]
+                    #[schedule(since = T13)]
                     advanceTempoHeaders(call) => {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))

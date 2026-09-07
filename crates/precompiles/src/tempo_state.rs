@@ -200,11 +200,11 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
-                    #[schedule(until = T12)]
+                    #[schedule(until = T13)]
                     finalizeTempo_0(call) => {
                         self.apply_checkpoints(l1, msg_sender, core::slice::from_ref(&call.header))
                     },
-                    #[schedule(since = T12)]
+                    #[schedule(since = T13)]
                     finalizeTempo_1(call) => {
                         self.apply_checkpoints(l1, msg_sender, &call.headers)
                     },
@@ -424,10 +424,38 @@ mod tests {
     }
 
     #[test]
-    fn legacy_finalize_tempo_works_before_t12() -> eyre::Result<()> {
+    fn finalize_tempo_selectors_switch_at_t13() -> eyre::Result<()> {
+        for hardfork in [TempoHardfork::T12, TempoHardfork::T13] {
+            let genesis = TempoHeader::default();
+            let genesis_hash = keccak256(encode_header(&genesis));
+            let mut harness = TempoStateHarness::new_with_hardfork(&genesis, hardfork)?;
+            let child = child_header(genesis_hash, 1);
+            harness.set_block_timestamp(&child);
+
+            let retired = if hardfork == TempoHardfork::T12 {
+                harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?
+            } else {
+                harness.finalize_legacy(ZONE_INBOX_ADDRESS, &child, false)?
+            };
+            assert!(retired.is_revert());
+            harness.assert_checkpoint(genesis_hash, genesis.number())?;
+
+            let active = if hardfork == TempoHardfork::T12 {
+                harness.finalize_legacy(ZONE_INBOX_ADDRESS, &child, false)?
+            } else {
+                harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?
+            };
+            assert!(active.is_success());
+            harness.assert_checkpoint(keccak256(encode_header(&child)), 1)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_finalize_tempo_works_before_t13() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_hash = keccak256(encode_header(&genesis));
-        let mut harness = TempoStateHarness::new_with_hardfork(&genesis, TempoHardfork::T11)?;
+        let mut harness = TempoStateHarness::new_with_hardfork(&genesis, TempoHardfork::T12)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
 

@@ -1110,7 +1110,7 @@ mod tests {
 
         // Preflight portal hash, live hardfork, then submission metadata with a 2-of-N threshold.
         l1.push_success(&abi_encode_b256(batch_data.prev_block_hash));
-        l1.push_success(&serde_json::json!({ "active": "T12" }));
+        l1.push_success(&serde_json::json!({ "active": "T13" }));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(0),
             abi_encode_u64(1),

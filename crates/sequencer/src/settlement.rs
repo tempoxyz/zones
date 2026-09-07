@@ -494,7 +494,7 @@ impl BatchSubmitter {
                 }
                 tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
             }
-            SettlementAbi::T12 => {
+            SettlementAbi::T13 => {
                 let mut submission = self
                     .portal
                     .submitBatch_1(
@@ -1281,27 +1281,27 @@ pub struct WithdrawalPage {
 /// Settlement ABI selected by the fork rules of the batch's imported Tempo block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementAbi {
-    /// Pre-T12 selector and EIP-712 statement.
+    /// Pre-T13 selector and EIP-712 statement.
     Legacy,
-    /// T12 selector and token-enablement-bound EIP-712 statement.
-    T12,
+    /// T13 selector and token-enablement-bound EIP-712 statement.
+    T13,
 }
 
 impl SettlementAbi {
     /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
     pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
-        let t12_active = provider
-            .is_hardfork_active(TempoHardfork::T12)
+        let t13_active = provider
+            .is_hardfork_active(TempoHardfork::T13)
             .await
             .wrap_err("failed reading the live Tempo L1 hardfork")?;
-        Ok(if t12_active { Self::T12 } else { Self::Legacy })
+        Ok(if t13_active { Self::T13 } else { Self::Legacy })
     }
 
     /// Hash the token transition exactly as the selected settlement statement expects.
     pub fn token_transition_hash(self, previous: u64, next: u64) -> B256 {
         match self {
             Self::Legacy => B256::ZERO,
-            Self::T12 => keccak256((previous, next).abi_encode()),
+            Self::T13 => keccak256((previous, next).abi_encode()),
         }
     }
 }
@@ -1698,7 +1698,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
             let (block_number, deposit_hash, deposit_number, token_count) = match *topic {
                 TempoAdvanced::SIGNATURE_HASH => {
                     let event = TempoAdvanced::decode_log(log).map_err(|err| {
-                        eyre::eyre!("invalid post-T12 TempoAdvanced log in block {number}: {err}")
+                        eyre::eyre!("invalid post-T13 TempoAdvanced log in block {number}: {err}")
                     })?;
                     (
                         event.tempoBlockNumber,
@@ -1951,7 +1951,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_bindings_keep_legacy_and_t12_selectors_distinct() {
+    fn settlement_bindings_keep_legacy_and_t13_selectors_distinct() {
         let legacy: [u8; 4] = keccak256(
             "submitBatch(uint64,uint64,(bytes32,bytes32),(bytes32,bytes32,uint64,uint64),bytes32,bytes,bytes,uint256,bytes[])"
         )[..4]
@@ -1964,31 +1964,31 @@ mod tests {
     #[tokio::test]
     async fn settlement_abi_follows_live_l1_hardfork() {
         let legacy = Asserter::new();
-        legacy.push_success(&serde_json::json!({ "active": "T11" }));
+        legacy.push_success(&serde_json::json!({ "active": "T12" }));
         assert_eq!(
             SettlementAbi::from_l1(&mock_l1(legacy)).await.unwrap(),
             SettlementAbi::Legacy
         );
 
-        let t12 = Asserter::new();
-        t12.push_success(&serde_json::json!({ "active": "T12" }));
+        let t13 = Asserter::new();
+        t13.push_success(&serde_json::json!({ "active": "T13" }));
         assert_eq!(
-            SettlementAbi::from_l1(&mock_l1(t12)).await.unwrap(),
-            SettlementAbi::T12
+            SettlementAbi::from_l1(&mock_l1(t13)).await.unwrap(),
+            SettlementAbi::T13
         );
     }
 
     #[test]
-    fn t12_uses_token_transition_for_legacy_boundary() {
+    fn t13_uses_token_transition_for_legacy_boundary() {
         assert_eq!(
             SettlementAbi::Legacy.token_transition_hash(0, 0),
             B256::ZERO
         );
         assert_eq!(
-            SettlementAbi::T12.token_transition_hash(0, 0),
+            SettlementAbi::T13.token_transition_hash(0, 0),
             keccak256((0_u64, 0_u64).abi_encode())
         );
-        assert_ne!(SettlementAbi::T12.token_transition_hash(0, 0), B256::ZERO);
+        assert_ne!(SettlementAbi::T13.token_transition_hash(0, 0), B256::ZERO);
     }
 
     fn test_prepared_batch(zone_height: u64, tempo_block_number: u64) -> PreparedBatch {

@@ -12,7 +12,7 @@ use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::noop::NoopProvider;
 use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
-use tempo_chainspec::spec::TempoHardforks as _;
+use tempo_chainspec::{TempoHardfork, spec::TempoHardforks as _};
 use tempo_evm::{TempoBlockAssembler, TempoEvmConfig};
 use tempo_primitives::{TempoHeader, TempoPrimitives};
 use zone_precompiles::{inbox, outbox, tempo_state};
@@ -33,8 +33,8 @@ pub use types::*;
 ///
 /// `config` is trusted network configuration chosen by the verifier. Every
 /// other value is prover supplied and must be validated against witness-backed
-/// execution. Before T12 the replay may end at an open Zone tip without withdrawal
-/// finalization. Every T12 batch must end at a full block's finalization boundary.
+/// execution. Before T13 the replay may end at an open Zone tip without withdrawal
+/// finalization. Every T13 batch must end at a full block's finalization boundary.
 pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
@@ -88,7 +88,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         inbox::slots::PROCESSED_DEPOSIT_NUMBER,
     )?
     .to::<u64>();
-    // Keep the public transition anchored to the physical pre-state. On the first T12 batch this
+    // Keep the public transition anchored to the physical pre-state. On the first T13 batch this
     // is zero; ZoneInbox authenticates the legacy hash prefix internally before writing the
     // migrated count, so rewriting this value would diverge from settlement attestations.
     let previous_processed_token_count = read_zone_storage(
@@ -168,14 +168,11 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             });
         }
 
-        validate_system_inputs(block, block_index)?;
-        if config
-            .chain_spec()
-            .tempo_hardfork_at(block.timestamp)
-            .is_t12()
-        {
+        let hardfork = config.chain_spec().tempo_hardfork_at(block.timestamp);
+        validate_system_inputs(block, block_index, hardfork)?;
+        if hardfork.is_t13() {
             let is_last = block_index + 1 == witness.zone_blocks.len();
-            validate_t12_block_shape(block, is_last)?;
+            validate_t13_block_shape(block, is_last)?;
         }
 
         // The EVM environment uses the verifier-selected fork schedule at this
@@ -436,18 +433,22 @@ fn validate_tempo_anchor(
     Ok(())
 }
 
-fn validate_t12_block_shape(block: &ZoneBlock, is_last: bool) -> Result<(), Error> {
+fn validate_t13_block_shape(block: &ZoneBlock, is_last: bool) -> Result<(), Error> {
     let valid = match &block.tempo_import {
         TempoImport::CheckpointOnly { .. } => !is_last,
         TempoImport::Full { .. } => is_last && block.finalize_withdrawal_batch_count.is_some(),
     };
     if !valid {
-        return Err(Error::InvalidT12BatchShape);
+        return Err(Error::InvalidT13BatchShape);
     }
     Ok(())
 }
 
-fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
+fn validate_system_inputs(
+    block: &ZoneBlock,
+    index: usize,
+    hardfork: TempoHardfork,
+) -> Result<(), Error> {
     if block.tempo_import.headers_rlp().is_empty() {
         return Err(Error::MissingTempoHeaders { block_index: index });
     }
@@ -457,8 +458,9 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> 
             enabled_tokens,
             ..
         } => {
-            if deposits.len() > MAX_UNPROCESSED_DEPOSITS
-                || enabled_tokens.len() > MAX_UNPROCESSED_TOKEN_ENABLEMENTS
+            if hardfork.is_t13()
+                && (deposits.len() > MAX_UNPROCESSED_DEPOSITS
+                    || enabled_tokens.len() > MAX_UNPROCESSED_TOKEN_ENABLEMENTS)
             {
                 return Err(Error::PortalWorkCapacityExceeded { block_index: index });
             }
@@ -522,10 +524,10 @@ pub enum Error {
     /// A full block exceeded a protocol-wide outstanding portal-work bound.
     #[error("zone block {block_index} exceeds portal-work capacity")]
     PortalWorkCapacityExceeded { block_index: usize },
-    /// A T12 batch must contain exactly one full operational block at the end, optionally preceded
+    /// A T13 batch must contain exactly one full operational block at the end, optionally preceded
     /// by checkpoint-only blocks.
-    #[error("invalid T12 batch shape")]
-    InvalidT12BatchShape,
+    #[error("invalid T13 batch shape")]
+    InvalidT13BatchShape,
     /// The witness identifies a Zone other than the verifier-selected chain specification.
     #[error("Zone chain ID mismatch: expected {expected}, got {actual}")]
     ChainIdMismatch { expected: u64, actual: u64 },
@@ -838,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn t12_batch_shape_rejects_multiple_full_blocks() {
+    fn t13_batch_shape_rejects_multiple_full_blocks() {
         let mut witness = minimal_batch_witness();
         for number in 1..=2 {
             witness.zone_blocks.push(ZoneBlock {
@@ -853,15 +855,15 @@ mod tests {
                 transactions: Vec::new(),
             });
         }
-        validate_system_inputs(&witness.zone_blocks[0], 0).unwrap();
+        validate_system_inputs(&witness.zone_blocks[0], 0, TempoHardfork::T13).unwrap();
         assert_eq!(
-            validate_t12_block_shape(&witness.zone_blocks[0], false),
-            Err(Error::InvalidT12BatchShape)
+            validate_t13_block_shape(&witness.zone_blocks[0], false),
+            Err(Error::InvalidT13BatchShape)
         );
     }
 
     #[test]
-    fn t12_batch_shape_rejects_checkpoint_only_batch() {
+    fn t13_batch_shape_rejects_checkpoint_only_batch() {
         let mut witness = minimal_batch_witness();
         witness.zone_blocks.push(ZoneBlock {
             number: 1,
@@ -874,10 +876,10 @@ mod tests {
             finalize_withdrawal_batch_encrypted_senders: Vec::new(),
             transactions: Vec::new(),
         });
-        validate_system_inputs(&witness.zone_blocks[0], 0).unwrap();
+        validate_system_inputs(&witness.zone_blocks[0], 0, TempoHardfork::T13).unwrap();
         assert_eq!(
-            validate_t12_block_shape(&witness.zone_blocks[0], true),
-            Err(Error::InvalidT12BatchShape)
+            validate_t13_block_shape(&witness.zone_blocks[0], true),
+            Err(Error::InvalidT13BatchShape)
         );
     }
 
@@ -1212,6 +1214,39 @@ mod tests {
     }
 
     #[test]
+    fn portal_work_capacity_activates_at_t13() {
+        for (deposit_count, token_count) in [
+            (MAX_UNPROCESSED_DEPOSITS + 1, 0),
+            (0, MAX_UNPROCESSED_TOKEN_ENABLEMENTS + 1),
+        ] {
+            let block = ZoneBlock {
+                number: 1,
+                parent_hash: B256::ZERO,
+                timestamp: 0,
+                timestamp_millis_part: 0,
+                beneficiary: Address::ZERO,
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from([0x01]),
+                    deposits: vec![Default::default(); deposit_count],
+                    decryptions: Vec::new(),
+                    enabled_tokens: vec![Default::default(); token_count],
+                },
+                finalize_withdrawal_batch_count: None,
+                finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+                transactions: Vec::new(),
+            };
+            assert_eq!(
+                validate_system_inputs(&block, 0, TempoHardfork::T12),
+                Ok(())
+            );
+            assert_eq!(
+                validate_system_inputs(&block, 0, TempoHardfork::T13),
+                Err(Error::PortalWorkCapacityExceeded { block_index: 0 })
+            );
+        }
+    }
+
+    #[test]
     fn accepts_an_open_snapshot_without_finalization() {
         let witness = minimal_batch_witness();
         let mut block = ZoneBlock {
@@ -1226,10 +1261,13 @@ mod tests {
             transactions: Vec::new(),
         };
 
-        assert_eq!(validate_system_inputs(&block, 0), Ok(()));
+        assert_eq!(
+            validate_system_inputs(&block, 0, TempoHardfork::T13),
+            Ok(())
+        );
         block.tempo_import = checkpoint_import(Vec::new());
         assert_eq!(
-            validate_system_inputs(&block, 0),
+            validate_system_inputs(&block, 0, TempoHardfork::T13),
             Err(Error::MissingTempoHeaders { block_index: 0 })
         );
     }
@@ -1249,7 +1287,10 @@ mod tests {
             transactions: Vec::new(),
         };
 
-        assert_eq!(validate_system_inputs(&block, 0), Ok(()));
+        assert_eq!(
+            validate_system_inputs(&block, 0, TempoHardfork::T13),
+            Ok(())
+        );
     }
 
     #[test]
