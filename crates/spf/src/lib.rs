@@ -1218,9 +1218,24 @@ mod tests {
                 beneficiary: Address::ZERO,
                 tempo_import: TempoImport::Full {
                     header_rlp: Bytes::from([0x01]),
-                    deposits: vec![Default::default(); deposit_count],
+                    deposits: vec![
+                        tempo_zone_contracts::QueuedDeposit {
+                            depositType: tempo_zone_contracts::DepositType::Deposit,
+                            depositData: Bytes::new(),
+                            rejected: false,
+                        };
+                        deposit_count
+                    ],
                     decryptions: Vec::new(),
-                    enabled_tokens: vec![Default::default(); token_count],
+                    enabled_tokens: vec![
+                        tempo_zone_contracts::EnabledToken {
+                            token: Address::ZERO,
+                            name: String::new(),
+                            symbol: String::new(),
+                            currency: String::new(),
+                        };
+                        token_count
+                    ],
                 },
                 finalize_withdrawal_batch_count: None,
                 finalize_withdrawal_batch_encrypted_senders: Vec::new(),
