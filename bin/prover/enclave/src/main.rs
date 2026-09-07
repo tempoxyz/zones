@@ -271,7 +271,8 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
         Ok(output) => VerifyResponse::Ok {
             version: PROTOCOL_VERSION,
             request_id: request.request_id,
-            output,
+            output: Box::new(output),
+            proof_bundle: None,
         },
         Err(error) => VerifyResponse::Error {
             version: PROTOCOL_VERSION,
@@ -295,7 +296,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_protocol_version() {
         let request = VerifyRequest {
-            version: 2,
+            version: PROTOCOL_VERSION + 1,
             request_id: "version-test".into(),
             witness: empty_witness(),
         };

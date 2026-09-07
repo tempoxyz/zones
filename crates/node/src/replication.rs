@@ -707,9 +707,9 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 
 /// Import live/backfilled blocks in canonical order on a follower.
 ///
-/// Live blocks are only imported when the sender equals the leader at their first imported Tempo
-/// header. For checkpoint-only blocks this is the historical L1 block they anchor to. This check
-/// resolves accidental split brain using the finalized schedule.
+/// Live full blocks are only imported when the sender equals the leader for their imported Tempo
+/// header. Checkpoint-only blocks have no designated leader and may be imported from any authorized
+/// P2P peer. The full-block check resolves accidental split brain using the finalized schedule.
 ///
 /// Backfilled blocks carry no producer claim and are judged by
 /// parent/anchor/execution/conflict validation alone. The loop exits when `stop` fires.
@@ -1198,11 +1198,9 @@ where
         }
         Err(PeerAnchorWaitError::Other(error)) => return Err(error),
     }
-
-    // Resolve live production authority only after observing the complete imported range. The
-    // range may publish a leadership transition governing its final anchor. Checkpoint-only blocks
-    // use the leader at that final historical anchor; full blocks follow the same rule with their
-    // single header. Backfilled blocks carry no producer claim and bypass this check.
+    // Resolve live full-block production authority after observing its imported header, which may
+    // publish the leadership transition governing that same anchor. Checkpoint-only blocks are
+    // leader-neutral, and backfilled blocks carry no producer claim.
     validate_live_import_sender(
         schedule,
         peer_block.live_sender.as_ref(),
@@ -1506,9 +1504,13 @@ impl DecodedTempoImport {
 
     /// Tempo anchor whose leader must produce this Zone block.
     ///
-    /// Checkpoint-only blocks use their first imported header. A full block imports exactly one header.
+    /// Checkpoint-only blocks have no designated leader. A full block imports exactly one Tempo
+    /// header, whose effective leader supplies its production authority.
     fn leader_anchor(&self) -> Option<u64> {
-        self.headers().first().map(|header| header.number())
+        match self {
+            Self::Full { header, .. } => Some(header.number()),
+            Self::CheckpointOnly { .. } => None,
+        }
     }
 }
 
@@ -1992,20 +1994,16 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_live_producer_is_leader_at_first_imported_anchor() {
+    fn checkpoint_live_producer_is_not_leader_restricted() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use reth_primitives_traits::SealedHeader;
         use tempo_primitives::TempoHeader;
 
         let outgoing = PrivateKey::from_seed(1).public_key();
         let incoming = PrivateKey::from_seed(2).public_key();
-        let current = PrivateKey::from_seed(3).public_key();
         let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, outgoing.clone(), 0));
         schedule
             .publish(LeadershipState::new(2, incoming.clone(), 100))
-            .unwrap();
-        schedule
-            .publish(LeadershipState::new(3, current.clone(), 120))
             .unwrap();
 
         let headers = [90, 110]
@@ -2022,15 +2020,9 @@ mod tests {
         let tempo_import = super::DecodedTempoImport::CheckpointOnly { headers };
 
         let leader_anchor = tempo_import.leader_anchor();
-        assert_eq!(leader_anchor, Some(90));
+        assert_eq!(leader_anchor, None);
         super::validate_live_import_sender(&schedule, Some(&outgoing), leader_anchor, 7).unwrap();
-        let error =
-            super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 7)
-                .expect_err("the checkpoint producer must lead at its first imported anchor");
-        assert!(error.to_string().contains(&outgoing.to_string()));
-        let error = super::validate_live_import_sender(&schedule, Some(&current), leader_anchor, 7)
-            .expect_err("the current leader must not own an earlier historical anchor");
-        assert!(error.to_string().contains(&outgoing.to_string()));
+        super::validate_live_import_sender(&schedule, Some(&incoming), leader_anchor, 7).unwrap();
 
         let full_import = super::DecodedTempoImport::Full {
             header: Box::new(SealedHeader::seal_slow(TempoHeader {

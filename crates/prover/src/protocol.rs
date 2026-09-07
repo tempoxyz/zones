@@ -1,8 +1,49 @@
+use alloy_primitives::{B256, Bytes, keccak256};
+use alloy_sol_types::{SolStruct as _, sol};
 use serde::{Deserialize, Serialize};
-use zone_spf::{BatchOutput, BatchWitness};
+use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
+use zone_spf::{BatchOutput, BatchWitness, PublicInputs};
 
 /// Current version of the prover request and response wire format.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Canonical verifier configuration for the first Nitro-backed verifier policy.
+pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
+
+sol! {
+    /// Data placed in the Nitro attestation document's `user_data` field.
+    #[derive(Debug, PartialEq, Eq)]
+    struct NitroBatchAttestation {
+        uint256 parentChainId;
+        address verifier;
+        address portal;
+        uint32 zoneId;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        uint64 expectedWithdrawalBatchIndex;
+        bytes32 prevBlockHash;
+        bytes32 nextBlockHash;
+        bytes32 prevProcessedHash;
+        bytes32 nextProcessedHash;
+        uint64 prevDepositNumber;
+        uint64 nextDepositNumber;
+        uint64 prevProcessedTokenCount;
+        uint64 nextProcessedTokenCount;
+        bytes32 withdrawalQueueHash;
+        bytes32 verifierConfigHash;
+    }
+}
+
+/// Proof material returned by an attesting prover.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProofBundle {
+    /// Opaque configuration passed to `IVerifier` and committed by the settlement certificate.
+    pub verifier_config: Bytes,
+    /// Raw COSE/CBOR Nitro attestation document.
+    pub proof: Bytes,
+}
 
 /// Request to verify a Zone batch witness against a trusted Tempo chain.
 #[derive(Debug, Deserialize, Serialize)]
@@ -32,7 +73,10 @@ pub enum VerifyResponse {
         /// Identifier copied from the request.
         request_id: String,
         /// Output produced by the Zone stateless proof function.
-        output: BatchOutput,
+        output: Box<BatchOutput>,
+        /// Nitro proof material returned by an attesting prover.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proof_bundle: Option<ProofBundle>,
     },
     /// The request could not be decoded, accepted, or verified.
     #[serde(rename = "error")]
@@ -69,9 +113,42 @@ pub enum ErrorCode {
     InternalError,
 }
 
+/// Construct the exact digest committed as Nitro attestation `user_data`.
+///
+/// The calling portal is bound independently of the Zone ID because every portal delegates to the
+/// same fixed verifier. The parent chain, verifier, and portal prevent cross-domain replay; every
+/// portal-facing commitment prevents reuse for a different batch.
+pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &BatchOutput) -> B256 {
+    let attestation = NitroBatchAttestation {
+        parentChainId: alloy_primitives::U256::from(public_inputs.parent_chain_id),
+        verifier: ZONE_VERIFIER_ADDRESS,
+        portal: public_inputs.portal,
+        zoneId: public_inputs.zone_id,
+        tempoBlockNumber: public_inputs.tempo_block_number,
+        anchorBlockNumber: public_inputs.anchor_block_number,
+        anchorBlockHash: public_inputs.anchor_block_hash,
+        expectedWithdrawalBatchIndex: public_inputs.expected_withdrawal_batch_index,
+        prevBlockHash: output.block_transition.prevBlockHash,
+        nextBlockHash: output.block_transition.nextBlockHash,
+        prevProcessedHash: output.deposit_queue_transition.prevProcessedHash,
+        nextProcessedHash: output.deposit_queue_transition.nextProcessedHash,
+        prevDepositNumber: output.deposit_queue_transition.prevDepositNumber,
+        nextDepositNumber: output.deposit_queue_transition.nextDepositNumber,
+        prevProcessedTokenCount: output.token_enablement_transition.prevProcessedTokenCount,
+        nextProcessedTokenCount: output.token_enablement_transition.nextProcessedTokenCount,
+        withdrawalQueueHash: output.withdrawal_queue_hash,
+        verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
+    };
+    attestation.eip712_hash_struct()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zone_spf::{
+        BatchOutput, BlockTransition, DepositQueueTransition, LastBatchCommitment,
+        TokenEnablementTransition,
+    };
 
     #[test]
     fn error_variant_uses_the_wire_field_names() {
@@ -88,5 +165,98 @@ mod tests {
         assert_eq!(json["version"], PROTOCOL_VERSION);
         assert_eq!(json["requestId"], "wire-test");
         assert_eq!(json["code"], "unsupported_chain");
+    }
+
+    #[test]
+    fn verifier_config_is_versioned_and_non_empty() {
+        assert_eq!(NITRO_VERIFIER_CONFIG_V1, [1]);
+        assert_ne!(keccak256(NITRO_VERIFIER_CONFIG_V1), keccak256([]));
+    }
+
+    #[test]
+    fn batch_attestation_hash_matches_solidity_golden_vector() {
+        let output = BatchOutput {
+            block_transition: BlockTransition {
+                prevBlockHash: B256::with_last_byte(1),
+                nextBlockHash: B256::with_last_byte(2),
+            },
+            deposit_queue_transition: DepositQueueTransition {
+                prevProcessedHash: B256::with_last_byte(3),
+                nextProcessedHash: B256::with_last_byte(4),
+                prevDepositNumber: 5,
+                nextDepositNumber: 6,
+            },
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: 7,
+                nextProcessedTokenCount: 8,
+            },
+            withdrawal_queue_hash: B256::with_last_byte(9),
+            last_batch_commitment: LastBatchCommitment {
+                withdrawal_batch_index: 10,
+            },
+        };
+
+        let public_inputs = PublicInputs {
+            parent_chain_id: 42_431,
+            portal: alloy_primitives::address!("0x1111111111111111111111111111111111111111"),
+            zone_id: 12,
+            tempo_block_number: 9,
+            anchor_block_number: 10,
+            anchor_block_hash: B256::with_last_byte(11),
+            expected_withdrawal_batch_index: 13,
+        };
+        assert_eq!(
+            nitro_batch_attestation_hash(&public_inputs, &output),
+            alloy_primitives::b256!(
+                "0xdf555b114bb028244692775b994c6a766999bd3f68307c9985fcf0122c449b01"
+            ),
+        );
+    }
+
+    #[test]
+    fn batch_attestation_hash_binds_token_enablement_progress() {
+        let mut output = BatchOutput {
+            block_transition: BlockTransition {
+                prevBlockHash: B256::ZERO,
+                nextBlockHash: B256::ZERO,
+            },
+            deposit_queue_transition: DepositQueueTransition {
+                prevProcessedHash: B256::ZERO,
+                nextProcessedHash: B256::ZERO,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0,
+            },
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: 0,
+                nextProcessedTokenCount: 0,
+            },
+            withdrawal_queue_hash: B256::ZERO,
+            last_batch_commitment: LastBatchCommitment {
+                withdrawal_batch_index: 0,
+            },
+        };
+        let public_inputs = PublicInputs {
+            parent_chain_id: 1,
+            portal: alloy_primitives::Address::ZERO,
+            zone_id: 1,
+            tempo_block_number: 1,
+            anchor_block_number: 1,
+            anchor_block_hash: B256::ZERO,
+            expected_withdrawal_batch_index: 1,
+        };
+        let expected = nitro_batch_attestation_hash(&public_inputs, &output);
+
+        output.token_enablement_transition.prevProcessedTokenCount = 1;
+        assert_ne!(
+            nitro_batch_attestation_hash(&public_inputs, &output),
+            expected
+        );
+
+        output.token_enablement_transition.prevProcessedTokenCount = 0;
+        output.token_enablement_transition.nextProcessedTokenCount = 1;
+        assert_ne!(
+            nitro_batch_attestation_hash(&public_inputs, &output),
+            expected
+        );
     }
 }
