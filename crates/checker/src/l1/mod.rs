@@ -267,13 +267,11 @@ fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
 pub(crate) fn classify_rpc_error(error: TransportError) -> AttemptError {
     let retryable = match &error {
         RpcError::ErrorResp(error) => {
-            // A different RPC backend may not have imported the anchored block yet.
-            // Keep the exact hash/canonicality requirement and retry the same read.
-            // Do not treat every -32001 (resource not found) response as transient.
-            error.is_retry_err()
-                || (error.code == -32001
-                    && (error.message == "block not found"
-                        || error.message.starts_with("block not found:")))
+            // Missing/unavailable resources and internal errors can result from
+            // backend import lag or upstream resets during a rollout. Retry these
+            // L1 reads without depending on provider-specific message text. The
+            // runtime bounds retries; exact hash/canonicality checks are unchanged.
+            error.is_retry_err() || matches!(error.code, -32001 | -32002 | -32603)
         }
         RpcError::UnsupportedFeature(_)
         | RpcError::LocalUsageError(_)
@@ -317,15 +315,25 @@ mod tests {
     const HASH: B256 = B256::repeat_byte(0x10);
 
     #[test]
-    fn block_not_found_is_retryable_but_other_rpc_errors_are_not() {
+    fn acquisition_rpc_codes_are_retryable_without_message_matching() {
         for (code, message, retryable) in [
             (-32001, "block not found", true),
             (-32001, "block not found: canonical hash 0x1234", true),
-            (-32001, "transaction not found", false),
-            (-32001, "historical state pruned", false),
+            (-32001, "transaction not found", true),
+            (-32001, "historical state pruned", true),
+            (-32001, "", true),
+            (-32002, "no healthy upstreams available", true),
+            (-32002, "", true),
+            (-32603, "internal eth error", true),
+            (-32603, "", true),
+            (-32000, "invalid input", false),
+            (-32600, "invalid request", false),
+            (-32601, "method not found", false),
             (-32602, "block not found", false),
+            (-32004, "method not supported", false),
             (3, "execution reverted", false),
             (-32005, "rate limit", true),
+            (429, "too many requests", true),
         ] {
             let payload = serde_json::from_value(serde_json::json!({
                 "code": code, "message": message,

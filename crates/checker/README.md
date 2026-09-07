@@ -97,35 +97,26 @@ height.
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
 or acknowledging the block. Each retry budget is bounded. Tempo retries use
 exponential backoff, while unavailable local Zone state retries once per second.
-Tempo's `-32001` block-not-found responses are treated as temporary acquisition
-failures, including canonical-hash reads against an RPC backend that has not yet
-imported the block. Retries keep the exact anchored hash and canonicality checks;
-they never substitute `latest` or skip a block.
-Pruned state disables immediately because it cannot recover.
+Tempo RPC codes `-32001` (resource not found), `-32002` (resource unavailable),
+and `-32603` (internal error) are retried regardless of message text, alongside
+the existing rate-limit and transport retries. This covers backend import lag
+and upstream resets without changing exact anchored-hash or canonicality checks;
+retries never substitute `latest` or skip a block. Persistent errors, including
+pruned history reported through these codes, exhaust the bounded retry budget.
+Explicitly detected pruned local state disables immediately.
 
 A deterministic mismatch records one durable finding, freezes the verified tip,
 and continues acknowledging subsequent notifications while recording how far the
 unchecked range extends. A finding remains active until the checker is rebuilt
 from authenticated genesis.
 
-An exhausted transient **Tempo RPC** retry budget pauses verification for a
-30-second cooldown, draining and acknowledging live ExEx notifications so Zone
-execution can continue. The checker then opens a fresh RPC connection,
-authenticates its persisted identity, and backfills from its last durably
-verified Zone block to the current canonical head. This also applies to transient
-connection and bootstrap failures. Repeated outages repeat the bounded retry and
-cooldown cycle. The acknowledged delivery height is never used as the verified
-checkpoint; recovery requires unpruned local history/state and an archive-capable
-Tempo endpoint.
-
-`disabled` remains 1 until verification advances (or records a divergence), and
-`recovering` distinguishes automatic recovery from a terminal failure.
-`recovery_attempts_total` counts reconnect/replay attempts. A deterministic
-finding, exhausted local-state retries, pruned state, invalid configuration or
-database error never triggers automatic recovery. Terminal errors disable and
-drain for the life of the process; restarting the node attempts to resume from
-the durable checkpoint. Observe mode never changes block execution or consensus
-behavior; operators must alert on disabled verification, lag or a divergence.
+An exhausted retry budget or an unrecoverable checker-local error disables the
+checker and drains ExEx notifications so it cannot terminate or stall Zone
+execution. Verification then stays disabled for the life of the process; since
+the checker runs as an ExEx inside the node, restarting the node attempts to
+resume from the last durably verified Zone block. Observe mode never changes
+block execution or consensus behavior; operators must alert on lag or an active
+divergence.
 
 The node's existing metrics endpoint exports:
 
@@ -138,8 +129,6 @@ The node's existing metrics endpoint exports:
 - `reth_tempo_zone_checker_acquisition_retries_total`
 - `reth_tempo_zone_checker_verified_zone_blocks_total`
 - `reth_tempo_zone_checker_recovery_rebuilds_total`
-- `reth_tempo_zone_checker_recovering`
-- `reth_tempo_zone_checker_recovery_attempts_total`
 
 At minimum, alert when `disabled` or `divergence_active` is `1`, verification
 lag continues to grow, or the verified height stops advancing while the Zone
