@@ -414,8 +414,7 @@ fn recover_encrypted_payload(
         decryption.sharedSecretYParity,
         &key_x.0,
         key_y_parity,
-        &decryption.cpProof.s.0,
-        &decryption.cpProof.c.0,
+        &decryption.cpProof,
     ) {
         return Ok(None);
     }

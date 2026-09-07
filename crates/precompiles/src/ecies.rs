@@ -12,7 +12,7 @@ use k256::{
     AffinePoint, ProjectivePoint, Scalar,
     elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
 };
-use tempo_zone_contracts::Withdrawal;
+use tempo_zone_contracts::{ChaumPedersenProof, Withdrawal};
 
 use crate::{
     aes_gcm,
@@ -63,8 +63,7 @@ pub struct EcdhProofResult {
     /// Y parity of the shared secret point (0x02 or 0x03).
     pub shared_secret_y_parity: u8,
     /// Chaum-Pedersen proof of correct shared secret derivation.
-    pub cp_proof_s: B256,
-    pub cp_proof_c: B256,
+    pub cp_proof: ChaumPedersenProof,
 }
 
 /// Result of sequencer-side ECIES decryption of an encrypted deposit.
@@ -115,8 +114,10 @@ pub fn compute_ecdh_proof(
     Some(EcdhProofResult {
         shared_secret: B256::from(shared_secret_x),
         shared_secret_y_parity,
-        cp_proof_s: B256::from_slice(s.to_repr().as_ref()),
-        cp_proof_c: B256::from_slice(c.to_repr().as_ref()),
+        cp_proof: ChaumPedersenProof {
+            s: B256::from_slice(s.to_repr().as_ref()),
+            c: B256::from_slice(c.to_repr().as_ref()),
+        },
     })
 }
 
@@ -660,8 +661,7 @@ mod tests {
         let proof_a = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
         let proof_b = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
 
-        assert_eq!(proof_a.cp_proof_s, proof_b.cp_proof_s);
-        assert_eq!(proof_a.cp_proof_c, proof_b.cp_proof_c);
+        assert_eq!(proof_a.cp_proof, proof_b.cp_proof);
     }
 
     #[test]

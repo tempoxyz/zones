@@ -21,6 +21,7 @@ use k256::{
     },
 };
 use tempo_precompiles::storage::StorageCtx;
+use tempo_zone_contracts::ChaumPedersenProof;
 
 /// Gas cost for Chaum-Pedersen proof verification (two EC muls + hashing).
 const CP_VERIFY_GAS: u64 = 6_000;
@@ -40,8 +41,7 @@ pub(crate) fn verify(
     shared_secret_y_parity: u8,
     sequencer_pub_x: &[u8; 32],
     sequencer_pub_y_parity: u8,
-    s_bytes: &[u8; 32],
-    c_bytes: &[u8; 32],
+    proof: &ChaumPedersenProof,
 ) -> bool {
     // Recover points
     let Some(ephemeral_pub) = recover_point(ephemeral_pub_x, ephemeral_pub_y_parity) else {
@@ -55,8 +55,8 @@ pub(crate) fn verify(
     };
 
     // Deserialize proof scalars by reducing modulo the group order.
-    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&(*s_bytes).into());
-    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&(*c_bytes).into());
+    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&proof.s.0.into());
+    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&proof.c.0.into());
 
     // R1 = s*G - c*pubSeq
     let r1 = ProjectivePoint::GENERATOR * s - ProjectivePoint::from(sequencer_pub) * c;
@@ -126,7 +126,15 @@ pub(crate) fn challenge_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::B256;
     use k256::elliptic_curve::{Field, PrimeField};
+
+    fn proof(s: [u8; 32], c: [u8; 32]) -> ChaumPedersenProof {
+        ChaumPedersenProof {
+            s: B256::from(s),
+            c: B256::from(c),
+        }
+    }
 
     #[test]
     fn test_recover_point_generator() {
@@ -169,8 +177,7 @@ mod tests {
             ss_enc.as_bytes()[0],
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &s.to_repr().into(),
-            &c.to_repr().into(),
+            &proof(s.to_repr().into(), c.to_repr().into()),
         );
 
         assert!(valid, "valid Chaum-Pedersen proof should verify");
@@ -197,8 +204,7 @@ mod tests {
             ss_enc.as_bytes()[0],
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &[0xAAu8; 32],
-            &[0xBBu8; 32],
+            &proof([0xAAu8; 32], [0xBBu8; 32]),
         );
 
         assert!(!valid, "invalid proof should not verify");
@@ -242,8 +248,7 @@ mod tests {
             ss_enc.as_bytes()[0],
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &s_tampered.to_repr().into(),
-            &c.to_repr().into(),
+            &proof(s_tampered.to_repr().into(), c.to_repr().into()),
         );
 
         assert!(!valid, "tampered s should not verify");
@@ -276,8 +281,7 @@ mod tests {
             ss_enc.as_bytes()[0],
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &s.to_repr().into(),
-            &c_tampered.to_repr().into(),
+            &proof(s.to_repr().into(), c_tampered.to_repr().into()),
         );
 
         assert!(!valid, "tampered c should not verify");
@@ -311,8 +315,7 @@ mod tests {
             flipped_ss_parity,
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &s.to_repr().into(),
-            &c.to_repr().into(),
+            &proof(s.to_repr().into(), c.to_repr().into()),
         );
 
         assert!(!valid, "wrong shared secret parity should not verify");
@@ -346,8 +349,7 @@ mod tests {
             ss_enc.as_bytes()[0],
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &s.to_repr().into(),
-            &c.to_repr().into(),
+            &proof(s.to_repr().into(), c.to_repr().into()),
         );
 
         assert!(!valid, "wrong ephemeral pubkey parity should not verify");
@@ -376,8 +378,7 @@ mod tests {
             ss_enc.as_bytes()[0],
             ps_enc.x().unwrap().as_slice().try_into().unwrap(),
             ps_enc.as_bytes()[0],
-            &s.to_repr().into(),
-            &c.to_repr().into(),
+            &proof(s.to_repr().into(), c.to_repr().into()),
         );
 
         assert!(
