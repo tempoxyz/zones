@@ -60,10 +60,10 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, FinalizedTarget, L1BlockDeposits,
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Full-block production permit backed by the effective leadership schedule.
+/// Block production permit backed by the effective leadership schedule.
 ///
-/// Full blocks require the leader assigned to their imported Tempo header. Checkpoint-only blocks
-/// are leader-neutral and bypass this permit. An optimistic override is open-ended until the next
+/// Blocks require the leader assigned to their first imported Tempo header, including checkpoint
+/// ranges that cross a leadership change. An optimistic override is open-ended until the next
 /// finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
@@ -80,7 +80,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the full zone block embedding `tempo_anchor`.
+    /// Decide whether this node may produce the zone block beginning at `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -478,11 +478,9 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
-        self.production_permit.as_ref().and_then(|permit| {
-            block
-                .leader_anchor()
-                .and_then(|anchor| permit.check(anchor))
-        })
+        self.production_permit
+            .as_ref()
+            .and_then(|permit| permit.check(block.leader_anchor()))
     }
 
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -499,12 +497,12 @@ struct AvailableTempoImport {
 impl AvailableTempoImport {
     /// Tempo anchor whose leader must produce this Zone block.
     ///
-    /// Checkpoint-only blocks have no designated leader. A full block imports exactly one Tempo
-    /// header, whose effective leader supplies its production authority.
-    fn leader_anchor(&self) -> Option<u64> {
+    /// The first imported header selects the leader even if later headers cross a handoff.
+    fn leader_anchor(&self) -> u64 {
         self.checkpoint_headers
-            .is_empty()
-            .then(|| self.l1_block.header.number())
+            .first()
+            .unwrap_or(&self.l1_block.header)
+            .number()
     }
 }
 
@@ -641,16 +639,55 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_import_is_not_leader_restricted() {
+    fn checkpoint_import_uses_first_header_leader() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+        use zone_p2p::LeadershipState;
+
+        let outgoing = PrivateKey::from_seed(1).public_key();
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, outgoing.clone(), 0));
+        schedule
+            .publish(LeadershipState::new(2, incoming.clone(), 100))
+            .unwrap();
+        let outgoing_permit = ProductionPermit::new(schedule.clone(), outgoing);
+        let incoming_permit = ProductionPermit::new(schedule, incoming);
         let available = AvailableTempoImport {
             l1_block: L1BlockDeposits {
                 header: header(90, 90),
                 events: Default::default(),
             },
-            checkpoint_headers: vec![header(90, 90), header(110, 110)],
+            checkpoint_headers: (90..=110).map(|number| header(number, number)).collect(),
         };
 
-        assert_eq!(available.leader_anchor(), None);
+        assert_eq!(available.leader_anchor(), 90);
+        assert_eq!(outgoing_permit.check(available.leader_anchor()), None);
+        assert_eq!(
+            incoming_permit.check(available.leader_anchor()),
+            Some(EngineExit::Demoted {
+                tempo_anchor: 90,
+                epoch: 1
+            })
+        );
+
+        // The next range independently selects the incoming leader, as does a full import.
+        for checkpoint_headers in [vec![header(111, 111)], Vec::new()] {
+            let next = AvailableTempoImport {
+                l1_block: L1BlockDeposits {
+                    header: header(111, 111),
+                    events: Default::default(),
+                },
+                checkpoint_headers,
+            };
+            assert_eq!(next.leader_anchor(), 111);
+            assert_eq!(incoming_permit.check(next.leader_anchor()), None);
+            assert_eq!(
+                outgoing_permit.check(next.leader_anchor()),
+                Some(EngineExit::Demoted {
+                    tempo_anchor: 111,
+                    epoch: 2
+                })
+            );
+        }
     }
 
     #[test]
