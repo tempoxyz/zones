@@ -1,57 +1,35 @@
 use super::*;
 
-/// A deposit extracted from L1.
+/// An internal withdrawal bounce-back extracted from L1.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Deposit {
-    /// TIP-20 token being deposited.
+pub struct WithdrawalBounceBackDeposit {
+    /// TIP-20 token being returned to the zone.
     pub token: Address,
-    /// Sender on L1.
-    pub sender: Address,
     /// Recipient on the zone.
     pub to: Address,
     /// Net amount deposited (fee already deducted on L1).
     pub amount: u128,
-    /// Fee paid on L1.
+    /// Fee paid on L1 (always zero for a bounce-back).
     pub fee: u128,
-    /// Tempo recipient for a failed-deposit refund.
-    pub tempo_refund_recipient: Address,
-    /// User-provided memo.
-    pub memo: B256,
 }
 
-impl Deposit {
-    /// Create a new deposit from an event.
-    pub fn from_event(event: DepositMade) -> Self {
-        Self {
-            token: event.token,
-            sender: event.sender,
-            to: event.to,
-            amount: event.netAmount,
-            fee: event.fee,
-            tempo_refund_recipient: event.tempoRefundRecipient,
-            memo: event.memo,
-        }
-    }
-
+impl WithdrawalBounceBackDeposit {
     /// Create a bounce-back deposit from an event.
-    pub fn from_bounce_back(event: WithdrawalBounceBack, portal_address: Address) -> Self {
+    pub fn from_bounce_back(event: WithdrawalBounceBack) -> Self {
         let mut encoded_nonce = [0u8; 20];
         encoded_nonce[12..].copy_from_slice(&event.fallbackNonce.to_be_bytes());
         Self {
             token: event.token,
-            sender: portal_address,
             to: Address::from(encoded_nonce),
             amount: event.amount,
             fee: 0,
-            tempo_refund_recipient: Address::ZERO,
-            memo: B256::ZERO,
         }
     }
 }
 
-/// An encrypted deposit extracted from L1.
+/// A user deposit extracted from L1.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct EncryptedDeposit {
+pub struct Deposit {
     /// TIP-20 token being deposited.
     pub token: Address,
     /// Sender on L1.
@@ -76,9 +54,9 @@ pub struct EncryptedDeposit {
     pub tag: [u8; 16],
 }
 
-impl EncryptedDeposit {
-    /// Create a new encrypted deposit from an event.
-    pub fn from_event(event: EncryptedDepositMade) -> Self {
+impl Deposit {
+    /// Create a new deposit from an event.
+    pub fn from_event(event: DepositMade) -> Self {
         Self {
             token: event.token,
             sender: event.sender,
@@ -95,41 +73,40 @@ impl EncryptedDeposit {
     }
 }
 
-/// A deposit from L1 — either regular (plaintext) or encrypted.
+/// A queue entry from L1: either an internal withdrawal bounce-back or a user deposit.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum L1Deposit {
-    /// A regular deposit with plaintext recipient and memo.
-    Regular(Deposit),
-    /// An encrypted deposit where recipient and memo are encrypted.
-    Encrypted(EncryptedDeposit),
+    /// An internal withdrawal bounce-back.
+    WithdrawalBounceBack(WithdrawalBounceBackDeposit),
+    /// A user deposit whose recipient and memo are encrypted.
+    Deposit(Deposit),
 }
 
 impl L1Deposit {
     /// Convert the L1 event payload into its canonical `advanceTempo` queue encoding.
     pub fn to_abi_queued_deposit(&self) -> abi::QueuedDeposit {
         match self {
-            Self::Regular(d) => abi::QueuedDeposit {
-                depositType: abi::DepositType::Regular,
-                depositData: abi::Deposit {
+            Self::WithdrawalBounceBack(d) => abi::QueuedDeposit {
+                depositType: abi::DepositType::WithdrawalBounceBack,
+                rejected: false,
+                depositData: abi::WithdrawalBounceBackDeposit {
                     token: d.token,
-                    sender: d.sender,
                     to: d.to,
                     amount: d.amount,
-                    tempoRefundRecipient: d.tempo_refund_recipient,
-                    memo: d.memo,
                 }
                 .abi_encode()
                 .into(),
             },
-            Self::Encrypted(d) => abi::QueuedDeposit {
-                depositType: abi::DepositType::Encrypted,
-                depositData: AbiEncryptedDeposit {
+            Self::Deposit(d) => abi::QueuedDeposit {
+                depositType: abi::DepositType::Deposit,
+                rejected: false,
+                depositData: AbiDeposit {
                     token: d.token,
                     sender: d.sender,
                     amount: d.amount,
                     tempoRefundRecipient: d.tempo_refund_recipient,
                     keyIndex: d.key_index,
-                    encrypted: AbiEncryptedDepositPayload {
+                    encrypted: AbiDepositPayload {
                         ephemeralPubkeyX: d.ephemeral_pubkey_x,
                         ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
                         ciphertext: d.ciphertext.clone().into(),
@@ -146,31 +123,28 @@ impl L1Deposit {
     /// Compute the next hash chain value: `keccak256(abi.encode(deposit, prevHash))`.
     pub fn hash_chain(&self, prev_hash: B256) -> B256 {
         match self {
-            Self::Regular(d) => keccak256(
+            Self::WithdrawalBounceBack(d) => keccak256(
                 (
-                    abi::DepositType::Regular,
-                    abi::Deposit {
+                    abi::DepositType::WithdrawalBounceBack,
+                    abi::WithdrawalBounceBackDeposit {
                         token: d.token,
-                        sender: d.sender,
                         to: d.to,
                         amount: d.amount,
-                        tempoRefundRecipient: d.tempo_refund_recipient,
-                        memo: d.memo,
                     },
                     prev_hash,
                 )
                     .abi_encode_params(),
             ),
-            Self::Encrypted(d) => keccak256(
+            Self::Deposit(d) => keccak256(
                 (
-                    abi::DepositType::Encrypted,
-                    AbiEncryptedDeposit {
+                    abi::DepositType::Deposit,
+                    AbiDeposit {
                         token: d.token,
                         sender: d.sender,
                         amount: d.amount,
                         tempoRefundRecipient: d.tempo_refund_recipient,
                         keyIndex: d.key_index,
-                        encrypted: AbiEncryptedDepositPayload {
+                        encrypted: AbiDepositPayload {
                             ephemeralPubkeyX: d.ephemeral_pubkey_x,
                             ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
                             ciphertext: d.ciphertext.clone().into(),

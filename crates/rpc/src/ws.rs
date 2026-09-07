@@ -36,7 +36,8 @@ use tracing::warn;
 use crate::{
     auth::{self, AuthContext, AuthError},
     server::{
-        MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request, validate_keychain_key_info,
+        MAX_BATCH_SIZE, RpcState, append_batch_response, authenticate_token, dispatch_request,
+        serialize_response_with_limit, validate_keychain_key_info,
     },
     subscription::WsSubscriptionStream,
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
@@ -111,6 +112,10 @@ impl WsSession {
         self.pending_subscription_count = self.pending_subscription_count.saturating_sub(1);
         self.subscriptions
             .insert(subscription_id, ActiveSubscription { task });
+    }
+
+    fn discard_pending_subscriptions(&mut self, count: usize) {
+        self.pending_subscription_count = self.pending_subscription_count.saturating_sub(count);
     }
 
     fn cleanup(self) {
@@ -371,48 +376,55 @@ async fn process_ws_text(
     session: &mut WsSession,
 ) -> (String, Vec<PendingSubscription>) {
     let trimmed = text.trim_start();
+    let max_response_size = state.config.max_response_size;
 
     if trimmed.starts_with('[') {
         match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
             Ok(requests) if requests.is_empty() => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::parse_error("empty batch"),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(Value::Null, JsonRpcError::parse_error("empty batch")),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
             Ok(requests) if requests.len() > MAX_BATCH_SIZE => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::invalid_params(format!(
-                        "batch too large ({} > {MAX_BATCH_SIZE})",
-                        requests.len()
-                    )),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(
+                        Value::Null,
+                        JsonRpcError::invalid_params(format!(
+                            "batch too large ({} > {MAX_BATCH_SIZE})",
+                            requests.len()
+                        )),
+                    ),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
             Ok(requests) => {
-                let mut responses = Vec::with_capacity(requests.len());
+                let mut responses = String::from("[");
                 let mut pending_subscriptions = Vec::new();
                 for req in &requests {
                     let result = dispatch_ws_request(req, auth, state, session).await;
-                    responses.push(result.response);
                     pending_subscriptions.extend(result.pending_subscriptions);
+                    if let Err(error) =
+                        append_batch_response(&mut responses, result.response, max_response_size)
+                    {
+                        session.discard_pending_subscriptions(pending_subscriptions.len());
+                        return (error, Vec::new());
+                    }
                 }
-                (
-                    serde_json::to_string(&responses)
-                        .expect("JsonRpcResponse serialization is infallible"),
-                    pending_subscriptions,
-                )
+                responses.pop();
+                responses.push(']');
+                (responses, pending_subscriptions)
             }
             Err(err) => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::parse_error(format!("parse error: {err}")),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(
+                        Value::Null,
+                        JsonRpcError::parse_error(format!("parse error: {err}")),
+                    ),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
         }
@@ -421,17 +433,18 @@ async fn process_ws_text(
             Ok(request) => {
                 let result = dispatch_ws_request(&request, auth, state, session).await;
                 (
-                    serde_json::to_string(&result.response)
-                        .expect("JsonRpcResponse serialization is infallible"),
+                    serialize_response_with_limit(result.response, max_response_size),
                     result.pending_subscriptions,
                 )
             }
             Err(err) => (
-                serde_json::to_string(&JsonRpcResponse::error(
-                    Value::Null,
-                    JsonRpcError::parse_error(format!("parse error: {err}")),
-                ))
-                .expect("JsonRpcResponse serialization is infallible"),
+                serialize_response_with_limit(
+                    JsonRpcResponse::error(
+                        Value::Null,
+                        JsonRpcError::parse_error(format!("parse error: {err}")),
+                    ),
+                    max_response_size,
+                ),
                 Vec::new(),
             ),
         }
@@ -520,10 +533,7 @@ async fn handle_ws_session(
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (notifications, mut outbound) = mpsc::channel::<String>(MAX_WS_OUTBOUND_QUEUE);
-    let (close_session, mut close_session_rx) = watch::channel(false);
-    let token_expiry = tokio::time::sleep(duration_until_unix_timestamp(auth.expires_at));
-    tokio::pin!(token_expiry);
-    let mut keychain_recheck = tokio::time::interval(Duration::from_secs(1));
+    let (close_session, close_session_rx) = watch::channel(false);
     let writer = tokio::spawn(async move {
         while let Some(message) = outbound.recv().await {
             if ws_sender.send(Message::Text(message.into())).await.is_err() {
@@ -533,75 +543,88 @@ async fn handle_ws_session(
     });
 
     let mut session = WsSession::default();
+    let terminate_connection = async {
+        let token_expiry = tokio::time::sleep(duration_until_unix_timestamp(auth.expires_at));
+        tokio::pin!(token_expiry);
+        let mut keychain_recheck = tokio::time::interval(Duration::from_secs(1));
+        let mut close_session_rx = close_session_rx;
 
-    loop {
-        let msg = tokio::select! {
-            biased;
-            _ = &mut token_expiry => break,
-            _ = close_session_rx.changed() => break,
-            _ = keychain_recheck.tick(), if auth.keychain_key_id.is_some() => {
-                // Revalidation may be slow; allow token expiry / forced close to
-                // interrupt it so those deadlines are not delayed by a hung RPC.
-                let still_valid = tokio::select! {
-                    biased;
-                    _ = &mut token_expiry => false,
-                    _ = close_session_rx.changed() => false,
-                    valid = keychain_auth_still_valid(&auth, &state) => valid,
-                };
-                if !still_valid {
-                    break;
-                }
-                continue;
-            }
-            msg = ws_receiver.next() => match msg {
-                Some(msg) => msg,
-                None => break,
-            },
-        };
-
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Binary(b)) => match std::str::from_utf8(&b) {
-                Ok(s) => s.into(),
-                Err(_) => {
-                    if !try_queue_notification(
-                        &notifications,
-                        &close_session,
-                        serde_json::to_string(&JsonRpcResponse::error(
-                            Value::Null,
-                            JsonRpcError::parse_error("invalid UTF-8"),
-                        ))
-                        .expect("JsonRpcResponse serialization is infallible"),
-                    ) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut token_expiry => break,
+                _ = close_session_rx.changed() => break,
+                _ = keychain_recheck.tick(), if auth.keychain_key_id.is_some() => {
+                    // Revalidation may be slow; allow token expiry / forced close to
+                    // interrupt it so those deadlines are not delayed by a hung RPC.
+                    let still_valid = tokio::select! {
+                        biased;
+                        _ = &mut token_expiry => false,
+                        _ = close_session_rx.changed() => false,
+                        valid = keychain_auth_still_valid(&auth, &state) => valid,
+                    };
+                    if !still_valid {
                         break;
                     }
-                    continue;
                 }
-            },
-            Ok(Message::Close(_)) => break,
-            Ok(_) => continue, // Ping/Pong handled by axum
-            Err(e) => {
-                warn!(target: "zone::rpc", err = %e, "ws recv error");
+            }
+        }
+    };
+    let handle_messages = async {
+        loop {
+            let text = match ws_receiver.next().await {
+                Some(Ok(Message::Text(text))) => text,
+                Some(Ok(Message::Binary(bytes))) => match std::str::from_utf8(&bytes) {
+                    Ok(text) => text.into(),
+                    Err(_) => {
+                        if !try_queue_notification(
+                            &notifications,
+                            &close_session,
+                            serialize_response_with_limit(
+                                JsonRpcResponse::error(
+                                    Value::Null,
+                                    JsonRpcError::parse_error("invalid UTF-8"),
+                                ),
+                                state.config.max_response_size,
+                            ),
+                        ) {
+                            break;
+                        }
+                        continue;
+                    }
+                },
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => continue, // Ping/Pong handled by axum
+                Some(Err(err)) => {
+                    warn!(target: "zone::rpc", %err, "ws recv error");
+                    break;
+                }
+            };
+
+            let (response_json, pending_subscriptions) =
+                process_ws_text(&text, &auth, &state, &mut session).await;
+
+            if !try_queue_notification(&notifications, &close_session, response_json) {
                 break;
             }
-        };
 
-        let (response_json, pending_subscriptions) =
-            process_ws_text(&text, &auth, &state, &mut session).await;
-
-        if !try_queue_notification(&notifications, &close_session, response_json) {
-            break;
+            activate_pending_subscriptions(
+                pending_subscriptions,
+                &notifications,
+                &close_session,
+                &mut session,
+            );
         }
+    };
 
-        activate_pending_subscriptions(
-            pending_subscriptions,
-            &notifications,
-            &close_session,
-            &mut session,
-        );
+    tokio::select! {
+        biased;
+        _ = terminate_connection => {}
+        _ = handle_messages => {}
     }
 
     session.cleanup();
+    writer.abort();
     drop(notifications);
     let _ = writer.await;
 }

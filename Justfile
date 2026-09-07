@@ -23,18 +23,15 @@ build binary extra_args="":
     {{cargo_build_binary}} build {{extra_args}} --bin {{binary}}
 
 [group('zone')]
-[doc('Regenerates the bundled zone dev genesis from the current Solidity artifacts')]
+[doc('Regenerates the bundled zone dev genesis')]
 regen-zone-dev-genesis:
     #!/bin/bash
     set -euo pipefail
     rm -rf {{zone_dev_genesis_tmp}}
-    forge build --root specs/ref-impls --no-lint
     cargo run -p tempo-xtask -- generate-zone-genesis \
         --output {{zone_dev_genesis_tmp}} \
         --chain-id 1337 \
-        --tempo-portal 0x0000000000000000000000000000000000000000 \
         --admin 0xaAaAaAaa00000000000000000000000000000000 \
-        --specs-out specs/ref-impls/out \
         --with-createx \
         --with-safe-deployer \
         --with-create2-factory
@@ -93,30 +90,8 @@ max-approve-portal token="0x20C0000000000000000000000000000000000000":
     echo "Approved!"
 
 [group('zone')]
-[doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
-    #!/bin/bash
-    set -euo pipefail
-    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
-    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    SENDER=$(cast wallet address "$PK")
-    TO="{{to}}"
-    if [[ -z "$TO" ]]; then
-        TO="$SENDER"
-    fi
-    echo "Depositing {{amount}} to $TO..."
-    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32,address)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" "$SENDER" \
-        --rpc-url "$RPC" --private-key "$PK" --json)
-    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
-    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
-    echo "Deposit sent! (block $L1_BLOCK_DEC)"
-    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
-
-[group('zone')]
-[doc('Sends an encrypted deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit-encrypted amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
+[doc('Sends a deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
+send-deposit amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -125,7 +100,7 @@ send-deposit-encrypted amount="1000000" to="" memo="0x00000000000000000000000000
         TO=$(cast wallet address "$PK")
     fi
     ARGS="--amount {{amount}} --token {{token}} --memo {{memo}} --to $TO --zone-rpc-url {{rpc}}"
-    cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- deposit $ARGS
 
 [group('zone')]
 [doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...). Set ZONE_FACTORY to override the Moderato default.')]
@@ -163,8 +138,8 @@ create-zone name token="" access_enforced="false" gateway_enforced="false":
     SEQUENCER_ADDR=$(cast wallet address "$SEQ_KEY")
     OUTPUT="generated/{{name}}"
     mkdir -p "$OUTPUT"
-    echo "Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    echo "Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
@@ -194,13 +169,12 @@ create-zone name token="" access_enforced="false" gateway_enforced="false":
     for gateway in "${GATEWAYS[@]}"; do
         [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
     done
-    cargo run -p tempo-xtask -- create-zone \
+    ZONE_FACTORY_OWNER_KEY="$PK" cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
         --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
-        --private-key "$PK" \
         "${CREATE_ARGS[@]}"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
 
@@ -218,16 +192,25 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
         exit 1
     fi
-    echo "Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
-    cargo run -p tempo-xtask -- deploy-router \
+    echo "Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- deploy-router \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
-        --private-key "$PK" \
         --stablecoin-dex "{{dex}}"
 
 [group('zone')]
-[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone via an encrypted deposit. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+[doc('Checks an Earn router and its ZonePortal closed-loop configuration, then prints Account roles for manual review. Requires L1_RPC_URL.')]
+verify-closed-loop earn_router:
+    #!/bin/bash
+    set -euo pipefail
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    cargo run -p tempo-xtask -- verify-closed-loop \
+        --l1-rpc-url "$L1_RPC" \
+        --earn-router "{{earn_router}}"
+
+[group('zone')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
 demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
@@ -240,11 +223,10 @@ demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
         echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
         exit 1
     fi
-    cargo run -p tempo-xtask -- demo-swap-and-deposit \
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- demo-swap-and-deposit \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
         --zone-rpc-url "{{rpc}}" \
-        --private-key "$PK" \
         --amount "{{amount}}" \
         --tick "{{tick}}"
 
@@ -267,10 +249,13 @@ zone-up name reset="false" profile="dev" args="":
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
-    SEQ_KEY="${SEQUENCER_KEY:-$(jq -r '.sequencerKey // empty' "$ZONE_JSON")}"
-    if [[ -z "$SEQ_KEY" ]]; then
-        echo "Error: SEQUENCER_KEY env var not set and not found in $ZONE_JSON" >&2
+    SEQ_KEY_FILE="${SEQUENCER_KEY_FILE:-}"
+    if [[ -z "$SEQ_KEY_FILE" ]] && ! jq -e '.sequencerKey? | strings | select(length > 0)' "$ZONE_JSON" > /dev/null; then
+        echo "Error: SEQUENCER_KEY_FILE env var not set and no sequencer key found in $ZONE_JSON" >&2
         exit 1
+    fi
+    if [[ -z "$SEQ_KEY_FILE" ]]; then
+        SEQ_KEY_FILE=<(jq -r '.sequencerKey' "$ZONE_JSON")
     fi
     DATADIR="/tmp/tempo-zone-{{name}}"
     if [[ "{{reset}}" = "true" ]]; then
@@ -295,7 +280,7 @@ zone-up name reset="false" profile="dev" args="":
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer \
-                      --sequencer-key "$SEQ_KEY" \
+                      --sequencer-key-file "$SEQ_KEY_FILE" \
                       {{args}}
 
 [group('zone')]
@@ -307,7 +292,7 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
     TX_OUTPUT=$(cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 150000 --json)
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
     STATUS=$(echo "$TX_OUTPUT" | jq -r '.status')
     if [[ "$STATUS" == "0x1" ]]; then
         echo "Approved!"
@@ -336,7 +321,13 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     L2_OUTPUT=$(cast send "$OUTBOX" \
         "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)" \
         "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" "{{reveal-to}}" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 10000000 --json)
+    L2_STATUS=$(echo "$L2_OUTPUT" | jq -r '.status')
+    if [[ "$L2_STATUS" != "0x1" ]]; then
+        echo "Withdrawal request failed on L2!"
+        echo "$L2_OUTPUT" | jq .
+        exit 1
+    fi
     L2_TX=$(echo "$L2_OUTPUT" | jq -r '.transactionHash')
     L2_BLOCK=$(echo "$L2_OUTPUT" | jq -r '.blockNumber')
     echo "Withdrawal requested on L2! tx: $L2_TX (block $(printf '%d' "$L2_BLOCK"))"
@@ -470,6 +461,63 @@ pause-deposits token:
 [doc('Resumes deposits for a previously paused TIP-20 on the ZonePortal. Token can be an address or alias. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars.')]
 resume-deposits token:
     just _portal-admin-token-call resumeDeposits {{token}}
+
+[group('zone')]
+[doc('Pauses batch submissions, all new deposits, and L1 withdrawal processing for 30 days. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY.')]
+pause-portal:
+    cargo run -p tempo-xtask -- pause-portal
+
+[group('zone')]
+[doc('Enables or disables closed-loop account enforcement. Pass true to close access or false to open it. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-access-mode enforced:
+    #!/bin/bash
+    set -euo pipefail
+    ENFORCED="{{enforced}}"
+    case "$ENFORCED" in
+        true) ARGS=(--enforced) ;;
+        false) ARGS=() ;;
+        *) echo "Error: enforced must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-access-mode "${ARGS[@]}"
+
+[group('zone')]
+[doc('Enables or disables callback gateway enforcement. Pass true to enforce registered gateways or false to allow arbitrary targets. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway-mode enforced:
+    #!/bin/bash
+    set -euo pipefail
+    ENFORCED="{{enforced}}"
+    case "$ENFORCED" in
+        true) ARGS=(--enforced) ;;
+        false) ARGS=() ;;
+        *) echo "Error: enforced must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-gateway-mode "${ARGS[@]}"
+
+[group('zone')]
+[doc('Adds or removes an account from closed-loop portal flows. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-allowed-account account allowed:
+    #!/bin/bash
+    set -euo pipefail
+    ALLOWED="{{allowed}}"
+    case "$ALLOWED" in
+        true) ARGS=(--allowed) ;;
+        false) ARGS=() ;;
+        *) echo "Error: allowed must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-allowed-account "{{account}}" "${ARGS[@]}"
+
+[group('zone')]
+[doc('Adds or removes a callback gateway. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway account allowed:
+    #!/bin/bash
+    set -euo pipefail
+    ALLOWED="{{allowed}}"
+    case "$ALLOWED" in
+        true) ARGS=(--allowed) ;;
+        false) ARGS=() ;;
+        *) echo "Error: allowed must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-gateway "{{account}}" "${ARGS[@]}"
 
 [group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
@@ -758,6 +806,7 @@ check-balance-redacted name token="0x20C0000000000000000000000000000000000000" r
 deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     #!/bin/bash
     set -euo pipefail
+    umask 077
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     OUTPUT="generated/{{name}}"
@@ -811,9 +860,9 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     echo "  Sequencer funded: https://explore.moderato.tempo.xyz/address/$SEQUENCER_ADDR"
     echo ""
 
-    # Step 3: Build Solidity specs
-    echo "Step 3: Building Solidity specs..."
-    (cd specs/ref-impls && forge build --skip test) || true
+    # Step 3: Build Solidity contracts
+    echo "Step 3: Building Solidity contracts..."
+    (cd crates/contracts && forge build --skip test) || true
     echo ""
 
     # Step 4: Create zone on L1 and generate genesis
@@ -842,13 +891,12 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     for gateway in "${GATEWAYS[@]}"; do
         [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
     done
-    cargo run -p tempo-xtask -- create-zone \
+    ZONE_FACTORY_OWNER_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
         --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
-        --private-key "$SEQUENCER_KEY" \
         "${CREATE_ARGS[@]}"
     echo ""
 
@@ -869,10 +917,9 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
 
     # Step 5: Register sequencer encryption key on the portal
     echo "Step 5: Registering sequencer encryption key on ZonePortal..."
-    cargo run -p tempo-xtask -- set-encryption-key \
+    PRIVATE_KEY="$SEQUENCER_KEY" cargo run -p tempo-xtask -- set-encryption-key \
         --l1-rpc-url "$HTTP_RPC" \
-        --portal "$PORTAL" \
-        --private-key "$SEQUENCER_KEY"
+        --portal "$PORTAL"
     echo ""
 
     # Step 6: Display summary
@@ -921,19 +968,16 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer \
-                      --sequencer-key "$SEQUENCER_KEY"
+                      --sequencer-key-file <(jq -r '.sequencerKey' "$OUTPUT/zone.json")
 
 [group('zone')]
-[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000 1 (10 txs, 10 per block, 200000 amount, encrypted)')]
-spam-deposits total="20" per-block="10" amount="1000000" encrypted="" token="0x20C0000000000000000000000000000000000000" lead-time="3":
+[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000')]
+spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" lead-time="3":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
-    if [[ "{{encrypted}}" == "true" || "{{encrypted}}" == "1" ]]; then
-        ARGS="$ARGS --encrypted"
-    fi
-    cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
+    PRIVATE_KEY="$PK" cargo run -p tempo-xtask -- spam-deposits $ARGS
 
 [group('zone')]
 [doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY for the token admin/depositor, L1_PORTAL_ADDRESS, and portal admin authority via ADMIN_KEY or matching generated/<name>/zone.json adminKey.')]
@@ -968,11 +1012,11 @@ docs-check:
     cd docs && bun run check && bun run check:types
 
 [group('docs')]
-[doc('Run Solidity specs tests')]
+[doc('Run Solidity contract tests')]
 docs-specs-test:
-    cd specs/ref-impls && forge test -vvv
+    cd crates/contracts && forge test -vvv
 
 [group('docs')]
-[doc('Build Solidity specs')]
+[doc('Build Solidity contracts')]
 docs-specs-build:
-    cd specs/ref-impls && forge build --sizes
+    cd crates/contracts && forge build --sizes

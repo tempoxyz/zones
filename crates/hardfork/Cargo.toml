@@ -1,0 +1,18 @@
+[package]
+name = "zone-hardfork"
+description = "Tempo Zone protocol hardfork definitions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-hardforks.workspace = true
+paste = "1.0.15"
+
+[features]
+default = []

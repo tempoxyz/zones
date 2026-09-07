@@ -81,7 +81,7 @@ l1_snapshot_derive_address() {
 
 l1_snapshot_artifact_hash() {
     local contract="$1"
-    local artifact="$L1_SNAPSHOT_ZONES_ROOT/specs/ref-impls/out/$contract.sol/$contract.json"
+    local artifact="$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/out/$contract.sol/$contract.json"
     l1_snapshot_require_file "$artifact"
     jq -cS '{deployedBytecode, storageLayout}' "$artifact" | sha256sum | awk '{print $1}'
 }
@@ -96,9 +96,9 @@ l1_snapshot_inputs_hash() {
             crates/contracts/Cargo.toml \
             crates/contracts/src/lib.rs \
             crates/contracts/src/precompiles/zone_factory.rs \
-            specs/ref-impls/out/ZonePortal.sol/ZonePortal.json \
-            specs/ref-impls/out/Verifier.sol/Verifier.json \
-            specs/ref-impls/out/ZoneMessenger.sol/ZoneMessenger.json
+            crates/contracts/out/ZonePortal.sol/ZonePortal.json \
+            crates/contracts/out/Verifier.sol/Verifier.json \
+            crates/contracts/out/ZoneMessenger.sol/ZoneMessenger.json
         do
             path="$L1_SNAPSHOT_ZONES_ROOT/$relative"
             l1_snapshot_require_file "$path"
@@ -227,7 +227,7 @@ l1_snapshot_load_config() {
 
 l1_snapshot_prepare_expectations() {
     echo "building native ZoneFactory shared runtime artifacts"
-    forge build --root "$L1_SNAPSHOT_ZONES_ROOT/specs/ref-impls" --skip test --no-lint >/dev/null
+    forge build --root "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts" --skip test --no-lint >/dev/null
 
     local factory_hash portal_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash
     factory_hash="$(l1_snapshot_sha256 "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/src/precompiles/zone_factory.rs")"
@@ -423,7 +423,7 @@ l1_snapshot_build() {
         --genesis "$L1_SNAPSHOT_RAW_GENESIS" \
         --output "$L1_SNAPSHOT_PATCHED_GENESIS" \
         --owner "$(l1_snapshot_derive_address 0)" \
-        --specs-out "$L1_SNAPSHOT_ZONES_ROOT/specs/ref-impls/out"
+        --specs-out "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/out"
     [[ "$(jq -er '.config.chainId' "$L1_SNAPSHOT_PATCHED_GENESIS")" == "$L1_SNAPSHOT_CHAIN_ID" ]] \
         || l1_snapshot_die "patched genesis chain ID is incorrect"
     [[ "$(jq -er '.config.generalGasLimit' "$L1_SNAPSHOT_PATCHED_GENESIS")" == "$L1_SNAPSHOT_GENERAL_GAS_LIMIT" ]] \

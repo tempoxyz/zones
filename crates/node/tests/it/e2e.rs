@@ -10,6 +10,7 @@ use std::{net::TcpListener, time::Duration};
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
+use alloy_network::ReceiptResponse;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
@@ -20,7 +21,8 @@ use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS,
 };
-use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
+use zone_l1::ChainTempoStateExt;
+use zone_primitives::constants::zone_chain_id;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
@@ -59,6 +61,7 @@ async fn test_sequencer_exposes_simulation_endpoints() -> eyre::Result<()> {
 
 /// A follower imports the leader's executed block and exposes the resulting state over RPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -95,7 +98,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let recipient = address!("0x0000000000000000000000000000000000005678");
     let amount = 1_000_000_u128;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, depositor, recipient, amount);
-    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
+    let observed = fixture.portal_events_from_deposits(std::slice::from_ref(&deposit));
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
     follower
         .l1_block_tracker()
@@ -126,7 +129,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let transfer_recipient = address!("0x0000000000000000000000000000000000009abc");
     fixture.seed_no_receive_policy(transfer_recipient)?;
     let sender_deposit = fixture.make_deposit(PATH_USD_ADDRESS, sender, sender, amount);
-    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(sender_deposit.clone())]);
+    let observed = fixture.portal_events_from_deposits(std::slice::from_ref(&sender_deposit));
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![sender_deposit]);
     follower
         .l1_block_tracker()
@@ -237,6 +240,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
 /// 4. The follower imports block 2 — only possible if it, too, reads policy at
 ///    height 2 and reproduces the revert, matching the leader's state root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Result<()> {
     use alloy_provider::ProviderBuilder;
     use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
@@ -277,7 +281,7 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
     // --- Block 1: fund Alice while pathUSD is still allow-all (anchor L1#1). ---
     let deposit_amount: u128 = 1_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, alice, alice, deposit_amount);
-    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
+    let observed = fixture.portal_events_from_deposits(std::slice::from_ref(&deposit));
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
     leader
         .wait_for_balance(
@@ -600,8 +604,8 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     // Start two zones with different chain IDs
-    let zone1 = ZoneTestNode::start_local_with_chain_id(71001).await?;
-    let zone2 = ZoneTestNode::start_local_with_chain_id(71002).await?;
+    let zone1 = ZoneTestNode::start_local_with_chain_id(zone_chain_id(1_337, 1)?).await?;
+    let zone2 = ZoneTestNode::start_local_with_chain_id(zone_chain_id(1_337, 2)?).await?;
 
     // Shared L1 fixture — same header timeline for both zones
     let mut fixture = L1Fixture::new();
@@ -714,7 +718,7 @@ async fn test_tempo_state_advances_with_l1_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify that TempoAdvanced and DepositProcessed events are emitted on
+/// Verify that TempoAdvanced and encrypted-deposit events are emitted on
 /// the ZoneInbox when processing deposits.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
@@ -757,7 +761,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
         "should have a TempoAdvanced event with depositsProcessed == 1"
     );
 
-    // Query DepositProcessed events
+    // Query encrypted deposit events
     let deposit_processed_filter = zone_inbox.DepositProcessed_filter().from_block(0);
     let deposit_processed_events = deposit_processed_filter.query().await?;
 
@@ -768,15 +772,9 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
 
     // Verify the deposit event details
     let (dp_event, _) = &deposit_processed_events[0];
-    assert_eq!(dp_event.sender, sender, "DepositProcessed sender mismatch");
-    assert_eq!(
-        dp_event.to, recipient,
-        "DepositProcessed recipient mismatch"
-    );
-    assert_eq!(
-        dp_event.amount, deposit_amount,
-        "DepositProcessed amount mismatch"
-    );
+    assert_eq!(dp_event.sender, sender, "deposit sender mismatch");
+    assert_eq!(dp_event.to, recipient, "deposit recipient mismatch");
+    assert_eq!(dp_event.amount, deposit_amount, "deposit amount mismatch");
 
     Ok(())
 }
@@ -994,7 +992,6 @@ async fn submit_withdrawals(
                 )
                 .nonce(nonce + offset as u64)
                 .gas_price(TEMPO_T0_BASE_FEE as u128)
-                .gas(WITHDRAWAL_TX_GAS)
                 .send()
                 .await?,
         );

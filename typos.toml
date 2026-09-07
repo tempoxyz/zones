@@ -1,5 +1,6 @@
 [files]
 extend-exclude = [
+    "crates/contracts/lib/**",
     ".git",
     "target",
     "testdata",
@@ -11,7 +12,6 @@ extend-exclude = [
     "**/test/**",
     "**/*_test.*",
     "**/*_tests.*",
-    "specs/ref-impls/lib/**",
 ]
 
 [default.extend-words]

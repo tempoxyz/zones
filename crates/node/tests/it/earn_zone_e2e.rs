@@ -24,9 +24,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_registry::AuthRole,
 };
 use tempo_primitives::transaction::Call;
-use tempo_zone_contracts::{
-    EncryptedDepositPayload, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
+use tempo_zone_contracts::{DepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
 
 const AMOUNT: u128 = 1_000_000;
 const REWARD_AMOUNT: u128 = AMOUNT / 10;
@@ -57,7 +55,13 @@ alloy_sol_types::sol! {
     struct EarnVaultControls {
         address emergencyGuardian;
         address asyncJanitor;
+        uint256 maxManagedAssets;
         EngineMigrationMode migrationMode;
+    }
+
+    struct DistributorConfig {
+        address distributor;
+        uint40 updateDelay;
     }
 
     struct FixedFeeRecipient {
@@ -78,7 +82,7 @@ alloy_sol_types::sol! {
         ExcessReturnFee excess;
     }
 
-    struct EarnEncryptedDepositPayload {
+    struct EarnDepositPayload {
         bytes32 ephemeralPubkeyX;
         uint8 ephemeralPubkeyYParity;
         bytes ciphertext;
@@ -88,7 +92,7 @@ alloy_sol_types::sol! {
 
     struct EarnZoneReturn {
         uint256 keyIndex;
-        EarnEncryptedDepositPayload encrypted;
+        EarnDepositPayload encrypted;
         address refundRecipient;
     }
 
@@ -109,7 +113,7 @@ alloy_sol_types::sol! {
     struct LegacyEarnZoneDelivery {
         address portal;
         uint256 keyIndex;
-        EarnEncryptedDepositPayload encrypted;
+        EarnDepositPayload encrypted;
         address refundRecipient;
     }
 
@@ -130,6 +134,7 @@ alloy_sol_types::sol! {
         address engine;
         address owner;
         EarnVaultControls controls;
+        DistributorConfig distributorConfig;
         FeeConfig fees;
         uint64 transferPolicyId;
     }
@@ -260,8 +265,7 @@ impl Default for EarnLimits {
 
 #[derive(Clone, Copy)]
 struct EarnAccessPolicy {
-    compound_id: u64,
-    whitelist_id: u64,
+    policy_id: u64,
 }
 
 struct EarnZoneFixture {
@@ -308,10 +312,6 @@ impl EarnZoneFixture {
         let portal = l1.deploy_zone().await?;
         let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal).await?;
         zone.wait_for_l2_tempo_finalized(0, E2E_TIMEOUT).await?;
-
-        let encryption_key = k256::SecretKey::from(l1.dev_signer().credential());
-        l1.set_sequencer_encryption_key(portal, &encryption_key)
-            .await?;
 
         let messenger = EarnZonePortalView::new(portal, l1.provider())
             .messenger()
@@ -371,6 +371,13 @@ impl EarnZoneFixture {
                 excessFeeRateBps: Default::default(),
             },
         };
+        let access_policy = if protected {
+            Some(EarnAccessPolicy {
+                policy_id: l1.create_whitelist_policy().await?,
+            })
+        } else {
+            None
+        };
         let params = EarnDeployParams {
             deploymentId: keccak256("zones-earn-e2e-v1"),
             engine,
@@ -378,10 +385,15 @@ impl EarnZoneFixture {
             controls: EarnVaultControls {
                 emergencyGuardian: Address::ZERO,
                 asyncJanitor: Address::ZERO,
+                maxManagedAssets: U256::ZERO,
                 migrationMode: EngineMigrationMode::OperatorEnabled,
             },
+            distributorConfig: DistributorConfig {
+                distributor: Address::ZERO,
+                updateDelay: Default::default(),
+            },
             fees,
-            transferPolicyId: 0,
+            transferPolicyId: access_policy.map_or(0, |policy| policy.policy_id),
         };
 
         let provider = l1.dev_provider();
@@ -509,8 +521,7 @@ impl EarnZoneFixture {
         )
         .await?;
 
-        let access_policy = if protected {
-            let whitelist_id = l1.create_whitelist_policy().await?;
+        if let Some(policy) = access_policy {
             let outsider = l1.signer_at(3).address();
             for account in [
                 earn_vault,
@@ -522,20 +533,9 @@ impl EarnZoneFixture {
                 user_address,
                 outsider,
             ] {
-                l1.whitelist_address(whitelist_id, account).await?;
+                l1.whitelist_address(policy.policy_id, account).await?;
             }
-            let compound_id = l1
-                .create_compound_policy(1, whitelist_id, whitelist_id)
-                .await?;
-            l1.change_transfer_policy_id(earn_share, compound_id)
-                .await?;
-            Some(EarnAccessPolicy {
-                compound_id,
-                whitelist_id,
-            })
-        } else {
-            None
-        };
+        }
 
         l1.enable_token_on_portal(portal, vault_asset).await?;
         l1.enable_token_on_portal(portal, alternate_asset).await?;
@@ -581,7 +581,7 @@ impl EarnZoneFixture {
             .ok_or_else(|| eyre::eyre!("Earn access policy is not configured"))?;
         let provider = self.l1.dev_provider();
         let receipt = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider)
-            .modifyPolicyWhitelist(policy.whitelist_id, account, eligible)
+            .modifyPolicyWhitelist(policy.policy_id, account, eligible)
             .send()
             .await?
             .get_receipt()
@@ -597,16 +597,11 @@ impl EarnZoneFixture {
             provider,
             token: self.earn_share,
         };
-        let recipient_authorized = registry
-            .is_auth_as(account, self.user.address(), AuthRole::Recipient)
-            .await;
-        let mint_authorized = registry
-            .is_auth_as(account, ZONE_INBOX_ADDRESS, AuthRole::MintRecipient)
-            .await;
+        let recipient_authorized = registry.is_auth_as(account, AuthRole::Recipient).await;
         eyre::ensure!(
-            recipient_authorized == eligible && mint_authorized == eligible,
-            "Zone did not mirror Earn eligibility for policy {} and {account}: recipient={recipient_authorized}, mint={mint_authorized}, expected={eligible}",
-            policy.compound_id
+            recipient_authorized == eligible,
+            "Zone did not mirror Earn recipient eligibility for policy {} and {account}: actual={recipient_authorized}, expected={eligible}",
+            policy.policy_id
         );
         Ok(())
     }
@@ -683,7 +678,7 @@ impl EarnZoneFixture {
         Ok(())
     }
 
-    async fn encrypted_entry(&mut self, token: Address, amount: u128) -> eyre::Result<()> {
+    async fn deposit_entry(&mut self, token: Address, amount: u128) -> eyre::Result<()> {
         let recipient = self.user.address();
         let provider = self.user.l1_provider();
         let receipt = ITIP20::new(token, provider)
@@ -696,11 +691,11 @@ impl EarnZoneFixture {
 
         let (key_index, encrypted) = self
             .l1
-            .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
+            .encrypt_deposit_for_portal(self.portal, self.user.address(), recipient, B256::ZERO)
             .await?;
         let balance_before = self.zone.balance_of(token, recipient).await?;
         let receipt = ZonePortal::new(self.portal, provider)
-            .depositEncrypted(token, amount, key_index, encrypted, recipient)
+            .deposit(token, amount, key_index, encrypted, recipient)
             .send()
             .await?
             .get_receipt()
@@ -728,12 +723,12 @@ impl EarnZoneFixture {
     ) -> eyre::Result<Bytes> {
         let (key_index, encrypted) = self
             .l1
-            .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
+            .encrypt_deposit_for_portal(self.portal, self.router, recipient, B256::ZERO)
             .await?;
         let action_id = keccak256(encrypted.ciphertext.as_ref());
         let zone_return = EarnZoneReturn {
             keyIndex: key_index,
-            encrypted: map_encrypted_payload(encrypted),
+            encrypted: map_deposit_payload(encrypted),
             refundRecipient: refund_recipient,
         };
         Ok(EarnCallbackData {
@@ -890,7 +885,7 @@ impl EarnZoneFixture {
         input_token: Address,
         recipient: Address,
     ) -> eyre::Result<u128> {
-        self.encrypted_entry(input_token, AMOUNT).await?;
+        self.deposit_entry(input_token, AMOUNT).await?;
         let before = self.zone.balance_of(self.earn_share, recipient).await?;
         let public_recipient_before = self.l1.balance_of(self.earn_share, recipient).await?;
         let portal_before = self.l1.balance_of(self.earn_share, self.portal).await?;
@@ -984,7 +979,7 @@ impl EarnZoneFixture {
         recipient: Address,
         data: Bytes,
     ) -> eyre::Result<()> {
-        self.encrypted_entry(input_token, AMOUNT).await?;
+        self.deposit_entry(input_token, AMOUNT).await?;
         let private_input_before = self
             .zone
             .balance_of(input_token, self.user.address())
@@ -1075,7 +1070,7 @@ impl EarnZoneFixture {
         input_token: Address,
         recipient: Address,
     ) -> eyre::Result<()> {
-        self.encrypted_entry(input_token, AMOUNT).await?;
+        self.deposit_entry(input_token, AMOUNT).await?;
         let recipient_earn_before = self.zone.balance_of(self.earn_share, recipient).await?;
         let public_refund_before = self
             .l1
@@ -1249,6 +1244,39 @@ impl EarnZoneFixture {
         u256_to_u128(returned, "assets returned by Zone redemption")
     }
 
+    async fn simulate_zone_redeem_as(
+        &self,
+        account: &mut ZoneAccount,
+        shares: u128,
+        output_token: Address,
+        recipient: Address,
+    ) -> eyre::Result<()> {
+        let limits = self.redeem_limits(shares, output_token).await?;
+        let data = self
+            .callback_data(
+                EarnFlow::Redeem,
+                output_token,
+                recipient,
+                account.address(),
+                limits,
+            )
+            .await?;
+        account
+            .simulate_withdraw_token_with(
+                self.earn_share,
+                WithdrawalArgs {
+                    amount: shares,
+                    to: Some(self.router),
+                    memo: B256::ZERO,
+                    gas_limit: CALLBACK_GAS_LIMIT,
+                    zone_fallback_recipient: Some(account.address()),
+                    data,
+                    reveal_to: Bytes::new(),
+                },
+            )
+            .await
+    }
+
     async fn migrate_existing_vault_shares(&mut self) -> eyre::Result<u128> {
         let user = self.user.address();
         let provider = self.user.l1_provider();
@@ -1290,7 +1318,7 @@ impl EarnZoneFixture {
 
         let (key_index, encrypted) = self
             .l1
-            .encrypt_deposit_for_portal(self.portal, user, B256::ZERO)
+            .encrypt_deposit_for_portal(self.portal, user, user, B256::ZERO)
             .await?;
         let private_before = self.zone.balance_of(self.earn_share, user).await?;
         let public_before = EarnShare::new(self.earn_share, self.l1.provider())
@@ -1341,7 +1369,7 @@ impl EarnZoneFixture {
             Call {
                 to: TxKind::Call(self.portal),
                 value: U256::ZERO,
-                input: ZonePortal::depositEncryptedCall {
+                input: ZonePortal::depositCall {
                     token: self.earn_share,
                     amount: earn_shares_u128,
                     keyIndex: key_index,
@@ -1451,8 +1479,8 @@ async fn deploy_contract(
         .ok_or_else(|| eyre::eyre!("{contract} deployment returned no contract address"))
 }
 
-fn map_encrypted_payload(payload: EncryptedDepositPayload) -> EarnEncryptedDepositPayload {
-    EarnEncryptedDepositPayload {
+fn map_deposit_payload(payload: DepositPayload) -> EarnDepositPayload {
+    EarnDepositPayload {
         ephemeralPubkeyX: payload.ephemeralPubkeyX,
         ephemeralPubkeyYParity: payload.ephemeralPubkeyYParity,
         ciphertext: payload.ciphertext,
@@ -1465,7 +1493,7 @@ fn legacy_delivery(portal: Address, refund_recipient: Address) -> LegacyEarnZone
     LegacyEarnZoneDelivery {
         portal,
         keyIndex: U256::ZERO,
-        encrypted: EarnEncryptedDepositPayload {
+        encrypted: EarnDepositPayload {
             ephemeralPubkeyX: B256::ZERO,
             ephemeralPubkeyYParity: 0,
             ciphertext: Bytes::new(),
@@ -1645,7 +1673,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
+async fn zone_removed_private_holder_is_blocked_until_reauthorized() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start_protected().await?;
     let outsider_signer = fixture.l1.signer_at(3);
     let outsider = outsider_signer.address();
@@ -1665,6 +1693,28 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         "eligible private outsider received no EarnShare"
     );
     fixture.set_access_eligibility(outsider, false).await?;
+    let redeem = fixture
+        .simulate_zone_redeem_as(
+            &mut outsider_account,
+            outsider_shares,
+            fixture.alternate_asset,
+            outsider,
+        )
+        .await;
+    eyre::ensure!(
+        redeem.is_err(),
+        "removed private holder unexpectedly exited while ineligible"
+    );
+    assert_eq!(
+        fixture
+            .zone
+            .balance_of(fixture.earn_share, outsider)
+            .await?,
+        U256::from(outsider_shares),
+        "rejected exit changed the removed holder's EarnShare balance"
+    );
+
+    fixture.set_access_eligibility(outsider, true).await?;
     let outsider_output = fixture
         .zone_redeem_as(
             &mut outsider_account,
@@ -1675,7 +1725,7 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         .await?;
     assert_eq!(
         outsider_output, AMOUNT,
-        "removed private holder did not exit 1:1"
+        "re-authorized private holder did not exit 1:1"
     );
     assert_eq!(
         fixture

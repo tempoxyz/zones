@@ -9,6 +9,7 @@
 
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::{Address, U256};
+use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 /// Longer timeout for real L1 tests.
@@ -104,10 +105,12 @@ async fn test_sequencer_restart_resumes_batch_submission() -> eyre::Result<()> {
     let seq_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     let first_withdrawal: u128 = 500_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(first_withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         first_withdrawal,
         WITHDRAWAL_TIMEOUT,
     )
@@ -135,10 +138,12 @@ async fn test_sequencer_restart_resumes_batch_submission() -> eyre::Result<()> {
 
     // --- Phase 3: Second withdrawal after restart ---
     let second_withdrawal: u128 = 300_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(second_withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         second_withdrawal,
         WITHDRAWAL_TIMEOUT,
     )
@@ -255,10 +260,12 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
 
     // Request a NEW withdrawal after restart to verify normal operation continues.
     let second_withdrawal: u128 = 400_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(second_withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         second_withdrawal,
         WITHDRAWAL_TIMEOUT,
     )
@@ -299,10 +306,12 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     // --- Cycle 1 ---
     let seq1 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(200_000).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         200_000,
         WITHDRAWAL_TIMEOUT,
     )
@@ -315,10 +324,12 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     // --- Cycle 2 ---
     let seq2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(300_000).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         300_000,
         WITHDRAWAL_TIMEOUT,
     )
@@ -331,10 +342,12 @@ async fn test_double_sequencer_restart() -> eyre::Result<()> {
     // --- Cycle 3 (final) ---
     let _seq3 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(400_000).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         400_000,
         WITHDRAWAL_TIMEOUT,
     )
@@ -455,6 +468,7 @@ async fn test_finalized_withdrawal_survives_sequencer_restart() -> eyre::Result<
     let seq_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     let withdrawal_amount: u128 = 500_000;
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(withdrawal_amount).await?;
     let withdrawal_block =
         wait_for_withdrawal_requested(&zone, account.address(), withdrawal_amount).await?;
@@ -481,6 +495,7 @@ async fn test_finalized_withdrawal_survives_sequencer_restart() -> eyre::Result<
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         withdrawal_amount,
         WITHDRAWAL_TIMEOUT,
     )

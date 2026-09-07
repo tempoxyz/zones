@@ -4,13 +4,13 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address, keccak256},
+    primitives::{Address, address},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
-use alloy_rlp::Encodable;
-use eyre::{WrapErr as _, eyre};
+use alloy_rpc_types_eth::BlockId;
+use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
@@ -21,7 +21,10 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::MODERATO_ZONE_FACTORY;
+use crate::{
+    generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -61,11 +64,8 @@ pub(crate) struct CreateZone {
     /// Sequencer address that will operate the zone. Repeat for a
     /// multi-sequencer set; the first address is the leader.
     ///
-    /// A multi-sequencer set is installed via a post-creation `setSequencerSet`
-    /// call so the on-chain `sequencerSetVersion` becomes non-zero, which the
-    /// P2P manifest requires. That call must be signed by the zone admin, so
-    /// `--private-key` must be the admin key when more than one sequencer is
-    /// given.
+    /// The complete set and threshold are installed atomically by `createZone`;
+    /// the first address is also the initial block-production leader.
     #[arg(long = "sequencer", required = true)]
     sequencers: Vec<Address>,
 
@@ -74,7 +74,7 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value_t = 1)]
     threshold: u8,
 
-    /// Admin address that controls token enablement and deposit pause/resume.
+    /// Admin address that controls token enablement and deposit pause/unpause.
     /// Pass the sequencer address explicitly when both roles should use the same key.
     #[arg(long)]
     admin: Address,
@@ -97,16 +97,26 @@ pub(crate) struct CreateZone {
     /// Genesis block gas limit for the zone L2.
     #[arg(long, default_value_t = 30_000_000)]
     gas_limit: u64,
-
-    /// Path to the Foundry compiled output directory containing zone contract artifacts.
-    #[arg(long, default_value = "specs/ref-impls/out")]
-    specs_out: PathBuf,
 }
 
 /// Mirrors `ZonePortal.MAX_SEQUENCERS` for a fast client-side error.
 const MAX_SEQUENCERS: usize = 8;
 
 impl CreateZone {
+    fn factory_params(&self) -> ZoneFactory::CreateZoneParams {
+        ZoneFactory::CreateZoneParams {
+            initialToken: self.initial_token,
+            accessMode: self.access_mode,
+            gatewayMode: self.gateway_mode,
+            allowedAccounts: self.allowed_accounts.clone(),
+            zoneGateways: self.zone_gateways.clone(),
+            admin: self.admin,
+            sequencers: self.sequencers.clone(),
+            threshold: self.threshold,
+            rpcUrl: self.rpc_url.clone(),
+        }
+    }
+
     pub(crate) async fn run(self) -> eyre::Result<()> {
         let leader = *self
             .sequencers
@@ -150,15 +160,6 @@ impl CreateZone {
             .strip_prefix("0x")
             .unwrap_or(&self.private_key);
         let signer: PrivateKeySigner = key_str.parse()?;
-        let signer_address = signer.address();
-        if self.sequencers.len() > 1 && signer_address != self.admin {
-            return Err(eyre!(
-                "multi-sequencer creation requires --private-key to be the admin key \
-                 ({}) so the sequencer set can be installed via setSequencerSet, \
-                 but the key resolves to {signer_address}",
-                self.admin
-            ));
-        }
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
@@ -203,19 +204,6 @@ impl CreateZone {
             ));
         }
 
-        // Anchor before createZone so the zone replays the creation block and its
-        // initial TokenEnabled event during L1 backfill.
-        let anchor_block_number = provider.get_block_number().await?;
-        let anchor_header = provider
-            .get_header_by_number(anchor_block_number.into())
-            .await?
-            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
-            .inner
-            .inner;
-        let mut genesis_header_rlp = Vec::new();
-        anchor_header.encode(&mut genesis_header_rlp);
-        let anchor_hash = keccak256(&genesis_header_rlp);
-
         println!("Admin: {}", self.admin);
         println!("Sequencers: {:?}", self.sequencers);
         println!("Threshold: {}", self.threshold);
@@ -224,26 +212,14 @@ impl CreateZone {
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
         );
-        // The native factory initializes the portal at `sequencerSetVersion` 0,
-        // but the P2P manifest (and follower attestation checks) require a
-        // non-zero version. Create the zone with a 1-of-1 leader set, then
-        // install the full set via `setSequencerSet`, which bumps the version
-        // to 1. Single-sequencer zones keep the legacy 1-of-1 set at version 0.
-        // The portal also bootstraps the first sequencer as the initial
+        // Install the requested set in the factory transaction. A separate
+        // setSequencerSet call would leave the portal live as a temporary
+        // 1-of-1 settlement authority before the intended quorum is active.
+        // The portal bootstraps the first sequencer as the initial
         // block-production leader (leaderEpoch 1); later transfers go through
-        // setLeader.
+        // setLeader. The factory-installed set starts at version 0.
         let receipt = factory
-            .createZone(ZoneFactory::CreateZoneParams {
-                initialToken: self.initial_token,
-                accessMode: self.access_mode,
-                gatewayMode: self.gateway_mode,
-                allowedAccounts: self.allowed_accounts.clone(),
-                zoneGateways: self.zone_gateways.clone(),
-                admin: self.admin,
-                sequencers: vec![leader],
-                threshold: 1,
-                rpcUrl: self.rpc_url.clone(),
-            })
+            .createZone(self.factory_params())
             .send_sync()
             .await?;
         println!("Transaction confirmed in block {:?}", receipt.block_number);
@@ -256,6 +232,9 @@ impl CreateZone {
                 receipt.transaction_hash
             ));
         }
+        let creation_block = receipt
+            .block_number
+            .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
         let event = receipt
             .inner
@@ -266,47 +245,65 @@ impl CreateZone {
 
         let zone_id = event.zoneId;
         let portal = event.portal;
-        let chain_id = zone_chain_id(zone_id);
+        let parent_chain_id = provider.get_chain_id().await?;
+        let chain_id = zone_chain_id(parent_chain_id, zone_id)?;
 
         let portal_contract = ZonePortal::new(portal, &provider);
-        if self.sequencers.len() > 1 {
-            println!(
-                "Installing {}-of-{} sequencer set via setSequencerSet...",
-                self.threshold,
-                self.sequencers.len()
-            );
-            let receipt = portal_contract
-                .setSequencerSet(self.sequencers.clone(), self.threshold)
-                .send_sync()
-                .await?;
-            if !receipt.status() {
-                return Err(eyre!(
-                    "setSequencerSet transaction reverted (tx: {:?})",
-                    receipt.transaction_hash
-                ));
-            }
-        }
-        let sequencer_set_version = portal_contract.sequencerSetVersion().call().await?;
+        let creation_block_id = BlockId::number(creation_block);
+        let sequencer_set_version = portal_contract
+            .sequencerSetVersion()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let initial_leader = portal_contract
+            .leader()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let leader_epoch = portal_contract
+            .leaderEpoch()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let leader_activation_block = portal_contract
+            .leaderActivationTempoBlock()
+            .block(creation_block_id)
+            .call()
+            .await?;
+
+        ensure!(
+            sequencer_set_version == 0,
+            "ZoneFactory initialized sequencer set version {sequencer_set_version}, expected 0"
+        );
+        ensure!(
+            initial_leader == leader
+                && leader_epoch == 1
+                && leader_activation_block == creation_block,
+            "ZoneFactory initialized leader snapshot ({initial_leader}, epoch {leader_epoch}, activation {leader_activation_block}), expected ({leader}, epoch 1, activation {creation_block})"
+        );
         println!("Sequencer set version: {sequencer_set_version}");
 
+        println!("Waiting for creation block {creation_block} to finalize...");
+        let anchor =
+            wait_for_finalized_pre_creation_anchor(&provider, portal, creation_block).await?;
         println!(
-            "Using pre-creation block {} (hash: {anchor_hash}) as genesis anchor",
-            anchor_header.inner.number
+            "Using pre-creation block {} (hash: {}) as genesis anchor",
+            anchor.block_number, anchor.hash
         );
 
-        let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
+        let header_rlp_hex = const_hex::encode(&anchor.rlp);
 
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
-            tempo_portal: portal,
+            tempo_portal: None,
+            l1_rpc_url: None,
             default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
             sequencer: Some(leader),
-            specs_out: self.specs_out.clone(),
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
@@ -329,12 +326,12 @@ impl CreateZone {
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "sequencerThreshold": self.threshold,
             "sequencerSetVersion": sequencer_set_version,
-            "tempoAnchorBlock": anchor_header.inner.number,
+            "tempoAnchorBlock": anchor.block_number,
             "zoneFactory": format!("{}", self.zone_factory),
             "rpcUrl": self.rpc_url,
         });
         let zone_json_path = self.output.join("zone.json");
-        std::fs::write(
+        write_owner_only(
             &zone_json_path,
             serde_json::to_string_pretty(&zone_json).wrap_err("failed encoding zone.json")?,
         )
@@ -356,7 +353,7 @@ impl CreateZone {
         if !self.rpc_url.is_empty() {
             println!("  RPC URL: {}", self.rpc_url);
         }
-        println!("  Tempo anchor block: {}", anchor_header.inner.number);
+        println!("  Tempo anchor block: {}", anchor.block_number);
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()
@@ -364,5 +361,40 @@ impl CreateZone {
         println!("  Zone metadata written to: {}", zone_json_path.display());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn factory_params_install_the_requested_quorum_atomically() {
+        let sequencers = vec![
+            address!("0x1000000000000000000000000000000000000001"),
+            address!("0x2000000000000000000000000000000000000002"),
+            address!("0x3000000000000000000000000000000000000003"),
+        ];
+        let command = CreateZone {
+            output: PathBuf::new(),
+            l1_rpc_url: String::new(),
+            zone_factory: Address::ZERO,
+            initial_token: address!("0x4000000000000000000000000000000000000004"),
+            access_mode: true,
+            gateway_mode: true,
+            zone_gateways: Vec::new(),
+            allowed_accounts: Vec::new(),
+            sequencers: sequencers.clone(),
+            threshold: 2,
+            admin: address!("0x5000000000000000000000000000000000000005"),
+            rpc_url: String::new(),
+            private_key: String::new(),
+            base_fee_per_gas: 1,
+            gas_limit: 30_000_000,
+        };
+
+        let params = command.factory_params();
+        assert_eq!(params.sequencers, sequencers);
+        assert_eq!(params.threshold, 2);
     }
 }

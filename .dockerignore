@@ -2,5 +2,6 @@
 contrib/
 docs/
 localnet/
-scripts/
+scripts/*
+!scripts/run-prover-host.sh
 target/

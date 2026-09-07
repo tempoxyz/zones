@@ -3,12 +3,14 @@
 pub use TempoState::{TempoStateErrors as TempoStateError, TempoStateEvents as TempoStateEvent};
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract TempoState {
         event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
         error InvalidParentHash();
         error InvalidBlockNumber();
+        error InvalidTimestamp();
         error InvalidRlpData();
         error OnlyZoneInbox();
 
@@ -16,7 +18,5 @@ crate::sol! {
         function tempoBlockNumber() external view returns (uint64);
 
         function finalizeTempo(bytes calldata header) external;
-        function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
-        function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
     }
 }

@@ -46,20 +46,24 @@ use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{BuiltPayload, PayloadKind};
 use reth_primitives_traits::SealedHeader;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tempo_primitives::TempoHeader;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
+use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or an
-/// active bounded forced-recovery override assigns `N` to this node.
+/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
+/// forced-recovery override assigns `N` to this node. An optimistic override is open-ended until
+/// the next finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -180,8 +184,8 @@ pub struct ZoneEngine {
     last_header: SealedHeader<TempoHeader>,
     /// Address that receives block fees.
     fee_recipient: Address,
-    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
-    sequencer_key: k256::SecretKey,
+    /// Private keys bound to the Portal indexes used by deposits.
+    encryption_keys: EncryptionKeyRing,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
     /// Optional per-anchor leadership permit. `None` runs the legacy single-sequencer mode.
@@ -197,7 +201,7 @@ impl ZoneEngine {
         l1_block_tracker: L1BlockTracker,
         last_header: SealedHeader<TempoHeader>,
         fee_recipient: Address,
-        sequencer_key: k256::SecretKey,
+        encryption_keys: EncryptionKeyRing,
         portal_address: Address,
     ) -> Self {
         Self {
@@ -208,7 +212,7 @@ impl ZoneEngine {
             l1_block_tracker,
             last_header,
             fee_recipient,
-            sequencer_key,
+            encryption_keys,
             portal_address,
             production_permit: None,
         }
@@ -310,12 +314,12 @@ impl ZoneEngine {
         }
     }
 
-    /// Decrypt encrypted deposits and ABI-encode them into a [`PreparedL1Block`] ready for
+    /// Decrypt deposits and ABI-encode them into a [`PreparedL1Block`] ready for
     /// the payload builder. Mint-recipient policy is enforced during upstream TIP-20 execution
     /// against the finalized L1 anchor.
     async fn prepare_l1_block(&self, l1_block: L1BlockDeposits) -> eyre::Result<PreparedL1Block> {
         l1_block
-            .prepare(&self.sequencer_key, self.portal_address)
+            .prepare(&self.encryption_keys, self.portal_address)
             .await
     }
 
@@ -328,10 +332,20 @@ impl ZoneEngine {
     async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
         let l1_num_hash = l1_block.header.num_hash();
 
-        // Zone block timestamp is locked to the L1 block's timestamp so the
-        // two chains stay in lockstep.
-        let timestamp_secs = l1_block.header.timestamp();
-        let timestamp_millis_part = l1_block.header.timestamp_millis_part;
+        // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
+        // fork cannot predate it. Use wall-clock time to avoid backdating transactions during
+        // catch-up, while allowing multiple blocks in the same millisecond.
+        let wall_clock_timestamp_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let timestamp_millis = zone_timestamp_millis(
+            l1_block.header.timestamp_millis(),
+            self.last_header.timestamp_millis(),
+            wall_clock_timestamp_millis,
+        );
+        let timestamp_secs = timestamp_millis / 1000;
+        let timestamp_millis_part = timestamp_millis % 1000;
 
         let l1_block = self.prepare_l1_block(l1_block).await?;
 
@@ -425,11 +439,37 @@ impl AvailableBlockDrain for ZoneEngine {
     }
 }
 
+/// Select a Zone timestamp that preserves the L1 lower bound without backdating user activity.
+fn zone_timestamp_millis(
+    l1_timestamp_millis: u64,
+    parent_timestamp_millis: u64,
+    wall_clock_timestamp_millis: u64,
+) -> u64 {
+    l1_timestamp_millis
+        .max(wall_clock_timestamp_millis)
+        .max(parent_timestamp_millis)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn zone_timestamp_uses_l1_timestamp_as_a_lower_bound() {
+        assert_eq!(zone_timestamp_millis(2_000, 999, 1_500), 2_000);
+    }
+
+    #[test]
+    fn zone_timestamp_uses_wall_clock_during_catch_up() {
+        assert_eq!(zone_timestamp_millis(1_000, 999, 2_000), 2_000);
+    }
+
+    #[test]
+    fn zone_timestamp_allows_parent_timestamp_when_catching_up_in_same_millisecond() {
+        assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
+    }
 
     struct PausedDrain {
         pending: VecDeque<u64>,
@@ -587,7 +627,7 @@ mod tests {
 
         let recovery_schedule = LeadershipSchedule::seeded(LeadershipState::new(7, me, 0));
         recovery_schedule
-            .prepare_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
+            .install_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
             .unwrap();
         recovery_schedule
             .publish(LeadershipState::new(8, other.clone(), 60))

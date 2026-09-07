@@ -18,6 +18,7 @@ zone-node = { workspace = true, features = ["cli"] }
 
 # reth
 reth-cli-util.workspace = true
+reth-node-core.workspace = true
 
 # tls
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
@@ -27,6 +28,8 @@ name = "tempo-zone"
 path = "src/main.rs"
 
 [features]
-default = ["jemalloc"]
+default = ["asm-keccak", "jemalloc", "keccak-cache-global"]
 
+asm-keccak = ["zone-node/asm-keccak"]
 jemalloc = ["reth-cli-util/jemalloc", "zone-node/jemalloc"]
+keccak-cache-global = ["zone-node/keccak-cache-global"]

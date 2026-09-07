@@ -7,9 +7,10 @@
 //! # Call ordering
 //!
 //! 1. Direct-call-only rules reject delegate calls before storage access.
-//! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
-//! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
+//! 2. Reject calls that cannot cover the calldata input cost before admission rules decode it.
+//! 3. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
+//! 4. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
+//! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Admission-rule rejections include calldata input gas, while early delegate-call rejection is
 //! unmetered. Calls without a fixed charge retain normal provider metering, and successful
@@ -27,14 +28,20 @@ use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
     dispatch::selector_from_calldata,
     error::TempoPrecompileError,
-    storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    input_cost,
+    storage::{
+        PrecompileStorageProvider, StorageCtx, actions::StorageActions,
+        evm::EvmPrecompileStorageProvider,
+    },
     storage_credits::NonCreditableSlots,
 };
+use zone_hardfork::ZoneHardfork;
 
 /// Shared EVM configuration and accounting state installed for every Zone precompile wrapper.
 #[derive(Clone)]
 pub struct ZonePrecompileEnv {
     cfg: revm::context::CfgEnv<TempoHardfork>,
+    zone_hardfork: ZoneHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 }
@@ -43,14 +50,21 @@ impl ZonePrecompileEnv {
     /// Captures the active EVM configuration and transaction-local storage accounting state.
     pub fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
+        zone_hardfork: ZoneHardfork,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
             cfg: cfg.clone(),
+            zone_hardfork,
             actions,
             non_creditable_slots,
         }
+    }
+
+    /// Returns the active Zone-owned protocol revision.
+    pub const fn zone_hardfork(&self) -> ZoneHardfork {
+        self.zone_hardfork
     }
 }
 
@@ -60,14 +74,8 @@ pub(crate) enum CallCheck {
     Continue,
     /// Revert with ABI-encoded data. The execution wrapper MUST apply input gas and reservoir.
     Revert(Bytes),
-    /// Abort admission because a state read failed.
-    Error(CallRuleError),
-}
-
-/// State-read failures raised while applying pre-execution rules.
-pub(crate) enum CallRuleError {
-    /// Error from Zone-local or L1-mirrored precompile storage.
-    Tempo(TempoPrecompileError),
+    /// Return an error raised while evaluating an admission rule.
+    Error(TempoPrecompileError),
 }
 
 /// Selector and caller dependent precompile call rules evaluated after storage setup.
@@ -80,7 +88,7 @@ pub(crate) trait CallRules: 'static {
         None
     }
 
-    /// Applies pure Zone-specific admission rules before storage setup.
+    /// Applies Zone-specific admission rules.
     fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
         CallCheck::Continue
     }
@@ -107,6 +115,19 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
+        let Ok(input_gas) = input_cost(env.cfg.spec, data.len()) else {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::OutOfGas,
+                input.reservoir,
+            ));
+        };
+        if input.gas < input_gas {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::OutOfGas,
+                input.reservoir,
+            ));
+        }
+
         let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
             return Ok(PrecompileOutput::halt(
@@ -126,6 +147,11 @@ pub(crate) fn create_precompile(
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
+        if fixed_gas.is_some() {
+            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
+            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
+            storage.set_tip1060_storage_credits(false);
+        }
 
         let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
             CallCheck::Continue => execute(data, caller),
@@ -134,27 +160,32 @@ pub(crate) fn create_precompile(
                 let output = s.revert_output(output);
                 add_input_cost(s, data, Ok(output))
             }
-            CallCheck::Error(CallRuleError::Tempo(error)) => {
-                StorageCtx::default().error_result(error)
+            CallCheck::Error(error) => {
+                let s = StorageCtx::default();
+                let result = s.error_result(error);
+                add_input_cost(s, data, result)
             }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
+            // Disable refunds to not leak any data about previous storage values.
+            output.gas_refunded = 0;
         }
         result
     })
 }
 
-fn add_input_cost(mut s: StorageCtx, data: &[u8], mut res: PrecompileResult) -> PrecompileResult {
+fn add_input_cost(mut s: StorageCtx, data: &[u8], res: PrecompileResult) -> PrecompileResult {
+    // Fatal errors must be propagated to abort execution.
+    let mut output = res?;
+
     let gas_before = s.gas_used();
     if let Some(err) = charge_input_cost(&mut s, data) {
         return err;
     }
-    if let Ok(output) = &mut res {
-        let input_gas = s.gas_used().saturating_sub(gas_before);
-        output.gas_used = output.gas_used.saturating_add(input_gas);
-    }
-    res
+    let input_gas = s.gas_used().saturating_sub(gas_before);
+    output.gas_used = output.gas_used.saturating_add(input_gas);
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -170,6 +201,7 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+    use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
@@ -219,6 +251,7 @@ mod tests {
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -254,6 +287,50 @@ mod tests {
     }
 
     #[test]
+    fn fixed_gas_disables_storage_credits_and_discards_refunds() {
+        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        cfg.spec = TempoHardfork::T8;
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let storage_owner = Address::repeat_byte(0x33);
+        let credit_slot = U256::from_be_slice(storage_owner.as_slice());
+        let observed_credit_state = Rc::new(Cell::new(U256::MAX));
+        let execute_credit_state = observed_credit_state.clone();
+        let precompile = create_precompile(
+            "FixedGasAccountingTest",
+            &env,
+            RecordingRules(Rc::new(RefCell::new(None))),
+            move |_, _| {
+                let mut storage = StorageCtx::default();
+                storage
+                    .sstore(storage_owner, U256::ZERO, U256::ONE)
+                    .unwrap();
+                execute_credit_state
+                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
+
+                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
+                storage.refund_gas(4_800);
+                let mut output = storage.success_output(Bytes::new());
+                output.gas_refunded = storage.gas_refunded();
+                Ok(output)
+            },
+        );
+
+        let mut ctx = test_context();
+        let output = precompile
+            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
+            .unwrap();
+
+        assert_eq!(output.gas_used, FIXED_GAS);
+        assert_eq!(output.gas_refunded, 0);
+        assert_eq!(observed_credit_state.get(), U256::ZERO);
+    }
+
+    #[test]
     fn protocol_precompile_applies_admission_and_evm_spec() {
         let observed_spec = Rc::new(Cell::new(None));
         let execute_spec = observed_spec.clone();
@@ -261,6 +338,7 @@ mod tests {
         cfg.spec = TempoHardfork::T8;
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -313,6 +391,7 @@ mod tests {
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         let env = ZonePrecompileEnv::new(
             &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -343,5 +422,72 @@ mod tests {
         assert!(!executed.get());
         assert_eq!(rejected.gas_used, FIXED_GAS);
         assert_eq!(rejected.bytes, Bytes::from_static(b"denied"));
+    }
+
+    #[test]
+    fn input_gas_threshold_tracks_t11() {
+        let calldata = [0u8; 32];
+
+        for (spec, required_gas) in [(TempoHardfork::T10, 6), (TempoHardfork::T11, 30)] {
+            let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+            cfg.spec = spec;
+            let env = ZonePrecompileEnv::new(
+                &cfg,
+                zone_hardfork::ZoneHardfork::Z0,
+                StorageActions::disabled(),
+                Rc::new(RefCell::new(NonCreditableSlots::empty())),
+            );
+            let precompile = create_precompile("InputGasTest", &env, NoCallRules, |_, _| {
+                Ok(StorageCtx::default().success_output(Bytes::new()))
+            });
+            let mut ctx = test_context();
+
+            let insufficient = precompile
+                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas - 1))
+                .unwrap();
+            assert_eq!(
+                insufficient.halt_reason(),
+                Some(&PrecompileHalt::OutOfGas),
+                "{spec:?} must require {required_gas} input gas"
+            );
+
+            let sufficient = precompile
+                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas))
+                .unwrap();
+            assert!(!sufficient.is_halt(), "{spec:?} must accept its exact cost");
+        }
+    }
+
+    struct FatalRules;
+
+    impl CallRules for FatalRules {
+        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+            StorageCtx::default().deduct_gas(10).unwrap();
+            CallCheck::Error(TempoPrecompileError::Fatal("boom".into()))
+        }
+    }
+
+    #[test]
+    fn input_cost_does_not_replace_fatal_admission_error() {
+        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            zone_hardfork::ZoneHardfork::Z0,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let precompile = create_precompile("FatalAdmissionTest", &env, FatalRules, |_, _| {
+            panic!("fatal admission must not execute the precompile")
+        });
+        let mut ctx = test_context();
+        let calldata = [1, 2, 3, 4];
+
+        let error = precompile
+            .call(input(&mut ctx, &calldata, Address::ZERO, 10))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            revm::precompile::PrecompileError::Fatal(message) if message == "boom"
+        ));
     }
 }

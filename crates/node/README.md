@@ -77,12 +77,11 @@ Chain continuity is enforced: the L1 block number must equal
 `tempoBlockNumber + 1` and its parent hash must match the stored
 `tempoBlockHash`.
 
-### Encrypted Deposits
+### Deposits
 
 Deposits can be encrypted using ECIES with the sequencer's public key. The
 sequencer decrypts them off-chain and provides `DecryptionData` (ECDH shared
-secret + Chaum-Pedersen proof) that the contract verifies on-chain via two
-precompiles before minting.
+secret + Chaum-Pedersen proof) that the native inbox verifies before minting.
 
 ## Token Enablement
 
@@ -215,7 +214,7 @@ just enable-token $TOKEN
 just max-approve-portal
 
 # Deposit to yourself on the zone
-just send-deposit 1000000 "" $TOKEN
+just send-deposit 1000000 "" 0x0000000000000000000000000000000000000000000000000000000000000000 $TOKEN
 ```
 
 ### 7. Test enforcement on the zone
@@ -254,8 +253,6 @@ just set-transfer-policy $TOKEN <M>
 
 | Address | Precompile | Purpose |
 |---------|-----------|---------|
-| `0x1C00…0100` | `ChaumPedersenVerify` | Verify DLOG equality proofs for ECDH |
-| `0x1C00…0101` | `AesGcmDecrypt` | AES-256-GCM authenticated decryption |
 | `0x403C…0000` | `TIP403Registry` | Upstream read-only execution over exact-block raw L1 policy state |
 
 ## EVM Configuration

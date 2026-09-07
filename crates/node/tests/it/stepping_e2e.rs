@@ -30,6 +30,7 @@ const SHORT_MULTI_BOUNDARY_BATCH_COUNT: u64 = 3;
 const SHORT_MULTI_BOUNDARY_GAP_BLOCKS: u64 = SHORT_EIP2935_HISTORY_WINDOW
     + SHORT_EIP2935_EFFECTIVE_WINDOW * SHORT_MULTI_BOUNDARY_BATCH_COUNT
     + 1;
+const CURRENT_TIP_BATCH_INTERVAL: u64 = 8;
 
 /// Extended timeout for ancestry tests — the L1 needs to mine >16k blocks and
 /// the zone must replay enough history to cross the first out-of-window boundary.
@@ -94,6 +95,102 @@ async fn fetch_submit_batch_call(
         u64::from_str_radix(block_number.strip_prefix("0x").unwrap_or(block_number), 16)?;
 
     Ok((call, block_number))
+}
+
+/// A transaction submitted after observing L1 head N can only execute in N+1 or later. Prove that
+/// the production submitter skips latest-state estimation and settles a batch anchored to N in
+/// the immediate successor block, where EIP-2935 exposes hash(N).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_current_tip_batch_submission_lands_in_successor_block() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start_with(|cfg| {
+        cfg.dev.block_time = None;
+    })
+    .await?;
+    let portal_address = l1.deploy_zone().await?;
+    let portal = ZonePortal::new(portal_address, l1.provider());
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+
+    let genesis_anchor = l1.provider().get_block_number().await?;
+    for _ in 0..CURRENT_TIP_BATCH_INTERVAL {
+        l1.fund_user(l1.admin_address(), 1).await?;
+    }
+    let current_tip = l1.provider().get_block_number().await?;
+    eyre::ensure!(
+        current_tip == genesis_anchor + CURRENT_TIP_BATCH_INTERVAL,
+        "instant-mining setup produced an unexpected L1 range: genesis={genesis_anchor}, tip={current_tip}"
+    );
+
+    zone.wait_for_tempo_block_number(current_tip, SHORT_STEPPING_TIMEOUT)
+        .await?;
+    zone.wait_for_block_number(CURRENT_TIP_BATCH_INTERVAL, SHORT_STEPPING_TIMEOUT)
+        .await?;
+    eyre::ensure!(
+        portal
+            .BatchSubmitted_filter()
+            .from_block(0)
+            .query()
+            .await?
+            .is_empty(),
+        "batch was submitted before the current-tip precondition was established"
+    );
+
+    let seq = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+    let (call, inclusion_block, tx_hash) = poll_until(
+        SHORT_STEPPING_TIMEOUT,
+        Duration::from_millis(100),
+        "current-tip BatchSubmitted event",
+        || {
+            let portal = &portal;
+            let seq = &seq;
+            let l1 = &l1;
+            async move {
+                if seq.monitor_handle.is_finished() {
+                    eyre::bail!("monitor task exited before submitting the current-tip batch");
+                }
+                if seq.withdrawal_handle.is_finished() {
+                    eyre::bail!(
+                        "withdrawal processor exited before current-tip batch submission completed"
+                    );
+                }
+
+                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                let Some((_, log)) = events.first() else {
+                    return Ok(None);
+                };
+                let tx_hash = log
+                    .transaction_hash
+                    .ok_or_else(|| eyre::eyre!("BatchSubmitted log missing transaction hash"))?;
+                let (call, inclusion_block) = fetch_submit_batch_call(l1, tx_hash).await?;
+                Ok(Some((call, inclusion_block, tx_hash)))
+            }
+        },
+    )
+    .await?;
+
+    eyre::ensure!(
+        call.tempoBlockNumber == current_tip,
+        "batch did not anchor to the observed current tip: expected={current_tip}, actual={}",
+        call.tempoBlockNumber
+    );
+    eyre::ensure!(
+        call.recentTempoBlockNumber == 0,
+        "current-tip batch unexpectedly used ancestry mode"
+    );
+    eyre::ensure!(
+        inclusion_block == current_tip + 1,
+        "current-tip settlement did not land in the immediate successor block: anchor={current_tip}, inclusion={inclusion_block}"
+    );
+
+    tracing::info!(
+        %tx_hash,
+        anchor_block = call.tempoBlockNumber,
+        settlement_block = inclusion_block,
+        "Current-tip batch settled in the immediate successor block"
+    );
+
+    Ok(())
 }
 
 /// Test that batch submission works after the zone's `tempoBlockNumber` has

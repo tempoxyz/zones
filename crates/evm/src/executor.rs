@@ -4,7 +4,7 @@
 //! Unlike the Tempo L1 `TempoBlockExecutor`, this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
-use alloy_consensus::transaction::TxHashRef;
+use alloy_consensus::TxReceipt as _;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
@@ -13,25 +13,112 @@ use alloy_evm::{
     },
     eth::{EthBlockExecutor, EthTxResult},
 };
+use alloy_sol_types::{SolCall as _, SolEvent as _};
 use reth_evm::block::StateDB;
 use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
+use tempo_zone_contracts::IZoneOutbox;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::{
-    ADVANCE_TEMPO_SELECTOR, L1StorageReader, is_finalize_withdrawal_batch_calldata, tx_context,
-};
+use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{L1OverlayDB, ZoneEvm};
 
-/// Zone transaction result with metadata identifying the first system transaction of each block.
+/// The current transaction-ordering phase of a zone block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ZoneBlockPhase {
+    /// The block has not yet committed its required opening `advanceTempo` transaction.
+    AwaitingAdvanceTempo,
+    /// The block has committed `advanceTempo` and may execute ordinary transactions.
+    Executing,
+    /// The block has finalized withdrawals and cannot accept any more transactions.
+    WithdrawalsFinalized,
+}
+
+impl ZoneBlockPhase {
+    fn validate_transaction(self, tx: &TempoTxEnvelope) -> Result<Self, BlockExecutionError> {
+        if tx.subblock_proposer().is_some() {
+            return Err(BlockValidationError::msg(
+                "subblock transactions are not supported in zone blocks",
+            )
+            .into());
+        }
+
+        let tx_kind = ZoneTransactionKind::classify(tx);
+
+        match (self, tx_kind) {
+            (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempo) => Ok(Self::Executing),
+            (Self::AwaitingAdvanceTempo, _) => Err(BlockValidationError::msg(
+                "advanceTempo must be the first transaction in a zone block",
+            )
+            .into()),
+            (Self::Executing, ZoneTransactionKind::AdvanceTempo) => Err(BlockValidationError::msg(
+                "advanceTempo must only execute once per zone block",
+            )
+            .into()),
+            (Self::Executing, ZoneTransactionKind::Regular) => Ok(Self::Executing),
+            (Self::Executing, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
+                Ok(Self::WithdrawalsFinalized)
+            }
+            (Self::Executing, ZoneTransactionKind::UnexpectedSystem) => {
+                Err(BlockValidationError::msg(
+                    "system transactions after advanceTempo must call \
+                     ZoneOutbox.finalizeWithdrawalBatch",
+                )
+                .into())
+            }
+            (Self::WithdrawalsFinalized, _) => Err(BlockValidationError::msg(
+                "finalizeWithdrawalBatch must be the last transaction in a zone block",
+            )
+            .into()),
+        }
+    }
+
+    /// Commit a successfully executed transition without allowing stale results to regress phase.
+    fn advance_to(&mut self, next: Self) {
+        *self = (*self).max(next);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZoneTransactionKind {
+    AdvanceTempo,
+    Regular,
+    FinalizeWithdrawalBatch,
+    UnexpectedSystem,
+}
+
+impl ZoneTransactionKind {
+    fn classify(tx: &TempoTxEnvelope) -> Self {
+        if !tx.is_system_tx() {
+            return Self::Regular;
+        }
+
+        if tx.calls().any(|(kind, input)| {
+            kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
+        }) {
+            return Self::AdvanceTempo;
+        }
+
+        if tx.calls().any(|(kind, input)| {
+            kind.to() == Some(&ZONE_OUTBOX_ADDRESS)
+                && input.starts_with(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR)
+        }) {
+            return Self::FinalizeWithdrawalBatch;
+        }
+
+        Self::UnexpectedSystem
+    }
+}
+
+/// Zone transaction result with the block phase to apply if the result is committed.
 #[derive(Debug)]
 pub struct ZoneTxResult<H, T> {
     inner: EthTxResult<H, T>,
-    is_advance_tempo: bool,
+    next_phase: ZoneBlockPhase,
 }
 
 impl<H, T> TxResult for ZoneTxResult<H, T>
@@ -52,12 +139,13 @@ where
 
 /// Simplified block executor for zone nodes.
 ///
-/// Enforces the single successful block-opening `advanceTempo` system transaction, then delegates
-/// ordinary execution to [`EthBlockExecutor`] without Tempo subblock validation, gas-section
-/// tracking, or end-of-block metadata requirements.
+/// Enforces the successful block-opening `advanceTempo` system transaction and same-block
+/// finalization of requested withdrawals, then delegates ordinary execution to
+/// [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or end-of-block
+/// metadata requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
-    has_advanced_tempo: bool,
+    phase: ZoneBlockPhase,
 }
 
 impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
@@ -79,7 +167,7 @@ where
                 chain_spec,
                 TempoReceiptBuilder::default(),
             ),
-            has_advanced_tempo: false,
+            phase: ZoneBlockPhase::AwaitingAdvanceTempo,
         }
     }
 }
@@ -96,6 +184,16 @@ where
     type Result = ZoneTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        if self
+            .inner
+            .ctx
+            .withdrawals
+            .as_ref()
+            .is_some_and(|withdrawals| !withdrawals.is_empty())
+        {
+            return Err(BlockValidationError::msg("withdrawals are not permitted").into());
+        }
+
         self.inner.apply_pre_execution_changes()
     }
 
@@ -109,15 +207,8 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
-        // Ensure `advanceTempo` is the first transaction and reject any other system
-        // transaction except withdrawal finalization.
-        let is_advance_tempo =
-            validate_system_transaction(self.has_advanced_tempo, recovered.tx())?;
+        let next_phase = self.phase.validate_transaction(recovered.tx())?;
 
-        let _tx_context_guard = tx_context::set_current_transaction(
-            *recovered.tx().tx_hash(),
-            tx_env.fee_payer().unwrap_or(tx_env.caller),
-        );
         let result = self
             .inner
             .execute_transaction_without_commit((tx_env, recovered));
@@ -125,24 +216,43 @@ where
         self.evm_mut().clear_l1_overlay_state();
         Ok(ZoneTxResult {
             inner: result?,
-            is_advance_tempo,
+            next_phase,
         })
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
-        self.has_advanced_tempo |= output.is_advance_tempo;
+        self.phase.advance_to(output.next_phase);
         self.inner.commit_transaction(output.inner)
     }
 
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        if !self.has_advanced_tempo {
+        if self.phase == ZoneBlockPhase::AwaitingAdvanceTempo {
             return Err(BlockValidationError::msg(
                 "zone block is missing its advanceTempo system transaction",
             )
             .into());
         }
+
+        let requested_withdrawal = self
+            .inner
+            .receipts()
+            .iter()
+            .flat_map(|receipt| receipt.logs())
+            .any(|log| {
+                log.address == ZONE_OUTBOX_ADDRESS
+                    && log.topics().first()
+                        == Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
+            });
+        if requested_withdrawal && self.phase != ZoneBlockPhase::WithdrawalsFinalized {
+            return Err(BlockValidationError::msg(
+                "zone block with withdrawal requests is missing its finalizeWithdrawalBatch \
+                 system transaction",
+            )
+            .into());
+        }
+
         self.inner.finish()
     }
 
@@ -159,66 +269,44 @@ where
     }
 }
 
-fn validate_system_transaction(
-    has_advanced_tempo: bool,
-    tx: &TempoTxEnvelope,
-) -> Result<bool, BlockExecutionError> {
-    let is_advance_tempo = tx.is_system_tx()
-        && tx.calls().any(|(kind, input)| {
-            kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
-        });
-
-    if !has_advanced_tempo {
-        return if is_advance_tempo {
-            Ok(true)
-        } else {
-            Err(BlockValidationError::msg(
-                "advanceTempo must be the first transaction in a zone block",
-            )
-            .into())
-        };
-    }
-
-    if is_advance_tempo {
-        return Err(BlockValidationError::msg(
-            "advanceTempo must only execute once per zone block",
-        )
-        .into());
-    }
-
-    if tx.is_system_tx()
-        && !tx.calls().any(|(kind, input)| {
-            kind.to() == Some(&ZONE_OUTBOX_ADDRESS) && is_finalize_withdrawal_batch_calldata(input)
-        })
-    {
-        return Err(BlockValidationError::msg(
-            "system transactions after advanceTempo must call ZoneOutbox.finalizeWithdrawalBatch",
-        )
-        .into());
-    }
-
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
-        validate_system_transaction,
+        ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneBlockExecutor,
+        ZoneBlockPhase, ZoneTransactionKind,
     };
 
-    use alloy_consensus::{Signed, TxLegacy};
-    use alloy_primitives::{Address, Bytes, Signature, U256};
-    use alloy_sol_types::SolCall;
+    use alloy_consensus::{Header, Signed, TxLegacy};
+    use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
+    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256, keccak256};
+    use alloy_rlp::Encodable as _;
+    use alloy_sol_types::{SolCall, SolEvent};
+    use reth_chainspec::EthChainSpec as _;
+    use reth_primitives_traits::Recovered;
+    use revm::database::{CacheDB, EmptyDB};
+    use tempo_chainspec::{hardfork::TempoHardfork, spec::DEV};
+    use tempo_evm::TempoBlockExecutionCtx;
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
         storage::{ContractStorage, Handler, StorageCtx, hashmap::HashMapStorageProvider},
         test_util::TIP20Setup,
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
-    use tempo_primitives::{TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE};
+    use tempo_primitives::{
+        TempoHeader, TempoReceipt, TempoTxEnvelope, TempoTxType,
+        subblock::TEMPO_SUBBLOCK_NONCE_KEY_PREFIX,
+        transaction::{
+            Call, TempoSignature, TempoTransaction,
+            envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
+        },
+    };
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
-    use tempo_zone_contracts::IZoneOutbox;
+    use tempo_zone_contracts::{ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox};
+    use zone_chainspec::ZoneChainSpec;
+    use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
+    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, zone_chain_id};
+
+    use crate::ZoneEvmFactory;
 
     fn system_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
         TempoTxEnvelope::Legacy(Signed::new_unhashed(
@@ -231,48 +319,15 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn discarded_advance_tempo_does_not_change_committed_ordering_state() {
-        let advance_tempo = system_tx(
+    fn advance_tempo_tx() -> TempoTxEnvelope {
+        system_tx(
             ZONE_INBOX_ADDRESS,
             Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
-        );
-        let mut has_advanced_tempo = false;
-
-        // Execution returns the marker but must not mutate committed state.
-        assert!(validate_system_transaction(has_advanced_tempo, &advance_tempo).unwrap());
-        assert!(!has_advanced_tempo);
-
-        // Only committing the result records the opening transaction.
-        has_advanced_tempo |=
-            validate_system_transaction(has_advanced_tempo, &advance_tempo).unwrap();
-        assert!(has_advanced_tempo);
+        )
     }
 
-    #[test]
-    fn advance_tempo_ordering_errors_are_reported() {
-        let advance_tempo = system_tx(
-            ZONE_INBOX_ADDRESS,
-            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
-        );
-        let ordinary = system_tx(Address::ZERO, Bytes::new());
-
-        let missing_first = validate_system_transaction(false, &ordinary).unwrap_err();
-        assert_eq!(
-            missing_first.to_string(),
-            "advanceTempo must be the first transaction in a zone block"
-        );
-
-        let duplicate = validate_system_transaction(true, &advance_tempo).unwrap_err();
-        assert_eq!(
-            duplicate.to_string(),
-            "advanceTempo must only execute once per zone block"
-        );
-    }
-
-    #[test]
-    fn only_withdrawal_finalization_system_transactions_are_allowed_after_advance_tempo() {
-        let finalize = system_tx(
+    fn finalize_withdrawal_batch_tx() -> TempoTxEnvelope {
+        system_tx(
             ZONE_OUTBOX_ADDRESS,
             IZoneOutbox::finalizeWithdrawalBatchCall {
                 count: U256::ZERO,
@@ -281,8 +336,108 @@ mod tests {
             }
             .abi_encode()
             .into(),
+        )
+    }
+
+    fn withdrawal_requested_receipt(address: Address) -> TempoReceipt {
+        let event = IZoneOutbox::WithdrawalRequested {
+            withdrawalIndex: 0,
+            sender: Address::repeat_byte(0x11),
+            token: Address::repeat_byte(0x22),
+            to: Address::repeat_byte(0x33),
+            amount: 1,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackNonce: 1,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        };
+        TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success: true,
+            cumulative_gas_used: 0,
+            logs: vec![Log {
+                address,
+                data: event.encode_log_data(),
+            }],
+        }
+    }
+
+    fn ordinary_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                to: to.into(),
+                input,
+                ..Default::default()
+            },
+            Signature::test_signature(),
+        ))
+    }
+
+    fn subblock_tx() -> TempoTxEnvelope {
+        let mut nonce_key = [0u8; 32];
+        nonce_key[0] = TEMPO_SUBBLOCK_NONCE_KEY_PREFIX;
+
+        TempoTxEnvelope::AA(
+            TempoTransaction {
+                calls: vec![Call {
+                    to: Address::ZERO.into(),
+                    value: U256::ZERO,
+                    input: Bytes::new(),
+                }],
+                nonce_key: U256::from_be_bytes(nonce_key),
+                ..Default::default()
+            }
+            .into_signed(TempoSignature::from(Signature::test_signature())),
+        )
+    }
+
+    #[test]
+    fn discarded_advance_tempo_does_not_change_committed_ordering_state() {
+        let advance_tempo = advance_tempo_tx();
+        let mut phase = ZoneBlockPhase::AwaitingAdvanceTempo;
+
+        let next_phase = phase.validate_transaction(&advance_tempo).unwrap();
+        assert_eq!(phase, ZoneBlockPhase::AwaitingAdvanceTempo);
+        assert_eq!(next_phase, ZoneBlockPhase::Executing);
+
+        // Only committing the result records the opening transaction.
+        phase.advance_to(next_phase);
+        assert_eq!(phase, ZoneBlockPhase::Executing);
+    }
+
+    #[test]
+    fn advance_tempo_ordering_errors_are_reported() {
+        let advance_tempo = advance_tempo_tx();
+        let ordinary = system_tx(Address::ZERO, Bytes::new());
+
+        let missing_first = ZoneBlockPhase::AwaitingAdvanceTempo
+            .validate_transaction(&ordinary)
+            .unwrap_err();
+        assert_eq!(
+            missing_first.to_string(),
+            "advanceTempo must be the first transaction in a zone block"
         );
-        assert!(!validate_system_transaction(true, &finalize).unwrap());
+
+        let duplicate = ZoneBlockPhase::Executing
+            .validate_transaction(&advance_tempo)
+            .unwrap_err();
+        assert_eq!(
+            duplicate.to_string(),
+            "advanceTempo must only execute once per zone block"
+        );
+    }
+
+    #[test]
+    fn only_withdrawal_finalization_system_transactions_are_allowed_after_advance_tempo() {
+        let finalize = finalize_withdrawal_batch_tx();
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
+        );
 
         let setter = system_tx(
             ZONE_OUTBOX_ADDRESS,
@@ -292,7 +447,9 @@ mod tests {
             .abi_encode()
             .into(),
         );
-        let error = validate_system_transaction(true, &setter).unwrap_err();
+        let error = ZoneBlockPhase::Executing
+            .validate_transaction(&setter)
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
             "system transactions after advanceTempo must call \
@@ -303,21 +460,369 @@ mod tests {
             ZONE_OUTBOX_ADDRESS,
             Bytes::copy_from_slice(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR),
         );
-        let error = validate_system_transaction(true, &malformed_finalize).unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "system transactions after advanceTempo must call \
-             ZoneOutbox.finalizeWithdrawalBatch"
+            ZoneBlockPhase::Executing
+                .validate_transaction(&malformed_finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
+        );
+
+        let mut trailing_calldata = IZoneOutbox::finalizeWithdrawalBatchCall {
+            count: U256::ZERO,
+            blockNumber: 1,
+            encryptedSenders: vec![],
+        }
+        .abi_encode();
+        trailing_calldata.extend_from_slice(&[0; 32]);
+        let trailing_finalize = system_tx(ZONE_OUTBOX_ADDRESS, trailing_calldata.into());
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&trailing_finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
         );
     }
 
     #[test]
+    fn malformed_t11_finalization_does_not_advance_block_phase() {
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+        let factory =
+            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let mut env = EvmEnv::default();
+        env.cfg_env.spec = TempoHardfork::T11;
+        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
+        let ctx = TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: None,
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(1),
+                slot_number: None,
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        executor.phase = ZoneBlockPhase::Executing;
+
+        let tx = Recovered::new_unchecked(
+            system_tx(
+                ZONE_OUTBOX_ADDRESS,
+                Bytes::copy_from_slice(&IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR),
+            ),
+            TEMPO_SYSTEM_TX_SENDER,
+        );
+        let error = executor.execute_transaction_without_commit(tx).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("system transaction execution failed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(executor.phase, ZoneBlockPhase::Executing);
+    }
+
+    #[test]
     fn ordinary_transactions_are_allowed_after_advance_tempo() {
-        let ordinary = TempoTxEnvelope::Legacy(Signed::new_unhashed(
-            TxLegacy::default(),
-            Signature::test_signature(),
-        ));
-        assert!(!validate_system_transaction(true, &ordinary).unwrap());
+        let ordinary = ordinary_tx(Address::ZERO, Bytes::new());
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&ordinary)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+    }
+
+    #[test]
+    fn withdrawal_requests_require_same_block_finalization() {
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+        let factory =
+            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
+        let ctx = TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: None,
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(1),
+                slot_number: None,
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        executor.phase = ZoneBlockPhase::Executing;
+        executor
+            .inner
+            .receipts
+            .push(withdrawal_requested_receipt(ZONE_OUTBOX_ADDRESS));
+
+        let error = match executor.finish() {
+            Ok(_) => panic!("withdrawal request block without finalization was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "zone block with withdrawal requests is missing its finalizeWithdrawalBatch system \
+             transaction"
+        );
+    }
+
+    #[test]
+    fn subblock_transactions_are_rejected_in_every_block_phase() {
+        let subblock = subblock_tx();
+        assert!(subblock.subblock_proposer().is_some());
+
+        for phase in [
+            ZoneBlockPhase::AwaitingAdvanceTempo,
+            ZoneBlockPhase::Executing,
+            ZoneBlockPhase::WithdrawalsFinalized,
+        ] {
+            let error = phase.validate_transaction(&subblock).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "subblock transactions are not supported in zone blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn withdrawal_finalization_is_the_last_transaction() {
+        let finalize = finalize_withdrawal_batch_tx();
+        let ordinary = ordinary_tx(Address::ZERO, Bytes::new());
+        let advance_tempo = advance_tempo_tx();
+        let mut phase = ZoneBlockPhase::Executing;
+
+        let next_phase = phase.validate_transaction(&finalize).unwrap();
+        assert_eq!(phase, ZoneBlockPhase::Executing);
+
+        phase.advance_to(next_phase);
+        for tx in [&ordinary, &finalize, &advance_tempo] {
+            let error = phase.validate_transaction(tx).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "finalizeWithdrawalBatch must be the last transaction in a zone block"
+            );
+        }
+    }
+
+    #[test]
+    fn zone_block_phase_transition_table_is_exhaustive() {
+        let advance = advance_tempo_tx();
+        let regular = ordinary_tx(Address::ZERO, Bytes::new());
+        let finalize = finalize_withdrawal_batch_tx();
+        let unexpected_system = system_tx(Address::ZERO, Bytes::new());
+
+        assert_eq!(
+            ZoneBlockPhase::AwaitingAdvanceTempo
+                .validate_transaction(&advance)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+        for tx in [&regular, &finalize, &unexpected_system] {
+            assert_eq!(
+                ZoneBlockPhase::AwaitingAdvanceTempo
+                    .validate_transaction(tx)
+                    .unwrap_err()
+                    .to_string(),
+                "advanceTempo must be the first transaction in a zone block"
+            );
+        }
+
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&regular)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&finalize)
+                .unwrap(),
+            ZoneBlockPhase::WithdrawalsFinalized
+        );
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&advance)
+                .unwrap_err()
+                .to_string(),
+            "advanceTempo must only execute once per zone block"
+        );
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&unexpected_system)
+                .unwrap_err()
+                .to_string(),
+            "system transactions after advanceTempo must call \
+             ZoneOutbox.finalizeWithdrawalBatch"
+        );
+
+        for tx in [&advance, &regular, &finalize, &unexpected_system] {
+            assert_eq!(
+                ZoneBlockPhase::WithdrawalsFinalized
+                    .validate_transaction(tx)
+                    .unwrap_err()
+                    .to_string(),
+                "finalizeWithdrawalBatch must be the last transaction in a zone block"
+            );
+        }
+    }
+
+    #[test]
+    fn discarded_finalization_and_stale_results_do_not_regress_phase() {
+        let finalize = finalize_withdrawal_batch_tx();
+        let ordinary = ordinary_tx(Address::ZERO, Bytes::new());
+        let mut phase = ZoneBlockPhase::Executing;
+
+        let ordinary_phase = phase.validate_transaction(&ordinary).unwrap();
+        let finalized_phase = phase.validate_transaction(&finalize).unwrap();
+        assert_eq!(phase, ZoneBlockPhase::Executing);
+
+        phase.advance_to(finalized_phase);
+        phase.advance_to(ordinary_phase);
+        assert_eq!(phase, ZoneBlockPhase::WithdrawalsFinalized);
+    }
+
+    #[test]
+    fn non_system_selector_lookalikes_are_regular_transactions() {
+        let advance_lookalike = ordinary_tx(
+            ZONE_INBOX_ADDRESS,
+            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
+        );
+        let finalize_lookalike = ordinary_tx(
+            ZONE_OUTBOX_ADDRESS,
+            IZoneOutbox::finalizeWithdrawalBatchCall {
+                count: U256::ZERO,
+                blockNumber: 1,
+                encryptedSenders: vec![],
+            }
+            .abi_encode()
+            .into(),
+        );
+
+        assert_eq!(
+            ZoneTransactionKind::classify(&advance_lookalike),
+            ZoneTransactionKind::Regular
+        );
+        assert_eq!(
+            ZoneTransactionKind::classify(&finalize_lookalike),
+            ZoneTransactionKind::Regular
+        );
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&advance_lookalike)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+        assert_eq!(
+            ZoneBlockPhase::Executing
+                .validate_transaction(&finalize_lookalike)
+                .unwrap(),
+            ZoneBlockPhase::Executing
+        );
+    }
+
+    #[test]
+    fn reverted_advance_tempo_does_not_satisfy_block_guard() {
+        let genesis = TempoHeader::default();
+        let mut genesis_rlp = Vec::new();
+        genesis.encode(&mut genesis_rlp);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let child = TempoHeader {
+            inner: Header {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut child_rlp = Vec::new();
+        child.encode(&mut child_rlp);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_storage(
+            TEMPO_STATE_ADDRESS,
+            U256::ZERO,
+            U256::from_be_bytes(genesis_hash.0),
+        )
+        .unwrap();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
+            .unwrap();
+        let mut zone_genesis = DEV.genesis().clone();
+        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
+        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+        let factory =
+            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let evm = factory.create_evm(db, EvmEnv::default());
+        let ctx = TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: None,
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(1),
+                slot_number: None,
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+
+        // The header is the valid next checkpoint, but a decryption entry without an encrypted
+        // deposit makes the Inbox precompile revert after attempting the checkpoint transition.
+        let calldata = IZoneInbox::advanceTempoCall {
+            header: child_rlp.into(),
+            deposits: Vec::new(),
+            decryptions: vec![DecryptionData {
+                sharedSecret: B256::ZERO,
+                sharedSecretYParity: 2,
+                cpProof: ChaumPedersenProof {
+                    s: B256::ZERO,
+                    c: B256::ZERO,
+                },
+            }],
+            enabledTokens: Vec::new(),
+        }
+        .abi_encode();
+        let tx = Recovered::new_unchecked(
+            system_tx(ZONE_INBOX_ADDRESS, calldata.into()),
+            TEMPO_SYSTEM_TX_SENDER,
+        );
+        let error = executor.execute_transaction_without_commit(tx).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("system transaction execution failed"),
+            "unexpected error: {error}"
+        );
+        let finish_error = match executor.finish() {
+            Ok(_) => panic!("reverted advanceTempo unexpectedly satisfied the block guard"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            finish_error.to_string(),
+            "zone block is missing its advanceTempo system transaction"
+        );
     }
 
     #[test]

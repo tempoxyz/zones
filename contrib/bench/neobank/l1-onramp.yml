@@ -45,7 +45,7 @@ templates:
     call:
       to: "${L1_PORTAL_ADDRESS}"
       abi: ZonePortal
-      function: "depositEncrypted(address,uint128,uint256,(bytes32,uint8,bytes,bytes12,bytes16),address)"
+      function: "deposit(address,uint128,uint256,(bytes32,uint8,bytes,bytes12,bytes16),address)"
       args:
         - "${ZONES_BENCH_TOKEN}"
         - ${ZONES_BENCH_DEPOSIT_AMOUNT}

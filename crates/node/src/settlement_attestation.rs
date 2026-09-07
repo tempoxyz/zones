@@ -1,6 +1,6 @@
 //! Batch-boundary settlement attestation construction and leader-side proposal recovery.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
@@ -23,6 +23,9 @@ use zone_p2p::P2pCommand;
 use crate::replication::AttestationContext;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
+/// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
+const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Check the manifest's settlement quorum against `ZonePortal` before any role task starts.
 ///
 /// A quorum node the portal has not registered can never settle, and an unreachable threshold
@@ -31,48 +34,62 @@ use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttesta
 /// Extra registered signers only warn: deregistering is a cleanup task, and failing on it would
 /// make every membership change a window in which no node can start.
 ///
-/// Skipped when no portal is deployed yet, matching `seed_leadership_schedule`: a zone whose
-/// creation block has not replayed has nothing to reconcile against.
+/// A configured portal must already be deployed at the current L1 tip. The persisted Zone genesis
+/// anchor may still predate portal deployment so the creation block can be replayed; this live-tip
+/// check is deliberately independent of that historical anchor.
 pub(crate) async fn validate_registered_sequencer_set(
     manifest: &zone_p2p::ZoneManifest,
     portal_address: alloy_primitives::Address,
     l1_provider: &alloy_provider::DynProvider<tempo_alloy::TempoNetwork>,
-) -> eyre::Result<()> {
-    // No portal configured (dev and test harnesses) means there is nothing to reconcile against.
+) -> eyre::Result<Option<u64>> {
+    // Programmatic synthetic test harnesses use zero to mean no Portal; the production CLI
+    // rejects a zero address before node launch.
     if portal_address.is_zero() {
         info!(target: "zone::p2p", "No ZonePortal configured; skipping the manifest quorum check");
-        return Ok(());
+        return Ok(None);
     }
     let portal_code = l1_provider
         .get_code_at(portal_address)
         .await
         .map_err(|err| eyre::eyre!("failed to check portal {portal_address} deployment: {err}"))?;
-    if portal_code.is_empty() {
-        info!(
-            target: "zone::p2p",
-            %portal_address,
-            "Portal is not deployed yet; skipping the manifest quorum check"
-        );
-        return Ok(());
-    }
+    eyre::ensure!(
+        !portal_code.is_empty(),
+        "ZonePortal {portal_address} is not deployed at the current L1 tip; refusing to start P2P before its sequencer set can be validated"
+    );
 
     // Read at the chain tip rather than the finalized head: a fresh or local L1 may have no
     // finalized block at all, and an unfinalized registration satisfying this check early is
     // harmless for a startup sanity check.
     let portal = ZonePortal::new(portal_address, l1_provider);
     let quorum: Vec<_> = manifest.quorum_nodes().collect();
-    let threshold_call = portal.sequencerThreshold();
-    let count_call = portal.sequencerCount();
-    let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
-        let (name, address) = (node.name(), *address);
-        let call = portal.isSequencer(address);
-        async move { call.call().await.map(|ok| (name, address, ok)) }
-    }));
-    let (threshold, registered_count, registered) =
-        tokio::try_join!(threshold_call.call(), count_call.call(), registered)
-            .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+    let (sequencer_set_version, threshold, registered_count) = l1_provider
+        .multicall()
+        .add(portal.sequencerSetVersion())
+        .add(portal.sequencerThreshold())
+        .add(portal.sequencerCount())
+        .aggregate()
+        .await
+        .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+    let mut registration_calls = l1_provider.multicall().dynamic();
+    for (_, address) in &quorum {
+        registration_calls = registration_calls.add_dynamic(portal.isSequencer(*address));
+    }
+    let registered = registration_calls
+        .aggregate()
+        .await
+        .wrap_err("failed reading the registered sequencers from ZonePortal")?;
+    let validated_version = portal
+        .sequencerSetVersion()
+        .call()
+        .await
+        .wrap_err("failed re-reading the ZonePortal sequencer-set version")?;
+    eyre::ensure!(
+        validated_version == sequencer_set_version,
+        "ZonePortal sequencer set changed during startup validation ({sequencer_set_version} -> {validated_version})"
+    );
 
-    for (name, address, is_registered) in registered {
+    for ((node, address), is_registered) in quorum.iter().zip(registered) {
+        let name = node.name();
         eyre::ensure!(
             is_registered,
             "manifest quorum node `{name}` ({address}) is not a registered ZonePortal sequencer"
@@ -92,8 +109,8 @@ pub(crate) async fn validate_registered_sequencer_set(
         );
     }
 
-    info!(target: "zone::p2p", threshold, quorum_nodes = quorum.len(), "Checked the manifest quorum against ZonePortal");
-    Ok(())
+    info!(target: "zone::p2p", threshold, sequencer_set_version, quorum_nodes = quorum.len(), "Checked the manifest quorum against ZonePortal");
+    Ok(Some(sequencer_set_version))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -203,21 +220,16 @@ where
         previous_batch(provider, number)?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
-    let set_version_call = portal.sequencerSetVersion();
-    let portal_batch_index_call = portal.withdrawalBatchIndex();
-    let verifier_call = portal.verifier();
-    let portal_tip_call = portal.blockHash();
-    let (set_version, portal_batch_index, verifier, portal_tip) = tokio::try_join!(
-        set_version_call.call(),
-        portal_batch_index_call.call(),
-        verifier_call.call(),
-        portal_tip_call.call(),
-    )?;
-    eyre::ensure!(
-        set_version == context.domain.sequencer_set_version,
-        "portal signer-set version {set_version} does not match manifest version {}",
-        context.domain.sequencer_set_version
-    );
+    let (set_version, portal_batch_index, verifier, portal_tip) = context
+        .l1_provider
+        .multicall()
+        .add(portal.sequencerSetVersion())
+        .add(portal.withdrawalBatchIndex())
+        .add(portal.verifier())
+        .add(portal.blockHash())
+        .aggregate()
+        .await?;
+    validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
     eyre::ensure!(
         portal_tip == previous_tip,
         "proposal does not extend the portal batch tip"
@@ -279,6 +291,19 @@ where
     }))
 }
 
+fn validate_sequencer_set_version(
+    pinned_version: Option<u64>,
+    live_version: u64,
+) -> eyre::Result<()> {
+    if let Some(pinned_version) = pinned_version {
+        eyre::ensure!(
+            live_version == pinned_version,
+            "portal signer-set version {live_version} does not match startup-pinned version {pinned_version}"
+        );
+    }
+    Ok(())
+}
+
 /// Verify that the proposed Tempo and anchor endpoints are canonical and that the anchor remains
 /// available through EIP-2935. The prover verifies the full ancestry between those endpoints.
 async fn validate_settlement_anchor(
@@ -288,21 +313,13 @@ async fn validate_settlement_anchor(
     anchor_block_number: u64,
     anchor_block_hash: B256,
 ) -> eyre::Result<()> {
-    eyre::ensure!(
-        anchor_block_number >= tempo_block_number,
-        "proposed L1 anchor predates the zone batch's Tempo block"
-    );
-
     let current_l1_block = context.l1_provider.get_block_number().await?;
-    eyre::ensure!(
-        anchor_block_number < current_l1_block,
-        "proposed L1 anchor is not yet available through EIP-2935"
-    );
-    eyre::ensure!(
-        current_l1_block.saturating_sub(anchor_block_number)
-            < context.anchor_config.history_window(),
-        "proposed L1 anchor fell outside the EIP-2935 history window"
-    );
+    validate_settlement_anchor_height(
+        tempo_block_number,
+        anchor_block_number,
+        current_l1_block,
+        context.anchor_config.history_window(),
+    )?;
 
     let anchor_header = context
         .l1_provider
@@ -332,6 +349,27 @@ async fn validate_settlement_anchor(
     Ok(())
 }
 
+fn validate_settlement_anchor_height(
+    tempo_block_number: u64,
+    anchor_block_number: u64,
+    current_l1_block: u64,
+    history_window: u64,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        anchor_block_number >= tempo_block_number,
+        "proposed L1 anchor predates the zone batch's Tempo block"
+    );
+    eyre::ensure!(
+        anchor_block_number <= current_l1_block,
+        "proposed L1 anchor is ahead of the current L1 tip"
+    );
+    eyre::ensure!(
+        current_l1_block.saturating_sub(anchor_block_number) < history_window,
+        "proposed L1 anchor fell outside the EIP-2935 history window"
+    );
+    Ok(())
+}
+
 /// Long-running async task that detects persisted batch boundaries and broadcasts settlement
 /// proposals to followers. At each boundary, it signs the proposal locally and initiates follower
 /// attestation collection; follower responses are received by the P2P sync task and inserted into
@@ -340,6 +378,7 @@ pub(crate) async fn collect_leader_settlements<P>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
     context: AttestationContext,
+    portal_confirmed_height: u64,
 ) where
     P: PersistedBlockSubscriptions
         + BlockNumReader
@@ -364,22 +403,14 @@ pub(crate) async fn collect_leader_settlements<P>(
         }
     };
 
-    let mut pending_boundary = None;
-    for number in 1..=head {
-        match propose_settlement(&provider, number, &commands, &context).await {
-            Ok(true) => {
-                pending_boundary = Some(number);
-                break;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                debug!(target: "zone::p2p", %err, number, "Skipped non-current settlement boundary during recovery")
-            }
-        }
-    }
+    // Start at the block after the portal-confirmed anchor.
+    let recovery_start = portal_confirmed_height.saturating_add(1);
+    let mut pending_boundary =
+        propose_persisted_settlement_range(&provider, &commands, &context, recovery_start, head)
+            .await;
 
     let mut last_scanned = head;
-    let mut retry = tokio::time::interval(Duration::from_secs(5));
+    let mut retry = tokio::time::interval(SETTLEMENT_RETRY_INTERVAL);
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -432,7 +463,28 @@ pub(crate) async fn collect_leader_settlements<P>(
                 let number = pending_boundary.expect("guarded by is_some");
                 match propose_settlement(&provider, number, &commands, &context).await {
                     Ok(true) => {}
-                    Ok(false) => pending_boundary = None,
+                    Ok(false) => {
+                        // The retained candidate only failed before we could determine whether it
+                        // was a boundary. Once a retry classifies it as an ordinary block, resume
+                        // the startup scan after it instead of stranding the rest of the range
+                        // behind last_scanned.
+                        let head = match provider.last_block_number() {
+                            Ok(head) => head,
+                            Err(err) => {
+                                debug!(target: "zone::p2p", %err, "Failed reading head while resuming settlement recovery");
+                                continue;
+                            }
+                        };
+                        pending_boundary = propose_persisted_settlement_range(
+                            &provider,
+                            &commands,
+                            &context,
+                            number.saturating_add(1),
+                            head,
+                        )
+                        .await;
+                        last_scanned = head;
+                    }
                     Err(err) => {
                         debug!(target: "zone::p2p", %err, height = number, "Settlement proposal retry is not currently valid");
 
@@ -492,8 +544,19 @@ async fn propose_persisted_settlement_range<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
+    scan_settlement_range(start, end, |candidate| {
+        propose_settlement(provider, candidate, commands, context)
+    })
+    .await
+}
+
+async fn scan_settlement_range<F, Fut>(start: u64, end: u64, mut propose: F) -> Option<u64>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = eyre::Result<bool>>,
+{
     for candidate in start..=end {
-        match propose_settlement(provider, candidate, commands, context).await {
+        match propose(candidate).await {
             Ok(true) => return Some(candidate),
             Ok(false) => {}
             Err(err) => {
@@ -545,7 +608,175 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_provider::{ProviderBuilder, mock::Asserter};
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tempo_alloy::TempoNetwork;
+    use zone_p2p::ZoneManifest;
     use zone_sequencer::attestation::AttestationStore;
+
+    #[test]
+    fn settlement_anchor_accepts_current_tip_and_rejects_future() {
+        validate_settlement_anchor_height(100, 100, 100, 10).unwrap();
+
+        let err = validate_settlement_anchor_height(100, 101, 100, 10).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("proposed L1 anchor is ahead of the current L1 tip")
+        );
+    }
+
+    fn test_manifest() -> ZoneManifest {
+        let public_keys = [1_u64, 2, 3].map(|seed| PrivateKey::from_seed(seed).public_key());
+        let mut input = format!(
+            "zone_id = 7\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(public_keys[0].as_ref())
+        );
+        for (index, public_key) in public_keys.iter().enumerate() {
+            let number = index + 1;
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{number}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"0x{number:040x}\"\naddress = \"127.0.0.1:{}\"\n",
+                const_hex::encode_prefixed(public_key.as_ref()),
+                9200 + index,
+            ));
+        }
+        ZoneManifest::parse(&input).expect("valid test manifest")
+    }
+
+    #[tokio::test]
+    async fn undeployed_portal_is_rejected_before_p2p_startup() {
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::new());
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let portal_address = alloy_primitives::Address::repeat_byte(0x11);
+
+        let err = validate_registered_sequencer_set(&test_manifest(), portal_address, &provider)
+            .await
+            .expect_err("an undeployed configured portal must prevent P2P startup");
+
+        assert!(
+            err.to_string().contains(&format!(
+                "ZonePortal {portal_address} is not deployed at the current L1 tip"
+            )),
+            "unexpected error: {err}"
+        );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn synthetic_test_harness_can_skip_an_unconfigured_portal() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+
+        let pinned_version = validate_registered_sequencer_set(
+            &test_manifest(),
+            alloy_primitives::Address::ZERO,
+            &provider,
+        )
+        .await
+        .expect("synthetic nodes have no configured ZonePortal");
+        assert_eq!(pinned_version, None);
+
+        assert!(
+            asserter.read_q().is_empty(),
+            "the zero-address test bypass must not issue an L1 request"
+        );
+    }
+
+    #[test]
+    fn settlement_rejects_runtime_sequencer_set_rotation() {
+        validate_sequencer_set_version(Some(7), 7).expect("unchanged version must remain valid");
+        let err = validate_sequencer_set_version(Some(7), 8)
+            .expect_err("runtime rotation must fail closed");
+        assert!(err.to_string().contains("startup-pinned version 7"));
+        validate_sequencer_set_version(None, 8)
+            .expect("synthetic nodes without a Portal have no pinned version");
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_retries_first_erroring_boundary() {
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let failed_once = failed_once.clone();
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                if number % 2 != 0 {
+                    return Ok(false);
+                }
+                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
+                    eyre::bail!("transient proposal failure");
+                }
+                Ok(number == 2)
+            }
+        };
+
+        let pending = scan_settlement_range(1, 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
+
+        let pending = scan_settlement_range(pending.unwrap(), 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2]);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_begins_after_portal_confirmed_height() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                Ok(number == 360)
+            }
+        };
+
+        let portal_confirmed_height = 240u64;
+        let pending =
+            scan_settlement_range(portal_confirmed_height.saturating_add(1), 360, propose).await;
+
+        assert_eq!(pending, Some(360));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.first(), Some(&241));
+        assert_eq!(calls.last(), Some(&360));
+        assert_eq!(calls.len(), 120);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_resumes_after_erroring_non_boundary() -> eyre::Result<()> {
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let failed_once = failed_once.clone();
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
+                    eyre::bail!("transient proposal failure");
+                }
+                Ok(number == 4)
+            }
+        };
+
+        let pending = scan_settlement_range(1, 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
+
+        let number = pending.unwrap();
+        assert!(!propose(number).await?);
+        let pending = scan_settlement_range(number.saturating_add(1), 4, propose).await;
+        assert_eq!(pending, Some(4));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2, 3, 4]);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn submission_confirmation_wakes_pending_boundary_without_retry_tick() {
@@ -564,7 +795,7 @@ mod tests {
         store.remove_submitted(2_070);
         let submitted = tokio::time::timeout(Duration::from_millis(100), waiting)
             .await
-            .expect("confirmation should wake the collector without its five-second retry")
+            .expect("confirmation should wake the collector without its fallback retry")
             .expect("submission wait task should not panic")
             .expect("submission notification channel should remain open");
         assert_eq!(submitted, 2_070);

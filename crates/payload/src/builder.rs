@@ -9,20 +9,17 @@ use crate::{
 };
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
-use alloy_evm::{
-    Evm, EvmFactory, block::BlockExecutorFactory,
-    revm::context_interface::block::Block as RevmBlock,
-};
+use alloy_evm::Evm;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
-use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
-    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes,
+    ConfigureEvm, Database, NextBlockEnvAttributes,
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput, WithTxEnv},
 };
 use reth_node_api::{FullNodeTypes, NodeTypes};
@@ -45,10 +42,11 @@ use tempo_primitives::{
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::{
-    TempoTransactionPool, transaction::TempoPooledTransaction, validator::ConfigureTempoPoolEvm,
+    StateAwareBestTransactions, TempoTransactionPool, transaction::TempoPooledTransaction,
 };
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
+use zone_evm::ZoneEvmConfig;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
@@ -112,8 +110,8 @@ impl Default for ZonePayloadFactory {
     }
 }
 
-impl<Node, EvmConfig>
-    PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider, EvmConfig>, EvmConfig>
+impl<Node>
+    PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider, ZoneEvmConfig>, ZoneEvmConfig>
     for ZonePayloadFactory
 where
     Node: FullNodeTypes,
@@ -122,22 +120,14 @@ where
             ChainSpec = ZoneChainSpec,
             Payload = ZonePayloadTypes,
         >,
-    EvmConfig: ConfigureTempoPoolEvm
-        + ConfigureEvm<
-            Primitives = tempo_primitives::TempoPrimitives,
-            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
-    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
-        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
-    BlockEnvFor<EvmConfig>: RevmBlock,
 {
-    type PayloadBuilder = ZonePayloadBuilder<Node::Provider, EvmConfig>;
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
 
     async fn build_payload_builder(
         self,
         ctx: &BuilderContext<Node>,
-        pool: TempoTransactionPool<Node::Provider, EvmConfig>,
-        evm_config: EvmConfig,
+        pool: TempoTransactionPool<Node::Provider, ZoneEvmConfig>,
+        evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
         Ok(ZonePayloadBuilder {
             pool,
@@ -153,13 +143,13 @@ where
 
 /// Zone payload builder that executes `advanceTempo` system txs + pool txs.
 #[derive(Debug, Clone)]
-pub struct ZonePayloadBuilder<Provider, EvmConfig> {
+pub struct ZonePayloadBuilder<Provider> {
     /// Transaction pool for selecting pool txs to include in the block.
-    pool: TempoTransactionPool<Provider, EvmConfig>,
+    pool: TempoTransactionPool<Provider, ZoneEvmConfig>,
     /// State provider for reading chain state during block building.
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
-    evm_config: EvmConfig,
+    evm_config: ZoneEvmConfig,
     /// Runs the background coordinator and dedicated prewarming-pool workers.
     task_executor: TaskExecutor,
     /// Total L1 fetch budget; one slot is reserved for canonical execution.
@@ -170,17 +160,9 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
 
-impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
+impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>
 where
     Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = ZoneChainSpec> + Clone + 'static,
-    EvmConfig: ConfigureTempoPoolEvm
-        + ConfigureEvm<
-            Primitives = tempo_primitives::TempoPrimitives,
-            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
-    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
-        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
-    BlockEnvFor<EvmConfig>: RevmBlock,
 {
     type Attributes = ZonePayloadAttributes;
     type BuiltPayload = TempoBuiltPayload;
@@ -228,6 +210,7 @@ where
             .build();
 
         let chain_spec = self.provider.chain_spec();
+        let chain_id = chain_spec.chain().id();
 
         let block_gas_limit = parent_header.gas_limit();
 
@@ -242,10 +225,9 @@ where
                 extra_data: attributes.extra_data(),
                 slot_number: attributes.slot_number(),
             },
-            // Zones don't use L1 gas sections. These fields are required
-            // by TempoNextBlockEnvAttributes but ignored by the zone executor.
+            // Zones don't use Tempo L1 gas sections.
             general_gas_limit: 0,
-            shared_gas_limit: block_gas_limit,
+            shared_gas_limit: 0,
             timestamp_millis_part: attributes.timestamp_millis_part(),
             consensus_context: None,
             subblock_fee_recipients: Default::default(),
@@ -254,11 +236,11 @@ where
             .evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes.clone())
             .map_err(PayloadBuilderError::other)?;
-        let base_fee = builder.evm().block().basefee();
+        let base_fee = builder.evm().block().basefee;
         let block_number: u64 = builder
             .evm()
             .block()
-            .number()
+            .number
             .try_into()
             .expect("block number fits u64");
 
@@ -279,12 +261,13 @@ where
             parent_header: (*parent_header).clone(),
             next_block_env_attributes,
             prepared: prepared.clone(),
+            chain_id,
         }
         .start();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
         builder
-            .execute_transaction(build_advance_tempo_tx(prepared))
+            .execute_transaction(build_advance_tempo_tx(prepared, chain_id))
             .map(|_| ())
             .map_err(PayloadBuilderError::evm)
             .map_err(|err| {
@@ -303,11 +286,18 @@ where
         // the size budget
         // The block executor owns gas-capacity accounting.
         let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
-        let mut best_txs = self
+        let raw_best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
+        let mut best_txs = StateAwareBestTransactions::new(raw_best_txs);
         if execute_pool_transactions(
-            |tx| builder.execute_transaction(tx).map(|_| ()),
+            |tx, best_txs| {
+                builder
+                    .execute_transaction_with_result_closure(tx, |result| {
+                        best_txs.on_new_result(result);
+                    })
+                    .map(|_| ())
+            },
             &mut best_txs,
             &cancel,
             pool_tx_size_budget,
@@ -321,6 +311,7 @@ where
             block_number,
             self.withdrawal_batch_interval_blocks,
             self.withdrawal_reveal_encryptor.as_deref(),
+            chain_id,
         )?;
 
         let BlockBuilderOutcome {
@@ -487,6 +478,7 @@ where
     T: BestTransactions<Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
     F: FnMut(
         WithTxEnv<tempo_revm::TempoTxEnv, Recovered<TempoTxEnvelope>>,
+        &mut T,
     ) -> Result<(), reth_evm::block::BlockExecutionError>,
 {
     let mut packed_tx_bytes = 0usize;
@@ -509,7 +501,7 @@ where
         }
 
         let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-        match execute_tx(tx_with_env) {
+        match execute_tx(tx_with_env, best_txs) {
             Ok(_) => packed_tx_bytes = packed_bytes_with_tx,
             Err(reth_evm::block::BlockExecutionError::Validation(
                 reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
@@ -540,7 +532,12 @@ where
             Err(reth_evm::block::BlockExecutionError::Internal(
                 reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
             )) if is_l1_storage_unavailable(error.as_ref()) => {
-                warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+                warn!(
+                    target: "zone::payload",
+                    %error,
+                    tx_hash = %pool_tx.hash(),
+                    "skipping pool tx due to transient RPC error"
+                );
             }
             Err(err) => return Err(PayloadBuilderError::evm(err)),
         }
@@ -572,6 +569,7 @@ fn finalize_withdrawal_batch_if_needed<B>(
     block_number: u64,
     interval_blocks: u64,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
+    chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
 where
     B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
@@ -594,7 +592,12 @@ where
                     ))
                 })?;
                 encryptor
-                    .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
+                    .encrypt_sender(
+                        request.revealTo.as_ref(),
+                        request.sender,
+                        request.txHash,
+                        request.fallbackNonce,
+                    )
                     .map(Bytes::from)
                     .ok_or_else(|| {
                         PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
@@ -606,7 +609,8 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     let count = U256::from(pending_withdrawals.len());
-    let finalize_tx = build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
+    let finalize_tx =
+        build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders, chain_id);
     builder
         .execute_transaction(finalize_tx)
         .map(|_| ())
@@ -636,6 +640,7 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     count: U256,
     block_number: u64,
     encrypted_senders: Vec<Bytes>,
+    chain_id: u64,
 ) -> Recovered<TempoTxEnvelope> {
     let calldata = abi::IZoneOutbox::finalizeWithdrawalBatchCall {
         count,
@@ -645,7 +650,7 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     .abi_encode();
 
     let tx = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -711,7 +716,10 @@ where
 /// Takes a [`PreparedL1Block`] where all ECIES decryption and ABI encoding have
 /// already been performed. TIP-403 policy is enforced during `advanceTempo` when
 /// the deposits mint TIP-20 tokens.
-pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEnvelope> {
+pub fn build_advance_tempo_tx(
+    prepared: &PreparedL1Block,
+    chain_id: u64,
+) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
     let mut header_rlp = Vec::new();
     prepared.header.header().encode(&mut header_rlp);
@@ -725,7 +733,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
     .abi_encode();
 
     let tx = TxLegacy {
-        chain_id: None,
+        chain_id: Some(chain_id),
         nonce: 0,
         gas_price: 0,
         gas_limit: 0,
@@ -743,7 +751,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{Header, Signed, TxLegacy};
-    use alloy_primitives::{B256, U256, address};
+    use alloy_primitives::{Address, B256, U256, address};
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
     use reth_revm::cancelled::CancelOnDrop;
@@ -865,7 +873,7 @@ mod tests {
         let cancel = CancelOnDrop::default();
 
         let outcome = super::execute_pool_transactions(
-            |_tx| -> Result<(), reth_evm::block::BlockExecutionError> {
+            |_tx, _best_txs| -> Result<(), reth_evm::block::BlockExecutionError> {
                 executed += 1;
                 Ok(())
             },
@@ -882,15 +890,12 @@ mod tests {
         assert_eq!(best_txs.oversized_marked, total - expected_fit);
     }
 
-    /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
-    /// deposit types. The calldata should include `QueuedDeposit` entries with the
-    /// correct `DepositType` discriminator and `DecryptionData` for encrypted deposits.
+    /// Verify calldata for an internal withdrawal bounce-back followed by an
+    /// encrypted user deposit.
     #[test]
-    fn test_build_advance_tempo_tx_with_encrypted_deposit() {
+    fn test_build_advance_tempo_tx_with_deposit() {
         let token = address!("0x0000000000000000000000000000000000001000");
         let sender = address!("0x0000000000000000000000000000000000001234");
-        let recipient = address!("0x0000000000000000000000000000000000005678");
-
         let header = TempoHeader {
             inner: Header {
                 number: 1,
@@ -905,28 +910,27 @@ mod tests {
             header: SealedHeader::seal_slow(header),
             queued_deposits: vec![
                 abi::QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
+                    rejected: false,
                     depositData: alloy_primitives::Bytes::from(
-                        alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
+                        alloy_sol_types::SolValue::abi_encode(&abi::WithdrawalBounceBackDeposit {
                             token,
-                            sender,
-                            to: recipient,
+                            to: Address::with_last_byte(1),
                             amount: 500_000,
-                            tempoRefundRecipient: recipient,
-                            memo: B256::ZERO,
                         }),
                     ),
                 },
                 abi::QueuedDeposit {
-                    depositType: DepositType::Encrypted,
+                    depositType: DepositType::Deposit,
+                    rejected: false,
                     depositData: alloy_primitives::Bytes::from(
-                        alloy_sol_types::SolValue::abi_encode(&abi::EncryptedDeposit {
+                        alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
                             token,
                             sender,
                             amount: 300_000,
                             tempoRefundRecipient: sender,
                             keyIndex: U256::ZERO,
-                            encrypted: abi::EncryptedDepositPayload {
+                            encrypted: abi::DepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),
                                 ephemeralPubkeyYParity: 0x02,
                                 ciphertext: vec![0xAA; 64].into(),
@@ -948,12 +952,15 @@ mod tests {
             enabled_tokens: vec![],
         };
 
-        let recovered_tx = super::build_advance_tempo_tx(&prepared);
+        let recovered_tx = super::build_advance_tempo_tx(&prepared, 1337);
 
         // Decode the calldata to verify structure.
         let envelope = recovered_tx.inner();
         let input = match envelope {
-            tempo_primitives::TempoTxEnvelope::Legacy(signed) => &signed.tx().input,
+            tempo_primitives::TempoTxEnvelope::Legacy(signed) => {
+                assert_eq!(signed.tx().chain_id, Some(1337));
+                &signed.tx().input
+            }
             _ => panic!("expected Legacy tx"),
         };
         let decoded = IZoneInbox::advanceTempoCall::abi_decode(input)
@@ -962,17 +969,17 @@ mod tests {
         // Should have 2 queued deposits
         assert_eq!(decoded.deposits.len(), 2, "should have 2 queued deposits");
 
-        // First should be Regular
+        // The internal withdrawal bounce-back keeps its dedicated discriminator.
         assert_eq!(
             decoded.deposits[0].depositType,
-            DepositType::Regular,
-            "first deposit should be Regular"
+            DepositType::WithdrawalBounceBack,
+            "first entry should be a withdrawal bounce-back"
         );
 
         // Second should be Encrypted
         assert_eq!(
             decoded.deposits[1].depositType,
-            DepositType::Encrypted,
+            DepositType::Deposit,
             "second deposit should be Encrypted"
         );
 

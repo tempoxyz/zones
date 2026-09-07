@@ -6,6 +6,7 @@ pub use IZoneOutbox::{
 };
 
 crate::sol! {
+    #[sol(abi)]
     #[derive(Debug, PartialEq, Eq)]
     contract IZoneOutbox {
         struct LastBatch {
@@ -62,11 +63,11 @@ crate::sol! {
         error TooManyWithdrawalsThisBlock();
         error InvalidRevealTo();
         error InvalidCurrentTxHash();
+        error ZeroAmountWithdrawal();
         error StaticCallNotAllowed();
 
         // -- View functions --
 
-        function config() external view returns (address);
         function tempoGasRate() external view returns (uint128);
         function maxWithdrawalsPerBlock() external view returns (uint32);
         function lastBatch() external view returns (LastBatch memory);

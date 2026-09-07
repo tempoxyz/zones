@@ -5,14 +5,10 @@
 //! cache entries through the normal Zone EVM path.
 
 use crate::build_advance_tempo_tx;
-use alloy_evm::{
-    EvmFactory,
-    block::{BlockExecutor, BlockExecutorFactory},
-    revm::context_interface::block::Block as RevmBlock,
-};
+use alloy_evm::block::BlockExecutor;
 use alloy_primitives::B256;
 use reth_errors::ProviderError;
-use reth_evm::{BlockEnvFor, ConfigureEvm, Database, execute::BlockBuilder};
+use reth_evm::{ConfigureEvm, Database, execute::BlockBuilder};
 use reth_primitives_traits::SealedHeader;
 use reth_revm::{State, cancelled::ManualCancel, database::StateProviderDatabase};
 use reth_storage_api::StateProviderFactory;
@@ -24,30 +20,25 @@ use std::{
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::DepositType;
+use zone_evm::ZoneEvmConfig;
 use zone_l1::PreparedL1Block;
 
 /// Immutable canonical inputs used to construct isolated prewarming workers.
-pub(crate) struct PrewarmingExecutionContext<Provider, EvmConfig> {
+pub(crate) struct PrewarmingExecutionContext<Provider> {
     pub(crate) provider: Provider,
-    pub(crate) evm_config: EvmConfig,
+    pub(crate) evm_config: ZoneEvmConfig,
     pub(crate) task_executor: TaskExecutor,
     pub(crate) l1_fetch_concurrency: usize,
     pub(crate) parent_hash: B256,
     pub(crate) parent_header: SealedHeader<TempoHeader>,
     pub(crate) next_block_env_attributes: TempoNextBlockEnvAttributes,
     pub(crate) prepared: PreparedL1Block,
+    pub(crate) chain_id: u64,
 }
 
-impl<Provider, EvmConfig> PrewarmingExecutionContext<Provider, EvmConfig>
+impl<Provider> PrewarmingExecutionContext<Provider>
 where
     Provider: StateProviderFactory + Clone + 'static,
-    EvmConfig: ConfigureEvm<
-            Primitives = tempo_primitives::TempoPrimitives,
-            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
-    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
-        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
-    BlockEnvFor<EvmConfig>: RevmBlock,
 {
     /// Start a bounded coordinator that dispatches deposits in canonical queue order.
     ///
@@ -88,7 +79,7 @@ where
             }
 
             // FIFO dispatch lets the cursor get the entry without scanning the queued-deposit prefix.
-            let decryptions = (deposit.depositType == DepositType::Encrypted)
+            let decryptions = (deposit.depositType == DepositType::Deposit)
                 .then(|| decryptions.next().cloned())
                 .flatten()
                 .into_iter()
@@ -133,7 +124,7 @@ where
         // that check have already warmed the shared cache, and the throwaway state is discarded.
         _ = worker
             .executor_mut()
-            .execute_transaction_without_commit(build_advance_tempo_tx(partial));
+            .execute_transaction_without_commit(build_advance_tempo_tx(partial, self.chain_id));
         Ok(())
     }
 }

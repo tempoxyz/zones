@@ -30,7 +30,7 @@ pub(crate) struct DeployRouter {
     l1_rpc_url: String,
 
     /// Private key (hex) for signing the deployment transaction.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// ZoneFactory contract address. Falls back to `zone.json`, then the shared Moderato default.
@@ -42,7 +42,7 @@ pub(crate) struct DeployRouter {
     stablecoin_dex: Address,
 
     /// Path to the Foundry compiled output directory containing contract artifacts.
-    #[arg(long, default_value = "specs/ref-impls/out")]
+    #[arg(long, default_value = "crates/contracts/out")]
     specs_out: PathBuf,
 }
 

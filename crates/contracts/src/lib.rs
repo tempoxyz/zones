@@ -6,7 +6,10 @@
 //!   accepts batch proofs, and processes withdrawals back to L1 recipients.
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes `LastBatch` state for proof generation.
-//! - **ZoneInbox**, **TempoState**, **ZoneTxContext** — Zone L2 predeploys.
+//! - **ZoneInbox** — deployed on the Zone L2. Advances finalized Tempo state, activates bridged
+//!   tokens, processes deposits, and tracks deposit queue progress.
+//! - **TempoState** — deployed on the Zone L2. Stores the finalized Tempo block checkpoint and
+//!   provides anchored Tempo storage reads to zone system execution.
 //! - **ZoneFactory** — native TIP-1091 precompile on Tempo L1.
 //! - **SwapAndDepositRouter** — deployed on Tempo L1.
 
@@ -57,14 +60,11 @@ mod tests {
     use alloy_sol_types::{SolCall, SolValue};
 
     #[test]
-    fn test_deposit_abi_encode_vs_params() {
-        let d = Deposit {
+    fn test_withdrawal_bounce_back_abi_encode_vs_params() {
+        let d = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
-            memo: B256::ZERO,
         };
 
         let encoded = d.abi_encode();
@@ -81,26 +81,24 @@ mod tests {
     }
 
     #[test]
-    fn test_queued_deposit_encoding() {
-        let deposit = Deposit {
+    fn test_queued_withdrawal_bounce_back_encoding() {
+        let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
-            memo: B256::ZERO,
         };
 
         let deposit_data = Bytes::from(deposit.abi_encode());
 
         let qd = QueuedDeposit {
-            depositType: DepositType::Regular,
+            depositType: DepositType::WithdrawalBounceBack,
+            rejected: false,
             depositData: deposit_data,
         };
 
         println!(
-            "DepositType::Regular abi_encode: {}",
-            const_hex::encode(DepositType::Regular.abi_encode())
+            "DepositType::WithdrawalBounceBack abi_encode: {}",
+            const_hex::encode(DepositType::WithdrawalBounceBack.abi_encode())
         );
         println!(
             "deposit.abi_encode() length: {}",
@@ -141,25 +139,30 @@ mod tests {
     }
 
     #[test]
-    fn test_deposit_hash_chain_matches_solidity() {
-        let deposit = Deposit {
+    fn test_withdrawal_bounce_back_hash_chain_matches_solidity() {
+        let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
-            memo: B256::ZERO,
         };
         let prev_hash = B256::ZERO;
 
-        let solidity_encoding = (DepositType::Regular, deposit.clone(), prev_hash).abi_encode();
+        let solidity_encoding = (
+            DepositType::WithdrawalBounceBack,
+            deposit.clone(),
+            prev_hash,
+        )
+            .abi_encode();
         let solidity_hash = keccak256(&solidity_encoding);
 
-        let rust_encoding = (DepositType::Regular, deposit, prev_hash).abi_encode();
+        let rust_encoding = (DepositType::WithdrawalBounceBack, deposit, prev_hash).abi_encode();
         let rust_hash = keccak256(&rust_encoding);
 
         assert_eq!(solidity_encoding, rust_encoding, "ABI encodings must match");
-        assert_eq!(solidity_hash, rust_hash, "Deposit hash chains must match");
+        assert_eq!(
+            solidity_hash, rust_hash,
+            "WithdrawalBounceBackDeposit hash chains must match"
+        );
     }
 
     #[test]
@@ -202,54 +205,33 @@ mod tests {
     }
 
     #[test]
-    fn test_router_plaintext_callback_encoding_matches_tuple() {
-        let callback = SwapAndDepositRouterPlaintextCallback {
-            token_out: address!("0x0000000000000000000000000000000000001001"),
-            target_portal: address!("0x0000000000000000000000000000000000002001"),
-            recipient: address!("0x0000000000000000000000000000000000003001"),
-            tempo_refund_recipient: address!("0x0000000000000000000000000000000000004001"),
-            memo: B256::from([0x11; 32]),
-            min_amount_out: 1234,
-        };
-
-        let tuple_encoding = (
-            false,
-            callback.token_out,
-            callback.target_portal,
-            callback.recipient,
-            callback.tempo_refund_recipient,
-            callback.memo,
-            callback.min_amount_out,
-        )
-            .abi_encode_params();
-
-        assert_eq!(callback.abi_encode(), tuple_encoding);
-    }
-
-    #[test]
     fn test_sender_tag_matches_plaintext_hash() {
         let sender = address!("0x0000000000000000000000000000000000000001");
         let tx_hash = B256::repeat_byte(0x22);
+        let fallback_nonce = 7u64;
         let plaintext = Withdrawal::authenticated_sender_plaintext(sender, tx_hash);
+        let mut tag_preimage = [0u8; 60];
+        tag_preimage[..52].copy_from_slice(&plaintext);
+        tag_preimage[52..].copy_from_slice(&fallback_nonce.to_be_bytes());
 
         assert_eq!(&plaintext[..20], sender.as_slice());
         assert_eq!(&plaintext[20..], tx_hash.as_slice());
         assert_eq!(
-            Withdrawal::sender_tag(sender, tx_hash),
-            keccak256(plaintext)
+            Withdrawal::sender_tag(sender, tx_hash, fallback_nonce),
+            keccak256(tag_preimage)
         );
     }
 
     #[test]
-    fn test_router_encrypted_callback_encoding_matches_tuple() {
-        let encrypted = EncryptedDepositPayload {
+    fn test_router_callback_encoding_matches_tuple() {
+        let encrypted = DepositPayload {
             ephemeralPubkeyX: B256::from([0x22; 32]),
             ephemeralPubkeyYParity: 0x02,
             ciphertext: Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]),
             nonce: [0x33; 12].into(),
             tag: [0x44; 16].into(),
         };
-        let callback = SwapAndDepositRouterEncryptedCallback {
+        let callback = SwapAndDepositRouterCallback {
             token_out: address!("0x0000000000000000000000000000000000001002"),
             target_portal: address!("0x0000000000000000000000000000000000002002"),
             key_index: U256::from(7),
@@ -259,7 +241,6 @@ mod tests {
         };
 
         let tuple_encoding = (
-            true,
             callback.token_out,
             callback.target_portal,
             callback.key_index,
