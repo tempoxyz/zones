@@ -108,7 +108,7 @@ impl ZoneInbox {
         let enabled_token_count = call.enabledTokens.len();
         let previous_token_count = StorageCtx
             .spec()
-            .is_t12()
+            .is_t13()
             .then(|| self.processed_enabled_token_count.read())
             .transpose()?;
         let mut next_token_enablement_hash = self.processed_token_enablement_hash.read()?;
@@ -121,7 +121,7 @@ impl ZoneInbox {
             {
                 return Err(ZoneInboxError::invalid_token_enablement_hash().into());
             }
-            // T12 adds the count cursor after zones may already have applied a historical token
+            // T13 adds the count cursor after zones may already have applied a historical token
             // prefix. Bootstrap that prefix once; afterward the hash check authenticates the
             // supplied suffix, so the stored count can advance locally.
             if previous_token_count == Some(0) {
@@ -214,7 +214,7 @@ impl ZoneInbox {
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.processed_deposit_number.write(processed_number)?;
 
-        if StorageCtx.spec().is_t12() {
+        if StorageCtx.spec().is_t13() {
             self.emit_event(TempoAdvanced {
                 tempoBlockHash: tempo_block_hash,
                 tempoBlockNumber: tempo_block_number,

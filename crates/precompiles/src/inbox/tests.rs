@@ -48,7 +48,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> eyre::Result<Self> {
-        Self::new_with_hardfork(TempoHardfork::T12)
+        Self::new_with_hardfork(TempoHardfork::T13)
     }
 
     fn new_with_hardfork(hardfork: TempoHardfork) -> eyre::Result<Self> {
@@ -420,24 +420,48 @@ fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<(
 }
 
 #[test]
-fn processed_enabled_token_count_activates_at_t12() -> eyre::Result<()> {
-    let mut harness = Harness::new_with_hardfork(TempoHardfork::T11)?;
+fn advance_tempo_headers_activates_at_t13() -> eyre::Result<()> {
+    for hardfork in [TempoHardfork::T12, TempoHardfork::T13] {
+        let mut harness = Harness::new_with_hardfork(hardfork)?;
+        let calldata = IZoneInbox::advanceTempoHeadersCall {
+            headers: vec![encode_header(&harness.child_header())],
+        }
+        .abi_encode();
+        let output = harness.call(Address::ZERO, calldata)?;
+        if hardfork == TempoHardfork::T12 {
+            assert!(output.is_revert());
+            let error = UnknownFunctionSelector::abi_decode(&output.bytes)?;
+            assert_eq!(
+                error.selector.as_slice(),
+                &IZoneInbox::advanceTempoHeadersCall::SELECTOR
+            );
+        } else {
+            assert!(output.is_success());
+        }
+        assert!(harness.l1.storage_requests().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn processed_enabled_token_count_activates_at_t13() -> eyre::Result<()> {
+    let mut harness = Harness::new_with_hardfork(TempoHardfork::T12)?;
     let calldata = IZoneInbox::processedEnabledTokenCountCall {}.abi_encode();
 
-    let pre_t12 = harness.call(ALICE, &calldata)?;
-    assert!(pre_t12.is_revert());
-    let error = UnknownFunctionSelector::abi_decode(&pre_t12.bytes)?;
+    let pre_t13 = harness.call(ALICE, &calldata)?;
+    assert!(pre_t13.is_revert());
+    let error = UnknownFunctionSelector::abi_decode(&pre_t13.bytes)?;
     assert_eq!(
         error.selector.as_slice(),
         &IZoneInbox::processedEnabledTokenCountCall::SELECTOR
     );
 
     let mut harness = Harness::new()?;
-    let t12_env = test_env(&harness.ctx);
-    let t12_precompile = ZoneInbox::create(harness.l1_state.clone(), &t12_env);
-    let post_t12 = call_precompile(
+    let t13_env = test_env(&harness.ctx);
+    let t13_precompile = ZoneInbox::create(harness.l1_state.clone(), &t13_env);
+    let post_t13 = call_precompile(
         &mut harness.ctx,
-        &t12_precompile,
+        &t13_precompile,
         ALICE,
         &calldata,
         GAS,
@@ -445,9 +469,9 @@ fn processed_enabled_token_count_activates_at_t12() -> eyre::Result<()> {
         ZONE_INBOX_ADDRESS,
         ZONE_INBOX_ADDRESS,
     )?;
-    assert!(post_t12.is_success());
+    assert!(post_t13.is_success());
     assert_eq!(
-        IZoneInbox::processedEnabledTokenCountCall::abi_decode_returns(&post_t12.bytes)?,
+        IZoneInbox::processedEnabledTokenCountCall::abi_decode_returns(&post_t13.bytes)?,
         0
     );
     Ok(())

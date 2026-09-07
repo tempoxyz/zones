@@ -46,7 +46,7 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
-    t12_zone_factory_state,
+    t13_zone_factory_state,
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -213,7 +213,7 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 }
 
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    for account in t12_zone_factory_state(owner) {
+    for account in t13_zone_factory_state(owner) {
         let storage = account.storage.map(|(slot, value)| {
             BTreeMap::from([(
                 B256::from(slot.to_be_bytes()),

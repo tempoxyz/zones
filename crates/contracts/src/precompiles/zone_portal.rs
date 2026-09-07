@@ -144,7 +144,7 @@ crate::sol! {
             uint64 lastProcessedDepositNumber
         );
 
-        /// T12 batch event with the processed enabled-token cursor.
+        /// T13 batch event with the processed enabled-token cursor.
         event BatchSubmitted(
             uint64 indexed withdrawalBatchIndex,
             uint256 indexed withdrawalQueueIndex,
@@ -334,7 +334,7 @@ crate::sol! {
             bytes[] calldata signatures
         ) external;
 
-        /// Submit a batch with the enabled-token transition. Active from T12.
+        /// Submit a batch with the enabled-token transition. Active from T13.
         function submitBatch(
             uint64 tempoBlockNumber,
             uint64 recentTempoBlockNumber,
@@ -416,11 +416,11 @@ crate::sol! {
     }
 }
 
-/// ZonePortal entries retired by the T12 hardfork.
-mod pre_t12_retired {
+/// ZonePortal entries retired by the T13 hardfork.
+mod pre_t13_retired {
     crate::sol! {
         #[sol(abi)]
-        contract ZonePortalPreT12Retired {
+        contract ZonePortalPreT13Retired {
             struct BlockTransition {
                 bytes32 prevBlockHash;
                 bytes32 nextBlockHash;
@@ -461,7 +461,7 @@ mod pre_t12_retired {
 }
 
 #[doc(hidden)]
-pub use pre_t12_retired::ZonePortalPreT12Retired;
+pub use pre_t13_retired::ZonePortalPreT13Retired;
 
 #[cfg(feature = "rpc")]
 impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
