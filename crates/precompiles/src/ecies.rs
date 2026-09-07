@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use ::aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use alloy_primitives::{Address, B256};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
@@ -15,7 +15,7 @@ use k256::{
 use tempo_zone_contracts::Withdrawal;
 
 use crate::{
-    aes_gcm::AesGcmDecrypt,
+    aes_gcm,
     chaum_pedersen::{challenge_hash, recover_point},
 };
 
@@ -148,7 +148,7 @@ pub fn decrypt_deposit(
     let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
     // AES-256-GCM decrypt
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, nonce, ciphertext, &[], tag);
+    let (plaintext, valid) = aes_gcm::decrypt(&aes_key, nonce, ciphertext, &[], tag);
     if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
         return None;
     }
@@ -396,7 +396,7 @@ pub fn decrypt_authenticated_withdrawal(
     let info = authenticated_withdrawal_hkdf_info(&eph_pubkey);
     let aes_key = hkdf_sha256(&shared_secret_x, b"authenticated-withdrawal-aes-key", &info);
 
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, &nonce, ciphertext, &[], &tag);
+    let (plaintext, valid) = aes_gcm::decrypt(&aes_key, &nonce, ciphertext, &[], &tag);
     if !valid || plaintext.len() != AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE {
         return None;
     }

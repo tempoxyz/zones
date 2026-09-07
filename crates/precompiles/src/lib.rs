@@ -51,8 +51,8 @@ macro_rules! zone_precompile {
 pub mod error;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
 
-pub mod aes_gcm;
-pub mod chaum_pedersen;
+mod aes_gcm;
+mod chaum_pedersen;
 pub mod ecies;
 pub mod outbox;
 
@@ -81,8 +81,6 @@ pub mod zone_fee_manager;
 pub mod zone_state;
 pub mod ztip20;
 
-pub use aes_gcm::AesGcmDecrypt;
-pub use chaum_pedersen::ChaumPedersenVerify;
 pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};
 pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};

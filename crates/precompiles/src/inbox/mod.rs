@@ -38,7 +38,7 @@ use tempo_zone_contracts::{
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
-    AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
+    ZonePrecompileError, ZoneResult, aes_gcm, chaum_pedersen,
     ecies::{ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, hkdf_info, hkdf_sha256},
     execution::NoCallRules,
     outbox::ZoneOutbox,
@@ -406,8 +406,8 @@ fn recover_encrypted_payload(
     decryption: &DecryptionData,
     (key_x, key_y_parity): (B256, u8),
 ) -> ZoneResult<Option<(Address, B256)>> {
-    ChaumPedersenVerify::verify_chaum_pedersen_gas()?;
-    if !ChaumPedersenVerify::verify(
+    chaum_pedersen::charge_gas()?;
+    if !chaum_pedersen::verify(
         &deposit.encrypted.ephemeralPubkeyX.0,
         deposit.encrypted.ephemeralPubkeyYParity,
         &decryption.sharedSecret.0,
@@ -427,8 +427,8 @@ fn recover_encrypted_payload(
         &deposit.sender,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
-    AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(
+    aes_gcm::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
+    let (plaintext, valid) = aes_gcm::decrypt(
         &key,
         &deposit.encrypted.nonce.0,
         &deposit.encrypted.ciphertext,
