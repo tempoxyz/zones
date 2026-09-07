@@ -104,19 +104,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             let url = url
                 .parse()
                 .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
-            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
-                .map_err(|error| {
-                    eyre::eyre!(
-                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
-                    )
-                })?
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
-            eyre::ensure!(
-                !portal_address.is_zero(),
-                "L1_PORTAL_ADDRESS must be nonzero"
-            );
-            Some((url, portal_address))
+            Some(url)
         }
         Ok(_) | Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
@@ -214,14 +202,15 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 }
 
 /// Creates the EVM config used by CLI subcommands.
-fn cli_evm_config(
-    chain_spec: Arc<ZoneChainSpec>,
-    l1_config: Option<(url::Url, Address)>,
-) -> ZoneEvmConfig {
-    let Some((l1_rpc_url, portal_address)) = l1_config else {
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_config: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_config else {
         return ZoneEvmConfig::new_without_l1(chain_spec);
     };
 
+    // Offline commands such as re-execute already load the canonical genesis.
+    // Its chain ID encodes the Zone ID, so a separate portal override can only
+    // introduce drift (e.g. after a devnet reset). Use TIP-1091's mapping.
+    let portal_address = tempo_precompiles::zone_factory::portal_address(chain_spec.zone_id());
     let cache = L1StateCache::default();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_http(l1_rpc_url)
@@ -664,6 +653,40 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[tokio::test]
+    async fn replay_portal_follows_the_loaded_chain_spec() {
+        use alloy_evm::{Evm, EvmFactory};
+        use alloy_primitives::address;
+        use reth_chainspec::EthChainSpec as _;
+        use reth_evm::ConfigureEvm;
+        use tempo_chainspec::spec::DEV;
+        use zone_primitives::constants::zone_chain_id;
+
+        // Cover both production encodings and a custom dev L1 without changing
+        // process-wide environment or contacting an L1 RPC endpoint.
+        for parent in [4217, 42431, 31318] {
+            for (zone_id, expected) in [
+                (7, address!("5AD0000000000000000000000000000000000007")),
+                (8, address!("5AD0000000000000000000000000000000000008")),
+            ] {
+                let mut genesis = DEV.genesis().clone();
+                genesis.config.chain_id = zone_chain_id(parent, zone_id).unwrap();
+                let spec = super::ZoneChainSpec::from_genesis_with_l1(genesis, &DEV).unwrap();
+                let config = super::cli_evm_config(
+                    std::sync::Arc::new(spec),
+                    Some("http://127.0.0.1:1".parse().unwrap()),
+                );
+                let evm = config
+                    .evm_factory()
+                    .create_evm(revm::database::EmptyDB::default(), Default::default());
+                assert_eq!(
+                    evm.ctx().journaled_state.database.l1_state().portal(),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
