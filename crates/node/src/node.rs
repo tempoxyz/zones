@@ -99,8 +99,8 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ShadowProverConfig,
-    WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
+    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorInput,
+    ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
     spawn_proof_collector, spawn_shadow_prover, spawn_zone_sequencer,
 };
 
@@ -744,6 +744,7 @@ where
 
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
+        let mut legacy_engine = None;
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
             Some(
                 Self::start_p2p(
@@ -773,7 +774,7 @@ where
             if let Some(ref config) = self.sequencer_config {
                 // Legacy single-sequencer mode keeps the static engine.
                 let sequencer_addr = config.sequencer_signer.address();
-                self.spawn_zone_engine(&ctx, sequencer_addr)?;
+                legacy_engine = Some(self.build_zone_engine(&ctx, sequencer_addr)?);
             }
             None
         };
@@ -964,6 +965,26 @@ where
             );
         } else if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
+            let anchor = zone_sequencer::resolve_portal_zone_anchor(
+                &provider,
+                self.portal_address,
+                &l1_provider,
+            )
+            .await?;
+            let (collector, collector_task) = spawn_proof_collector(
+                proof_collector_config,
+                provider.clone(),
+                l1_provider.clone(),
+                anchor.block_number,
+                tokio_util::sync::CancellationToken::new(),
+            )?;
+            task_executor.spawn_critical_task("zone-proof-collector", async move {
+                let _ = collector_task.await;
+            });
+            let engine = legacy_engine
+                .expect("legacy sequencer builds an engine")
+                .with_proof_collector(collector.clone());
+            task_executor.spawn_critical_task("zone-engine", engine.run());
 
             Self::launch_sequencer_tasks(
                 config,
@@ -975,7 +996,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
-                Some(proof_collector_config),
+                Some(ProofCollectorInput::Running(collector)),
                 prover_config,
             )
             .await?;
@@ -1525,12 +1546,12 @@ where
         Ok(())
     }
 
-    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
-    fn spawn_zone_engine(
+    /// Build the engine; start it once the proof collector is available.
+    fn build_zone_engine(
         &self,
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<ZoneEngine> {
         let provider = ctx.node.provider();
         let last_header = provider
             .sealed_header(provider.best_block_number()?)?
@@ -1548,11 +1569,7 @@ where
                 .expect("sequencer mode configures deposit decryption keys"),
             self.portal_address,
         );
-        ctx.node
-            .task_executor()
-            .spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned");
-        Ok(())
+        Ok(engine)
     }
 
     /// Launch the redacted RPC server.
@@ -1606,7 +1623,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
-        proof_collector_config: Option<ProofCollectorConfig>,
+        proof_collector_config: Option<ProofCollectorInput>,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");

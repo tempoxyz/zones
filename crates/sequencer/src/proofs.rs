@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 use reth_provider::TransactionVariant;
 use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use zone_rpc::ZoneDebugApi;
@@ -129,8 +129,8 @@ impl ProofStore {
 
     fn insert(&self, proof: StoredBlockProof) -> Result<Arc<StoredBlockProof>> {
         proof.validate()?;
+        let mut state = self.state.write();
         {
-            let state = self.state.read();
             if proof.block_number <= state.pruned_through {
                 bail!(
                     "cannot store proof for settled Zone block {}",
@@ -164,10 +164,7 @@ impl ProofStore {
         sync_directory(&self.directory)?;
 
         let proof = Arc::new(proof);
-        self.state
-            .write()
-            .proofs
-            .insert(proof.block_number, proof.clone());
+        state.proofs.insert(proof.block_number, proof.clone());
         Ok(proof)
     }
 
@@ -263,9 +260,40 @@ fn sync_directory(directory: &Path) -> Result<()> {
 pub struct ProofCollectorHandle {
     store: Arc<ProofStore>,
     status: watch::Receiver<CollectorStatus>,
+    requests: mpsc::Sender<CollectRequest>,
+}
+
+struct CollectRequest {
+    number: u64,
+    hash: B256,
+    response: oneshot::Sender<Result<()>>,
 }
 
 impl ProofCollectorHandle {
+    /// Collect and durably publish one executed block before it becomes canonical.
+    pub async fn collect_block(&self, number: u64, hash: B256) -> Result<()> {
+        let (response, result) = oneshot::channel();
+        self.requests
+            .send(CollectRequest {
+                number,
+                hash,
+                response,
+            })
+            .await
+            .context("proof collector stopped")?;
+        let mut status = self.status.clone();
+        tokio::pin!(result);
+        loop {
+            if let Some(failure) = status.borrow().failure.clone() {
+                bail!("proof collection is unavailable: {failure}");
+            }
+            tokio::select! {
+                result = &mut result => return result.context("proof collector dropped request")?,
+                changed = status.changed() => { changed.context("proof collector stopped")?; }
+            }
+        }
+    }
+
     pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
         let mut status = self.status.clone();
         loop {
@@ -298,6 +326,7 @@ struct ProofCollector<P> {
     l1_provider: DynProvider<TempoNetwork>,
     store: Arc<ProofStore>,
     status: watch::Sender<CollectorStatus>,
+    requests: mpsc::Receiver<CollectRequest>,
 }
 
 pub fn spawn_proof_collector<P: ZoneSequencerProvider>(
@@ -309,23 +338,26 @@ pub fn spawn_proof_collector<P: ZoneSequencerProvider>(
 ) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
     let store = Arc::new(ProofStore::open(config.directory.clone(), pruned_through)?);
     let (status_tx, status_rx) = watch::channel(CollectorStatus::default());
+    let (requests_tx, requests_rx) = mpsc::channel(16);
     let collector = ProofCollector {
         config,
         provider,
         l1_provider,
         store: store.clone(),
         status: status_tx,
+        requests: requests_rx,
     };
     let handle = ProofCollectorHandle {
         store,
         status: status_rx,
+        requests: requests_tx,
     };
     let task = tokio::spawn(collector.run(shutdown));
     Ok((handle, task))
 }
 
 impl<P: ZoneSequencerProvider> ProofCollector<P> {
-    async fn run(self, shutdown: CancellationToken) {
+    async fn run(mut self, shutdown: CancellationToken) {
         info!(
             target: "zone::sequencer::proofs",
             directory = %self.config.directory.display(),
@@ -362,6 +394,14 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => return,
+                request = self.requests.recv() => {
+                    let Some(request) = request else {
+                        warn!(target: "zone::sequencer::proofs", "Proof collection request channel closed");
+                        return;
+                    };
+                    let result = self.collect_and_persist(request.number, request.hash).await;
+                    let _ = request.response.send(result);
+                }
                 _ = fallback.tick() => {}
                 notification = canonical.next() => {
                     let Some(notification) = notification else {
@@ -382,7 +422,9 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         let stored = self.store.state.read().proofs.clone();
         for (number, proof) in stored {
             let canonical = self.provider.block_hash(number)?;
-            if number > head || canonical != Some(proof.block_hash) {
+            let staged_next = number == head.saturating_add(1)
+                && self.provider.block_hash(head)? == Some(proof.parent_hash);
+            if !staged_next && (number > head || canonical != Some(proof.block_hash)) {
                 self.store.invalidate_from(number)?;
                 break;
             }
@@ -428,6 +470,10 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         let block = self
             .provider
             .recovered_block(block_hash.into(), TransactionVariant::WithHash)?
+            .or(self
+                .provider
+                .pending_block()?
+                .filter(|block| block.hash() == block_hash))
             .ok_or_eyre(format!("executed Zone block {block_hash} not found"))?;
         ensure!(
             block.number() == number && block.hash() == block_hash,

@@ -38,8 +38,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer,
+    ProofCollectorInput, ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle,
+    ZoneSequencerProvider, resolve_portal_zone_anchor, spawn_proof_collector, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -1008,10 +1008,33 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
+            // Keep collection alive until the engine finishes its in-flight block on demotion.
+            let collector_stop = CancellationToken::new();
+            let (collector, collector_task) = spawn_proof_collector(
+                sequencer.proof_collector_config.clone(),
+                context.provider.clone(),
+                context.attestation.l1_provider.clone(),
+                portal_confirmed_height,
+                collector_stop.clone(),
+            )?;
+            let collector_task = AbortOnDropHandle::new(collector_task);
+            tasks.spawn(async move {
+                let _ = collector_task.await;
+                TaskEnd::Ended("proof-collector")
+            });
             let engine = build_engine(context, sequencer, last_header);
+            // Synthetic fixtures use a zero portal and an L1 endpoint without trie proofs.
+            // Node startup rejects a zero portal for real P2P deployments.
+            let engine = if context.portal_address.is_zero() {
+                engine
+            } else {
+                engine.with_proof_collector(collector.clone())
+            };
             let engine_token = token.clone();
+            let collector_guard = collector_stop.drop_guard();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
             tasks.spawn(async move {
+                let _collector_guard = collector_guard;
                 let exit = engine.run_until(engine_token).await;
                 // Signalled before the task resolves so `stop` learns the canonical head is
                 // pinned without having to drain the JoinSet first.
@@ -1087,14 +1110,13 @@ where
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
             let zone_provider = context.provider.clone();
             let prover_config = sequencer.prover_config.clone();
-            let proof_collector_config = sequencer.proof_collector_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
                 let handle = spawn_zone_sequencer(
                     sequencer_config,
                     signer,
                     zone_provider,
-                    Some(proof_collector_config),
+                    Some(ProofCollectorInput::Running(collector)),
                     prover_config,
                     sequencer_token.clone(),
                 )

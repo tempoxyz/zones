@@ -615,6 +615,8 @@ pub(crate) fn seed_raw_tip403_policy(
 }
 
 pub(crate) trait TestNodeHandle: Send {
+    fn proof_directory(&self) -> std::path::PathBuf;
+    fn pending_block_number(&self) -> eyre::Result<Option<u64>>;
     fn subscribe_to_canonical_state(
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives>;
@@ -635,6 +637,20 @@ where
     >,
     AddOns: RethRpcAddOns<Node>,
 {
+    fn proof_directory(&self) -> std::path::PathBuf {
+        self.node.data_dir.data_dir().join("proofs")
+    }
+
+    fn pending_block_number(&self) -> eyre::Result<Option<u64>> {
+        use alloy_consensus::BlockHeader as _;
+        use reth_provider::BlockReader as _;
+        Ok(self
+            .node
+            .provider()
+            .pending_block()?
+            .map(|block| block.number()))
+    }
+
     fn subscribe_to_canonical_state(
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives> {
@@ -705,6 +721,13 @@ pub(crate) struct ZoneTestNode {
 }
 
 impl ZoneTestNode {
+    pub(crate) fn proof_directory(&self) -> std::path::PathBuf {
+        self.node_handle.proof_directory()
+    }
+
+    pub(crate) fn pending_block_number(&self) -> eyre::Result<Option<u64>> {
+        self.node_handle.pending_block_number()
+    }
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
