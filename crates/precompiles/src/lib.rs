@@ -10,9 +10,9 @@
 //!
 //! ## Cryptography
 //!
-//! - **Chaum-Pedersen verification** ([`chaum_pedersen`]) — verifies DLOG equality proofs
-//!   for ECDH shared secret derivation inside the native inbox.
-//! - **AES-256-GCM decryption** ([`aes_gcm`]) — decrypts ECIES ciphertext and verifies
+//! - **Chaum-Pedersen verification** — verifies DLOG equality proofs for ECDH shared secret
+//!   derivation inside the native inbox.
+//! - **AES-256-GCM decryption** — decrypts ECIES ciphertext and verifies
 //!   the GCM authentication tag inside the native inbox.
 //! - **ECIES** ([`ecies`]) — sequencer-side ECIES decryption logic.
 //!
