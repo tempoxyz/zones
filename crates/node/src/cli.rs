@@ -657,7 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn replay_portal_follows_the_loaded_chain_spec() {
-        use alloy_evm::{Evm, EvmFactory};
+        use alloy_evm::EvmFactory;
         use alloy_primitives::address;
         use reth_chainspec::EthChainSpec as _;
         use reth_evm::ConfigureEvm;
