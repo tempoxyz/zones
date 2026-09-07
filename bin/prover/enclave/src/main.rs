@@ -350,7 +350,7 @@ mod tests {
     use tempo_primitives::TempoHeader;
     use zone_spf::{
         BatchWitness, BlockTransition, DepositQueueTransition, LastBatchCommitment, PublicInputs,
-        TempoStateWitness, ZoneStateWitness,
+        TempoStateWitness, TokenEnablementTransition, ZoneStateWitness,
     };
 
     use super::*;
@@ -388,9 +388,13 @@ mod tests {
                 prevDepositNumber: 5,
                 nextDepositNumber: 6,
             },
-            withdrawal_queue_hash: B256::with_last_byte(7),
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: 7,
+                nextProcessedTokenCount: 8,
+            },
+            withdrawal_queue_hash: B256::with_last_byte(9),
             last_batch_commitment: LastBatchCommitment {
-                withdrawal_batch_index: 8,
+                withdrawal_batch_index: 10,
             },
         };
         let expected_digest = nitro_batch_attestation_hash(&public_inputs, &output);
