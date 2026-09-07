@@ -134,8 +134,12 @@ pub(crate) struct CheckerMetrics {
     pub(crate) verification_lag_blocks: Gauge,
     /// One when a deterministic finding has stopped verification.
     pub(crate) divergence_active: Gauge,
-    /// One when an unrecoverable checker error has disabled verification.
+    /// One while verification is disabled, including transient L1 recovery.
     pub(crate) disabled: Gauge,
+    /// One while waiting to reconnect or replay after exhausted L1 acquisition.
+    pub(crate) recovering: Gauge,
+    /// Number of fresh connection/replay attempts after exhausted L1 acquisition.
+    pub(crate) recovery_attempts_total: Counter,
     /// Number of transient acquisition retries.
     pub(crate) acquisition_retries_total: Counter,
     /// Number of verified Zone blocks.

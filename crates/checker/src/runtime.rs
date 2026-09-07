@@ -6,9 +6,9 @@ use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumHash;
 use alloy_provider::{DynProvider, Provider as _, ProviderBuilder};
 use alloy_rpc_client::{ConnectionConfig, RpcClient, WebSocketConfig};
-use futures::{StreamExt as _, TryStreamExt as _, future};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, future};
 use reth_chainspec::ChainSpecProvider;
-use reth_exex::{ExExContext, ExExHead, ExExNotification};
+use reth_exex::{ExExContext, ExExEvent, ExExHead, ExExNotification};
 use reth_node_api::{BlockBody as _, FullNodeComponents, NodePrimitives};
 use reth_primitives_traits::RecoveredBlock;
 use reth_storage_api::{BlockHashReader as _, BlockNumReader, StateProviderFactory};
@@ -32,7 +32,20 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_STATE_ATTEMPTS: u32 = 30;
 /// Retry bound for Tempo acquisition.
 const MAX_L1_ATTEMPTS: u32 = 10;
+/// Give an unavailable backend time to catch up before opening a fresh connection.
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+
+/// Only exhausted transient L1 acquisition is eligible for automatic recovery.
+/// Keep this typed through `eyre` so local-state and deterministic failures cannot
+/// accidentally trigger recovery based on their error text.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation} retry budget exhausted after {attempts} failed attempts: {last_error}")]
+struct L1RetryExhausted {
+    operation: String,
+    attempts: u32,
+    last_error: String,
+}
 
 /// `NodePrimitives` whose transaction and receipt types the checker can process.
 pub(crate) trait CheckedPrimitives: NodePrimitives {}
@@ -58,8 +71,42 @@ where
 {
     let metrics = CheckerMetrics::default();
     metrics.disabled.set(0.0);
-    let result = run_inner(config, ctx, &metrics).await;
-    metrics.disabled.set(1.0);
+    let result = loop {
+        // Each attempt drops the old provider/store, reconnects, authenticates the
+        // database identity and replays from its durable verified tip. Drained
+        // notifications below never become the checker's verification checkpoint.
+        let result = run_inner(config.clone(), ctx, &metrics).await;
+        metrics.disabled.set(1.0);
+        let Err(error) = &result else { break result };
+        if !error.is::<L1RetryExhausted>() {
+            break result;
+        }
+        metrics.recovering.set(1.0);
+        tracing::warn!(
+            target: "zone::checker",
+            %error,
+            cooldown_secs = RECOVERY_COOLDOWN.as_secs(),
+            "checker L1 acquisition exhausted; reconnecting after cooldown"
+        );
+
+        // Drain live notifications during cooldown to keep observe mode from
+        // blocking Zone execution. Recovery backfills from durable local history,
+        // which must remain unpruned, even if the ExEx WAL has been acknowledged.
+        ctx.set_notifications_without_head();
+        let events = ctx.events.clone();
+        if let Err(error) = drain_during_cooldown(&mut ctx.notifications, |notification| {
+            let tip = notification_tip(&notification)
+                .ok_or_else(|| eyre::eyre!("received an empty ExEx notification"))?;
+            events.send(ExExEvent::FinishedHeight(tip))?;
+            Ok(())
+        })
+        .await
+        {
+            break Err(error);
+        }
+        metrics.recovery_attempts_total.increment(1);
+    };
+    metrics.recovering.set(0.0);
     match result {
         Ok(()) => tracing::error!(
             target: "zone::checker",
@@ -91,11 +138,34 @@ where
     future::pending().await
 }
 
+/// Wait a fixed cooldown while acknowledging live delivery, never verified state.
+async fn drain_during_cooldown<S, T>(
+    notifications: &mut S,
+    mut acknowledge: impl FnMut(T) -> eyre::Result<()>,
+) -> eyre::Result<()>
+where
+    S: Stream<Item = eyre::Result<T>> + Unpin,
+{
+    let cooldown = tokio::time::sleep(RECOVERY_COOLDOWN);
+    tokio::pin!(cooldown);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut cooldown => return Ok(()),
+            notification = notifications.next() => {
+                let notification = notification
+                    .ok_or_else(|| eyre::eyre!("checker notification stream closed during recovery"))??;
+                acknowledge(notification)?;
+            }
+        }
+    }
+}
+
 /// Bootstrap or open durable state, then verify each append-only notification in turn.
 ///
 /// Transient acquisition failures are retried up to a fixed bound. An authenticated
-/// divergence is persisted until the checker is rebuilt, while exhausted or
-/// deterministic failures return so the outer runtime can disable and drain.
+/// divergence is persisted until the checker is rebuilt. Exhausted L1 acquisition
+/// returns a typed error for recovery; deterministic failures disable permanently.
 async fn run_inner<Node>(
     config: CheckerConfig,
     ctx: &mut ExExContext<Node>,
@@ -144,6 +214,12 @@ where
         metrics.recovery_rebuilds_total.increment(1);
     }
     metrics.update(&snapshot);
+    if matches!(&snapshot.metadata.status, Status::Diverged { .. }) {
+        // A persisted finding stays terminal even if reconnecting/bootstrap had
+        // to recover first. Report it through divergence_active, not recovering.
+        metrics.disabled.set(0.0);
+        metrics.recovering.set(0.0);
+    }
 
     ctx.catch_up_notifications_with_head(ExExHead::new(snapshot.metadata.verified_zone.into()))?;
     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
@@ -190,6 +266,10 @@ where
                 snapshot = next;
                 metrics.verified_zone_blocks_total.increment(verified);
                 metrics.update(&snapshot);
+                if verified > 0 {
+                    metrics.disabled.set(0.0);
+                    metrics.recovering.set(0.0);
+                }
                 ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
             }
             Err(BlockError::Finding { zone, error }) => {
@@ -203,6 +283,8 @@ where
                     },
                 )?;
                 metrics.update(&snapshot);
+                metrics.disabled.set(0.0);
+                metrics.recovering.set(0.0);
                 ctx.send_finished_height(delivered_tip)?;
             }
             Err(BlockError::Disable(error)) => return Err(error),
@@ -325,7 +407,14 @@ impl Backoff {
 
     /// Record one failed attempt.
     fn record(&mut self, error: &eyre::Report, operation: &str) -> eyre::Result<()> {
-        record_retry_attempt(&mut self.attempts, MAX_L1_ATTEMPTS, error, operation)
+        record_retry_attempt(&mut self.attempts, MAX_L1_ATTEMPTS, error, operation).map_err(|_| {
+            L1RetryExhausted {
+                operation: operation.to_owned(),
+                attempts: self.attempts,
+                last_error: format!("{error:#}"),
+            }
+            .into()
+        })
     }
 
     /// Wait and increase the next delay.
@@ -617,12 +706,140 @@ mod tests {
         )
         .await;
         assert_eq!(attempts.get(), MAX_L1_ATTEMPTS);
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("retry budget exhausted")
-        );
+        let error = result.unwrap_err();
+        assert!(error.is::<L1RetryExhausted>());
+        assert!(error.to_string().contains("retry budget exhausted"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cooldown_drains_delivery_without_extending_deadline() {
+        let start = tokio::time::Instant::now();
+        let mut notifications =
+            futures::stream::iter([Ok(11), Ok(12)]).chain(futures::stream::pending());
+        let mut acknowledged = Vec::new();
+        drain_during_cooldown(&mut notifications, |height| {
+            acknowledged.push(height);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(acknowledged, [11, 12]);
+        assert_eq!(start.elapsed(), RECOVERY_COOLDOWN);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cooldown_delivery_failures_are_terminal() {
+        let mut closed = futures::stream::empty::<eyre::Result<()>>();
+        let error = drain_during_cooldown(&mut closed, |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(!error.is::<L1RetryExhausted>());
+
+        let mut failed = futures::stream::iter([Err::<(), _>(eyre::eyre!("WAL read failed"))]);
+        let error = drain_during_cooldown(&mut failed, |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "WAL read failed");
+        assert!(!error.is::<L1RetryExhausted>());
+
+        let mut notification = futures::stream::iter([Ok(())]);
+        let error =
+            drain_during_cooldown(&mut notification, |_| Err(eyre::eyre!("manager closed")))
+                .await
+                .unwrap_err();
+        assert_eq!(error.to_string(), "manager closed");
+        assert!(!error.is::<L1RetryExhausted>());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_replays_durable_tip_not_drained_delivery() {
+        use crate::{
+            accounting::{AccountKey, BalanceChange, Effect, State},
+            persistence::{Checkpoint, Identity},
+        };
+        use alloy_primitives::{Address, B256, U256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("checker");
+        let block = |number| BlockRef::new(number, B256::with_last_byte(number as u8));
+        let token = Address::repeat_byte(5);
+        let account = AccountKey::new(token, Address::repeat_byte(6));
+        let mut state = State::default();
+        state.apply(&[Effect::EnableToken(token)]).unwrap();
+        let checkpoint = Checkpoint {
+            identity: Identity {
+                l1_chain_id: 1,
+                zone_chain_id: 2,
+                zone_id: 3,
+                portal: Address::repeat_byte(4),
+                creation: block(20),
+            },
+            zone: block(0),
+            tempo: block(20),
+            state,
+        };
+        let (store, snapshot) = Store::open_or_create(&path, &checkpoint).unwrap();
+        let first = store
+            .apply(
+                CandidateTransition::derive(
+                    snapshot,
+                    block(1),
+                    block(0),
+                    block(21),
+                    &[Effect::Account {
+                        key: account,
+                        change: BalanceChange::Credit(U256::from(10)),
+                    }],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        // A multi-block notification can commit block 1 before acquisition for
+        // block 2 exhausts. Its observed head must not replace the durable tip.
+        store.observe(&first, block(2)).unwrap();
+        drop(store);
+
+        let mut delivered =
+            futures::stream::iter([Ok(block(3)), Ok(block(4))]).chain(futures::stream::pending());
+        let mut finished = block(1);
+        drain_during_cooldown(&mut delivered, |tip| {
+            finished = tip;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(finished, block(4));
+
+        let (store, recovered) = Store::open(&path, checkpoint.identity).unwrap();
+        assert_eq!(recovered.metadata.verified_zone, block(1));
+        assert_eq!(recovered.metadata.imported_tempo, block(21));
+        assert_eq!(recovered.state.account(account), Some(U256::from(10)));
+        assert!(matches!(
+            already_applied(&recovered, 1, block(1).hash),
+            Ok(true)
+        ));
+        assert!(matches!(
+            already_applied(&recovered, 2, block(2).hash),
+            Ok(false)
+        ));
+        let next = store
+            .apply(
+                CandidateTransition::derive(
+                    recovered,
+                    block(2),
+                    block(1),
+                    block(22),
+                    &[Effect::Account {
+                        key: account,
+                        change: BalanceChange::Credit(U256::from(5)),
+                    }],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(next.metadata.verified_zone, block(2));
+        assert_eq!(next.metadata.imported_tempo, block(22));
+        assert_eq!(next.state.account(account), Some(U256::from(15)));
     }
 
     #[tokio::test]
@@ -707,6 +924,7 @@ mod tests {
         )
         .expect_err("the final attempt must disable the checker");
         assert_eq!(attempts, MAX_STATE_ATTEMPTS);
+        assert!(!error.is::<L1RetryExhausted>());
         assert!(error.to_string().contains("retry budget exhausted"));
     }
 }
