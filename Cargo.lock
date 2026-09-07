@@ -13775,6 +13775,7 @@ dependencies = [
  "reth-provider",
  "reth-storage-api",
  "serde",
+ "serde_json",
  "tempfile",
  "tempo-alloy",
  "tempo-chainspec",
