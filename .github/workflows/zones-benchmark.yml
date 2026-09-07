@@ -572,7 +572,7 @@ jobs:
         with:
           version: v0.15.0
 
-      - uses: tempoxyz/gh-actions/actions/setup-foundry@16356ec5155405ba5e33f5558e80b5bf77eb70ab
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
         with:
           version: nightly
 
