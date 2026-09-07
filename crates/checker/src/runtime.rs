@@ -583,6 +583,48 @@ fn validate_tempo_advance(parent: u64, tip: u64) -> eyre::Result<()> {
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn transient_acquisition_recovers_within_budget() {
+        let attempts = std::cell::Cell::new(0);
+        let value = retry_transient(
+            || {
+                attempts.set(attempts.get() + 1);
+                future::ready(if attempts.get() < 3 {
+                    Err(AttemptError::retry(eyre::eyre!("block not found")))
+                } else {
+                    Ok(42)
+                })
+            },
+            "Portal balance acquisition",
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_acquisition_stops_at_retry_budget() {
+        let attempts = std::cell::Cell::new(0);
+        let result = retry_transient(
+            || {
+                attempts.set(attempts.get() + 1);
+                future::ready(Err::<(), _>(AttemptError::retry(eyre::eyre!(
+                    "block not found"
+                ))))
+            },
+            "Portal balance acquisition",
+        )
+        .await;
+        assert_eq!(attempts.get(), MAX_L1_ATTEMPTS);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("retry budget exhausted")
+        );
+    }
+
     #[tokio::test]
     async fn disable_error_is_not_retried() {
         let attempts = std::cell::Cell::new(0);

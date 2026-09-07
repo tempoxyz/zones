@@ -97,6 +97,10 @@ height.
 Temporary Tempo RPC or local-state acquisition failures retry without advancing
 or acknowledging the block. Each retry budget is bounded. Tempo retries use
 exponential backoff, while unavailable local Zone state retries once per second.
+Tempo's `-32001` block-not-found responses are treated as temporary acquisition
+failures, including canonical-hash reads against an RPC backend that has not yet
+imported the block. Retries keep the exact anchored hash and canonicality checks;
+they never substitute `latest` or skip a block.
 Pruned state disables immediately because it cannot recover.
 
 A deterministic mismatch records one durable finding, freezes the verified tip,

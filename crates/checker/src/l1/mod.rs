@@ -263,10 +263,18 @@ fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
     }
 }
 
-/// Classify one provider RPC failure without relying on its display text.
+/// Classify one provider RPC failure using its structured code and message.
 pub(crate) fn classify_rpc_error(error: TransportError) -> AttemptError {
     let retryable = match &error {
-        RpcError::ErrorResp(error) => error.is_retry_err(),
+        RpcError::ErrorResp(error) => {
+            // A different RPC backend may not have imported the anchored block yet.
+            // Keep the exact hash/canonicality requirement and retry the same read.
+            // Do not treat every -32001 (resource not found) response as transient.
+            error.is_retry_err()
+                || (error.code == -32001
+                    && (error.message == "block not found"
+                        || error.message.starts_with("block not found:")))
+        }
         RpcError::UnsupportedFeature(_)
         | RpcError::LocalUsageError(_)
         | RpcError::SerError(_)
@@ -307,6 +315,32 @@ mod tests {
 
     const BLOCK: u64 = 100;
     const HASH: B256 = B256::repeat_byte(0x10);
+
+    #[test]
+    fn block_not_found_is_retryable_but_other_rpc_errors_are_not() {
+        for (code, message, retryable) in [
+            (-32001, "block not found", true),
+            (-32001, "block not found: canonical hash 0x1234", true),
+            (-32001, "transaction not found", false),
+            (-32001, "historical state pruned", false),
+            (-32602, "block not found", false),
+            (3, "execution reverted", false),
+            (-32005, "rate limit", true),
+        ] {
+            let payload = serde_json::from_value(serde_json::json!({
+                "code": code, "message": message,
+            }))
+            .unwrap();
+            assert_eq!(
+                matches!(
+                    classify_rpc_error(RpcError::ErrorResp(payload)),
+                    AttemptError::Retry(_)
+                ),
+                retryable,
+                "{code}: {message}"
+            );
+        }
+    }
 
     #[test]
     fn validates_rpc_hash_against_decoded_header() {
