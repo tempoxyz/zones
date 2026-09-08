@@ -528,7 +528,8 @@ pub struct ZoneArgs {
     #[arg(
         long = "l1.fetch-concurrency",
         env = "L1_FETCH_CONCURRENCY",
-        default_value_t = 4
+        default_value_t = 4,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
     )]
     pub l1_fetch_concurrency: usize,
 
@@ -664,6 +665,20 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn l1_fetch_concurrency_must_be_positive() {
+        let result = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--l1.fetch-concurrency",
+            "0",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
