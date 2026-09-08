@@ -50,8 +50,9 @@ mod zone_transaction_pool_alias {
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     replication::{
-        AttestationContext, BroadcasterShutdown, FollowerBlockSync, PeerTipRegistry,
-        broadcast_persisted_blocks, collect_follower_settlement_signatures,
+        AttestationContext, BlockSyncP2p, BroadcasterShutdown, FollowerBlockSync,
+        FollowerBlockSyncContext, PeerTipRegistry, broadcast_persisted_blocks,
+        collect_follower_settlement_signatures,
     },
     settlement_attestation::collect_leader_settlements,
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
@@ -887,32 +888,25 @@ where
             sinks.install(sync_tx, Some(transactions_tx), Some(backfill_tx));
 
             let follower_token = token.clone();
-            let provider = context.provider.clone();
-            let engine = context.engine_handle.clone();
-            let commands = context.commands.clone();
-            let backfill_commands = context.backfill_commands.clone();
-            let tracker = context.l1_block_tracker.clone();
-            let queue = context.deposit_queue.clone();
-            let attestation = context.attestation.clone();
-            let schedule = context.schedule.clone();
-            let peer_tips = context.peer_tips.clone();
+            let sync_context = FollowerBlockSyncContext {
+                provider: context.provider.clone(),
+                engine: context.engine_handle.clone(),
+                l1_block_tracker: context.l1_block_tracker.clone(),
+                deposit_queue: context.deposit_queue.clone(),
+                attestation: context.attestation.clone(),
+                schedule: context.schedule.clone(),
+                peer_tips: context.peer_tips.clone(),
+            };
+            let sync_p2p = BlockSyncP2p {
+                events: sync_rx,
+                commands: context.commands.clone(),
+                backfill_responses: backfill_rx,
+                backfill_commands: context.backfill_commands.clone(),
+            };
             tasks.spawn(async move {
-                FollowerBlockSync::new(
-                    provider,
-                    engine,
-                    sync_rx,
-                    commands,
-                    backfill_commands,
-                    backfill_rx,
-                    tracker,
-                    queue,
-                    attestation,
-                    schedule,
-                    peer_tips,
-                    follower_token.clone(),
-                )
-                .run()
-                .await;
+                FollowerBlockSync::new(sync_context, sync_p2p, follower_token.clone())
+                    .run()
+                    .await;
                 if follower_token.is_cancelled() {
                     TaskEnd::Ended("follower-block-sync (cancelled)")
                 } else {
