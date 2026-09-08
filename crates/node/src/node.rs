@@ -99,7 +99,7 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorInput,
+    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
     ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
     spawn_proof_collector, spawn_shadow_prover, spawn_zone_sequencer,
 };
@@ -180,6 +180,9 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
+    /// Disable the proof gate only for synthetic fixtures without a proof-serving L1.
+    #[cfg(feature = "test-utils")]
+    pub skip_proof_persistence: bool,
     /// Shared sequencer signer used for block production and encryption.
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
@@ -857,7 +860,8 @@ where
                 l1_provider.clone(),
                 0,
                 tokio_util::sync::CancellationToken::new(),
-            )?;
+            )
+            .await?;
             task_executor.spawn_critical_task("rpc-follower-proof-collector", async move {
                 let _ = collector_task.await;
             });
@@ -977,7 +981,8 @@ where
                 l1_provider.clone(),
                 anchor.block_number,
                 tokio_util::sync::CancellationToken::new(),
-            )?;
+            )
+            .await?;
             task_executor.spawn_critical_task("zone-proof-collector", async move {
                 let _ = collector_task.await;
             });
@@ -996,7 +1001,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
-                Some(ProofCollectorInput::Running(collector)),
+                Some(collector),
                 prover_config,
             )
             .await?;
@@ -1623,7 +1628,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
-        proof_collector_config: Option<ProofCollectorInput>,
+        proof_collector_config: Option<ProofCollectorHandle>,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
@@ -1662,14 +1667,6 @@ where
                 }
                 res = seq_handle.monitor_handle => {
                     tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
-                }
-                res = async {
-                    match seq_handle.proof_collector_handle {
-                        Some(handle) => handle.await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    tracing::error!(target: "reth::cli", ?res, "Proof collector task exited");
                 }
             }
         });

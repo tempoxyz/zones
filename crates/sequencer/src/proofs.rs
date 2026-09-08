@@ -52,7 +52,7 @@ impl std::fmt::Debug for ProofCollectorConfig {
     }
 }
 
-/// Immutable proof material collected for one canonical Zone block.
+/// Immutable proof material collected for one executed Zone block, possibly not yet canonical.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredBlockProof {
@@ -65,9 +65,26 @@ pub struct StoredBlockProof {
 }
 
 #[derive(Clone, Debug, Default)]
-struct CollectorStatus {
-    ready: bool,
-    failure: Option<Arc<str>>,
+enum CollectorStatus {
+    #[default]
+    Reconciling,
+    Ready,
+    Failed(Arc<eyre::Report>),
+}
+
+#[derive(Debug)]
+struct CollectionUnavailable(Arc<eyre::Report>);
+
+impl std::fmt::Display for CollectionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("proof collection is unavailable")
+    }
+}
+
+impl std::error::Error for CollectionUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref().as_ref())
+    }
 }
 
 #[derive(Debug)]
@@ -191,26 +208,53 @@ impl ProofStore {
     }
 
     fn invalidate_from(&self, from: u64) -> Result<()> {
-        let removed = {
-            let mut state = self.state.write();
-            let retained = state.proofs.split_off(&from);
-            retained.into_values().collect::<Vec<_>>()
-        };
-        self.remove_files(removed)
+        let mut state = self.state.write();
+        // Keep the index until deletion is durable so a failed operation can be retried.
+        self.remove_files(
+            state
+                .proofs
+                .range(from..)
+                .map(|(_, proof)| proof.clone())
+                .collect(),
+        )?;
+        state.proofs.split_off(&from);
+        Ok(())
+    }
+
+    /// Retain canonical proofs and at most one staged child of the canonical head.
+    fn reconcile(
+        &self,
+        head: u64,
+        mut block_hash: impl FnMut(u64) -> Result<Option<B256>>,
+    ) -> Result<()> {
+        let stored = self.state.read().proofs.clone();
+        for (number, proof) in stored {
+            let canonical = block_hash(number)?;
+            let staged_next =
+                head.checked_add(1) == Some(number) && block_hash(head)? == Some(proof.parent_hash);
+            if !staged_next && (number > head || canonical != Some(proof.block_hash)) {
+                self.invalidate_from(number)?;
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn prune_through(&self, through: u64) -> Result<()> {
-        let removed = {
-            let mut state = self.state.write();
-            if through <= state.pruned_through {
-                return Ok(());
-            }
-            state.pruned_through = through;
-            let retained = state.proofs.split_off(&through.saturating_add(1));
-            let removed = std::mem::replace(&mut state.proofs, retained);
-            removed.into_values().collect::<Vec<_>>()
-        };
-        self.remove_files(removed)
+        let mut state = self.state.write();
+        if through <= state.pruned_through {
+            return Ok(());
+        }
+        self.remove_files(
+            state
+                .proofs
+                .range(..=through)
+                .map(|(_, proof)| proof.clone())
+                .collect(),
+        )?;
+        state.proofs.retain(|number, _| *number > through);
+        state.pruned_through = through;
+        Ok(())
     }
 
     fn remove_files(&self, proofs: Vec<Arc<StoredBlockProof>>) -> Result<()> {
@@ -233,7 +277,7 @@ impl ProofStore {
 }
 
 impl StoredBlockProof {
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         ensure!(
             self.format_version == FORMAT_VERSION,
             "unsupported proof format version {}",
@@ -243,7 +287,7 @@ impl StoredBlockProof {
         Ok(())
     }
 
-    pub fn file_name(&self) -> std::ffi::OsString {
+    fn file_name(&self) -> std::ffi::OsString {
         format!("{}-{:x}.json", self.block_number, self.block_hash).into()
     }
 }
@@ -270,40 +314,48 @@ struct CollectRequest {
 }
 
 impl ProofCollectorHandle {
-    /// Collect and durably publish one executed block before it becomes canonical.
-    pub async fn collect_block(&self, number: u64, hash: B256) -> Result<()> {
+    /// Collect one executed block before it becomes canonical.
+    ///
+    /// Success means the proof file and its directory have both been synced. Dropping this
+    /// future does not cancel an already queued request or authorize canonicalization.
+    pub async fn collect_and_persist(&self, number: u64, hash: B256) -> Result<()> {
         let (response, result) = oneshot::channel();
-        self.requests
-            .send(CollectRequest {
-                number,
-                hash,
-                response,
-            })
-            .await
-            .context("proof collector stopped")?;
+        let result = async {
+            self.requests
+                .send(CollectRequest {
+                    number,
+                    hash,
+                    response,
+                })
+                .await
+                .context("proof collector stopped")?;
+            result.await.context("proof collector dropped request")?
+        };
         let mut status = self.status.clone();
         tokio::pin!(result);
         loop {
-            if let Some(failure) = status.borrow().failure.clone() {
-                bail!("proof collection is unavailable: {failure}");
+            if let CollectorStatus::Failed(failure) = &*status.borrow() {
+                return Err(CollectionUnavailable(failure.clone()).into());
             }
             tokio::select! {
-                result = &mut result => return result.context("proof collector dropped request")?,
+                result = &mut result => return result,
                 changed = status.changed() => { changed.context("proof collector stopped")?; }
             }
         }
     }
 
+    /// Wait for a reconciled, complete inclusive range of retained proofs.
     pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
+        ensure!(from <= to, "invalid proof range {from}..={to}");
         let mut status = self.status.clone();
         loop {
-            if status.borrow().ready
+            if matches!(*status.borrow(), CollectorStatus::Ready)
                 && let Ok(proofs) = self.store.snapshot(from, to)
             {
                 return Ok(proofs);
             }
-            if let Some(failure) = status.borrow().failure.clone() {
-                bail!("proof collection is unavailable: {failure}");
+            if let CollectorStatus::Failed(failure) = &*status.borrow() {
+                return Err(CollectionUnavailable(failure.clone()).into());
             }
             status
                 .changed()
@@ -329,14 +381,20 @@ struct ProofCollector<P> {
     requests: mpsc::Receiver<CollectRequest>,
 }
 
-pub fn spawn_proof_collector<P: ZoneSequencerProvider>(
+/// Reload the durable spool on a blocking task, then start collection until shutdown.
+pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
     config: ProofCollectorConfig,
     provider: P,
     l1_provider: DynProvider<TempoNetwork>,
     pruned_through: u64,
     shutdown: CancellationToken,
 ) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
-    let store = Arc::new(ProofStore::open(config.directory.clone(), pruned_through)?);
+    let directory = config.directory.clone();
+    let store = Arc::new(
+        tokio::task::spawn_blocking(move || ProofStore::open(directory, pruned_through))
+            .await
+            .context("proof store opening task panicked")??,
+    );
     let (status_tx, status_rx) = watch::channel(CollectorStatus::default());
     let (requests_tx, requests_rx) = mpsc::channel(16);
     let collector = ProofCollector {
@@ -369,17 +427,12 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         loop {
             match self.reconcile_and_collect().await {
                 Ok(()) => {
-                    self.status.send_modify(|status| {
-                        status.ready = true;
-                        status.failure = None;
-                    });
+                    self.status.send_replace(CollectorStatus::Ready);
                 }
                 Err(error) => {
                     error!(target: "zone::sequencer::proofs", %error, "Proof collection failed");
-                    self.status.send_modify(|status| {
-                        status.ready = false;
-                        status.failure = Some(Arc::from(error.to_string()));
-                    });
+                    self.status
+                        .send_replace(CollectorStatus::Failed(Arc::new(error)));
                     if shutdown
                         .run_until_cancelled(tokio::time::sleep(RETRY_INTERVAL))
                         .await
@@ -409,7 +462,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
                         return;
                     };
                     if notification.reverted().is_some() {
-                        self.status.send_modify(|status| status.ready = false);
+                        self.status.send_replace(CollectorStatus::Reconciling);
                         info!(target: "zone::sequencer::proofs", "Reconciling proof spool after canonical reorg");
                     }
                 }
@@ -419,16 +472,13 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
 
     async fn reconcile_and_collect(&self) -> Result<()> {
         let head = self.provider.best_block_number()?;
-        let stored = self.store.state.read().proofs.clone();
-        for (number, proof) in stored {
-            let canonical = self.provider.block_hash(number)?;
-            let staged_next = number == head.saturating_add(1)
-                && self.provider.block_hash(head)? == Some(proof.parent_hash);
-            if !staged_next && (number > head || canonical != Some(proof.block_hash)) {
-                self.store.invalidate_from(number)?;
-                break;
-            }
-        }
+        let store = self.store.clone();
+        let provider = self.provider.clone();
+        tokio::task::spawn_blocking(move || {
+            store.reconcile(head, |number| Ok(provider.block_hash(number)?))
+        })
+        .await
+        .context("proof reconciliation task panicked")??;
 
         let start = self.store.state.read().pruned_through.saturating_add(1);
         for number in start..=head {
@@ -449,7 +499,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             return Ok(());
         }
         if self.store.state.read().proofs.contains_key(&number) {
-            self.store.invalidate_from(number)?;
+            self.invalidate_from(number).await?;
         }
         let proof = self.collect_block(number, block_hash).await?;
         let store = self.store.clone();
@@ -464,6 +514,13 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             "Collected and persisted block proofs"
         );
         Ok(())
+    }
+
+    async fn invalidate_from(&self, number: u64) -> Result<()> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.invalidate_from(number))
+            .await
+            .context("proof invalidation task panicked")?
     }
 
     async fn collect_block(&self, number: u64, block_hash: B256) -> Result<StoredBlockProof> {
@@ -571,5 +628,150 @@ mod tests {
 
         let error = store.insert(proof(1, B256::repeat_byte(2))).unwrap_err();
         assert!(error.to_string().contains("conflicting proof"));
+    }
+
+    #[test]
+    fn retries_pruning_after_file_deletion_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
+        let proof = proof(1, B256::repeat_byte(1));
+        let path = directory.path().join(proof.file_name());
+        store.insert(proof).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        let error = store.prune_through(1).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(store.state.read().pruned_through, 0);
+        assert_eq!(store.snapshot(1, 1).unwrap().len(), 1);
+
+        fs::remove_dir(&path).unwrap();
+        store.prune_through(1).unwrap();
+        assert_eq!(store.state.read().pruned_through, 1);
+        assert!(store.state.read().proofs.is_empty());
+    }
+
+    #[test]
+    fn restart_retains_staged_child_but_reorg_invalidates_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent_hash = B256::repeat_byte(1);
+        let staged_hash = B256::repeat_byte(2);
+        let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
+        let mut staged = proof(2, staged_hash);
+        staged.parent_hash = parent_hash;
+        store.insert(staged).unwrap();
+        drop(store);
+
+        let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
+        store
+            .reconcile(1, |number| Ok((number == 1).then_some(parent_hash)))
+            .unwrap();
+        assert!(store.contains(2, staged_hash));
+        store
+            .reconcile(
+                1,
+                |number| Ok((number == 1).then_some(B256::repeat_byte(3))),
+            )
+            .unwrap();
+        assert!(store.state.read().proofs.is_empty());
+        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn reconciliation_discards_descendants_beyond_the_staged_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
+        let parent_hash = B256::repeat_byte(1);
+        let mut staged = proof(2, B256::repeat_byte(2));
+        staged.parent_hash = parent_hash;
+        store.insert(staged).unwrap();
+        store.insert(proof(3, B256::repeat_byte(3))).unwrap();
+        store
+            .reconcile(1, |number| Ok((number == 1).then_some(parent_hash)))
+            .unwrap();
+        assert_eq!(
+            store
+                .state
+                .read()
+                .proofs
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn retries_invalidation_after_partial_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
+        store.insert(proof(1, B256::repeat_byte(1))).unwrap();
+        let second = proof(2, B256::repeat_byte(2));
+        let path = directory.path().join(second.file_name());
+        store.insert(second).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        let error = store.invalidate_from(1).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(store.snapshot(1, 2).unwrap().len(), 2);
+        fs::remove_dir(&path).unwrap();
+        store.invalidate_from(1).unwrap();
+        assert!(store.state.read().proofs.is_empty());
+        assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_failure_preserves_the_error_chain() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+        let error = eyre::Report::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .wrap_err("open proof file");
+        let (_status_tx, status) = watch::channel(CollectorStatus::Failed(Arc::new(error)));
+        let (requests, _receiver) = mpsc::channel(1);
+        let handle = ProofCollectorHandle {
+            store,
+            status,
+            requests,
+        };
+        let error = handle.wait_for_range(1, 1).await.unwrap_err();
+        assert!(error.chain().any(|source| {
+            source
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+        }));
+    }
+
+    #[tokio::test]
+    async fn collection_request_returns_the_persistence_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+        let (_status_tx, status) = watch::channel(CollectorStatus::Ready);
+        let (requests, mut receiver) = mpsc::channel::<CollectRequest>(1);
+        let handle = ProofCollectorHandle {
+            store,
+            status,
+            requests,
+        };
+        let responder = async {
+            let request = receiver.recv().await.unwrap();
+            assert_eq!(request.number, 1);
+            request
+                .response
+                .send(Err(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                )
+                .into()))
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(handle.collect_and_persist(1, B256::ZERO), responder);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 }

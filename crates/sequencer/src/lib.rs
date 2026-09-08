@@ -55,15 +55,6 @@ pub use withdrawals::{
 
 use crate::rpc::rpc_connection_config;
 
-/// Proof collector lifecycle supplied to the sequencer services.
-#[derive(Clone, Debug)]
-pub enum ProofCollectorInput {
-    /// Start a background collector with the sequencer services.
-    Start(ProofCollectorConfig),
-    /// Share the collector that gates the node's block-production engine.
-    Running(ProofCollectorHandle),
-}
-
 /// Native Zone node provider capabilities required by sequencer components.
 ///
 /// This is a zero-method convenience trait over Reth's storage and canonical-state
@@ -136,8 +127,6 @@ pub struct ZoneSequencerHandle {
     pub withdrawal_handle: tokio::task::JoinHandle<()>,
     /// Join handle for the zone monitor task (which also handles batch submission).
     pub monitor_handle: tokio::task::JoinHandle<()>,
-    /// Join handle for the proactive proof collector, when configured.
-    pub proof_collector_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Spawn all zone sequencer background tasks.
@@ -161,7 +150,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
-    proof_collector: Option<ProofCollectorInput>,
+    proof_collector: Option<ProofCollectorHandle>,
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
@@ -175,25 +164,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
-    let (proof_services, proof_collector_handle) = if let Some(input) = proof_collector {
-        let (collector, collector_task) = match input {
-            ProofCollectorInput::Start(collector_config) => {
-                let portal_anchor =
-                    resolve_portal_zone_anchor(&zone_provider, config.portal_address, &l1_provider)
-                        .await
-                        .expect("proof collector can resolve the portal-confirmed Zone anchor");
-                let (collector, collector_task) = proofs::spawn_proof_collector(
-                    collector_config,
-                    zone_provider.clone(),
-                    l1_provider.clone(),
-                    portal_anchor.block_number,
-                    shutdown.clone(),
-                )
-                .expect("proof collector store can be opened");
-                (collector, Some(collector_task))
-            }
-            ProofCollectorInput::Running(collector) => (collector, None),
-        };
+    let proof_services = if let Some(collector) = proof_collector {
         let shadow = prover_config.map(|prover_config| {
             prover::spawn_shadow_prover(
                 prover_config,
@@ -204,16 +175,13 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
                 l1_provider.clone(),
             )
         });
-        (
-            Some(prover::ProofServices::new(collector, shadow)),
-            collector_task,
-        )
+        Some(prover::ProofServices::new(collector, shadow))
     } else {
         assert!(
             prover_config.is_none(),
             "shadow prover requires a proof collector"
         );
-        (None, None)
+        None
     };
     let sequencer_address = signer.address();
 
@@ -262,7 +230,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     ZoneSequencerHandle {
         withdrawal_handle,
         monitor_handle,
-        proof_collector_handle,
     }
 }
 

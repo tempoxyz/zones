@@ -24,15 +24,16 @@
 //!                                │                  ZoneEngine
 //!                                │               5. resolve payload
 //!                                │               6. newPayload
-//!                                │               7. FCU (update head)
+//!                                │               7. persist proofs (file + directory sync)
+//!                                │               8. FCU (update head)
 //!                                │                       │
 //!                                ◄── confirm ◄───────────┘
 //! ```
 //!
 //! The deposit queue uses a **peek / confirm** pattern: the engine peeks at
 //! the next L1 block, wraps it into [`ZonePayloadAttributes`], and only
-//! confirms (removes) the block after `newPayload` succeeds. A failed build
-//! leaves the block in the queue for retry.
+//! confirms (removes) the block after proof persistence and canonical forkchoice succeed.
+//! A failed build, proof write, or forkchoice leaves the block in the queue for retry.
 //!
 //! The zone assumes **instant finality** — head, safe, and finalized all point
 //! to the same block.
@@ -411,7 +412,7 @@ impl ZoneEngine {
 
         if let Some(collector) = &self.proof_collector {
             collector
-                .collect_block(block_number, header.hash())
+                .collect_and_persist(block_number, header.hash())
                 .await
                 .wrap_err_with(|| {
                     format!("collect proofs before canonicalizing Zone block {block_number}")

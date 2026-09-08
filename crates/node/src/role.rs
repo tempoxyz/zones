@@ -38,8 +38,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ProofCollectorInput, ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle,
-    ZoneSequencerProvider, resolve_portal_zone_anchor, spawn_proof_collector, spawn_zone_sequencer,
+    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
+    resolve_portal_zone_anchor, spawn_proof_collector, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -336,7 +336,6 @@ async fn supervise_sequencer_tasks(
 ) -> TaskEnd {
     let mut withdrawal = AbortOnDropHandle::new(handle.withdrawal_handle);
     let mut monitor = AbortOnDropHandle::new(handle.monitor_handle);
-    let mut proof_collector = handle.proof_collector_handle.map(AbortOnDropHandle::new);
 
     tokio::select! {
         biased;
@@ -344,22 +343,13 @@ async fn supervise_sequencer_tasks(
             // Both children observe the same token at their poll boundaries. Keep both handles
             // alive until they finish; the outer generation timeout will abort this supervisor
             // and AbortOnDropHandle will then abort either child that is still stuck.
-            let proof_result = async {
-                match &mut proof_collector {
-                    Some(proof_collector) => Some(proof_collector.await),
-                    None => None,
-                }
-            };
-            let (withdrawal_result, monitor_result, proof_result) =
-                tokio::join!(&mut withdrawal, &mut monitor, proof_result);
+            let (withdrawal_result, monitor_result) =
+                tokio::join!(&mut withdrawal, &mut monitor);
             if let Err(err) = withdrawal_result {
                 warn!(target: "zone::role", %err, "Withdrawal processor task failed during shutdown");
             }
             if let Err(err) = monitor_result {
                 warn!(target: "zone::role", %err, "Zone monitor task failed during shutdown");
-            }
-            if let Some(Err(err)) = proof_result {
-                warn!(target: "zone::role", %err, "Proof collector task failed during shutdown");
             }
             TaskEnd::SequencerStopped
         }
@@ -379,18 +369,6 @@ async fn supervise_sequencer_tasks(
             }
             // Returning drops and aborts the withdrawal handle before the generation restarts.
             TaskEnd::Ended("zone-monitor")
-        }
-        result = async {
-            match &mut proof_collector {
-                Some(proof_collector) => proof_collector.await,
-                None => std::future::pending().await,
-            }
-        } => {
-            match result {
-                Ok(()) => warn!(target: "zone::role", "Proof collector task stopped unexpectedly"),
-                Err(err) => warn!(target: "zone::role", %err, "Proof collector task failed"),
-            }
-            TaskEnd::Ended("proof-collector")
         }
     }
 }
@@ -1016,19 +994,22 @@ where
                 context.attestation.l1_provider.clone(),
                 portal_confirmed_height,
                 collector_stop.clone(),
-            )?;
+            )
+            .await?;
             let collector_task = AbortOnDropHandle::new(collector_task);
             tasks.spawn(async move {
                 let _ = collector_task.await;
                 TaskEnd::Ended("proof-collector")
             });
             let engine = build_engine(context, sequencer, last_header);
-            // Synthetic fixtures use a zero portal and an L1 endpoint without trie proofs.
-            // Node startup rejects a zero portal for real P2P deployments.
-            let engine = if context.portal_address.is_zero() {
-                engine
-            } else {
+            let enforce_proof_persistence = true;
+            #[cfg(feature = "test-utils")]
+            let enforce_proof_persistence =
+                enforce_proof_persistence && !sequencer.config.skip_proof_persistence;
+            let engine = if enforce_proof_persistence {
                 engine.with_proof_collector(collector.clone())
+            } else {
+                engine
             };
             let engine_token = token.clone();
             let collector_guard = collector_stop.drop_guard();
@@ -1116,7 +1097,7 @@ where
                     sequencer_config,
                     signer,
                     zone_provider,
-                    Some(ProofCollectorInput::Running(collector)),
+                    Some(collector),
                     prover_config,
                     sequencer_token.clone(),
                 )
@@ -1261,7 +1242,6 @@ mod tests {
         let handle = ZoneSequencerHandle {
             withdrawal_handle,
             monitor_handle,
-            proof_collector_handle: None,
         };
 
         let outcome = tokio::time::timeout(
@@ -1310,7 +1290,6 @@ mod tests {
             ZoneSequencerHandle {
                 withdrawal_handle,
                 monitor_handle,
-                proof_collector_handle: None,
             },
             stop.clone(),
         ));
