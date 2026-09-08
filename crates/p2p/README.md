@@ -32,8 +32,8 @@ unavailable, or skipped Portal epochs make the recovery boundary ambiguous.
 After a normal Portal transition ends recovery, a restart skips the completed stale directive and
 logs a removal warning. Operators should still remove the directive from every manifest promptly.
 
-If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
-behavior.
+The manifestless `--sequencer` startup path is deprecated. Use `tempo-zone node --dev` for local
+development.
 
 ## Roles
 
@@ -215,7 +215,7 @@ Add `--sequencer.enable-prover` to run the detached shadow prover on this follow
 anchor committed by the transaction after the matching Zone range is canonical locally. This is
 observational: proof success or failure never changes settlement or the follower's RPC service.
 
-The `--sequencer` flag conflicts with `--sequencer.manifest` because the
+The deprecated `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
 
 DNS peer addresses do not provide a stable egress IP for Commonware's inbound
