@@ -5180,6 +5180,17 @@ impl L1Fixture {
         FixtureBlock { header }
     }
 
+    /// Build the next L1 block at an explicit timestamp, preserving the parent hash chain.
+    /// Hardfork tests use this to align L1 headers with activation.
+    pub(crate) fn next_block_at(&mut self, timestamp: u64) -> FixtureBlock {
+        assert!(
+            timestamp >= self.next_timestamp,
+            "fixture timestamps must increase"
+        );
+        self.next_timestamp = timestamp;
+        self.next_block()
+    }
+
     /// Enqueue a pre-built block into a deposit queue with the given deposits.
     pub(crate) fn enqueue(
         &self,

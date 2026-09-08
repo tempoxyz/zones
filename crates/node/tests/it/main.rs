@@ -6,6 +6,7 @@ mod e2e;
 mod earn_zone_e2e;
 mod enable_token;
 mod handoff_e2e;
+mod hardfork_e2e;
 mod l1_e2e;
 mod network_chaos_e2e;
 mod network_chaos_p2p_e2e;
