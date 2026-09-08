@@ -541,7 +541,8 @@ where
                 PeerBlockImportOutcome::Paused(Some(block)) => {
                     let block = *block;
                     let number = block.block.header.number();
-                    debug_assert!(self.pending.insert(number, block).is_none());
+                    let dropped = self.pending.insert(number, block);
+                    debug_assert!(dropped.is_none());
                     return Ok(PeerBlockImportOutcome::Paused(None));
                 }
                 PeerBlockImportOutcome::Paused(None) => {

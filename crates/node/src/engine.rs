@@ -149,14 +149,16 @@ where
         if stop.is_cancelled() {
             return Ok(Some(EngineExit::Cancelled));
         }
-        if drain.production_paused() {
-            return Ok(None);
-        }
         let Some(block) = drain.next_available() else {
             return Ok(None);
         };
         if let Some(exit) = drain.permit(&block) {
             return Ok(Some(exit));
+        }
+        // The subscriber publishes a pause before enqueueing its anchor. Read the gate after
+        // selecting the candidate so that anchor cannot slip past an earlier pause observation.
+        if drain.production_paused() {
+            return Ok(None);
         }
         drain.advance_one(block).await?;
     }
@@ -493,6 +495,7 @@ mod tests {
         first_started: Option<oneshot::Sender<()>>,
         release_first: Option<oneshot::Receiver<()>>,
         paused: Arc<AtomicBool>,
+        pause_on_peek: bool,
         /// Blocks (by value) the permit rejects, with the exit it produces.
         denied: Vec<(u64, EngineExit)>,
     }
@@ -501,6 +504,9 @@ mod tests {
         type Block = u64;
 
         fn next_available(&self) -> Option<Self::Block> {
+            if self.pause_on_peek {
+                self.paused.store(true, Ordering::Relaxed);
+            }
             self.pending.front().copied()
         }
 
@@ -543,6 +549,7 @@ mod tests {
             first_started: Some(first_started),
             release_first: Some(release_first),
             paused: Arc::new(AtomicBool::new(false)),
+            pause_on_peek: false,
             denied: Vec::new(),
         };
 
@@ -574,6 +581,7 @@ mod tests {
             first_started: None,
             release_first: None,
             paused: Arc::new(AtomicBool::new(false)),
+            pause_on_peek: false,
             denied: vec![(
                 3,
                 EngineExit::Demoted {
@@ -607,6 +615,7 @@ mod tests {
             first_started: None,
             release_first: None,
             paused: Arc::new(AtomicBool::new(false)),
+            pause_on_peek: false,
             denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
         };
 
@@ -627,6 +636,7 @@ mod tests {
             first_started: None,
             release_first: None,
             paused: Arc::new(AtomicBool::new(true)),
+            pause_on_peek: false,
             denied: Vec::new(),
         };
 
@@ -654,6 +664,7 @@ mod tests {
             first_started: Some(first_started),
             release_first: Some(release_first),
             paused: paused.clone(),
+            pause_on_peek: false,
             denied: Vec::new(),
         };
 
@@ -669,6 +680,29 @@ mod tests {
         let drain = task.await.unwrap();
         assert_eq!(drain.advanced, [1]);
         assert_eq!(drain.pending, [2, 3]);
+    }
+
+    #[tokio::test]
+    async fn portal_pause_published_before_queue_peek_prevents_production() {
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([42]),
+            advanced: Vec::new(),
+            first_started: None,
+            release_first: None,
+            paused: Arc::new(AtomicBool::new(false)),
+            // Publish the pause as the subscriber makes its anchor visible to the queue peek.
+            pause_on_peek: true,
+            denied: Vec::new(),
+        };
+
+        assert_eq!(
+            drain_all_available(&mut drain, &CancellationToken::new())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(drain.advanced.is_empty());
+        assert_eq!(drain.pending, [42]);
     }
 
     #[test]

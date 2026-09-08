@@ -116,11 +116,21 @@ async fn refresh_portal_pause(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
     let block_number = header.number();
-    let paused = ZonePortal::new(portal_address, l1_provider)
-        .paused()
-        .block(alloy_rpc_types_eth::BlockId::number(block_number))
-        .call()
+    let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+    let code = l1_provider
+        .get_code_at(portal_address)
+        .block_id(block_id)
         .await?;
+    // A newly deployed portal may exist at latest but not yet at the finalized checkpoint.
+    let paused = if code.is_empty() {
+        false
+    } else {
+        ZonePortal::new(portal_address, l1_provider)
+            .paused()
+            .block(block_id)
+            .call()
+            .await?
+    };
     let changed = l1_block_tracker.observe_portal_pause(block_number, paused);
     if changed {
         info!(
@@ -131,6 +141,23 @@ async fn refresh_portal_pause(
         );
     }
     Ok(())
+}
+
+/// Wait for a known finalized pause state before allowing node startup to continue.
+async fn initialize_portal_pause(
+    l1_provider: &DynProvider<TempoNetwork>,
+    portal_address: Address,
+    l1_block_tracker: &L1BlockTracker,
+) {
+    while let Err(err) = refresh_portal_pause(l1_provider, portal_address, l1_block_tracker).await {
+        warn!(
+            target: "zone::engine",
+            %portal_address,
+            %err,
+            "Waiting for finalized portal pause state before starting the node"
+        );
+        tokio::time::sleep(PORTAL_PAUSE_POLL_INTERVAL).await;
+    }
 }
 
 /// Keep observing finalized portal state independently of the bounded L1 ingestion queue.
@@ -723,14 +750,8 @@ where
         if !self.portal_address.is_zero() {
             // Initialize the gate before any producer starts. This makes restart during an active
             // pause fail closed instead of waiting for historical receipt replay to catch up.
-            refresh_portal_pause(&l1_provider, self.portal_address, &self.l1_block_tracker)
-                .await
-                .map_err(|err| {
-                    eyre::eyre!(
-                        "failed to initialize finalized portal pause state for {}: {err}",
-                        self.portal_address
-                    )
-                })?;
+            initialize_portal_pause(&l1_provider, self.portal_address, &self.l1_block_tracker)
+                .await;
             task_executor.spawn_critical_task(
                 "portal-pause-watcher",
                 watch_portal_pause(
@@ -2124,32 +2145,127 @@ mod tests {
         assert!(validate_zone_chain_id(42_431, 0, 123).is_err());
     }
 
-    #[tokio::test]
-    async fn portal_pause_watcher_observes_automatic_expiry_without_an_event() {
-        fn push_snapshot(asserter: &Asserter, block_number: u64, paused: bool) {
-            asserter.push_success(&Some(TempoHeaderResponse {
-                inner: alloy_rpc_types_eth::Header {
-                    hash: alloy_primitives::B256::with_last_byte(block_number as u8),
-                    inner: TempoHeader {
-                        inner: alloy_consensus::Header {
-                            number: block_number,
-                            ..Default::default()
-                        },
+    fn push_finalized_header(asserter: &Asserter, block_number: u64) {
+        asserter.push_success(&Some(TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header {
+                hash: alloy_primitives::B256::with_last_byte(block_number as u8),
+                inner: TempoHeader {
+                    inner: alloy_consensus::Header {
+                        number: block_number,
                         ..Default::default()
                     },
-                    total_difficulty: None,
-                    size: None,
+                    ..Default::default()
                 },
-                timestamp_millis: 0,
-            }));
-            asserter.push_success(&Bytes::from(ZonePortal::pausedCall::abi_encode_returns(
-                &paused,
-            )));
-        }
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        }));
+    }
 
+    fn push_portal_pause_snapshot(asserter: &Asserter, block_number: u64, paused: bool) {
+        push_finalized_header(asserter, block_number);
+        asserter.push_success(&Bytes::from_static(&[0x00]));
+        asserter.push_success(&Bytes::from(ZonePortal::pausedCall::abi_encode_returns(
+            &paused,
+        )));
+    }
+
+    #[tokio::test]
+    async fn portal_pause_handles_deployment_after_finalized_checkpoint() {
         let asserter = Asserter::new();
-        push_snapshot(&asserter, 10, true);
-        push_snapshot(&asserter, 11, false);
+        push_finalized_header(&asserter, 10);
+        asserter.push_success(&Bytes::new());
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let tracker = L1BlockTracker::default();
+        let portal = Address::repeat_byte(0x11);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            initialize_portal_pause(&provider, portal, &tracker),
+        )
+        .await
+        .expect("an undeployed portal must not block startup");
+        assert!(!tracker.portal_paused());
+        assert!(asserter.read_q().is_empty());
+
+        // Once deployment finalizes, the same reader must observe the portal's actual state.
+        push_portal_pause_snapshot(&asserter, 11, true);
+        refresh_portal_pause(&provider, portal, &tracker)
+            .await
+            .unwrap();
+        assert!(tracker.portal_paused());
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn portal_pause_initialization_waits_for_finalized_state() {
+        let asserter = Asserter::new();
+        asserter.push_success(&None::<TempoHeaderResponse>);
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let tracker = L1BlockTracker::default();
+        let portal = Address::repeat_byte(0x11);
+        let initialize = initialize_portal_pause(&provider, portal, &tracker);
+        tokio::pin!(initialize);
+
+        // Startup must remain pending rather than proceeding with an unknown pause state.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut initialize)
+                .await
+                .is_err()
+        );
+        assert!(asserter.read_q().is_empty());
+        push_finalized_header(&asserter, 11);
+        asserter.push_success(&Bytes::from_static(&[0x00]));
+        asserter.push_failure_msg("paused call temporarily unavailable");
+        push_portal_pause_snapshot(&asserter, 11, true);
+        tokio::time::timeout(Duration::from_secs(2), initialize)
+            .await
+            .expect("initialization must retry when finalized state becomes available");
+        assert!(tracker.portal_paused());
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn portal_pause_rpc_errors_preserve_the_previous_state() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let tracker = L1BlockTracker::default();
+        let portal = Address::repeat_byte(0x11);
+        tracker.observe_portal_pause(10, true);
+
+        push_finalized_header(&asserter, 11);
+        asserter.push_failure_msg("code lookup unavailable");
+        assert!(
+            refresh_portal_pause(&provider, portal, &tracker)
+                .await
+                .is_err()
+        );
+        assert!(tracker.portal_paused());
+
+        push_finalized_header(&asserter, 11);
+        asserter.push_success(&Bytes::from_static(&[0x00]));
+        asserter.push_failure_msg("paused call unavailable");
+        assert!(
+            refresh_portal_pause(&provider, portal, &tracker)
+                .await
+                .is_err()
+        );
+        assert!(tracker.portal_paused());
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn portal_pause_watcher_observes_automatic_expiry_without_an_event() {
+        let asserter = Asserter::new();
+        push_portal_pause_snapshot(&asserter, 10, true);
+        push_portal_pause_snapshot(&asserter, 11, false);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
