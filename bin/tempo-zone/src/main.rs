@@ -3,8 +3,6 @@
 
 mod defaults;
 
-use zone_node::cli::ZoneCli;
-
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -22,7 +20,7 @@ fn main() {
     zone_node::init_version_metadata();
     defaults::init_defaults();
 
-    if let Err(err) = ZoneCli::parse().run() {
+    if let Err(err) = zone_node::cli::run() {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }

@@ -263,14 +263,38 @@ impl EthExecutorSpec for ZoneChainSpec {
 pub struct ZoneChainSpecParser;
 
 #[cfg(feature = "cli")]
+impl ZoneChainSpecParser {
+    /// Returns the placeholder chain spec Reth uses to select the dev datadir before provisioning.
+    pub fn dev_chain_spec() -> eyre::Result<Arc<ZoneChainSpec>> {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_primitives::constants::zone_chain_id(DEV.chain().id(), 1)?;
+        Ok(Arc::new(ZoneChainSpec::from_genesis_with_l1(
+            genesis,
+            DEV.as_ref(),
+        )?))
+    }
+}
+
+#[cfg(feature = "cli")]
 impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
     type ChainSpec = ZoneChainSpec;
 
-    const SUPPORTED_CHAINS: &'static [&'static str] = &[];
+    const SUPPORTED_CHAINS: &'static [&'static str] = &["dev"];
+
+    fn default_value() -> Option<&'static str> {
+        None
+    }
 
     fn parse(s: &str) -> eyre::Result<std::sync::Arc<Self::ChainSpec>> {
-        let genesis = reth_cli::chainspec::parse_genesis(s)?;
-        Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
+        // Reth's `node --dev` selects a chain named `dev` before the node launcher runs. The
+        // launcher replaces this deterministic placeholder with the L1-anchored genesis it
+        // provisions. Both use zone ID 1, so Reth opens the correct chain datadir up front.
+        if s == "dev" {
+            Self::dev_chain_spec()
+        } else {
+            let genesis = reth_cli::chainspec::parse_genesis(s)?;
+            Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
+        }
     }
 }
 
@@ -475,7 +499,19 @@ mod tests {
 
     #[cfg(feature = "cli")]
     #[test]
-    fn parser_rejects_named_tempo_chain() {
-        assert!(ZoneChainSpecParser::parse("dev").is_err());
+    fn parser_has_no_default_chain() {
+        assert_eq!(ZoneChainSpecParser::default_value(), None);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn parser_accepts_dev_placeholder() {
+        let zone = ZoneChainSpecParser::parse("dev").expect("valid dev placeholder");
+
+        assert_eq!(zone.zone_id(), 1);
+        assert_eq!(
+            decode_l1_chain_id(zone.chain().id()).unwrap(),
+            DEV.chain().id()
+        );
     }
 }
