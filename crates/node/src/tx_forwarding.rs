@@ -455,7 +455,7 @@ mod tests {
             events
                 .send(P2pEvent::TransactionReceived {
                     follower_ed25519_public_key: peer.clone(),
-                    transaction,
+                    transaction: transaction.into(),
                 })
                 .await
                 .unwrap();

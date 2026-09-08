@@ -13898,6 +13898,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "base64 0.22.1",
+ "bytes",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -13977,6 +13978,7 @@ version = "0.3.1"
 dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
+ "bytes",
  "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",

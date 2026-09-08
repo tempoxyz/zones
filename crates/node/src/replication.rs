@@ -41,6 +41,7 @@ use zone_sequencer::{
 };
 
 use alloy_signer_local::PrivateKeySigner;
+use bytes::Bytes;
 use eyre::{OptionExt as _, WrapErr as _};
 
 use crate::settlement_attestation::build_settlement_attestation;
@@ -421,7 +422,7 @@ impl BackfillProgress {
 /// backfilled blocks.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPeerBlock {
-    encoded: Vec<u8>,
+    encoded: Bytes,
     live_sender: Option<P2pPeerId>,
 }
 
@@ -956,7 +957,7 @@ async fn process_follower_block<P>(
     pending: &mut BTreeMap<u64, PendingPeerBlock>,
     backfill: &mut BackfillProgress,
     number: u64,
-    block: Vec<u8>,
+    block: Bytes,
     live_sender: Option<P2pPeerId>,
     stop: &sync::CancellationToken,
 ) -> bool
@@ -1105,7 +1106,7 @@ where
         + 'static,
 {
     // Check the received block
-    let mut input = peer_block.encoded.as_slice();
+    let mut input = peer_block.encoded.as_ref();
     let block = Block::decode(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
     if !input.is_empty() {
@@ -2075,7 +2076,7 @@ mod tests {
 
     fn pending_block(payload: u64) -> super::PendingPeerBlock {
         super::PendingPeerBlock {
-            encoded: vec![payload as u8],
+            encoded: vec![payload as u8].into(),
             live_sender: None,
         }
     }

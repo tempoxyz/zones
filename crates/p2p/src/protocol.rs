@@ -1,4 +1,5 @@
 use alloy_primitives::B256;
+use bytes::Bytes;
 
 use crate::network::MAX_MESSAGE_SIZE;
 
@@ -74,7 +75,7 @@ impl RequestFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseFrame {
-    Block { request_id: u64, block: Vec<u8> },
+    Block { request_id: u64, block: Bytes },
     Complete { request_id: u64, tip: PeerTip },
 }
 
@@ -105,7 +106,8 @@ impl ResponseFrame {
         }
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+    /// Decodes one response frame, keeping the block payload as a view into `bytes`.
+    pub(crate) fn decode(bytes: Bytes) -> Result<Self, DecodeError> {
         let Some((&tag, payload)) = bytes.split_first() else {
             return Err(DecodeError::EmptyResponse);
         };
@@ -131,7 +133,7 @@ impl ResponseFrame {
                 }
                 Ok(Self::Block {
                     request_id,
-                    block: payload.to_vec(),
+                    block: bytes.slice(RESPONSE_HEADER_LEN..),
                 })
             }
             COMPLETE_FRAME => Ok(Self::Complete {
@@ -168,6 +170,7 @@ pub(crate) enum EncodeError {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::B256;
+    use bytes::Bytes;
 
     use super::{
         DecodeError, EncodeError, PeerTip, RESPONSE_HEADER_LEN, RequestFrame, ResponseFrame,
@@ -206,13 +209,16 @@ mod tests {
     fn response_golden_bytes_and_round_trips() {
         let block = ResponseFrame::Block {
             request_id: 7,
-            block: vec![0xaa, 0xbb],
+            block: Bytes::from_static(&[0xaa, 0xbb]),
         };
         assert_eq!(
             block.encode().unwrap(),
             vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 0xaa, 0xbb]
         );
-        assert_eq!(ResponseFrame::decode(&block.encode().unwrap()), Ok(block));
+        assert_eq!(
+            ResponseFrame::decode(block.encode().unwrap().into()),
+            Ok(block)
+        );
 
         let complete = ResponseFrame::Complete {
             request_id: 7,
@@ -222,7 +228,7 @@ mod tests {
         assert_eq!(encoded[0], 1);
         assert_eq!(&encoded[1..9], &7_u64.to_be_bytes());
         assert_eq!(encoded.len(), RESPONSE_HEADER_LEN + PeerTip::ENCODED_LEN);
-        assert_eq!(ResponseFrame::decode(&encoded), Ok(complete));
+        assert_eq!(ResponseFrame::decode(encoded.into()), Ok(complete));
     }
 
     #[test]
@@ -231,23 +237,26 @@ mod tests {
             RequestFrame::decode(&[]),
             Err(DecodeError::IncorrectRequestLength { .. })
         ));
-        assert_eq!(ResponseFrame::decode(&[]), Err(DecodeError::EmptyResponse));
         assert_eq!(
-            ResponseFrame::decode(&[0]),
+            ResponseFrame::decode(Bytes::new()),
+            Err(DecodeError::EmptyResponse)
+        );
+        assert_eq!(
+            ResponseFrame::decode(Bytes::from_static(&[0])),
             Err(DecodeError::MissingRequestId)
         );
         assert_eq!(
-            ResponseFrame::decode(&[9]),
+            ResponseFrame::decode(Bytes::from_static(&[9])),
             Err(DecodeError::UnknownResponseTag(9))
         );
         assert!(matches!(
-            ResponseFrame::decode(&[1, 0, 0, 0, 0, 0, 0, 0, 7]),
+            ResponseFrame::decode(Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 7])),
             Err(DecodeError::InvalidCompletionLength { .. })
         ));
         let mut overlong_completion = vec![1, 0, 0, 0, 0, 0, 0, 0, 7];
         overlong_completion.extend_from_slice(&[0; PeerTip::ENCODED_LEN + 1]);
         assert!(matches!(
-            ResponseFrame::decode(&overlong_completion),
+            ResponseFrame::decode(overlong_completion.into()),
             Err(DecodeError::InvalidCompletionLength { .. })
         ));
     }
@@ -258,7 +267,7 @@ mod tests {
         assert!(matches!(
             ResponseFrame::Block {
                 request_id: 1,
-                block: block.clone(),
+                block: block.clone().into(),
             }
             .encode(),
             Err(EncodeError::OversizedResponseBlock { .. })
@@ -266,7 +275,7 @@ mod tests {
         let mut encoded = vec![0, 0, 0, 0, 0, 0, 0, 0, 1];
         encoded.extend_from_slice(&block);
         assert!(matches!(
-            ResponseFrame::decode(&encoded),
+            ResponseFrame::decode(encoded.into()),
             Err(DecodeError::OversizedResponseBlock { .. })
         ));
     }
