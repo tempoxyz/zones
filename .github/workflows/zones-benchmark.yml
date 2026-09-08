@@ -58,11 +58,6 @@ on:
         type: string
         required: true
         default: "2000000"
-      activity-amount:
-        description: Amount for each ordinary Zone TIP-20 transfer.
-        type: string
-        required: true
-        default: "1"
       withdrawal-amount:
         description: Net amount for each Zone withdrawal request.
         type: string
@@ -224,7 +219,7 @@ jobs:
           INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
           INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
-          INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
+          INPUT_ACTIVITY_AMOUNT: "1"
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_SWAP_MECHANISM: direct-swap
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
