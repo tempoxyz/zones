@@ -421,7 +421,7 @@ impl BackfillProgress {
 /// backfilled blocks.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPeerBlock {
-    encoded: Vec<u8>,
+    block: SealedBlock<Block>,
     live_sender: Option<P2pPeerId>,
 }
 
@@ -477,7 +477,8 @@ fn buffer_pending_block(
     }
 }
 
-fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
+/// Decodes one received block, so that the import path never decodes it again.
+fn decode_peer_block(encoded: &[u8]) -> eyre::Result<SealedBlock<Block>> {
     let mut input = encoded;
     let block = Block::decode(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
@@ -486,7 +487,7 @@ fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
         "encoded zone block has {} trailing bytes",
         input.len()
     );
-    Ok(block.header.number())
+    Ok(SealedBlock::seal_slow(block))
 }
 
 fn serve_backfill_page<P>(
@@ -761,8 +762,8 @@ pub(crate) async fn run_follower_block_sync<P>(
                 };
                 match response {
                     BackfillResponse::Block { block, .. } => {
-                        let number = match encoded_block_number(&block) {
-                            Ok(number) => number,
+                        let block = match decode_peer_block(&block) {
+                            Ok(block) => block,
                             Err(err) => {
                                 tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
                                 continue;
@@ -779,7 +780,6 @@ pub(crate) async fn run_follower_block_sync<P>(
                             &schedule,
                             &mut pending,
                             &mut backfill,
-                            number,
                             block,
                             None,
                             &stop,
@@ -870,8 +870,8 @@ pub(crate) async fn run_follower_block_sync<P>(
                             }
                             _ => unreachable!("outer match arm restricts the event kind"),
                         };
-                        let number = match encoded_block_number(&block) {
-                            Ok(number) => number,
+                        let block = match decode_peer_block(&block) {
+                            Ok(block) => block,
                             Err(err) => {
                                 tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
                                 continue;
@@ -888,7 +888,6 @@ pub(crate) async fn run_follower_block_sync<P>(
                             &schedule,
                             &mut pending,
                             &mut backfill,
-                            number,
                             block,
                             live_sender,
                             &stop,
@@ -955,8 +954,7 @@ async fn process_follower_block<P>(
     schedule: &LeadershipSchedule,
     pending: &mut BTreeMap<u64, PendingPeerBlock>,
     backfill: &mut BackfillProgress,
-    number: u64,
-    block: Vec<u8>,
+    block: SealedBlock<Block>,
     live_sender: Option<P2pPeerId>,
     stop: &sync::CancellationToken,
 ) -> bool
@@ -978,10 +976,8 @@ where
             return true;
         }
     };
-    let peer_block = PendingPeerBlock {
-        encoded: block,
-        live_sender,
-    };
+    let number = block.number();
+    let peer_block = PendingPeerBlock { block, live_sender };
     if number <= best {
         match import_peer_block(
             provider,
@@ -989,7 +985,7 @@ where
             l1_block_tracker,
             deposit_queue,
             schedule,
-            &peer_block,
+            peer_block,
             stop,
         )
         .await
@@ -1079,7 +1075,7 @@ where
             l1_block_tracker,
             deposit_queue,
             schedule,
-            &block,
+            block,
             stop,
         )
         .await?;
@@ -1092,7 +1088,7 @@ async fn import_peer_block<P>(
     l1_block_tracker: &L1BlockTracker,
     deposit_queue: &DepositQueue,
     schedule: &LeadershipSchedule,
-    peer_block: &PendingPeerBlock,
+    peer_block: PendingPeerBlock,
     stop: &sync::CancellationToken,
 ) -> eyre::Result<PeerBlockImportOutcome>
 where
@@ -1104,15 +1100,7 @@ where
         + Sync
         + 'static,
 {
-    // Check the received block
-    let mut input = peer_block.encoded.as_slice();
-    let block = Block::decode(&mut input)
-        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
-    if !input.is_empty() {
-        eyre::bail!("encoded zone block has {} trailing bytes", input.len());
-    }
-
-    let block = SealedBlock::seal_slow(block);
+    let PendingPeerBlock { block, live_sender } = peer_block;
     let block_number = block.number();
     let hash = block.hash();
     let best_block = provider.best_block_number()?;
@@ -1169,17 +1157,12 @@ where
     // Check once before waiting to reject an already-known invalid sender without blocking the
     // import loop. `wait_for_validated_peer_anchor` checks again after observing the anchor:
     // the anchor itself may finalize a leadership transition that changes its assigned producer.
-    validate_live_block_sender(
-        schedule,
-        peer_block.live_sender.as_ref(),
-        anchor.number,
-        block_number,
-    )?;
+    validate_live_block_sender(schedule, live_sender.as_ref(), anchor.number, block_number)?;
     let observed = match wait_for_validated_peer_anchor(
         l1_block_tracker,
         schedule,
         &portal_inputs,
-        peer_block.live_sender.as_ref(),
+        live_sender.as_ref(),
         anchor,
         block_number,
         stop,
@@ -2073,9 +2056,25 @@ mod tests {
         assert_eq!(snapshot[0].1, tip);
     }
 
-    fn pending_block(payload: u64) -> super::PendingPeerBlock {
+    fn pending_block(number: u64) -> super::PendingPeerBlock {
+        use reth_primitives_traits::SealedBlock;
+        use tempo_primitives::{Block, TempoHeader};
+
         super::PendingPeerBlock {
-            encoded: vec![payload as u8],
+            block: SealedBlock::seal_slow(Block {
+                header: TempoHeader {
+                    inner: alloy_consensus::Header {
+                        number,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                body: alloy_consensus::BlockBody {
+                    transactions: vec![],
+                    ommers: vec![],
+                    withdrawals: None,
+                },
+            }),
             live_sender: None,
         }
     }
