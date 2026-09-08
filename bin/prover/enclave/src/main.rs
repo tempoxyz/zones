@@ -275,7 +275,7 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
                 version: PROTOCOL_VERSION,
                 request_id: request.request_id,
                 output: Box::new(output),
-                proof_bundle: Some(proof_bundle),
+                proof_bundle,
             },
             Err(message) => VerifyResponse::Error {
                 version: PROTOCOL_VERSION,
