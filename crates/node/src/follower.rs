@@ -254,6 +254,7 @@ where
         // Always probe on startup to see if we're behind
         let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut l1_changes = self.context.l1_block_tracker.subscribe_changes();
 
         // If we don't get blocks after 30s, probe to get the next block
         let inactivity = tokio::time::sleep(BLOCK_INACTIVITY_TIMEOUT);
@@ -381,6 +382,18 @@ where
                         return;
                     }
                 }
+                changed = l1_changes.changed(), if self.pending.first_number().is_some() => {
+                    if changed.is_err() {
+                        debug!(target: "zone::p2p", "L1 state change channel closed");
+                        return;
+                    }
+                    if self.context.l1_block_tracker.portal_paused() {
+                        continue;
+                    }
+                    if !self.process_pending_blocks().await {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -390,6 +403,7 @@ where
         leader: &P2pPeerId,
         proposal: Vec<u8>,
     ) -> eyre::Result<u64> {
+        ensure_settlement_signing_allowed(&self.context.l1_block_tracker)?;
         let proposal = SettlementAttestation::decode(&proposal)?;
         let height: u64 = proposal
             .zoneHeight
@@ -416,6 +430,10 @@ where
             proposal == expected,
             "settlement proposal does not match follower state"
         );
+
+        // L1 reads above may yield while a pause finalizes. Re-check immediately before using the
+        // quorum key so a proposal that raced the first gate cannot obtain an honest signature.
+        ensure_settlement_signing_allowed(&self.context.l1_block_tracker)?;
 
         // Unreachable on an rpc-only member: the P2P layer never routes a proposal to one.
         // Fails closed rather than panicking if it ever does.
@@ -458,6 +476,9 @@ where
                 Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
                     tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
                 }
+                Ok(PeerBlockImportOutcome::Paused(_)) => {
+                    debug!(target: "zone::p2p", "Ignoring already-canonical peer block while the portal is paused");
+                }
                 Ok(PeerBlockImportOutcome::Imported) => {}
                 Err(err) => {
                     tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
@@ -472,8 +493,15 @@ where
         if number > best.saturating_add(1) {
             info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
         }
+        self.process_pending_blocks().await
+    }
+
+    async fn process_pending_blocks(&mut self) -> bool {
         match self.import_pending_blocks().await {
             Ok(PeerBlockImportOutcome::Cancelled) => return false,
+            Ok(PeerBlockImportOutcome::Paused(_)) => {
+                debug!(target: "zone::p2p", "Portal is paused; retaining peer blocks for import after resume");
+            }
             Ok(PeerBlockImportOutcome::TimedOut {
                 block_number,
                 anchor,
@@ -502,11 +530,37 @@ where
 
     async fn import_pending_blocks(&mut self) -> eyre::Result<PeerBlockImportOutcome> {
         loop {
+            if self.context.l1_block_tracker.portal_paused() {
+                return Ok(PeerBlockImportOutcome::Paused(None));
+            }
             let head = self.context.provider.best_block_number()?;
             let Some(block) = self.pending.take_next_after(head) else {
                 return Ok(PeerBlockImportOutcome::Imported);
             };
-            self.import_peer_block(block).await?;
+            match self.import_peer_block(block).await? {
+                PeerBlockImportOutcome::Paused(Some(block)) => {
+                    let block = *block;
+                    let number = block.block.header.number();
+                    debug_assert!(self.pending.insert(number, block).is_none());
+                    return Ok(PeerBlockImportOutcome::Paused(None));
+                }
+                PeerBlockImportOutcome::Paused(None) => {
+                    return Ok(PeerBlockImportOutcome::Paused(None));
+                }
+                PeerBlockImportOutcome::Cancelled => {
+                    return Ok(PeerBlockImportOutcome::Cancelled);
+                }
+                PeerBlockImportOutcome::TimedOut {
+                    block_number,
+                    anchor,
+                } => {
+                    return Ok(PeerBlockImportOutcome::TimedOut {
+                        block_number,
+                        anchor,
+                    });
+                }
+                PeerBlockImportOutcome::Imported => {}
+            }
         }
     }
 
@@ -543,6 +597,15 @@ where
             eyre::bail!(
                 "peer block gap: local head is {best_block}, received height {block_number}, expected {expected_number}"
             );
+        }
+
+        if self.context.l1_block_tracker.portal_paused() {
+            return Ok(PeerBlockImportOutcome::Paused(Some(Box::new(
+                PendingPeerBlock {
+                    block: block.into_block(),
+                    live_sender: peer_block.live_sender,
+                },
+            ))));
         }
 
         // 2. Block's parent hash is correct
@@ -611,6 +674,17 @@ where
             Err(PeerAnchorWaitError::Other(error)) => return Err(error),
         };
 
+        // The anchor observation publishes its finalized pause transition before waking this
+        // import. This is the block-boundary fence that prevents importing the pause block itself.
+        if self.context.l1_block_tracker.portal_paused() {
+            return Ok(PeerBlockImportOutcome::Paused(Some(Box::new(
+                PendingPeerBlock {
+                    block: block.into_block(),
+                    live_sender: peer_block.live_sender,
+                },
+            ))));
+        }
+
         // The subscriber normally enqueues immediately after recording this observation. Enqueueing
         // here as well closes that small scheduling window and makes follower import self-contained;
         // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
@@ -656,6 +730,14 @@ where
         info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
         Ok(PeerBlockImportOutcome::Imported)
     }
+}
+
+fn ensure_settlement_signing_allowed(l1_block_tracker: &L1BlockTracker) -> eyre::Result<()> {
+    eyre::ensure!(
+        !l1_block_tracker.portal_paused(),
+        "portal is paused; refusing to sign a settlement proposal"
+    );
+    Ok(())
 }
 
 fn validate_live_block_sender(
@@ -721,8 +803,14 @@ async fn wait_for_validated_peer_anchor(
 #[derive(Debug)]
 enum PeerBlockImportOutcome {
     Imported,
+    /// Import stopped at the pause boundary. Direct imports return the retained block; the
+    /// pending-buffer wrapper reinserts it and returns `None`.
+    Paused(Option<Box<PendingPeerBlock>>),
     Cancelled,
-    TimedOut { block_number: u64, anchor: NumHash },
+    TimedOut {
+        block_number: u64,
+        anchor: NumHash,
+    },
 }
 
 #[derive(Debug)]
@@ -1064,6 +1152,17 @@ mod tests {
         let wrong_parent =
             validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7).unwrap_err();
         assert!(wrong_parent.to_string().contains("does not extend"));
+    }
+
+    #[test]
+    fn follower_refuses_settlement_signatures_while_portal_is_paused() {
+        let tracker = L1BlockTracker::default();
+        ensure_settlement_signing_allowed(&tracker).unwrap();
+
+        tracker.observe_portal_pause(10, true);
+        let error = ensure_settlement_signing_allowed(&tracker)
+            .expect_err("a paused follower must not use its quorum key");
+        assert!(error.to_string().contains("refusing to sign"));
     }
 
     #[tokio::test]

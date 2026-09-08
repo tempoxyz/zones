@@ -167,7 +167,16 @@ impl L1BlockTracker {
             .portal_pause
             .map_or(paused, |(_, current)| current != paused);
         state.portal_pause = Some((block_number, paused));
+        drop(state);
+        if changed {
+            self.changed.send_replace(());
+        }
         changed
+    }
+
+    /// Subscribe to validated L1-state changes, including portal pause transitions.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
 
     /// Return whether `number` fits inside the bounded subscriber lookahead window.

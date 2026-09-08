@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portal_pause_leaves_the_entire_backlog_queued() {
+    async fn portal_pause_retains_then_drains_the_entire_backlog() {
         let stop = CancellationToken::new();
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2]),
@@ -633,6 +633,13 @@ mod tests {
         assert_eq!(drain_all_available(&mut drain, &stop).await.unwrap(), None);
         assert!(drain.advanced.is_empty());
         assert_eq!(drain.pending, [1, 2]);
+
+        // Both an explicit resume and automatic expiry clear this same production gate. Once the
+        // independently polled portal snapshot does so, the next engine heartbeat must catch up.
+        drain.paused.store(false, Ordering::Relaxed);
+        assert_eq!(drain_all_available(&mut drain, &stop).await.unwrap(), None);
+        assert_eq!(drain.advanced, [1, 2]);
+        assert!(drain.pending.is_empty());
     }
 
     #[tokio::test]

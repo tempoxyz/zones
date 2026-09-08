@@ -197,6 +197,26 @@ fn l1_block_tracker_keeps_the_newest_portal_pause_state() {
 }
 
 #[tokio::test]
+async fn l1_block_tracker_notifies_pause_state_subscribers() {
+    let tracker = L1BlockTracker::default();
+    let mut changes = tracker.subscribe_changes();
+
+    tracker.observe_portal_pause(11, true);
+    changes
+        .changed()
+        .await
+        .expect("pause-state subscription must remain open");
+    assert!(tracker.portal_paused());
+
+    tracker.observe_portal_pause(12, false);
+    changes
+        .changed()
+        .await
+        .expect("pause-state subscription must remain open");
+    assert!(!tracker.portal_paused());
+}
+
+#[tokio::test]
 async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
     let tracker = L1BlockTracker::default();
     let anchor = NumHash::new(10, B256::with_last_byte(0x10));

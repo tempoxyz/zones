@@ -2071,9 +2071,12 @@ mod tests {
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
     use alloy_primitives::{Bytes, Signature, TxKind, U256};
+    use alloy_provider::{ProviderBuilder, mock::Asserter};
+    use alloy_sol_types::SolCall as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
+    use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::transaction::{
         AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
     };
@@ -2119,6 +2122,56 @@ mod tests {
         assert!(validate_zone_chain_id(4_217, 7, expected).is_err());
         assert!(validate_zone_chain_id(42_431, 7, expected + 1).is_err());
         assert!(validate_zone_chain_id(42_431, 0, 123).is_err());
+    }
+
+    #[tokio::test]
+    async fn portal_pause_watcher_observes_automatic_expiry_without_an_event() {
+        fn push_snapshot(asserter: &Asserter, block_number: u64, paused: bool) {
+            asserter.push_success(&Some(TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header {
+                    hash: alloy_primitives::B256::with_last_byte(block_number as u8),
+                    inner: TempoHeader {
+                        inner: alloy_consensus::Header {
+                            number: block_number,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    total_difficulty: None,
+                    size: None,
+                },
+                timestamp_millis: 0,
+            }));
+            asserter.push_success(&Bytes::from(ZonePortal::pausedCall::abi_encode_returns(
+                &paused,
+            )));
+        }
+
+        let asserter = Asserter::new();
+        push_snapshot(&asserter, 10, true);
+        push_snapshot(&asserter, 11, false);
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let tracker = L1BlockTracker::default();
+        let portal = Address::repeat_byte(0x11);
+
+        refresh_portal_pause(&provider, portal, &tracker)
+            .await
+            .unwrap();
+        assert!(tracker.portal_paused());
+
+        let watcher = tokio::spawn(watch_portal_pause(provider, portal, tracker.clone()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tracker.portal_paused() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("polling must observe automatic pause expiry without a resume event");
+        watcher.abort();
+
+        assert!(asserter.read_q().is_empty());
     }
 
     #[test]

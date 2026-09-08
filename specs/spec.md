@@ -401,9 +401,11 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
 - `pause()`: Pause all new deposits, Zone block production, and L1 withdrawal processing for the
   public `PAUSE_DURATION` constant of 30 days. Nodes stop production at a block boundary after
-  observing the pause in finalized Tempo state. The pause expires automatically and cannot be
-  extended while active. Production resumes after an admin resume or automatic expiry and catches
-  up the finalized Tempo anchors accumulated during the pause.
+  observing the pause in finalized Tempo state. Followers also retain, but do not import, peer
+  blocks and refuse settlement signatures while the pause is active. The pause expires
+  automatically and cannot be extended while active. Production and follower import resume after
+  an admin resume or automatic expiry and catch up the finalized Tempo anchors and buffered peer
+  blocks accumulated during the pause.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
