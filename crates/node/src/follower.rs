@@ -92,9 +92,9 @@ impl BackfillProgress {
 ///
 /// `live_sender` is the broadcast sender for live blocks and `None` for
 /// backfilled blocks.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PendingPeerBlock {
-    encoded: Vec<u8>,
+    block: Block,
     live_sender: Option<P2pPeerId>,
 }
 
@@ -148,7 +148,7 @@ impl PendingBlocks {
     }
 }
 
-fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
+fn decode_peer_block(encoded: &[u8]) -> eyre::Result<Block> {
     let mut input = encoded;
     let block = Block::decode(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
@@ -157,7 +157,7 @@ fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
         "encoded zone block has {} trailing bytes",
         input.len()
     );
-    Ok(block.header.number())
+    Ok(block)
 }
 
 /// Latest tip evidence advertised by each peer, with observation time.
@@ -273,8 +273,8 @@ where
                     };
                     match response {
                         BackfillResponse::Block { block, .. } => {
-                            let number = match encoded_block_number(&block) {
-                                Ok(number) => number,
+                            let block = match decode_peer_block(&block) {
+                                Ok(block) => block,
                                 Err(err) => {
                                     tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
                                     continue;
@@ -283,7 +283,7 @@ where
                             inactivity
                                 .as_mut()
                                 .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                            if !self.process_follower_block(number, block, None).await
+                            if !self.process_follower_block(block, None).await
                             {
                                 return;
                             }
@@ -320,18 +320,18 @@ where
                             }
                         }
                         P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
-                            let live_sender = Some(leader_ed25519_public_key);
-                            let number = match encoded_block_number(&block) {
-                                Ok(number) => number,
+                            let block = match decode_peer_block(&block) {
+                                Ok(block) => block,
                                 Err(err) => {
                                     tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
                                     continue;
                                 }
                             };
+                            let live_sender = Some(leader_ed25519_public_key);
                             inactivity
                                 .as_mut()
                                 .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                            if !self.process_follower_block(number, block, live_sender).await
+                            if !self.process_follower_block(block, live_sender).await
                             {
                                 return;
                             }
@@ -440,10 +440,10 @@ where
 
     async fn process_follower_block(
         &mut self,
-        number: u64,
-        block: Vec<u8>,
+        block: Block,
         live_sender: Option<P2pPeerId>,
     ) -> bool {
+        let number = block.header.number();
         let best = match self.context.provider.best_block_number() {
             Ok(best) => best,
             Err(err) => {
@@ -451,12 +451,9 @@ where
                 return true;
             }
         };
-        let peer_block = PendingPeerBlock {
-            encoded: block,
-            live_sender,
-        };
+        let peer_block = PendingPeerBlock { block, live_sender };
         if number <= best {
-            match self.import_peer_block(&peer_block).await {
+            match self.import_peer_block(peer_block).await {
                 Ok(PeerBlockImportOutcome::Cancelled) => return false,
                 Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
                     tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
@@ -509,23 +506,15 @@ where
             let Some(block) = self.pending.take_next_after(head) else {
                 return Ok(PeerBlockImportOutcome::Imported);
             };
-            self.import_peer_block(&block).await?;
+            self.import_peer_block(block).await?;
         }
     }
 
     async fn import_peer_block(
         &self,
-        peer_block: &PendingPeerBlock,
+        peer_block: PendingPeerBlock,
     ) -> eyre::Result<PeerBlockImportOutcome> {
-        // Check the received block
-        let mut input = peer_block.encoded.as_slice();
-        let block = Block::decode(&mut input)
-            .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
-        if !input.is_empty() {
-            eyre::bail!("encoded zone block has {} trailing bytes", input.len());
-        }
-
-        let block = SealedBlock::seal_slow(block);
+        let block = SealedBlock::seal_slow(peer_block.block);
         let block_number = block.number();
         let hash = block.hash();
         let best_block = self.context.provider.best_block_number()?;
@@ -1291,9 +1280,18 @@ mod tests {
         assert_eq!(snapshot[0].1, tip);
     }
 
-    fn pending_block(payload: u64) -> PendingPeerBlock {
+    fn pending_block(number: u64) -> PendingPeerBlock {
         PendingPeerBlock {
-            encoded: vec![payload as u8],
+            block: Block {
+                header: TempoHeader {
+                    inner: alloy_consensus::Header {
+                        number,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             live_sender: None,
         }
     }
@@ -1324,7 +1322,7 @@ mod tests {
         let next = pending
             .take_next_after(98)
             .expect("the immediately next pending block must be available");
-        assert_eq!(next.encoded, vec![99]);
+        assert_eq!(next.block.header.number(), 99);
         assert_eq!(pending.first_number(), Some(100));
     }
 }
