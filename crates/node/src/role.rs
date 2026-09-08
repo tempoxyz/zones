@@ -5,7 +5,6 @@ use std::{sync::Arc, time::Duration};
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
 use alloy_primitives::Address;
-use eyre::WrapErr as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
@@ -256,6 +255,7 @@ pub(crate) struct Sequencing<P> {
     status: SharedRoleStatus,
     active: watch::Sender<bool>,
     finalized: mpsc::Sender<NumHash>,
+    settlement: Option<mpsc::Sender<NumHash>>,
     observed_through: Option<u64>,
 }
 
@@ -338,7 +338,13 @@ where
         self.finalized
             .send(block)
             .await
-            .wrap_err("P2P finalized block channel closed")?;
+            .expect("P2P finalized block channel closed");
+        if let Some(settlement) = &self.settlement {
+            settlement
+                .send(block)
+                .await
+                .expect("settlement worker channel closed");
+        }
         Ok(true)
     }
 }
@@ -365,6 +371,7 @@ pub(crate) async fn run_sequencer<P, Pool>(
     let _cancel = stop.clone().drop_guard();
     let (active_tx, active_rx) = watch::channel(false);
     let (finalized_tx, finalized_rx) = mpsc::channel(128);
+    let (settlement_tx, settlement_rx) = mpsc::channel(128);
     let engine = context.sequencer.as_ref().map(|sequencer| {
         build_engine(
             &context,
@@ -381,6 +388,7 @@ pub(crate) async fn run_sequencer<P, Pool>(
         status: context.status.clone(),
         active: active_tx,
         finalized: finalized_tx,
+        settlement: context.sequencer.as_ref().map(|_| settlement_tx),
         // Programmatic dev nodes with a zero Portal inject already-applied L1 fixtures.
         observed_through: context.portal_address.is_zero().then_some(u64::MAX),
     };
@@ -436,7 +444,7 @@ pub(crate) async fn run_sequencer<P, Pool>(
         transactions_rx,
     ));
     if context.sequencer.is_some() {
-        tasks.spawn(run_leader_services(context, active_rx, stop));
+        tasks.spawn(run_leader_services(context, active_rx, settlement_rx, stop));
     }
     let result = tasks.join_next().await;
     panic!("zone sequencer task stopped unexpectedly: {result:?}");
@@ -446,6 +454,7 @@ pub(crate) async fn run_sequencer<P, Pool>(
 async fn run_leader_services<P, Pool>(
     context: SequencerContext<P, Pool>,
     mut active: watch::Receiver<bool>,
+    blocks: mpsc::Receiver<NumHash>,
     stop: CancellationToken,
 ) where
     P: ZoneSequencerProvider + PersistedBlockSubscriptions,
@@ -455,11 +464,28 @@ async fn run_leader_services<P, Pool>(
         .sequencer
         .as_ref()
         .expect("sequencer resources required");
+    let signer = deps
+        .config
+        .l1_transaction_signer
+        .clone()
+        .unwrap_or_else(|| deps.config.sequencer_signer.clone());
+    let handle = spawn_zone_sequencer(
+        deps.sequencer_config.clone(),
+        signer,
+        context.provider.clone(),
+        deps.prover_config.clone(),
+        stop.clone(),
+        Some(active.clone()),
+        Some(blocks),
+    )
+    .await;
+    let mut worker = AbortOnDropHandle::new(handle);
     loop {
-        if active.wait_for(|active| *active).await.is_err() {
-            return;
+        tokio::select! {
+            result = active.wait_for(|active| *active) => { if result.is_err() { return; } }
+            () = stop.cancelled() => return,
+            result = &mut worker => panic!("settlement worker stopped: {result:?}"),
         }
-        let token = stop.child_token();
         let portal_anchor = match resolve_portal_zone_anchor(
             &context.provider,
             context.portal_address,
@@ -484,34 +510,13 @@ async fn run_leader_services<P, Pool>(
             context.attestation.clone(),
             portal_anchor.block_number,
         );
-        let signer = deps
-            .config
-            .l1_transaction_signer
-            .clone()
-            .unwrap_or_else(|| deps.config.sequencer_signer.clone());
-        let handle = spawn_zone_sequencer(
-            deps.sequencer_config.clone(),
-            signer,
-            context.provider.clone(),
-            deps.prover_config.clone(),
-            token.clone(),
-        )
-        .await;
-        let mut withdrawal = AbortOnDropHandle::new(handle.withdrawal_handle);
-        let mut monitor = AbortOnDropHandle::new(handle.monitor_handle);
         tokio::pin!(proposals);
         tokio::select! {
             _ = active.wait_for(|active| !*active) => {}
             () = stop.cancelled() => {}
             () = &mut proposals => panic!("settlement proposal collector stopped"),
-            result = &mut withdrawal => panic!("withdrawal worker stopped: {result:?}"),
-            result = &mut monitor => panic!("batch submission worker stopped: {result:?}"),
+            result = &mut worker => panic!("settlement worker stopped: {result:?}"),
         }
-        token.cancel();
-        // Never drop an in-flight L1 receipt wait at a leadership boundary.
-        let (withdrawal, monitor) = tokio::join!(withdrawal, monitor);
-        withdrawal.expect("withdrawal worker failed during demotion");
-        monitor.expect("batch worker failed during demotion");
         if stop.is_cancelled() {
             return;
         }

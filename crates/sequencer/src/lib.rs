@@ -6,6 +6,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_chains::Chain;
+use alloy_eips::NumHash;
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
@@ -14,7 +15,7 @@ use reth_chain_state::CanonStateSubscriptions;
 use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc, watch};
 
 pub mod abi {
     pub use tempo_zone_contracts::*;
@@ -35,7 +36,7 @@ pub use encryption_key::{
     EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
     register_encryption_key,
 };
-pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
+pub use monitor::ZoneMonitorConfig;
 pub use prover::{
     SHADOW_PROVER_QUEUE_CAPACITY, ShadowProofAnchor, ShadowProver, ShadowProverConfig,
     spawn_shadow_prover,
@@ -117,38 +118,18 @@ pub struct ZoneSequencerConfig {
     pub attestation_store: Option<AttestationStore>,
 }
 
-/// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
-pub struct ZoneSequencerHandle {
-    /// Join handle for the withdrawal processor task.
-    pub withdrawal_handle: tokio::task::JoinHandle<()>,
-    /// Join handle for the zone monitor task (which also handles batch submission).
-    pub monitor_handle: tokio::task::JoinHandle<()>,
-}
-
-/// Spawn all zone sequencer background tasks.
-///
-/// This is the top-level POC entrypoint that starts:
-/// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
-///   events into the shared store, builds [`crate::BatchData`], and submits each batch
-///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
-///   submission.
-/// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
-///   `processWithdrawals` for each pending withdrawal.
-/// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates
-///   observationally without delaying or changing settlement.
-///
-/// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
-/// when submitting concurrent L1 transactions.
-///
-/// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
-/// in-flight L1 transaction resolves before teardown.
+/// Start the settlement worker. In P2P mode, `active` gates settlement and `blocks` carries
+/// finalized payload references. Legacy single-sequencer nodes use canonical notifications.
+/// Demotion cancels future work but drains transactions already sent to L1.
 pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle {
+    mut active: Option<watch::Receiver<bool>>,
+    mut blocks: Option<mpsc::Receiver<NumHash>>,
+) -> tokio::task::JoinHandle<()> {
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
@@ -171,7 +152,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
-    let withdrawal_notify = Arc::new(Notify::new());
     let withdrawal_repair_notify = Arc::new(Notify::new());
 
     let withdrawal_config = WithdrawalProcessorConfig {
@@ -189,32 +169,85 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         batch_anchor_config: config.batch_anchor_config,
         attestation_store: config.attestation_store,
     };
-    let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
+    let withdrawals = withdrawals::WithdrawalProcessor::new(
         withdrawal_config,
         l1_provider.clone(),
         withdrawal_store.clone(),
-        withdrawal_notify.clone(),
         withdrawal_repair_notify.clone(),
-        shutdown.clone(),
     );
-    let monitor_shared_state = ZoneMonitorSharedState::new(
-        withdrawal_store,
-        withdrawal_notify,
-        withdrawal_repair_notify,
-    );
-    let monitor_handle = monitor::spawn_zone_monitor(
-        monitor_config,
-        zone_provider,
-        l1_provider,
-        signer,
-        monitor_shared_state,
-        shadow_prover,
-        shutdown,
-    );
+    tokio::spawn(async move {
+        loop {
+            if let Some(active) = &mut active {
+                if active.has_changed().is_err() {
+                    return;
+                }
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    result = active.wait_for(|active| *active) => { if result.is_err() { return; } }
+                }
+            }
+            let token = shutdown.child_token();
+            let work = async {
+                while !token.is_cancelled() {
+                    let monitor = monitor::ZoneMonitor::new_with_provider(
+                        monitor_config.clone(),
+                        zone_provider.clone(),
+                        l1_provider.clone(),
+                        Some(signer.clone()),
+                        withdrawal_store.clone(),
+                        withdrawal_repair_notify.clone(),
+                        shadow_prover.clone(),
+                    )
+                    .await;
+                    match monitor {
+                        Ok(mut monitor) => {
+                            if let Err(error) = monitor
+                                .run_settlement(&withdrawals, &mut blocks, &token)
+                                .await
+                            {
+                                tracing::error!(%error, "Settlement failed; restoring from the Portal anchor");
+                            }
+                        }
+                        Err(error) => tracing::error!(%error, "Cannot restore settlement state"),
+                    }
+                    if token
+                        .run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
+                }
+            };
+            finish_on_demotion(work, &token, &shutdown, &mut active).await;
+            if shutdown.is_cancelled() {
+                return;
+            }
+        }
+    })
+}
 
-    ZoneSequencerHandle {
-        withdrawal_handle,
-        monitor_handle,
+/// A role change stops admission of new transactions, never an in-flight receipt wait.
+async fn finish_on_demotion(
+    work: impl std::future::Future<Output = ()>,
+    token: &tokio_util::sync::CancellationToken,
+    shutdown: &tokio_util::sync::CancellationToken,
+    active: &mut Option<watch::Receiver<bool>>,
+) {
+    tokio::pin!(work);
+    let completed = tokio::select! {
+        () = &mut work => true,
+        () = shutdown.cancelled() => false,
+        _ = async {
+            match active {
+                Some(active) => { let _ = active.wait_for(|active| !*active).await; }
+                None => std::future::pending::<()>().await,
+            }
+        } => false,
+    };
+    token.cancel();
+    if !completed {
+        work.await;
     }
 }
 
@@ -258,6 +291,50 @@ mod tests {
         time::{Duration, timeout},
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    #[tokio::test]
+    async fn demotion_drains_an_in_flight_operation_before_returning() {
+        let (role, receiver) = watch::channel(true);
+        let token = tokio_util::sync::CancellationToken::new();
+        let work_token = token.clone();
+        let (draining, drained) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let work = async move {
+                work_token.cancelled().await;
+                draining.send(()).unwrap();
+                released.await.unwrap();
+            };
+            finish_on_demotion(
+                work,
+                &token,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut Some(receiver),
+            )
+            .await;
+        });
+        role.send(false).unwrap();
+        drained.await.unwrap();
+        assert!(
+            !task.is_finished(),
+            "demotion abandoned an in-flight operation"
+        );
+        release.send(()).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_work_is_not_polled_again_during_shutdown() {
+        let token = tokio_util::sync::CancellationToken::new();
+        finish_on_demotion(
+            async {},
+            &token,
+            &tokio_util::sync::CancellationToken::new(),
+            &mut None,
+        )
+        .await;
+        assert!(token.is_cancelled());
+    }
 
     async fn serve_block_number(
         stream: TcpStream,

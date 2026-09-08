@@ -54,9 +54,6 @@ const MAX_RETRIES: u32 = 3;
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(200);
 
-/// Backoff before rebuilding the monitor after a start or run failure.
-const RESTART_BACKOFF: Duration = Duration::from_secs(5);
-
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
@@ -72,29 +69,6 @@ pub struct ZoneMonitorConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// Shared P2P attestations, required after a settlement signer set is activated.
     pub attestation_store: Option<AttestationStore>,
-}
-
-/// Withdrawal state shared between the zone monitor and withdrawal processor.
-#[derive(Clone)]
-pub struct ZoneMonitorSharedState {
-    withdrawal_store: SharedWithdrawalStore,
-    withdrawal_notify: Arc<Notify>,
-    repair_notify: Arc<Notify>,
-}
-
-impl ZoneMonitorSharedState {
-    /// Create the shared withdrawal state used by the zone monitor.
-    pub fn new(
-        withdrawal_store: SharedWithdrawalStore,
-        withdrawal_notify: Arc<Notify>,
-        repair_notify: Arc<Notify>,
-    ) -> Self {
-        Self {
-            withdrawal_store,
-            withdrawal_notify,
-            repair_notify,
-        }
-    }
 }
 
 /// Monitors the Zone L2 chain for new finalized batch boundaries and submits
@@ -117,9 +91,6 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     withdrawal_store: SharedWithdrawalStore,
     /// Batch submitter for posting batches to the ZonePortal on **Tempo L1**.
     batch_submitter: BatchSubmitter,
-    /// Notifier for the withdrawal processor — signalled after each successful
-    /// batch submission so it can process newly enqueued withdrawal slots.
-    withdrawal_notify: Arc<Notify>,
     /// Notifier from the withdrawal processor when the current portal head slot
     /// is missing or stale and its bounded recovery page must be refilled.
     repair_notify: Arc<Notify>,
@@ -157,7 +128,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         l1_provider: DynProvider<TempoNetwork>,
         signer: PrivateKeySigner,
         withdrawal_store: SharedWithdrawalStore,
-        withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
     ) -> Result<Self> {
         Self::new_with_provider(
@@ -166,21 +136,18 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             l1_provider,
             Some(signer),
             withdrawal_store,
-            withdrawal_notify,
             repair_notify,
             None,
         )
         .await
     }
 
-    #[expect(clippy::too_many_arguments)]
-    async fn new_with_provider(
+    pub(crate) async fn new_with_provider(
         config: ZoneMonitorConfig,
         provider: P,
         l1_provider: DynProvider<TempoNetwork>,
         signer: Option<PrivateKeySigner>,
         withdrawal_store: SharedWithdrawalStore,
-        withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
         shadow_prover: Option<ShadowProver>,
     ) -> Result<Self> {
@@ -232,7 +199,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             provider,
             withdrawal_store,
             batch_submitter,
-            withdrawal_notify,
             repair_notify,
             last_submitted_zone_block,
             prev_processed_deposit_hash,
@@ -290,6 +256,55 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                             "canonical zone chain reorged while the sequencer was active"
                         ));
                     }
+                }
+            }
+        }
+    }
+
+    /// One worker advances batches, then processes the resulting withdrawal queue.
+    pub(crate) async fn run_settlement(
+        &mut self,
+        withdrawals: &crate::withdrawals::WithdrawalProcessor,
+        blocks: &mut Option<tokio::sync::mpsc::Receiver<alloy_eips::NumHash>>,
+        shutdown: &sync::CancellationToken,
+    ) -> Result<()> {
+        let use_canonical_notifications = blocks.is_none();
+        // Channel-driven nodes still observe reorgs, but ordinary commits wake the worker
+        // through the finalized-payload channel. Legacy nodes use canonical commits directly.
+        let mut canonical = self
+            .provider
+            .canonical_state_stream()
+            .filter(move |notification| {
+                std::future::ready(use_canonical_notifications || notification.reverted().is_some())
+            });
+        let mut fallback = tokio::time::interval(self.config.poll_interval);
+        let mut withdrawal_poll = tokio::time::interval(withdrawals.poll_interval());
+        loop {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+            self.process_available_blocks(shutdown).await;
+            withdrawals.process_cycle(shutdown).await;
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return Ok(()),
+                _ = self.repair_notify.notified() => self.refill_withdrawal_cache().await,
+                _ = fallback.tick() => {}
+                _ = withdrawal_poll.tick() => {}
+                block = async {
+                    match blocks {
+                        Some(blocks) => blocks.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let block = block.expect("finalized payload channel closed");
+                    let header = self.provider.sealed_header(block.number)?
+                        .ok_or_else(|| eyre::eyre!("finalized payload {} is missing", block.number))?;
+                    eyre::ensure!(header.hash() == block.hash, "finalized payload is no longer canonical");
+                }
+                notification = canonical.next() => {
+                    let notification = notification.ok_or_else(|| eyre::eyre!("canonical zone stream closed"))?;
+                    eyre::ensure!(notification.reverted().is_none(), "canonical zone chain reorged during settlement");
                 }
             }
         }
@@ -375,7 +390,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 evicted_tail_slots,
                 "Restored pending withdrawals from chain"
             );
-            self.withdrawal_notify.notify_one();
         } else if previous_slots > 0 {
             info!(
                 page_head,
@@ -635,8 +649,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         }
                     }
 
-                    self.withdrawal_notify.notify_one();
-
                     return Ok(());
                 }
                 Err(BatchSubmitError::Cancelled) => return Err(BatchSubmitError::Cancelled),
@@ -829,83 +841,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     }
 }
 
-/// Spawn the zone monitor as a background task.
-///
-/// The monitor consumes canonical Zone state notifications and submits finalized batch
-/// boundaries to the ZonePortal on Tempo L1. Local state only advances on successful submission.
-///
-/// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
-pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
-    config: ZoneMonitorConfig,
-    zone_provider: P,
-    l1_provider: DynProvider<TempoNetwork>,
-    signer: PrivateKeySigner,
-    shared_state: ZoneMonitorSharedState,
-    shadow_prover: Option<ShadowProver>,
-    shutdown: sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    let ZoneMonitorSharedState {
-        withdrawal_store,
-        withdrawal_notify,
-        repair_notify,
-    } = shared_state;
-    tokio::spawn(async move {
-        loop {
-            if shutdown.is_cancelled() {
-                info!("Zone monitor stopped before start");
-                return;
-            }
-            let mut monitor = match ZoneMonitor::new_with_provider(
-                config.clone(),
-                zone_provider.clone(),
-                l1_provider.clone(),
-                Some(signer.clone()),
-                withdrawal_store.clone(),
-                withdrawal_notify.clone(),
-                repair_notify.clone(),
-                shadow_prover.clone(),
-            )
-            .await
-            {
-                Ok(monitor) => monitor,
-                Err(e) => {
-                    error!(error = %e, "Zone monitor failed to start, retrying in 5s");
-                    if shutdown
-                        .run_until_cancelled(tokio::time::sleep(RESTART_BACKOFF))
-                        .await
-                        .is_none()
-                    {
-                        info!("Zone monitor stopped before start");
-                        return;
-                    }
-                    continue;
-                }
-            };
-
-            match monitor.run(&shutdown).await {
-                Ok(()) => {
-                    info!("Zone monitor stopped");
-                    return;
-                }
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "Zone monitor failed; rebuilding from the portal anchor in 5s"
-                    );
-                    if shutdown
-                        .run_until_cancelled(tokio::time::sleep(RESTART_BACKOFF))
-                        .await
-                        .is_none()
-                    {
-                        info!("Zone monitor stopped");
-                        return;
-                    }
-                }
-            }
-        }
-    })
-}
-
 /// Try to decode a ZonePortal revert reason from an eyre error chain.
 ///
 /// Extracts hex-encoded revert data from the error's display string and decodes
@@ -1018,7 +953,6 @@ mod tests {
             provider: zone_provider,
             withdrawal_store: SharedWithdrawalStore::new(),
             batch_submitter: BatchSubmitter::new(portal_address, l1_provider),
-            withdrawal_notify: Arc::new(Notify::new()),
             repair_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),
@@ -1118,7 +1052,6 @@ mod tests {
             mock_provider(l1.clone()),
             None,
             SharedWithdrawalStore::new(),
-            Arc::new(Notify::new()),
             Arc::new(Notify::new()),
             None,
         )

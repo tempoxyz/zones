@@ -1616,20 +1616,15 @@ where
             zone_provider,
             prover_config,
             tokio_util::sync::CancellationToken::new(),
+            None,
+            None,
         )
         .await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
-        // Critical task — node shuts down if either exits.
-        task_executor.spawn_critical_task("zone-monitor", async move {
-            tokio::select! {
-                res = seq_handle.withdrawal_handle => {
-                    tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
-                }
-                res = seq_handle.monitor_handle => {
-                    tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
-                }
-            }
+        task_executor.spawn_critical_task("zone-settlement", async move {
+            let result = seq_handle.await;
+            panic!("settlement worker exited: {result:?}");
         });
 
         // Flush unpersisted blocks on shutdown.

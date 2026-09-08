@@ -608,11 +608,18 @@ pub(crate) trait TestNodeHandle: Send {
 
     fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture;
 
+    fn spawn_batch_monitor(
+        &self,
+        config: zone_sequencer::ZoneMonitorConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+        l1: alloy_provider::DynProvider<TempoNetwork>,
+    ) -> Pin<Box<dyn Future<Output = tokio::task::JoinHandle<()>> + Send + '_>>;
+
     fn spawn_sequencer(
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
         signer: alloy_signer_local::PrivateKeySigner,
-    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = tokio::task::JoinHandle<()>> + Send + '_>>;
 }
 
 impl<Node, AddOns> TestNodeHandle for NodeHandle<Node, AddOns>
@@ -633,11 +640,46 @@ where
         &mut self.node_exit_future
     }
 
+    #[expect(
+        clippy::async_yields_async,
+        reason = "the harness needs the task handle to simulate a crash"
+    )]
+    fn spawn_batch_monitor(
+        &self,
+        config: zone_sequencer::ZoneMonitorConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+        l1: alloy_provider::DynProvider<TempoNetwork>,
+    ) -> Pin<Box<dyn Future<Output = tokio::task::JoinHandle<()>> + Send + '_>> {
+        let provider = self.node.provider().clone();
+        Box::pin(async move {
+            let mut monitor = zone_sequencer::monitor::ZoneMonitor::new(
+                config,
+                provider,
+                l1,
+                signer,
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            tokio::spawn(async move {
+                monitor
+                    .run(&tokio_util::sync::CancellationToken::new())
+                    .await
+                    .unwrap();
+            })
+        })
+    }
+
+    #[expect(
+        clippy::async_yields_async,
+        reason = "the harness needs the task handle to simulate a crash"
+    )]
     fn spawn_sequencer(
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
         signer: alloy_signer_local::PrivateKeySigner,
-    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = tokio::task::JoinHandle<()>> + Send + '_>> {
         let provider = self.node.provider().clone();
         Box::pin(async move {
             zone_sequencer::spawn_zone_sequencer(
@@ -646,6 +688,8 @@ where
                 provider,
                 None,
                 tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
             )
             .await
         })
@@ -703,11 +747,23 @@ impl ZoneTestNode {
             .graceful_shutdown_with_timeout(Duration::from_secs(5));
     }
 
+    /// Submit batches without consuming their withdrawal queue, to build a restart fixture.
+    pub(crate) async fn spawn_batch_monitor(
+        &self,
+        config: zone_sequencer::ZoneMonitorConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+        l1: alloy_provider::DynProvider<TempoNetwork>,
+    ) -> tokio::task::JoinHandle<()> {
+        self.node_handle
+            .spawn_batch_monitor(config, signer, l1)
+            .await
+    }
+
     async fn spawn_sequencer(
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
         signer: alloy_signer_local::PrivateKeySigner,
-    ) -> zone_sequencer::ZoneSequencerHandle {
+    ) -> tokio::task::JoinHandle<()> {
         self.node_handle.spawn_sequencer(config, signer).await
     }
 
@@ -3581,7 +3637,7 @@ pub(crate) async fn spawn_sequencer(
     zone: &ZoneTestNode,
     portal_address: Address,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
-) -> zone_sequencer::ZoneSequencerHandle {
+) -> tokio::task::JoinHandle<()> {
     spawn_sequencer_with_config(
         l1,
         zone,
@@ -3601,7 +3657,7 @@ pub(crate) async fn spawn_sequencer_with_config(
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
     batch_anchor_config: zone_sequencer::BatchAnchorConfig,
     withdrawal_batch_limits: zone_sequencer::WithdrawalBatchLimits,
-) -> zone_sequencer::ZoneSequencerHandle {
+) -> tokio::task::JoinHandle<()> {
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {

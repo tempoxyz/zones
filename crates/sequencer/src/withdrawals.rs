@@ -326,7 +326,6 @@ pub struct WithdrawalProcessor {
     provider: DynProvider<TempoNetwork>,
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     store: SharedWithdrawalStore,
-    notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
     sequencer_metrics: SequencerMetrics,
@@ -340,7 +339,6 @@ impl WithdrawalProcessor {
         config: WithdrawalProcessorConfig,
         provider: DynProvider<TempoNetwork>,
         store: SharedWithdrawalStore,
-        notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
     ) -> Self {
         config.batch_limits.assert_valid();
@@ -351,7 +349,6 @@ impl WithdrawalProcessor {
             provider,
             portal,
             store,
-            notify,
             repair_notify,
             metrics: WithdrawalProcessorMetrics::default(),
             sequencer_metrics: SequencerMetrics::default(),
@@ -377,47 +374,19 @@ impl WithdrawalProcessor {
         }
     }
 
-    /// Run the processor loop. This method never returns under normal operation.
-    ///
-    /// Waits for a notification from the batch submitter (or a fallback timeout) before
-    /// checking the L1 withdrawal queue. Returns only when `shutdown` fires; the
-    /// token is observed at the wait boundary so an in-flight processing cycle completes
-    /// first.
-    #[instrument(skip_all, fields(portal = %self.config.portal_address))]
-    pub async fn run(&self, shutdown: &sync::CancellationToken) {
-        info!("Withdrawal processor started");
+    pub(crate) fn poll_interval(&self) -> Duration {
+        self.config.fallback_poll_interval
+    }
 
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => {
-                    debug!("Withdrawal processor observed shutdown at the poll boundary");
-                    return;
-                }
-                _ = self.notify.notified() => {
-                    debug!("Woken by batch submission notification");
-                }
-                _ = tokio::time::sleep(self.config.fallback_poll_interval) => {
-                    debug!("Fallback poll interval elapsed");
-                }
-            }
-
-            if let Err(e) = self.process_queue(shutdown).await {
-                error!(error = %e, "Withdrawal processing cycle failed");
-            }
-
-            if shutdown.is_cancelled() {
-                debug!("Withdrawal processor stopped after draining submitted transactions");
-                return;
-            }
-
-            if let Err(error) = self.update_sequencer_metrics().await {
-                warn!(
-                    %error,
-                    sequencer = %self.config.sequencer_address,
-                    "Failed to refresh sequencer PathUSD balance metric"
-                );
-            }
+    /// Drain one withdrawal cycle, including receipts for transactions already sent to L1.
+    pub(crate) async fn process_cycle(&self, shutdown: &sync::CancellationToken) {
+        if let Err(error) = self.process_queue(shutdown).await {
+            error!(%error, "Withdrawal processing cycle failed");
+        }
+        if !shutdown.is_cancelled()
+            && let Err(error) = self.update_sequencer_metrics().await
+        {
+            warn!(%error, "Failed to refresh sequencer balance");
         }
     }
 
@@ -832,27 +801,6 @@ struct SubmitBatches<'a> {
     first_nonce: u64,
     withdrawals: &'a [abi::Withdrawal],
     batches: Vec<WithdrawalBatch>,
-}
-
-/// Spawn the withdrawal processor as a background task.
-///
-/// The processor waits for notifications from the batch submitter (via `notify`) and then
-/// processes withdrawals from the ZonePortal queue on Tempo L1.
-///
-/// The `provider` must already include the sequencer wallet for signing L1 transactions.
-pub fn spawn_withdrawal_processor(
-    config: WithdrawalProcessorConfig,
-    provider: DynProvider<TempoNetwork>,
-    store: SharedWithdrawalStore,
-    notify: Arc<Notify>,
-    repair_notify: Arc<Notify>,
-    shutdown: sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let processor = WithdrawalProcessor::new(config, provider, store, notify, repair_notify);
-        processor.run(&shutdown).await;
-        info!("Withdrawal processor stopped");
-    })
 }
 
 /// Return the gas reserved for one withdrawal inside a `processWithdrawals` transaction.
@@ -1321,13 +1269,7 @@ mod tests {
             sequencer_address: Address::repeat_byte(0x77),
             batch_limits: WithdrawalBatchLimits::default(),
         };
-        WithdrawalProcessor::new(
-            config,
-            mock_provider(l1),
-            store,
-            Arc::new(Notify::new()),
-            repair_notify,
-        )
+        WithdrawalProcessor::new(config, mock_provider(l1), store, repair_notify)
     }
 
     #[tokio::test]

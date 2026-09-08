@@ -694,12 +694,8 @@ async fn test_many_concurrent_withdrawals_are_batched() -> eyre::Result<()> {
             let sequencer = &sequencer;
             async move {
                 eyre::ensure!(
-                    !sequencer.monitor_handle.is_finished(),
-                    "zone monitor exited while processing concurrent withdrawals"
-                );
-                eyre::ensure!(
-                    !sequencer.withdrawal_handle.is_finished(),
-                    "withdrawal processor exited while processing concurrent withdrawals"
+                    !sequencer.is_finished(),
+                    "settlement worker exited while processing concurrent withdrawals"
                 );
 
                 let events = portal
@@ -2173,7 +2169,7 @@ async fn test_global_pause_blocks_deposits_and_l1_withdrawal_processing() -> eyr
     )
     .await?;
     eyre::ensure!(
-        !sequencer.withdrawal_handle.is_finished(),
+        !sequencer.is_finished(),
         "withdrawal processor exited while the portal was paused"
     );
     poll_until(
