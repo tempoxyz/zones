@@ -1018,6 +1018,37 @@ impl ZoneTestNode {
         .await
     }
 
+    /// Run the scheduled T12 -> T13 transition against a real L1 and return the proof chain spec.
+    pub(crate) async fn start_from_l1_with_t13(
+        l1_http_url: &url::Url,
+        l1_rpc_url: &url::Url,
+        portal_address: Address,
+        activation: u64,
+    ) -> eyre::Result<(Self, Arc<ZoneChainSpec>)> {
+        let (mut genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+        let provider = ProviderBuilder::new().connect_http(l1_http_url.clone());
+        let zone_id = ZonePortal::new(portal_address, provider)
+            .zoneId()
+            .call()
+            .await?;
+        let chain_id = derive_zone_chain_id(1_337, zone_id)?;
+        genesis.config.chain_id = chain_id;
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t13Time".into(), activation)?;
+        let spec = Arc::new(ZoneChainSpec::from_genesis(genesis.clone())?);
+        let node = Self::launch_with_genesis(
+            l1_rpc_url.to_string(),
+            portal_address,
+            chain_id,
+            Some(genesis),
+            l1_dev_signer(),
+        )
+        .await?;
+        Ok((node, spec))
+    }
+
     /// Start a zone node with additional private keys for historical encrypted deposits.
     pub(crate) async fn start_from_l1_with_decryption_keys(
         l1_http_url: &url::Url,
@@ -2681,6 +2712,26 @@ impl L1TestNode {
     /// Start an L1 dev node with the default configuration (500ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
+    }
+
+    /// Start in T12 with the legacy shared runtimes; normal block execution installs T13.
+    pub(crate) async fn start_with_t13(activation: u64) -> eyre::Result<Self> {
+        use reth_chainspec::EthChainSpec as _;
+        use tempo_contracts::precompiles::initial_zone_factory_state;
+        Self::start_with(|cfg| {
+            let mut genesis = cfg.chain.genesis().clone();
+            genesis
+                .config
+                .extra_fields
+                .insert_value("t13Time".into(), activation)
+                .unwrap();
+            for account in initial_zone_factory_state(l1_dev_signer().address()) {
+                genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
+            }
+            cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
+            cfg.dev.block_time = None;
+        })
+        .await
     }
 
     /// Start an L1 dev node, applying a closure to customise the [`NodeConfig`]
