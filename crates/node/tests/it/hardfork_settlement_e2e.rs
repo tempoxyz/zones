@@ -122,6 +122,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     submitter
         .submit_batch(
             &submitter.prepare_batch(legacy).await?,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -260,7 +261,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     let batch = batch_from_output(end, zone.tempo_block_number().await?, &output);
     let prepared = submitter.prepare_batch(batch).await?;
     let settled = submitter
-        .submit_batch(&prepared, &CancellationToken::new())
+        .submit_batch(&prepared, None, &CancellationToken::new())
         .await
         .map_err(|err| eyre::eyre!("T13 settlement: {err:?}"))?;
     assert_eq!(settled.lastProcessedEnabledTokenCount, 3);
@@ -279,7 +280,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     );
     assert!(
         submitter
-            .submit_batch(&prepared, &CancellationToken::new())
+            .submit_batch(&prepared, None, &CancellationToken::new())
             .await
             .is_err(),
         "settlement cannot replay"
