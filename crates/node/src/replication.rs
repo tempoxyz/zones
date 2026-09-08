@@ -2,65 +2,22 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
-use alloy_provider::DynProvider;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_primitives_traits::SealedBlock;
 use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
-use std::collections::HashMap;
-use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
 use tracing::{debug, info};
 use zone_l1::TempoStateExt as _;
 use zone_p2p::{BackfillCommand, BackfillRequest, P2pCommand, P2pEvent, P2pPeerId, PeerTip};
-use zone_sequencer::{
-    BatchAnchorConfig,
-    attestation::{AttestationDomain, AttestationStore, SignedSettlementAttestation},
-};
+use zone_sequencer::attestation::{AttestationStore, SignedSettlementAttestation};
 
-use alloy_signer_local::PrivateKeySigner;
 use eyre::{OptionExt as _, WrapErr as _};
 
-use crate::settlement_attestation::build_settlement_attestation;
-
-/// Shared signing and L1-validation context for settlement attestations.
-#[derive(Clone)]
-pub(crate) struct AttestationContext {
-    pub(crate) domain: AttestationDomain,
-    /// Portal sequencer-set version validated against the manifest at startup.
-    pub(crate) pinned_sequencer_set_version: Option<u64>,
-    /// `None` on an rpc-only member: it holds no individual key and never signs.
-    pub(crate) signer: Option<PrivateKeySigner>,
-    pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-    pub(crate) store: AttestationStore,
-    pub(crate) l1_provider: DynProvider<TempoNetwork>,
-    pub(crate) anchor_config: BatchAnchorConfig,
-}
-
-impl AttestationContext {
-    pub(crate) fn new(
-        domain: AttestationDomain,
-        pinned_sequencer_set_version: Option<u64>,
-        signer: Option<PrivateKeySigner>,
-        addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-        store: AttestationStore,
-        l1_provider: DynProvider<TempoNetwork>,
-        anchor_config: BatchAnchorConfig,
-    ) -> Self {
-        Self {
-            domain,
-            pinned_sequencer_set_version,
-            signer,
-            addresses,
-            store,
-            l1_provider,
-            anchor_config,
-        }
-    }
-}
+use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PersistedTip {

@@ -31,9 +31,7 @@ use zone_payload::{
 };
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
-use crate::{
-    replication::AttestationContext, settlement_attestation::build_settlement_attestation,
-};
+use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
 
 const BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BLOCK_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);

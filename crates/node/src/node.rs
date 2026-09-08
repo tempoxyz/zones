@@ -6,7 +6,7 @@
 use crate::{
     ZoneEngine,
     follower::PeerTipRegistry,
-    replication::{AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
+    replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
         canonical_recovery_height, route_backfill_requests, route_backfill_responses,
@@ -17,6 +17,7 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
+    settlement_attestation::AttestationContext,
     shadow_prover::RpcFollowerShadowProver,
 };
 use alloy_chains::Chain;
