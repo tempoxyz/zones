@@ -6,11 +6,11 @@
 use crate::{
     ZoneEngine,
     follower::PeerTipRegistry,
+    p2p_engine::{ZoneP2pEngine, route_backfill_requests},
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
-        EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
-        canonical_recovery_height, route_backfill_requests, route_backfill_responses,
-        route_events_to_generations, run_role_controller,
+        LeaderSequencerDeps, SequencerContext, SharedRoleStatus, canonical_recovery_height,
+        run_sequencer,
     },
     rpc::{
         NodeZoneDebugApi, OperatorWeb3Api, OperatorZoneApi, SequencerRpcContext,
@@ -544,7 +544,7 @@ where
 
 /// P2P services that continue running after the network is initialized.
 struct P2PRuntime {
-    sinks: EventSinks,
+    sinks: ZoneP2pEngine,
     commands: Sender<P2pCommand>,
     backfill_commands: Sender<BackfillCommand>,
     attestation: AttestationContext,
@@ -898,9 +898,8 @@ where
             backfill_requests_rx,
         }) = p2p_runtime
         {
-            // Backfill serving is role-neutral: every role serves the same canonical
-            // provider, so the server outlives role generations and a leadership handoff
-            // can never drop an accepted request.
+            // Every node serves canonical blocks through a process-lifetime backfill server,
+            // retaining accepted requests across leadership changes.
             task_executor.spawn_critical_task(
                 "zone-backfill-server",
                 serve_backfill_requests(
@@ -920,7 +919,7 @@ where
                 )?),
                 None => None,
             };
-            let context = RoleControllerContext {
+            let context = SequencerContext {
                 local_ed25519_public_key,
                 schedule,
                 provider: provider.clone(),
@@ -941,8 +940,8 @@ where
                 status: role_status,
             };
             task_executor.spawn_critical_task(
-                "zone-role-controller",
-                run_role_controller(context, sinks, l1_blocks_rx),
+                "zone-sequencer",
+                run_sequencer(context, sinks, l1_blocks_rx),
             );
 
             // Flush unpersisted blocks on shutdown.
@@ -1305,15 +1304,14 @@ where
 
     /// Start the Commonware network and the long-lived P2P event demultiplexer.
     ///
-    /// Role-specific consumers are attached later by the role controller through the returned
-    /// [`EventSinks`]. Generic events and typed backfill ports are routed for the process lifetime.
+    /// The returned [`ZoneP2pEngine`] retains stable consumers for the process lifetime.
     fn launch_p2p_network(
         config: P2pConfig,
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
         backfill_requests: tokio::sync::mpsc::Sender<BackfillRequest>,
     ) -> eyre::Result<(
-        EventSinks,
+        ZoneP2pEngine,
         tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>,
         tokio::sync::mpsc::Sender<BackfillCommand>,
     )> {
@@ -1327,18 +1325,13 @@ where
             backfill,
         } = handle.into_parts();
 
-        let sinks = EventSinks::default();
-        task_executor.spawn_critical_task(
-            "zone-p2p-event-router",
-            route_events_to_generations(events, sinks.clone()),
-        );
+        let sinks = ZoneP2pEngine {
+            events,
+            backfill: backfill.responses,
+        };
         task_executor.spawn_critical_task(
             "zone-p2p-backfill-request-router",
             route_backfill_requests(backfill.requests, backfill_requests),
-        );
-        task_executor.spawn_critical_task(
-            "zone-p2p-backfill-response-router",
-            route_backfill_responses(backfill.responses, sinks.clone()),
         );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
@@ -1378,7 +1371,7 @@ where
         Ok((sinks, commands, backfill.commands))
     }
 
-    /// Build the leader-generation sequencer dependencies (activated only while leader).
+    /// Build settlement dependencies (active only while sequencing).
     fn build_leader_sequencer_deps(
         config: ZoneSequencerAddOnsConfig,
         l1_rpc_url: String,

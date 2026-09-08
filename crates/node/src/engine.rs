@@ -31,13 +31,14 @@
 //!
 //! The deposit queue uses a **peek / confirm** pattern: the engine peeks at
 //! the next L1 block, wraps it into [`ZonePayloadAttributes`], and only
-//! confirms (removes) the block after `newPayload` succeeds. A failed build
+//! confirms (removes) the block after `newPayload` and the final forkchoice update succeed. A failed build
 //! leaves the block in the queue for retry.
 //!
 //! The zone assumes **instant finality** — head, safe, and finalized all point
 //! to the same block.
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes as EthPayloadAttributes};
 use eyre::OptionExt;
@@ -81,7 +82,7 @@ impl ProductionPermit {
 
     /// Decide whether this node may produce the zone block embedding `tempo_anchor`.
     ///
-    /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
+    /// `None` authorizes production; `Some(exit)` explains why production is fenced.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
         match self.schedule.leader_for(tempo_anchor) {
             None => Some(EngineExit::Fenced { tempo_anchor }),
@@ -164,7 +165,8 @@ where
 /// 3. Sends FCU with payload attributes to start a build
 /// 4. Resolves the built payload
 /// 5. Submits via `newPayload`
-/// 6. Confirms the L1 block in the queue (removes it)
+/// 6. Finalizes the payload with a forkchoice update
+/// 7. Confirms the L1 block in the queue (removes it)
 ///
 /// On failure the L1 block stays in the queue and is retried.
 #[derive(Debug)]
@@ -222,6 +224,27 @@ impl ZoneEngine {
     pub fn with_production_permit(mut self, permit: ProductionPermit) -> Self {
         self.production_permit = Some(permit);
         self
+    }
+
+    /// Produce one available anchor using the current canonical parent.
+    /// Called by the persistent sequencer between peer imports.
+    pub(crate) async fn produce_next(
+        &mut self,
+        parent: SealedHeader<TempoHeader>,
+    ) -> eyre::Result<Option<NumHash>> {
+        let Some(block) = self.deposit_queue.peek() else {
+            return Ok(None);
+        };
+        if self
+            .production_permit
+            .as_ref()
+            .is_some_and(|permit| permit.check(block.header.number()).is_some())
+        {
+            return Ok(None);
+        }
+        self.last_header = parent;
+        self.advance(block).await?;
+        Ok(Some(self.last_header.num_hash()))
     }
 
     /// Runs the main Zone engine loop until cancelled or halted by the leadership permit.
@@ -328,7 +351,7 @@ impl ZoneEngine {
     /// Wraps the given L1 block into [`ZonePayloadAttributes`], sends FCU
     /// with those attributes, waits for the payload to be built, then submits
     /// via `newPayload`. Only confirms (removes) the L1 block from the
-    /// deposit queue after `newPayload` succeeds.
+    /// deposit queue after `newPayload` and the final forkchoice update succeed.
     async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
         let l1_num_hash = l1_block.header.num_hash();
 
@@ -399,21 +422,21 @@ impl ZoneEngine {
             eyre::bail!("Invalid payload for block {block_number}");
         }
 
-        // newPayload succeeded — remove the exact finalized L1 block that
-        // produced it. A mismatch indicates an internal consumer-ordering bug.
+        // Publish and release the anchor only after FCU has finalized this payload. A failed
+        // FCU leaves the queue intact so the same anchor can be retried from the canonical head.
+        let result = self
+            .to_engine
+            .fork_choice_updated(ForkchoiceState::same_hash(header.hash()), None)
+            .await?;
+        eyre::ensure!(
+            result.is_valid(),
+            "Invalid post-payload forkchoice: {result:?}"
+        );
+        self.last_header = header;
         self.deposit_queue.confirm(l1_num_hash)?;
         self.l1_block_tracker.prune_through(l1_num_hash.number);
         if let Some(permit) = &self.production_permit {
             permit.record_applied_anchor(l1_num_hash.number);
-        }
-
-        self.last_header = header;
-
-        // Canonicalize the new head — FCU-with-attrs above only set the
-        // *previous* head as canonical; this bare FCU makes the just-built
-        // block the EL's canonical head.
-        if let Err(e) = self.update_forkchoice_state().await {
-            error!(target: "zone::engine", "Error sending post-newPayload FCU: {:?}", e);
         }
 
         Ok(())

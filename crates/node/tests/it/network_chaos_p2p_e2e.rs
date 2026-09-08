@@ -749,8 +749,30 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     // The transaction remains private to B while every P2P path involving B is down. Commonware
     // may include it in a local proposal, but that proposal must not reach A/C or settle on L1.
     // Its canonical inclusion under B after reconnection creates the boundary this test follows.
+    // Observing the transition does not mean the outgoing prefix has been imported yet.
+    // Wait for A's last authorized anchor and let C import that exact prefix before asserting
+    // isolation. Catching up on A's durable tail is valid while B remains disconnected.
+    let activation = cluster.nodes[0]
+        .leadership()
+        .latest()
+        .expect("observed leadership transition")
+        .activation_tempo_block();
+    cluster.nodes[0]
+        .wait_for_tempo_block_number(activation.saturating_sub(1), NETWORK_TIMEOUT)
+        .await?;
+    eyre::ensure!(
+        cluster.nodes[0].tempo_block_number().await? == activation.saturating_sub(1),
+        "A advanced beyond its last authorized L1 anchor"
+    );
     let a_fenced_height = cluster.nodes[0].provider().get_block_number().await?;
+    cluster.nodes[2]
+        .wait_for_block_number(a_fenced_height, NETWORK_TIMEOUT)
+        .await?;
     let c_fenced_height = cluster.nodes[2].provider().get_block_number().await?;
+    eyre::ensure!(
+        a_fenced_height == c_fenced_height,
+        "C advanced beyond A's authorized prefix while B was isolated"
+    );
     let withdrawal_hash = account.submit_withdrawal(WITHDRAWAL_AMOUNT).await?;
     eyre::ensure!(
         cluster.nodes[0]

@@ -1,6 +1,5 @@
 //! Node-side leader replication and role-neutral backfill serving.
 
-use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
@@ -8,7 +7,7 @@ use reth_primitives_traits::SealedBlock;
 use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
 use tempo_primitives::{Block, TempoHeader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync;
 use tracing::{debug, info};
 use zone_l1::TempoStateExt as _;
@@ -19,38 +18,15 @@ use eyre::{OptionExt as _, WrapErr as _};
 
 use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PersistedTip {
-    number: u64,
-    hash: B256,
-}
-
 pub(crate) struct EncodedPersistedBlock {
-    number: u64,
     hash: B256,
     encoded: Vec<u8>,
-}
-
-/// The one shutdown decision the role controller makes for a leader's block broadcaster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BroadcasterShutdown {
-    /// The engine has stopped, so wait for its frozen canonical tail to become durable.
-    Drain,
-    /// The engine stop was not proven; flush only the durable prefix and abandon the rest.
-    Stop,
 }
 
 /// Interface used by the replication task to keep track of blocks that are persisted vs broadcast
 pub(crate) trait PersistedBlockSource: Clone + Send + Sync + 'static {
     fn last_block_number(&self) -> eyre::Result<u64>;
-    /// The canonical head, which may be ahead of the persisted head (reth persists lazily).
-    ///
-    /// This is a drain *target*, never a broadcast height: a canonical-only block lives in
-    /// reth's volatile in-memory state and would vanish from this node on restart. Read it only
-    /// after the engine has stopped, and publish the blocks it names through the persisted
-    /// stream.
-    fn canonical_block_number(&self) -> eyre::Result<u64>;
-    fn persisted_block_stream(&self) -> BoxStream<'static, PersistedTip>;
+    fn persisted_block_stream(&self) -> BoxStream<'static, ()>;
     fn encoded_block_by_number(&self, number: u64) -> eyre::Result<EncodedPersistedBlock>;
 }
 
@@ -62,16 +38,9 @@ where
         Ok(BlockNumReader::last_block_number(self)?)
     }
 
-    fn canonical_block_number(&self) -> eyre::Result<u64> {
-        Ok(BlockNumReader::best_block_number(self)?)
-    }
-
-    fn persisted_block_stream(&self) -> BoxStream<'static, PersistedTip> {
+    fn persisted_block_stream(&self) -> BoxStream<'static, ()> {
         PersistedBlockSubscriptions::persisted_block_stream(self)
-            .map(|tip| PersistedTip {
-                number: tip.number,
-                hash: tip.hash,
-            })
+            .map(|_| ())
             .boxed()
     }
 
@@ -81,222 +50,43 @@ where
             .ok_or_else(|| eyre::eyre!("persisted zone block {number} is missing"))?;
         let sealed = SealedBlock::seal_slow(block);
         Ok(EncodedPersistedBlock {
-            number: sealed.number(),
             hash: sealed.hash(),
             encoded: alloy_rlp::encode(sealed.into_block()),
         })
     }
 }
 
-/// Broadcast every newly persisted leader block in canonical order until cancelled.
-///
-/// A single shutdown command decides how to handle the leader's final block:
-///
-/// * [`BroadcasterShutdown::Drain`] is the graceful path. The role controller sends it only
-///   after the engine task has returned, which freezes the canonical head and lets this task wait
-///   for the final block to persist before publishing it.
-/// * [`BroadcasterShutdown::Stop`] is the abrupt path. It flushes what is already durable and
-///   abandons the rest.
-///
-/// Neither path ever broadcasts a canonical-only block.
-pub(crate) async fn broadcast_persisted_blocks<P>(
+/// Publish exactly the locally produced blocks, after they are durable. Peer imports never
+/// enter this channel, and a role change cannot truncate the previous leader's durable tail.
+pub(crate) async fn broadcast_finalized_blocks<P: PersistedBlockSource>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
-    mut shutdown: oneshot::Receiver<BroadcasterShutdown>,
-) where
-    P: PersistedBlockSource,
-{
-    // Handle race conditions carefully at startup. Read before subscribing, then reconcile after subscribing.
-    // This closes both startup windows: a block persisted before the subscription is found by the
-    // second read, while a block persisted after the subscription is retained by the stream.
-    let mut last_broadcast = match provider.last_block_number() {
-        Ok(number) => number,
-        Err(err) => {
-            tracing::error!(target: "zone::p2p", %err, "Failed reading persisted zone head");
-            return;
-        }
-    };
+    mut blocks: mpsc::Receiver<alloy_eips::NumHash>,
+) -> eyre::Result<()> {
     let mut persisted = provider.persisted_block_stream();
-    let startup_tip = match provider.last_block_number() {
-        Ok(number) => number,
-        Err(err) => {
-            tracing::error!(target: "zone::p2p", %err, "Failed reconciling persisted zone head");
-            return;
+    while let Some(block) = blocks.recv().await {
+        while provider.last_block_number()? < block.number {
+            persisted
+                .next()
+                .await
+                .ok_or_eyre("persisted block stream closed")?;
         }
-    };
-
-    if let Err(err) =
-        broadcast_persisted_range(&provider, &commands, &mut last_broadcast, startup_tip, None)
-            .await
-    {
-        tracing::error!(target: "zone::p2p", %err, "Failed broadcasting persisted zone blocks");
-        return;
-    }
-
-    loop {
-        let persisted_tip = tokio::select! {
-            biased;
-            command = &mut shutdown => {
-                match command {
-                    Ok(BroadcasterShutdown::Drain) => {
-                        if let Err(err) = drain_persisted_blocks_after_engine_stop(
-                            &provider,
-                            &commands,
-                            &mut last_broadcast,
-                            &mut persisted,
-                        )
-                        .await
-                        {
-                            tracing::error!(target: "zone::p2p", %err, "Failed draining persisted zone blocks after the leader engine stopped");
-                        }
-                    }
-                    Ok(BroadcasterShutdown::Stop) => {
-                        // Stopped without an engine-complete drain, so the canonical head is
-                        // still moving and cannot be a flush target. Publish what is already
-                        // durable and abandon the rest: a canonical-only block would disappear
-                        // from this node on restart, leaving followers on a height no replica can
-                        // serve.
-                        match provider.last_block_number() {
-                            Ok(persisted_head) => {
-                                if let Err(err) = broadcast_persisted_range(
-                                    &provider,
-                                    &commands,
-                                    &mut last_broadcast,
-                                    persisted_head,
-                                    None,
-                                )
-                                .await
-                                {
-                                    tracing::error!(target: "zone::p2p", %err, "Failed flushing persisted zone blocks on stop");
-                                }
-                            }
-                            Err(err) => {
-                                tracing::error!(target: "zone::p2p", %err, "Failed reading the persisted zone head for the stop flush");
-                            }
-                        }
-                        debug!(target: "zone::p2p", "Persisted block broadcaster stopped");
-                    }
-                    Err(_) => {
-                        debug!(target: "zone::p2p", "Persisted block broadcaster shutdown control dropped");
-                    }
-                }
-                return;
-            }
-            tip = persisted.next() => match tip {
-                Some(tip) => tip,
-                None => break,
-            },
-        };
-        if persisted_tip.number < last_broadcast {
-            tracing::error!(
-                target: "zone::p2p",
-                persisted = persisted_tip.number,
-                last_broadcast,
-                "Persisted zone head moved backwards"
-            );
-            return;
-        }
-
-        if let Err(err) = broadcast_persisted_range(
-            &provider,
-            &commands,
-            &mut last_broadcast,
-            persisted_tip.number,
-            Some(persisted_tip.hash),
-        )
-        .await
-        {
-            tracing::error!(target: "zone::p2p", %err, "Failed broadcasting persisted zone blocks");
-            return;
-        }
-    }
-    debug!(target: "zone::p2p", "Persisted block stream closed");
-}
-
-/// Publish the outgoing leader's final blocks once they are durable.
-///
-/// The caller must have observed the engine task return before signalling this, which is what
-/// makes the loop terminate: cancelling the generation token is not a block boundary, because an
-/// in-flight advance still completes before the engine yields. Only a stopped engine pins the
-/// canonical head, and only a pinned target can be waited for.
-///
-/// Blocks still go out through [`broadcast_persisted_range`] with the hash the persisted stream
-/// reported, so the durable-source invariant holds on this path too.
-async fn drain_persisted_blocks_after_engine_stop<P>(
-    provider: &P,
-    commands: &mpsc::Sender<P2pCommand>,
-    last_broadcast: &mut u64,
-    persisted: &mut BoxStream<'static, PersistedTip>,
-) -> eyre::Result<()>
-where
-    P: PersistedBlockSource,
-{
-    let canonical = provider.canonical_block_number()?;
-    let persisted_head = provider.last_block_number()?;
-    broadcast_persisted_range(provider, commands, last_broadcast, persisted_head, None).await?;
-
-    while *last_broadcast < canonical {
-        let persisted_tip = persisted.next().await.ok_or_else(|| {
-            eyre::eyre!("persisted zone block stream closed before the canonical tail persisted")
-        })?;
-        if persisted_tip.number < *last_broadcast {
-            eyre::bail!(
-                "persisted zone head moved backwards while draining after the leader engine stopped: persisted={}, last_broadcast={}",
-                persisted_tip.number,
-                *last_broadcast,
-            );
-        }
-        broadcast_persisted_range(
-            provider,
-            commands,
-            last_broadcast,
-            persisted_tip.number,
-            Some(persisted_tip.hash),
-        )
-        .await?;
-    }
-
-    debug!(target: "zone::p2p", canonical, broadcast = *last_broadcast, "Drained the canonical tail after the leader engine stopped");
-    Ok(())
-}
-
-async fn broadcast_persisted_range<P>(
-    provider: &P,
-    commands: &mpsc::Sender<P2pCommand>,
-    last_broadcast: &mut u64,
-    tip_number: u64,
-    expected_tip_hash: Option<B256>,
-) -> eyre::Result<()>
-where
-    P: PersistedBlockSource,
-{
-    for number in last_broadcast.saturating_add(1)..=tip_number {
-        let block = provider.encoded_block_by_number(number)?;
-        let number = block.number;
-        let hash = block.hash;
-        if number == tip_number
-            && let Some(expected) = expected_tip_hash
-            && hash != expected
-        {
-            eyre::bail!(
-                "persisted zone block hash does not match notification at height {number}: expected={expected}, actual={hash}"
-            );
-        }
+        let encoded = provider.encoded_block_by_number(block.number)?;
+        eyre::ensure!(
+            encoded.hash == block.hash,
+            "finalized block changed before propagation"
+        );
         commands
-            .send(P2pCommand::BroadcastBlock(block.encoded))
+            .send(P2pCommand::BroadcastBlock(encoded.encoded))
             .await
-            .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
-        debug!(target: "zone::p2p", number, ?hash, "Queued persisted block for followers");
-        *last_broadcast = number;
+            .wrap_err("P2P command channel closed")?;
     }
     Ok(())
 }
 
-const BACKFILL_PAGE_SIZE: u64 = 64;
-/// Bounds queued requests at the process-lifetime backfill server. Requesters keep at most
-/// one request outstanding per peer, so manifest size bounds the live queue depth; the
-/// headroom absorbs requests arriving before the server task starts.
+/// Bounded queue for role-neutral canonical block serving.
 pub(crate) const BACKFILL_SERVE_QUEUE_CAPACITY: usize = 128;
+const BACKFILL_PAGE_SIZE: u64 = 64;
 
 fn serve_backfill_page<P>(
     provider: &P,
@@ -350,9 +140,8 @@ where
 /// Serve block backfill requests for the process lifetime.
 ///
 /// Backfill serving is role-neutral: leaders, followers, and fenced nodes all serve the
-/// same canonical provider. Running one server outside the role generations means a
-/// generation switch can never drop or abandon an accepted request, which would suppress
-/// the requesting peer until its response timeout and stall a leadership handoff.
+/// same canonical provider. The process-lifetime server retains accepted requests across
+/// leadership changes, so peers can complete their backfill during a handoff.
 /// Exits when the request channel closes.
 pub(crate) async fn serve_backfill_requests<P>(
     provider: P,
@@ -392,13 +181,7 @@ pub(crate) async fn serve_backfill_requests<P>(
     }
 }
 
-/// Collect and verify follower settlement signatures on the leader, without ever
-/// requesting or importing peer blocks.
-///
-/// While this runs, [`ZoneEngine`](crate::ZoneEngine) is the sole chain-head
-/// writer. Backfill requests are served by the process-lifetime
-/// [`serve_backfill_requests`] task, never by role generations. The loop exits
-/// when `stop` fires.
+/// Validate a follower signature against its authenticated identity and canonical settlement.
 async fn store_follower_settlement_signature<P>(
     provider: &P,
     follower: &P2pPeerId,
@@ -513,98 +296,34 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use alloy_eips::NumHash;
     use std::sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     };
-
-    use futures::{StreamExt as _, stream};
-    use tokio::sync::{oneshot, watch};
-
-    use super::{
-        BroadcasterShutdown, EncodedPersistedBlock, PersistedBlockSource, PersistedTip,
-        broadcast_persisted_blocks,
-    };
-    use alloy_primitives::B256;
-    use zone_p2p::P2pCommand;
+    use tokio::sync::watch;
 
     #[derive(Clone)]
-    struct StartupRaceSource {
-        reads: Arc<AtomicUsize>,
-        tip: PersistedTip,
-    }
-
-    impl PersistedBlockSource for StartupRaceSource {
-        fn last_block_number(&self) -> eyre::Result<u64> {
-            let read = self.reads.fetch_add(1, Ordering::SeqCst);
-            Ok(if read == 0 {
-                self.tip.number - 1
-            } else {
-                self.tip.number
-            })
-        }
-
-        fn canonical_block_number(&self) -> eyre::Result<u64> {
-            Ok(self.tip.number)
-        }
-
-        fn persisted_block_stream(&self) -> futures::stream::BoxStream<'static, PersistedTip> {
-            stream::iter([self.tip]).boxed()
-        }
-
-        fn encoded_block_by_number(&self, number: u64) -> eyre::Result<EncodedPersistedBlock> {
-            assert_eq!(number, self.tip.number);
-            Ok(EncodedPersistedBlock {
-                number,
-                hash: self.tip.hash,
-                encoded: vec![number as u8],
-            })
-        }
-    }
-
-    /// A provider whose canonical head sits above its persisted head, which is the window the
-    /// stop flush and the demotion drain both have to get right.
-    #[derive(Clone)]
-    struct DivergentHeadSource {
-        canonical: u64,
+    struct Source {
         persisted: Arc<AtomicU64>,
-        /// The persisted head observed while the broadcaster subscribes. Subsequent reads see
-        /// `persisted`, allowing tests to model a block that becomes durable during shutdown.
-        startup_persisted: u64,
-        startup_reads: Arc<AtomicUsize>,
-        updates: watch::Receiver<PersistedTip>,
+        updates: watch::Receiver<()>,
     }
 
-    impl PersistedBlockSource for DivergentHeadSource {
+    impl PersistedBlockSource for Source {
         fn last_block_number(&self) -> eyre::Result<u64> {
-            let read = self.startup_reads.fetch_add(1, Ordering::SeqCst);
-            Ok(if read < 2 {
-                self.startup_persisted
-            } else {
-                self.persisted.load(Ordering::SeqCst)
-            })
+            Ok(self.persisted.load(Ordering::SeqCst))
         }
-
-        fn canonical_block_number(&self) -> eyre::Result<u64> {
-            Ok(self.canonical)
-        }
-
-        fn persisted_block_stream(&self) -> futures::stream::BoxStream<'static, PersistedTip> {
-            stream::unfold(self.updates.clone(), |mut updates| async move {
+        fn persisted_block_stream(&self) -> BoxStream<'static, ()> {
+            futures::stream::unfold(self.updates.clone(), |mut updates| async move {
                 updates.changed().await.ok()?;
-                let tip = *updates.borrow_and_update();
-                Some((tip, updates))
+                Some(((), updates))
             })
             .boxed()
         }
-
         fn encoded_block_by_number(&self, number: u64) -> eyre::Result<EncodedPersistedBlock> {
-            assert!(
-                number <= self.persisted.load(Ordering::SeqCst),
-                "encoded a block that is not durable yet: {number}"
-            );
+            assert!(number <= self.persisted.load(Ordering::SeqCst));
             Ok(EncodedPersistedBlock {
-                number,
                 hash: B256::repeat_byte(number as u8),
                 encoded: vec![number as u8],
             })
@@ -612,109 +331,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcasts_block_persisted_during_startup_reconciliation_once() {
-        let source = StartupRaceSource {
-            reads: Arc::new(AtomicUsize::new(0)),
-            tip: PersistedTip {
-                number: 1,
-                hash: B256::repeat_byte(0x11),
-            },
-        };
-        let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
-        let (_shutdown, shutdown_rx) = oneshot::channel();
-
-        broadcast_persisted_blocks(source, commands, shutdown_rx).await;
-
-        assert_eq!(
-            command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
-        );
-        assert_eq!(command_rx.recv().await, None);
-    }
-
-    #[tokio::test]
-    async fn stop_flush_never_broadcasts_a_canonical_only_block() {
-        // Exactly the reported window: block N is canonical but only N-1 is durable.
-        let source = DivergentHeadSource {
-            canonical: 2,
-            persisted: Arc::new(AtomicU64::new(1)),
-            startup_persisted: 0,
-            startup_reads: Arc::new(AtomicUsize::new(0)),
-            updates: watch::channel(PersistedTip {
-                number: 1,
-                hash: B256::repeat_byte(1),
-            })
-            .1,
-        };
-        let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
-        let (shutdown, shutdown_rx) = oneshot::channel();
-        shutdown
-            .send(BroadcasterShutdown::Stop)
-            .expect("the broadcaster must retain the shutdown receiver");
-
-        broadcast_persisted_blocks(source, commands, shutdown_rx).await;
-
-        // Block 1 is durable and must be flushed; block 2 exists only in memory and would be
-        // lost on restart, stranding any follower that imported it.
-        assert_eq!(
-            command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
-        );
-        assert_eq!(
-            command_rx.recv().await,
-            None,
-            "the stop flush broadcast a canonical-but-unpersisted block"
-        );
-    }
-
-    #[tokio::test]
-    async fn drain_after_engine_stop_waits_for_the_canonical_tail_to_persist() {
+    async fn propagation_waits_for_persistence_and_drains_after_producer_closes() {
         let persisted = Arc::new(AtomicU64::new(1));
-        let (updates, update_rx) = watch::channel(PersistedTip {
-            number: 1,
-            hash: B256::repeat_byte(1),
-        });
-        let source = DivergentHeadSource {
-            canonical: 2,
+        let (updates, update_rx) = watch::channel(());
+        let source = Source {
             persisted: persisted.clone(),
-            startup_persisted: 0,
-            startup_reads: Arc::new(AtomicUsize::new(0)),
             updates: update_rx,
         };
-        let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
-        let (shutdown, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(broadcast_persisted_blocks(source, commands, shutdown_rx));
-
-        shutdown
-            .send(BroadcasterShutdown::Drain)
-            .expect("the broadcaster must retain the shutdown receiver");
-
-        // The durable prefix goes out immediately.
-        assert_eq!(
-            command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
-        );
-        // The canonical tail must not, until it persists.
+        let (commands, mut received) = mpsc::channel(4);
+        let (blocks, block_rx) = mpsc::channel(4);
+        blocks
+            .send(NumHash::new(2, B256::repeat_byte(2)))
+            .await
+            .unwrap();
+        drop(blocks);
+        let task = tokio::spawn(broadcast_finalized_blocks(source, commands, block_rx));
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), command_rx.recv())
+            tokio::time::timeout(std::time::Duration::from_millis(20), received.recv())
                 .await
-                .is_err(),
-            "the drain broadcast the canonical tail before it was durable"
+                .is_err()
         );
-
+        assert!(!task.is_finished());
         persisted.store(2, Ordering::SeqCst);
-        updates
-            .send(PersistedTip {
-                number: 2,
-                hash: B256::repeat_byte(2),
-            })
-            .expect("the broadcaster must retain the persisted-block stream");
-
+        updates.send(()).unwrap();
+        task.await.unwrap().unwrap();
         assert_eq!(
-            command_rx.recv().await,
+            received.recv().await,
             Some(P2pCommand::BroadcastBlock(vec![2]))
         );
-        task.await.expect("the broadcaster task must not panic");
-        assert_eq!(command_rx.recv().await, None);
+        assert_eq!(received.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn propagation_sends_only_named_blocks_and_rejects_hash_mismatch() {
+        let (_updates, update_rx) = watch::channel(());
+        let source = Source {
+            persisted: Arc::new(AtomicU64::new(4)),
+            updates: update_rx,
+        };
+        let (commands, mut received) = mpsc::channel(4);
+        let (blocks, block_rx) = mpsc::channel(4);
+        blocks
+            .send(NumHash::new(2, B256::repeat_byte(2)))
+            .await
+            .unwrap();
+        blocks.send(NumHash::new(4, B256::ZERO)).await.unwrap();
+        drop(blocks);
+        let error = broadcast_finalized_blocks(source, commands, block_rx)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("changed before propagation"));
+        assert_eq!(
+            received.recv().await,
+            Some(P2pCommand::BroadcastBlock(vec![2]))
+        );
+        assert_eq!(received.recv().await, None);
     }
 }

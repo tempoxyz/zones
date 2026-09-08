@@ -185,7 +185,7 @@ impl PeerTipRegistry {
             .collect()
     }
 }
-/// Shared state required to validate and import blocks in a follower generation.
+/// Shared state required to validate and import peer blocks.
 pub(crate) struct FollowerBlockSyncContext<P> {
     pub(crate) provider: P,
     pub(crate) engine: ConsensusEngineHandle<ZonePayloadTypes>,
@@ -196,7 +196,7 @@ pub(crate) struct FollowerBlockSyncContext<P> {
     pub(crate) peer_tips: PeerTipRegistry,
 }
 
-/// Live P2P and backfill channels owned by one follower sync generation.
+/// Stable P2P and backfill channels owned by the sequencer.
 pub(crate) struct BlockSyncP2p {
     pub(crate) events: mpsc::Receiver<P2pEvent>,
     pub(crate) commands: mpsc::Sender<P2pCommand>,
@@ -204,10 +204,7 @@ pub(crate) struct BlockSyncP2p {
     pub(crate) backfill_commands: mpsc::Sender<BackfillCommand>,
 }
 
-/// State and channels owned by one follower block-sync generation.
-///
-/// A role transition drops this value only after cancelling [`Self::stop`], so no dependency of
-/// the import loop escapes the generation that owns it.
+/// Persistent block sync state. The channel loop also owns local block production.
 pub(crate) struct FollowerBlockSync<P> {
     context: FollowerBlockSyncContext<P>,
     p2p: BlockSyncP2p,
@@ -250,7 +247,13 @@ where
         }
     }
 
-    pub(crate) async fn run(mut self) {
+    pub(crate) async fn run(
+        mut self,
+        mut sequencing: crate::role::Sequencing<P>,
+        mut l1_blocks: mpsc::Receiver<zone_l1::L1BlockDeposits>,
+    ) {
+        let mut schedule = self.context.schedule.subscribe();
+        let mut role_retry = tokio::time::interval(Duration::from_millis(500));
         // Always probe on startup to see if we're behind
         let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -260,12 +263,29 @@ where
         tokio::pin!(inactivity);
 
         loop {
+            // Production and import execute outside select: neither may be cancelled halfway
+            // through an Engine API update by another channel becoming ready.
+            let produced = match sequencing.advance().await {
+                Ok(produced) => produced,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to advance the sequencer");
+                    false
+                }
+            };
             tokio::select! {
-            biased;
+
                 () = self.stop.cancelled() => {
                     debug!(target: "zone::p2p", "Follower block sync stopped");
                     return;
                 }
+                block = l1_blocks.recv() => {
+                    sequencing.observed(block.expect("L1 subscriber block channel closed"));
+                }
+                changed = schedule.changed() => {
+                    changed.expect("leadership schedule channel closed");
+                }
+                _ = role_retry.tick() => {}
+                () = tokio::task::yield_now(), if produced => {}
                 response = self.p2p.backfill_responses.recv() => {
                     let Some(response) = response else {
                         debug!(target: "zone::p2p", "Backfill response channel closed");
@@ -273,6 +293,7 @@ where
                     };
                     match response {
                         BackfillResponse::Block { block, .. } => {
+                            if sequencing.is_leader() { continue; }
                             let block = match decode_peer_block(&block) {
                                 Ok(block) => block,
                                 Err(err) => {
@@ -320,6 +341,7 @@ where
                             }
                         }
                         P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
+                            if sequencing.is_leader() { continue; }
                             let block = match decode_peer_block(&block) {
                                 Ok(block) => block,
                                 Err(err) => {
@@ -1129,7 +1151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_anchor_wait_stops_promptly_on_generation_cancellation() {
+    async fn peer_anchor_wait_stops_promptly_on_shutdown() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
         let leader = PrivateKey::from_seed(1).public_key();
@@ -1152,7 +1174,7 @@ mod tests {
             PEER_ANCHOR_WAIT_TIMEOUT,
         )
         .await
-        .expect_err("cancelled generation must stop waiting for its peer anchor");
+        .expect_err("cancelled sync must stop waiting for its peer anchor");
 
         assert!(matches!(error, PeerAnchorWaitError::Cancelled));
     }
