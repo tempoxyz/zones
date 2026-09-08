@@ -319,13 +319,8 @@ where
                                 Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
                             }
                         }
-                        P2pEvent::BlockReceived { .. } => {
-                            let (block, live_sender) = match event {
-                                P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
-                                    (block, Some(leader_ed25519_public_key))
-                                }
-                                _ => unreachable!("outer match arm restricts the event kind"),
-                            };
+                        P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
+                            let live_sender = Some(leader_ed25519_public_key);
                             let number = match encoded_block_number(&block) {
                                 Ok(number) => number,
                                 Err(err) => {

@@ -128,13 +128,6 @@ pub(crate) struct EventSinks {
     inner: Arc<std::sync::Mutex<GenerationSinks>>,
 }
 
-#[derive(Default)]
-struct GenerationSinks {
-    sync: Option<mpsc::Sender<P2pEvent>>,
-    transactions: Option<mpsc::Sender<P2pEvent>>,
-    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
-}
-
 impl EventSinks {
     fn install(
         &self,
@@ -171,6 +164,13 @@ impl EventSinks {
             .backfill_responses
             .clone()
     }
+}
+
+#[derive(Default)]
+struct GenerationSinks {
+    sync: Option<mpsc::Sender<P2pEvent>>,
+    transactions: Option<mpsc::Sender<P2pEvent>>,
+    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
 }
 
 /// Long-lived P2P event demultiplexer for non-backfill protocols.
