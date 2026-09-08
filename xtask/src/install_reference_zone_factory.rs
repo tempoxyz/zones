@@ -142,7 +142,8 @@ fn install_eip2935_history_storage(genesis: &mut Genesis) -> eyre::Result<()> {
 fn load_native_artifacts(specs_out: &Path) -> eyre::Result<NativeArtifacts> {
     Ok(NativeArtifacts {
         portal: load_runtime(specs_out, "ZonePortal")?,
-        verifier: load_runtime(specs_out, "Verifier")?,
+        // The verifier runtime is supplied by Tempo rather than a local Solidity artifact.
+        verifier: TEMPO_ZONE_VERIFIER_RUNTIME,
         messenger: load_runtime(specs_out, "ZoneMessenger")?,
     })
 }

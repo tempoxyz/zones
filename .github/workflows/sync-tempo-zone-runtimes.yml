@@ -38,7 +38,6 @@ jobs:
         run: |
           forge inspect ZonePortal deployedBytecode > "$RUNNER_TEMP/ZonePortal"
           forge inspect ZoneMessenger deployedBytecode > "$RUNNER_TEMP/ZoneMessenger"
-          forge inspect Verifier deployedBytecode > "$RUNNER_TEMP/Verifier"
 
       - name: Publish runtime sync event
         env:
