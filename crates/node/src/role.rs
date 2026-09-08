@@ -619,6 +619,7 @@ where
 pub(crate) async fn run_role_controller<P, Pool>(
     context: RoleControllerContext<P, Pool>,
     sinks: EventSinks,
+    mut l1_blocks: mpsc::Receiver<zone_l1::L1BlockDeposits>,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -780,6 +781,11 @@ pub(crate) async fn run_role_controller<P, Pool>(
         };
         tokio::select! {
             biased;
+            block = l1_blocks.recv() => {
+                if block.is_none() {
+                    panic!("L1 subscriber block channel closed");
+                }
+            }
             changed = schedule_changes.changed() => {
                 if changed.is_err() {
                     error!(target: "zone::role", "Leadership schedule notifier closed");

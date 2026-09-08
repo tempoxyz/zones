@@ -726,6 +726,7 @@ where
                 None
             };
 
+        let (l1_blocks_tx, l1_blocks_rx) = tokio::sync::mpsc::channel(128);
         let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
             ctx.node.provider().clone(),
@@ -737,6 +738,11 @@ where
             finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
+        let l1_subscriber = if self.p2p_config.is_some() {
+            l1_subscriber.with_block_sender(l1_blocks_tx)
+        } else {
+            l1_subscriber
+        };
         let task_executor = ctx.node.task_executor().clone();
         task_executor.spawn_critical_task(
             "l1-block-subscriber",
@@ -934,8 +940,10 @@ where
                 peer_tips,
                 status: role_status,
             };
-            task_executor
-                .spawn_critical_task("zone-role-controller", run_role_controller(context, sinks));
+            task_executor.spawn_critical_task(
+                "zone-role-controller",
+                run_role_controller(context, sinks, l1_blocks_rx),
+            );
 
             // Flush unpersisted blocks on shutdown.
             let engine_shutdown = handle.engine_shutdown.clone();

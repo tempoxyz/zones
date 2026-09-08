@@ -159,6 +159,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
         block_tracker: L1BlockTracker::default(),
         leadership_sink: None,
         finalized_batch_submissions: None,
+        block_sender: None,
         encryption_keys: None,
         subscriber_metrics: Default::default(),
     }
@@ -773,7 +774,8 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 
 #[tokio::test]
 async fn test_sync_finalized_ingests_missing_finalized_range() {
-    let subscriber = test_subscriber(9);
+    let (sender, mut blocks_rx) = tokio::sync::mpsc::channel(3);
+    let subscriber = test_subscriber(9).with_block_sender(sender);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -803,6 +805,12 @@ async fn test_sync_finalized_ingests_missing_finalized_range() {
         .await
         .unwrap();
     assert_eq!(next_block, 13);
+    for expected in [10, 11, 12] {
+        let block = blocks_rx.try_recv().unwrap();
+        assert_eq!(block.header.number(), expected);
+        assert!(block.events.deposits.is_empty());
+    }
+    assert!(blocks_rx.try_recv().is_err());
 
     let blocks = subscriber.deposit_queue.drain();
     assert_eq!(
@@ -2065,4 +2073,25 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
     assert_eq!(subscriber.block_tracker.latest(), None);
+}
+
+#[tokio::test]
+async fn closed_sequencer_channel_stops_ingestion_without_advancing_cursor() {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    drop(receiver);
+    let subscriber = test_subscriber(9).with_block_sender(sender);
+    let asserter = Asserter::new();
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let header = make_test_header(10);
+    asserter.push_success(&Some(header_response(header.clone())));
+    push_header_and_empty_receipts(&asserter, header);
+    let mut next_block = 10;
+    let error = subscriber
+        .sync_finalized(&provider, &mut next_block)
+        .await
+        .unwrap_err();
+    assert!(!error.should_retry());
+    assert_eq!(next_block, 10);
+    assert!(error.to_string().contains("sequencer block delivery"));
 }

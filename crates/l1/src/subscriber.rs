@@ -446,6 +446,8 @@ pub struct L1Subscriber<P> {
     /// Optional observational channel for finalized accepted batch submissions.
     pub(crate) finalized_batch_submissions:
         Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
+    /// Ordered finalized blocks, delivered after their events and caches are applied.
+    pub(crate) block_sender: Option<tokio::sync::mpsc::Sender<L1BlockDeposits>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub(crate) encryption_keys: Option<EncryptionKeyRing>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -509,9 +511,17 @@ where
             block_tracker,
             leadership_sink,
             finalized_batch_submissions,
+            block_sender: None,
             encryption_keys,
             subscriber_metrics: Default::default(),
         }
+    }
+
+    /// Deliver every finalized block, including blocks without deposits, to the sequencer.
+    /// A bounded channel applies backpressure; a closed receiver stops ingestion.
+    pub fn with_block_sender(mut self, sender: tokio::sync::mpsc::Sender<L1BlockDeposits>) -> Self {
+        self.block_sender = Some(sender);
+        self
     }
 
     /// Connect to the L1 node.
@@ -751,7 +761,7 @@ where
         }
         let appended = self
             .deposit_queue
-            .try_enqueue_sealed(sealed, events.clone())
+            .try_enqueue_sealed(sealed.clone(), events.clone())
             .wrap_err_with(|| {
                 format!("unexpected discontinuity while enqueueing L1 block {block_number}")
             })?;
@@ -782,6 +792,19 @@ where
         // configured retention sink and the contiguous observation tracker.
         self.apply_enabled_token_events(&events);
         self.update_l1_state_anchor(block_number, &invalidated);
+        if let Some(sender) = &self.block_sender {
+            sender
+                .send(L1BlockDeposits {
+                    header: sealed,
+                    events,
+                })
+                .await
+                .map_err(|_| L1SubscriberError::Fatal {
+                    block_number,
+                    stage: "sequencer block delivery",
+                    source: eyre::eyre!("sequencer block receiver is unavailable"),
+                })?;
+        }
         if appended {
             self.subscriber_metrics.blocks_enqueued.increment(1);
         }
