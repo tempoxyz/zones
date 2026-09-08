@@ -99,6 +99,9 @@ or acknowledging the block. Each retry budget is bounded. Tempo retries use
 exponential backoff, while unavailable local Zone state retries once per second.
 Pruned state disables immediately because it cannot recover.
 
+Tempo RPC codes `-32001` (resource not found), `-32002` (resource unavailable),
+and `-32603` (internal error) are retried regardless of message text.
+
 A deterministic mismatch records one durable finding, freezes the verified tip,
 and continues acknowledging subsequent notifications while recording how far the
 unchecked range extends. A finding remains active until the checker is rebuilt
