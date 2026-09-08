@@ -55,7 +55,6 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
-use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
@@ -332,8 +331,7 @@ impl BatchSubmitter {
     ///   recent anchor block is used and ancestry headers are collected (for
     ///   future prover integration).
     ///
-    /// `verifierConfig` selects the Nitro verifier policy. `proof` remains empty while the Nitro
-    /// prover runs observationally.
+    /// `verifierConfig` and `proof` remain empty while the Nitro prover runs observationally.
     ///
     /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
     /// settlement quorum is cancelled when the leader generation shuts down.
@@ -369,8 +367,7 @@ impl BatchSubmitter {
             nextProcessedTokenCount: batch.next_processed_token_count,
         };
 
-        let verifier_config = Bytes::from_static(NITRO_VERIFIER_CONFIG_V1);
-
+        let verifier_config = Bytes::new();
         let signer = self.signer.as_ref();
         let metadata = self
             .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
@@ -836,7 +833,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            attestation.verifierConfigHash == keccak256(NITRO_VERIFIER_CONFIG_V1),
+            attestation.verifierConfigHash == keccak256(Bytes::new()),
             "certificate verifier config changed"
         );
         eyre::ensure!(
