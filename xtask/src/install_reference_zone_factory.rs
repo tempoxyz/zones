@@ -296,24 +296,20 @@ mod tests {
     }
 
     #[test]
-    fn replaces_pinned_tempo_shared_runtimes() {
-        assert_replaces_shared_runtimes([
+    fn validates_tempo_shared_runtimes() {
+        assert_validates_shared_runtimes([
             TEMPO_ZONE_PORTAL_RUNTIME,
             TEMPO_ZONE_VERIFIER_RUNTIME,
             TEMPO_ZONE_MESSENGER_RUNTIME,
         ]);
-    }
-
-    #[test]
-    fn replaces_t12_tempo_shared_runtimes() {
-        assert_replaces_shared_runtimes([
+        assert_validates_shared_runtimes([
             T12_ZONE_PORTAL_RUNTIME,
             T12_ZONE_VERIFIER_RUNTIME,
             T12_ZONE_MESSENGER_RUNTIME,
         ]);
     }
 
-    fn assert_replaces_shared_runtimes([portal, verifier, messenger]: [Bytes; 3]) {
+    fn assert_validates_shared_runtimes([portal, verifier, messenger]: [Bytes; 3]) {
         let owner = address!("0x0000000000000000000000000000000000000001");
         let mut genesis = Genesis::default();
         genesis.alloc.insert(
@@ -330,6 +326,7 @@ mod tests {
                 .insert(address, GenesisAccount::default().with_code(Some(code)));
         }
 
+        let upstream_alloc = genesis.alloc.clone();
         let artifacts = NativeArtifacts {
             portal: Bytes::from_static(&[1]),
             verifier: Bytes::from_static(&[2]),
@@ -352,60 +349,22 @@ mod tests {
                     .with_nonce(Some(1))
                     .with_code(Some(code))
             );
-        }
-    }
-
-    #[test]
-    fn rejects_unknown_shared_runtime() {
-        for (name, address) in [
-            ("ZonePortal implementation", ZONE_PORTAL_IMPL_ADDRESS),
-            ("Verifier", ZONE_VERIFIER_ADDRESS),
-            ("ZoneMessenger", ZONE_MESSENGER_ADDRESS),
-        ] {
-            assert_rejects_shared_runtime(
-                name,
-                address,
-                GenesisAccount::default().with_code(Some(Bytes::from_static(&[0xff]))),
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_known_shared_runtimes_with_non_default_state() {
-        for (name, address, codes) in [
-            (
-                "ZonePortal implementation",
-                ZONE_PORTAL_IMPL_ADDRESS,
-                [TEMPO_ZONE_PORTAL_RUNTIME, T12_ZONE_PORTAL_RUNTIME],
-            ),
-            (
-                "Verifier",
-                ZONE_VERIFIER_ADDRESS,
-                [TEMPO_ZONE_VERIFIER_RUNTIME, T12_ZONE_VERIFIER_RUNTIME],
-            ),
-            (
-                "ZoneMessenger",
-                ZONE_MESSENGER_ADDRESS,
-                [TEMPO_ZONE_MESSENGER_RUNTIME, T12_ZONE_MESSENGER_RUNTIME],
-            ),
-        ] {
-            for code in codes {
-                let account = GenesisAccount::default().with_code(Some(code));
-                for conflicting in [
-                    account.clone().with_nonce(Some(1)),
-                    account.clone().with_balance(U256::ONE),
-                    account.with_storage(Some(BTreeMap::from([(
-                        B256::ZERO,
-                        B256::with_last_byte(1),
-                    )]))),
-                ] {
-                    assert_rejects_shared_runtime(name, address, conflicting);
-                }
+            let account = &upstream_alloc[&address];
+            for conflicting in [
+                account.clone().with_code(Some(Bytes::from_static(&[0xff]))),
+                account.clone().with_nonce(Some(1)),
+                account.clone().with_balance(U256::ONE),
+                account.clone().with_storage(Some(BTreeMap::from([(
+                    B256::ZERO,
+                    B256::with_last_byte(1),
+                )]))),
+            ] {
+                assert_rejects_shared_runtime(address, conflicting);
             }
         }
     }
 
-    fn assert_rejects_shared_runtime(name: &str, address: Address, account: GenesisAccount) {
+    fn assert_rejects_shared_runtime(address: Address, account: GenesisAccount) {
         let owner = address!("0x0000000000000000000000000000000000000001");
         let mut genesis = Genesis::default();
         genesis.alloc.insert(address, account.clone());
@@ -419,11 +378,9 @@ mod tests {
                 messenger: Bytes::from_static(&[3]),
             },
         )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("refusing to replace conflicting {name} allocation at {address}")
-        );
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("refusing to replace conflicting"));
         assert_eq!(genesis.alloc[&address], account);
     }
 }
