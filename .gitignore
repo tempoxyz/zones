@@ -12,7 +12,6 @@ profile.json.gz
 .idea
 **/.env
 **/.envrc
-!.envrc
 localnet/**
 generated/
 /earn/

@@ -3,10 +3,12 @@
 use alloy_primitives::Address;
 use alloy_sol_types::SolInterface;
 use tempo_contracts::precompiles::IStorageCredits;
+use tempo_precompiles::dispatch::abi_decoder_config_for_spec;
 
 use crate::{
     execution::{CallCheck, CallRules},
     privacy::check_caller,
+    storage::StorageCtx,
 };
 
 /// Zone-specific rules applied before forwarding to upstream `StorageCredits`.
@@ -15,7 +17,10 @@ pub(crate) struct StorageCreditsRules;
 
 impl CallRules for StorageCreditsRules {
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Ok(call) = IStorageCredits::IStorageCreditsCalls::abi_decode(data) else {
+        let Ok(call) = IStorageCredits::IStorageCreditsCalls::abi_decode_with_config(
+            data,
+            abi_decoder_config_for_spec(StorageCtx::default().spec()),
+        ) else {
             return CallCheck::Continue;
         };
 
@@ -40,12 +45,20 @@ impl CallRules for StorageCreditsRules {
 mod tests {
     use super::*;
     use alloy_sol_types::{SolCall, SolError};
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_zone_contracts::Unauthorized;
 
     use crate::{
         storage::StorageCtx,
         test_utils::{test_context, test_storage_provider},
     };
+
+    fn admit_at(data: &[u8], caller: Address, spec: TempoHardfork) -> CallCheck {
+        let mut ctx = test_context();
+        ctx.cfg.spec = spec;
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+        StorageCtx::enter(&mut storage, || StorageCreditsRules.admit(data, caller))
+    }
 
     #[test]
     fn account_indexed_getters_allow_only_owner() {
@@ -85,17 +98,37 @@ mod tests {
     #[test]
     fn mutations_and_malformed_calldata_remain_upstream_authorized() {
         let caller = Address::repeat_byte(0x11);
-        let rules = StorageCreditsRules;
-
         assert!(matches!(
-            rules.admit(
+            admit_at(
                 &IStorageCredits::setBudgetCall { credits: 7 }.abi_encode(),
-                caller
+                caller,
+                TempoHardfork::T8,
             ),
             CallCheck::Continue
         ));
         assert!(matches!(
-            rules.admit(&IStorageCredits::balanceOfCall::SELECTOR, caller),
+            admit_at(
+                &IStorageCredits::balanceOfCall::SELECTOR,
+                caller,
+                TempoHardfork::T8,
+            ),
+            CallCheck::Continue
+        ));
+    }
+
+    #[test]
+    fn t11_defers_noncanonical_address_calldata_to_upstream() {
+        let owner = Address::repeat_byte(0x11);
+        let outsider = Address::repeat_byte(0x22);
+        let mut data = IStorageCredits::balanceOfCall { account: owner }.abi_encode();
+        data[4] = 1;
+
+        assert!(matches!(
+            admit_at(&data, outsider, TempoHardfork::T8),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+        ));
+        assert!(matches!(
+            admit_at(&data, outsider, TempoHardfork::T11),
             CallCheck::Continue
         ));
     }

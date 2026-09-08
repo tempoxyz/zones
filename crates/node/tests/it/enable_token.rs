@@ -301,6 +301,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
     let alpha_withdrawal: u128 = 1_000_000; // 1 AlphaUSD
+    let alpha_balance_before = l1.balance_of(l1_alpha_usd, account.address()).await?;
     account
         .withdraw_token(l2_alpha_usd, alpha_withdrawal)
         .await?;
@@ -310,6 +311,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
         portal_address,
         l1_alpha_usd,
         account.address(),
+        alpha_balance_before,
         alpha_withdrawal,
         withdrawal_timeout,
     )

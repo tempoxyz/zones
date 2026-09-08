@@ -570,6 +570,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
 
     // Request withdrawal on L2
     let withdrawal_amount: u128 = 500_000; // 0.5 pathUSD
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(withdrawal_amount).await?;
 
     // Wait for the withdrawal to be fully processed on L1
@@ -577,6 +578,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        l1_balance_before,
         withdrawal_amount,
         withdrawal_timeout,
     )
@@ -854,10 +856,14 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
     let arbitrary_l1_recipient = l1.signer_at(5).address();
     let mut withdrawal = WithdrawalArgs::new(withdrawal_amount);
     withdrawal.to = Some(arbitrary_l1_recipient);
+    let l1_balance_before = l1
+        .balance_of(PATH_USD_ADDRESS, arbitrary_l1_recipient)
+        .await?;
     account.withdraw_with(withdrawal).await?;
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         arbitrary_l1_recipient,
+        l1_balance_before,
         withdrawal_amount,
         Duration::from_secs(60),
     )
@@ -1972,11 +1978,13 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 
     // Withdraw pathUSD
     let pathusd_withdrawal: u128 = 500_000; // 0.5 pathUSD
+    let pathusd_balance_before = l1.balance_of(PATH_USD_ADDRESS, account.address()).await?;
     account.withdraw(pathusd_withdrawal).await?;
 
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         account.address(),
+        pathusd_balance_before,
         pathusd_withdrawal,
         withdrawal_timeout,
     )
@@ -1984,6 +1992,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 
     // Withdraw ZoneUSD
     let zoneusd_withdrawal: u128 = 1_000_000; // 1 ZoneUSD
+    let zoneusd_balance_before = l1.balance_of(l1_zone_usd, account.address()).await?;
     account
         .withdraw_token(l2_zone_usd, zoneusd_withdrawal)
         .await?;
@@ -1992,6 +2001,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
         portal_address,
         l1_zone_usd,
         account.address(),
+        zoneusd_balance_before,
         zoneusd_withdrawal,
         withdrawal_timeout,
     )
@@ -2091,6 +2101,7 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
         ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
 
     let withdrawal_amount: u128 = 500_000; // 0.5 pathUSD
+    let l1_balance_before = l1.balance_of(PATH_USD_ADDRESS, recipient).await?;
     recipient_account.withdraw(withdrawal_amount).await?;
 
     // --- Step 6: Wait for the withdrawal to be fully processed on L1 ---
@@ -2098,6 +2109,7 @@ async fn test_deposit_and_withdrawal() -> eyre::Result<()> {
     l1.wait_for_withdrawal_on_l1(
         portal_address,
         recipient,
+        l1_balance_before,
         withdrawal_amount,
         withdrawal_timeout,
     )

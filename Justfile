@@ -292,7 +292,7 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
     TX_OUTPUT=$(cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 150000 --json)
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
     STATUS=$(echo "$TX_OUTPUT" | jq -r '.status')
     if [[ "$STATUS" == "0x1" ]]; then
         echo "Approved!"
@@ -321,7 +321,13 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     L2_OUTPUT=$(cast send "$OUTBOX" \
         "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)" \
         "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" "{{reveal-to}}" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 10000000 --json)
+    L2_STATUS=$(echo "$L2_OUTPUT" | jq -r '.status')
+    if [[ "$L2_STATUS" != "0x1" ]]; then
+        echo "Withdrawal request failed on L2!"
+        echo "$L2_OUTPUT" | jq .
+        exit 1
+    fi
     L2_TX=$(echo "$L2_OUTPUT" | jq -r '.transactionHash')
     L2_BLOCK=$(echo "$L2_OUTPUT" | jq -r '.blockNumber')
     echo "Withdrawal requested on L2! tx: $L2_TX (block $(printf '%d' "$L2_BLOCK"))"
@@ -460,6 +466,58 @@ resume-deposits token:
 [doc('Pauses batch submissions, all new deposits, and L1 withdrawal processing for 30 days. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY.')]
 pause-portal:
     cargo run -p tempo-xtask -- pause-portal
+
+[group('zone')]
+[doc('Enables or disables closed-loop account enforcement. Pass true to close access or false to open it. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-access-mode enforced:
+    #!/bin/bash
+    set -euo pipefail
+    ENFORCED="{{enforced}}"
+    case "$ENFORCED" in
+        true) ARGS=(--enforced) ;;
+        false) ARGS=() ;;
+        *) echo "Error: enforced must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-access-mode "${ARGS[@]}"
+
+[group('zone')]
+[doc('Enables or disables callback gateway enforcement. Pass true to enforce registered gateways or false to allow arbitrary targets. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway-mode enforced:
+    #!/bin/bash
+    set -euo pipefail
+    ENFORCED="{{enforced}}"
+    case "$ENFORCED" in
+        true) ARGS=(--enforced) ;;
+        false) ARGS=() ;;
+        *) echo "Error: enforced must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-gateway-mode "${ARGS[@]}"
+
+[group('zone')]
+[doc('Adds or removes an account from closed-loop portal flows. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-allowed-account account allowed:
+    #!/bin/bash
+    set -euo pipefail
+    ALLOWED="{{allowed}}"
+    case "$ALLOWED" in
+        true) ARGS=(--allowed) ;;
+        false) ARGS=() ;;
+        *) echo "Error: allowed must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-allowed-account "{{account}}" "${ARGS[@]}"
+
+[group('zone')]
+[doc('Adds or removes a callback gateway. Pass true to add or false to remove. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY.')]
+set-gateway account allowed:
+    #!/bin/bash
+    set -euo pipefail
+    ALLOWED="{{allowed}}"
+    case "$ALLOWED" in
+        true) ARGS=(--allowed) ;;
+        false) ARGS=() ;;
+        *) echo "Error: allowed must be 'true' or 'false'" >&2; exit 1 ;;
+    esac
+    cargo run -p tempo-xtask -- set-gateway "{{account}}" "${ARGS[@]}"
 
 [group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
