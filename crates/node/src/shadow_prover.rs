@@ -377,16 +377,40 @@ mod tests {
 
     #[test]
     fn submission_match_binds_t13_token_cursor() {
+        use alloy_primitives::{B256, U256};
+        use tempo_zone_contracts::{BlockTransition, DepositQueueTransition};
+
         let call = submitBatchCall {
+            tempoBlockNumber: 10,
+            recentTempoBlockNumber: 0,
+            blockTransition: BlockTransition {
+                prevBlockHash: B256::ZERO,
+                nextBlockHash: B256::repeat_byte(1),
+            },
+            depositQueueTransition: DepositQueueTransition {
+                prevProcessedHash: B256::ZERO,
+                nextProcessedHash: B256::repeat_byte(2),
+                prevDepositNumber: 0,
+                nextDepositNumber: 3,
+            },
             tokenEnablementTransition: TokenEnablementTransition {
                 prevProcessedTokenCount: 2,
                 nextProcessedTokenCount: 4,
             },
-            ..Default::default()
+            withdrawalQueueHash: B256::repeat_byte(3),
+            verifierConfig: Default::default(),
+            proof: Default::default(),
+            nextZoneHeight: U256::from(1),
+            signatures: Vec::new(),
         };
         let mut event = BatchSubmitted {
+            withdrawalBatchIndex: 1,
+            withdrawalQueueIndex: U256::ZERO,
+            nextProcessedDepositQueueHash: call.depositQueueTransition.nextProcessedHash,
+            nextBlockHash: call.blockTransition.nextBlockHash,
+            withdrawalQueueHash: call.withdrawalQueueHash,
+            lastProcessedDepositNumber: call.depositQueueTransition.nextDepositNumber,
             lastProcessedEnabledTokenCount: 4,
-            ..Default::default()
         };
         assert!(call_matches_event(&call, &event));
         event.lastProcessedEnabledTokenCount = 3;

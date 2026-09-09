@@ -1288,7 +1288,6 @@ mod tests {
                 let portal_inputs = AdvanceTempoPortalInputs {
                     deposits: vec![],
                     enabled_tokens: vec![],
-                    follows_checkpoint_blocks: false,
                 };
                 wait_for_validated_peer_anchor(
                     &tracker,
@@ -1342,7 +1341,6 @@ mod tests {
             &AdvanceTempoPortalInputs {
                 deposits: vec![],
                 enabled_tokens: vec![],
-                follows_checkpoint_blocks: false,
             },
             None,
             NumHash::new(10, B256::repeat_byte(0x10)),
@@ -1370,7 +1368,6 @@ mod tests {
             &AdvanceTempoPortalInputs {
                 deposits: vec![],
                 enabled_tokens: vec![],
-                follows_checkpoint_blocks: false,
             },
             None,
             NumHash::new(10, B256::repeat_byte(0x10)),
