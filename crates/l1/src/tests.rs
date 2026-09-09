@@ -145,7 +145,6 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
     set_tempo_checkpoint(&zone_provider, checkpoint);
 
     L1Subscriber {
-        mode: Default::default(),
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
@@ -837,25 +836,26 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 
 #[tokio::test]
 async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
-    let subscriber = test_subscriber(9);
+    let checkpoint = seal(make_test_header(9)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
 
-    let header_10 = make_test_header(10);
+    let header_10 = make_chained_header(10, checkpoint.hash);
     let header_11 = make_chained_header(11, header_hash(&header_10));
     let header_12 = make_chained_header(12, header_hash(&header_11));
     let anchor_12 = seal(header_12.clone()).num_hash();
 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
-    push_header_and_empty_receipts(&asserter, header_10);
+    push_header_and_empty_receipts(&asserter, header_10.clone());
 
     // One newHeads notification wakes the subscriber. The finalized tag has
     // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
-    push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
+    push_header_and_empty_receipts(&asserter, header_11.clone());
+    push_header_and_empty_receipts(&asserter, header_12.clone());
 
     let err = subscriber
         .follow_finalized(&l1_provider, Box::pin(futures::stream::iter([()])))
@@ -863,6 +863,19 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         .expect_err("finite header stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
 
+    assert_eq!(
+        subscriber.block_tracker.control_plane_latest(),
+        Some(anchor_12)
+    );
+    assert!(subscriber.deposit_queue.last_enqueued().is_none());
+    for header in [header_10, header_11, header_12] {
+        push_header_and_empty_receipts(&asserter, header);
+    }
+    subscriber.next_block_to_sync().unwrap();
+    subscriber
+        .backfill_anchors(&l1_provider, 10, 12)
+        .await
+        .unwrap();
     let blocks = subscriber.deposit_queue.drain();
     assert_eq!(
         blocks
@@ -1884,7 +1897,7 @@ fn pause_events_invalidate_cached_portal_storage() {
 
     let block = NumHash::new(1, B256::with_last_byte(0x10));
     let processed = subscriber.extract_events(block, &[receipt]).unwrap();
-    assert!(processed.portal_pause.unwrap().is_paused());
+    assert!(processed.portal_pause.unwrap());
     assert!(processed.invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &processed.invalidated);
     assert_eq!(
@@ -2025,7 +2038,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(header_response(header_10.clone())));
-    asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(vec![receipt.clone()]));
 
     assert_eq!(
         subscriber
@@ -2035,6 +2048,13 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
         11
     );
 
+    assert!(queue.last_enqueued().is_none());
+    asserter.push_success(&Some(header_response(header_10)));
+    asserter.push_success(&Some(vec![receipt]));
+    subscriber
+        .backfill_anchors(&l1_provider, 10, 10)
+        .await
+        .unwrap();
     let seen = sink.seen.lock();
     assert_eq!(seen.len(), 1);
     let (transition, queue_tip_at_apply) = &seen[0];
@@ -2137,8 +2157,7 @@ async fn control_plane_advances_past_paused_execution_lookahead() {
     subscriber.encryption_keys = Some(keys.clone());
     let registry = subscriber.enabled_tokens.clone();
     let cache = subscriber.l1_state_cache.clone();
-    let (control, anchors) = subscriber.split_control_plane();
-    assert_eq!(control.next_block_to_sync().unwrap(), 1);
+    assert_eq!(subscriber.next_block_to_sync().unwrap(), 1);
     let tip = MAX_L1_LOOKAHEAD_BLOCKS + 1;
     let leader = Address::repeat_byte(2);
     let token = Address::repeat_byte(3);
@@ -2191,13 +2210,14 @@ async fn control_plane_advances_past_paused_execution_lookahead() {
     }
     let provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    tokio::time::timeout(
+    let error = tokio::time::timeout(
         Duration::from_secs(10),
-        control.sync_finalized_once(&provider, 1),
+        subscriber.follow_finalized(&provider, Box::pin(futures::stream::empty())),
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_err();
+    assert!(error.to_string().contains("head notification stream ended"));
     assert_eq!(
         tracker.control_plane_latest(),
         Some(NumHash::new(tip, parent))
@@ -2214,13 +2234,12 @@ async fn control_plane_advances_past_paused_execution_lookahead() {
 
     // The execution reader remains bounded even though governance passed its window.
     let blocked_rpc = Asserter::new();
-    blocked_rpc.push_success(&Some(header_response(make_test_header(tip))));
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_mocked_client(blocked_rpc.clone());
     assert!(
         tokio::time::timeout(
             Duration::from_millis(20),
-            anchors.sync_finalized_once(&provider, tip)
+            subscriber.backfill_anchors(&provider, tip, tip)
         )
         .await
         .is_err()
@@ -2234,16 +2253,13 @@ async fn anchor_reader_waits_for_control_plane_before_enqueueing() {
     let subscriber = test_subscriber_with_checkpoint(checkpoint);
     let queue = subscriber.deposit_queue.clone();
     let tracker = subscriber.block_tracker.clone();
-    let (control, anchors) = subscriber.split_control_plane();
-    control.next_block_to_sync().unwrap();
-    anchors.next_block_to_sync().unwrap();
+    subscriber.next_block_to_sync().unwrap();
     let header = make_chained_header(10, checkpoint.hash);
     let asserter = Asserter::new();
-    asserter.push_success(&Some(header_response(header.clone())));
     push_header_and_empty_receipts(&asserter, header.clone());
     let provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    let pending = anchors.sync_finalized_once(&provider, 10);
+    let pending = subscriber.backfill_anchors(&provider, 10, 10);
     tokio::pin!(pending);
     assert!(
         tokio::time::timeout(Duration::from_millis(20), &mut pending)
@@ -2258,10 +2274,62 @@ async fn anchor_reader_waits_for_control_plane_before_enqueueing() {
     push_header_and_empty_receipts(&control_rpc, header);
     let control_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(control_rpc);
-    control
+    subscriber
         .sync_finalized_once(&control_provider, 10)
         .await
         .unwrap();
     pending.await.unwrap();
     assert_eq!(queue.last_enqueued(), tracker.control_plane_latest());
+}
+
+#[tokio::test]
+async fn anchor_retry_does_not_interrupt_governance_or_reapply_it() {
+    let checkpoint = seal(make_test_header(9)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
+    let header_10 = make_chained_header(10, checkpoint.hash);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let control_rpc = Asserter::new();
+    let control_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_mocked_client(control_rpc.clone());
+    control_rpc.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&control_rpc, header_10.clone());
+    subscriber
+        .sync_finalized_once(&control_provider, 10)
+        .await
+        .unwrap();
+
+    let anchor_rpc = Asserter::new();
+    let anchor_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_mocked_client(anchor_rpc.clone());
+    anchor_rpc.push_success(&serde_json::Value::Null);
+    let pending = subscriber.follow_anchors(&anchor_provider);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut pending)
+            .await
+            .is_err()
+    );
+    assert!(anchor_rpc.read_q().is_empty());
+    assert!(subscriber.deposit_queue.last_enqueued().is_none());
+
+    // The observer can advance while the queue reader waits to retry.
+    control_rpc.push_success(&Some(header_response(header_11.clone())));
+    push_header_and_empty_receipts(&control_rpc, header_11.clone());
+    subscriber
+        .sync_finalized_once(&control_provider, 11)
+        .await
+        .unwrap();
+    let observed = subscriber.block_tracker.control_plane_latest();
+    assert_eq!(observed, Some(seal(header_11.clone()).num_hash()));
+    push_header_and_empty_receipts(&anchor_rpc, header_10);
+    push_header_and_empty_receipts(&anchor_rpc, header_11);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(subscriber.deposit_queue.last_enqueued(), observed);
+    assert_eq!(subscriber.block_tracker.control_plane_latest(), observed);
+    assert!(anchor_rpc.read_q().is_empty());
+    assert!(control_rpc.read_q().is_empty());
 }

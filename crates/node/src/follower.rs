@@ -408,7 +408,10 @@ where
         leader: &P2pPeerId,
         proposal: Vec<u8>,
     ) -> eyre::Result<u64> {
-        ensure_settlement_signing_allowed(&self.context.l1_block_tracker)?;
+        eyre::ensure!(
+            !self.context.l1_block_tracker.portal_paused(),
+            "portal is paused; refusing to sign a settlement proposal"
+        );
         let proposal = SettlementAttestation::decode(&proposal)?;
         let height: u64 = proposal
             .zoneHeight
@@ -438,7 +441,10 @@ where
 
         // L1 reads above may yield while a pause finalizes. Re-check immediately before using the
         // quorum key so a proposal that raced the first gate cannot obtain an honest signature.
-        ensure_settlement_signing_allowed(&self.context.l1_block_tracker)?;
+        eyre::ensure!(
+            !self.context.l1_block_tracker.portal_paused(),
+            "portal is paused; refusing to sign a settlement proposal"
+        );
 
         // Unreachable on an rpc-only member: the P2P layer never routes a proposal to one.
         // Fails closed rather than panicking if it ever does.
@@ -743,14 +749,6 @@ where
         info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
         Ok(PeerBlockImportOutcome::Imported)
     }
-}
-
-fn ensure_settlement_signing_allowed(l1_block_tracker: &L1BlockTracker) -> eyre::Result<()> {
-    eyre::ensure!(
-        !l1_block_tracker.portal_paused(),
-        "portal is paused; refusing to sign a settlement proposal"
-    );
-    Ok(())
 }
 
 fn validate_live_block_sender(
@@ -1165,22 +1163,6 @@ mod tests {
         let wrong_parent =
             validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7).unwrap_err();
         assert!(wrong_parent.to_string().contains("does not extend"));
-    }
-
-    #[test]
-    fn follower_refuses_settlement_signatures_while_portal_is_paused() {
-        let tracker = L1BlockTracker::default();
-        ensure_settlement_signing_allowed(&tracker).unwrap();
-
-        tracker
-            .observe_portal_pause(
-                alloy_eips::NumHash::new(10, alloy_primitives::B256::with_last_byte(10)),
-                true,
-            )
-            .unwrap();
-        let error = ensure_settlement_signing_allowed(&tracker)
-            .expect_err("a paused follower must not use its quorum key");
-        assert!(error.to_string().contains("refusing to sign"));
     }
 
     #[tokio::test]

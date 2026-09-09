@@ -629,7 +629,10 @@ async fn propose_settlement<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
-    ensure_settlement_proposal_allowed(&context.l1_block_tracker)?;
+    eyre::ensure!(
+        !context.l1_block_tracker.portal_paused(),
+        "portal is paused; deferring settlement proposal"
+    );
     let Some(attestation) = build_settlement_attestation(provider, number, context, None).await?
     else {
         return Ok(false);
@@ -639,7 +642,10 @@ where
         .as_ref()
         .ok_or_eyre("this node holds no individual secp256k1 key, so it cannot settle")?;
     // Validation reads L1 asynchronously; a pause may finalize during those reads.
-    ensure_settlement_proposal_allowed(&context.l1_block_tracker)?;
+    eyre::ensure!(
+        !context.l1_block_tracker.portal_paused(),
+        "portal is paused; deferring settlement proposal"
+    );
     let signed =
         SignedSettlementAttestation::sign(attestation.clone(), context.domain, signer_key)?;
     let signer = signed.recover_signer(context.domain)?;
@@ -658,14 +664,6 @@ where
         .wrap_err("P2P command channel closed")?;
     info!(target: "zone::p2p", height = number, %signer, signatures, "Signed and broadcast settlement proposal");
     Ok(true)
-}
-
-fn ensure_settlement_proposal_allowed(tracker: &zone_l1::L1BlockTracker) -> eyre::Result<()> {
-    eyre::ensure!(
-        !tracker.portal_paused(),
-        "portal is paused; deferring settlement proposal"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

@@ -843,8 +843,6 @@ where
             finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
-        let (control_plane, l1_subscriber) = l1_subscriber.split_control_plane();
-        task_executor.spawn_critical_task("l1-control-plane", Box::pin(control_plane.run()));
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 

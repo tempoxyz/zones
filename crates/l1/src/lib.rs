@@ -16,7 +16,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use alloy_consensus::{BlockHeader as _, Sealable as _};
+use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockNumberOrTag, NumHash};
 use alloy_network::{ReceiptResponse as _, primitives::HeaderResponse as _};
 use alloy_primitives::{Address, B256, Bloom, U256, keccak256};

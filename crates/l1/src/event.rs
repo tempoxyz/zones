@@ -17,19 +17,6 @@ pub struct L1PortalEvents {
     pub leader_transitions: Vec<LeaderTransition>,
 }
 
-/// A portal-wide pause state change decoded from a finalized log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PortalPauseTransition {
-    Paused,
-    Resumed,
-}
-
-impl PortalPauseTransition {
-    pub(crate) const fn is_paused(self) -> bool {
-        matches!(self, Self::Paused)
-    }
-}
-
 /// A finalized `SequencerEncryptionKeyUpdated` Portal event.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EncryptionKeyRotation {
@@ -154,12 +141,8 @@ impl L1PortalEvents {
     ///
     /// Logs whose topic0 does not match a known portal event are skipped.
     /// Known events that fail to decode return an error.
-    /// Portal-wide pause and resume events return their transition.
-    pub(crate) fn push_log(
-        &mut self,
-        log: &Log,
-        block_number: u64,
-    ) -> eyre::Result<Option<PortalPauseTransition>> {
+    /// Portal-wide pause and resume events return the new paused state.
+    pub(crate) fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<Option<bool>> {
         if !Self::is_known_event(log) {
             debug!(
                 l1_block = block_number,
@@ -251,7 +234,7 @@ impl L1PortalEvents {
                     account = %event.account,
                     "Portal-wide pause observed on L1"
                 );
-                Some(PortalPauseTransition::Paused)
+                Some(true)
             }
             ZonePortalEvents::PortalResumed(event) => {
                 info!(
@@ -259,7 +242,7 @@ impl L1PortalEvents {
                     account = %event.account,
                     "Portal-wide resume observed on L1"
                 );
-                Some(PortalPauseTransition::Resumed)
+                Some(false)
             }
             _ => None,
         };
