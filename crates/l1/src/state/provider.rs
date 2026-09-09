@@ -325,10 +325,8 @@ impl L1StateProvider {
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
-        let value = self
-            .rpc_client
-            .get_storage_async(address, slot, BlockId::number(block_number))
-            .await?;
+        let id = BlockId::number(block_number);
+        let value = self.rpc_client.get_storage_async(address, slot, id).await?;
         self.cache.lock().set(address, slot, block_number, value);
         Ok(value)
     }
