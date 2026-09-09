@@ -2292,8 +2292,19 @@ async fn test_global_pause_stops_and_resumes_block_production() -> eyre::Result<
     let token = l1
         .create_tip20("PausedUSD", "pUSD", B256::with_last_byte(0x7f))
         .await?;
-    l1.enable_token_on_portal(portal_address, token).await?;
-    let governance_block = l1.provider().get_block_number().await?;
+    let governance_receipt = portal
+        .enableToken(token)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(
+        governance_receipt.status(),
+        "enableToken failed while paused"
+    );
+    let governance_block = governance_receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("governance receipt has no block number"))?;
     poll_until(
         L1_TIMEOUT,
         Duration::from_millis(100),

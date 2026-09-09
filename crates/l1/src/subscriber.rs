@@ -139,7 +139,7 @@ impl L1BlockTracker {
             .map(|observation| observation.hash)
     }
 
-    /// Return the highest independently observed L1 anchor.
+    /// Return the highest L1 anchor admitted to the bounded execution tracker.
     pub fn latest(&self) -> Option<NumHash> {
         self.state.read().latest
     }
