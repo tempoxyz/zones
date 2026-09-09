@@ -802,14 +802,9 @@ async fn zone_witnesses(
                 .zone_execution_witness(BlockNumberOrTag::Number(number))
                 .await
                 .map_err(|error| eyre::eyre!(error.to_string()))
-                .wrap_err_with(|| {
-                    format!("debug_zoneExecutionWitness for Zone block {number}")
-                })?;
-            if witness.execution_witness.headers.len() > 1 {
-                bail!(
-                    "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"
-                );
-            }
+                .wrap_err_with(|| format!("debug_zoneExecutionWitness for Zone block {number}"))?;
+            // Historical BLOCKHASH reads are authenticated by EIP-2935 storage
+            // proofs in the state witness, regardless of ancestor header count.
             debug!(
                 target: "zone::sequencer::prover",
                 zone_block = number,
@@ -1075,9 +1070,49 @@ fn witness_size(witness: &BatchWitness) -> usize {
 mod tests {
     use super::*;
     use alloy_consensus::Header as ConsensusHeader;
+    use zone_rpc::types::ZoneExecutionWitness;
     use zone_spf::{
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
     };
+
+    struct StubDebugApi(ZoneExecutionWitness);
+
+    #[jsonrpsee::core::async_trait]
+    impl ZoneDebugApi for StubDebugApi {
+        async fn zone_execution_witness(
+            &self,
+            block: BlockNumberOrTag,
+        ) -> jsonrpsee::core::RpcResult<ZoneExecutionWitness> {
+            assert_eq!(block, BlockNumberOrTag::Number(3));
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn zone_witnesses_accepts_multiple_ancestor_headers() {
+        // Collection only transports these bytes; SPF authenticates their contents.
+        let state_node = Bytes::from_static(&[0xc0]);
+        let code = Bytes::from_static(&[0x00]);
+        let read = TempoStorageRead {
+            account: Address::repeat_byte(1),
+            slot: B256::repeat_byte(2),
+        };
+        let mut witness = ZoneExecutionWitness::default();
+        let (first, first_hash) = ancestry_header(1, B256::ZERO);
+        let (second, _) = ancestry_header(2, first_hash);
+        witness.execution_witness.headers = vec![first, second];
+        witness.execution_witness.state = vec![state_node.clone()];
+        witness.execution_witness.codes = vec![code.clone()];
+        witness.tempo_reads = vec![read];
+
+        let (state, tempo_reads) = zone_witnesses(&StubDebugApi(witness), 3, 3)
+            .await
+            .expect("ancestor headers must not prevent witness collection");
+
+        assert_eq!(state.node_pool, vec![state_node]);
+        assert_eq!(state.bytecodes, vec![code]);
+        assert_eq!(tempo_reads, vec![(3, read)]);
+    }
 
     fn ancestry_header(number: u64, parent_hash: B256) -> (Bytes, B256) {
         let header = TempoHeader {
