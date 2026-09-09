@@ -216,7 +216,20 @@ async fn connect(url: &str) -> eyre::Result<DynProvider<TempoNetwork>> {
     let provider = retry_transient(
         || async {
             let client = RpcClient::builder()
-                .connect_with_config(url, rpc_connection_config())
+                // We use the default retry settings here to avoid retrying indefinitely within a
+                // single connection attempt. The surrounding loop retries failures with bounded
+                // backoff.
+                .connect_with_config(
+                    url,
+                    ConnectionConfig::new().with_ws_config(
+                        WebSocketConfig::default()
+                            // Historical Tempo blocks and receipt responses can exceed
+                            // tungstenite's default 16 MiB frame limit during checker bootstrap
+                            // and recovery.
+                            .max_frame_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE))
+                            .max_message_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)),
+                    ),
+                )
                 .await
                 .map_err(classify_rpc_error)?;
             Ok(ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -227,14 +240,6 @@ async fn connect(url: &str) -> eyre::Result<DynProvider<TempoNetwork>> {
     )
     .await?;
     Ok(provider)
-}
-
-fn rpc_connection_config() -> ConnectionConfig {
-    ConnectionConfig::new().with_ws_config(
-        WebSocketConfig::default()
-            .max_frame_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE))
-            .max_message_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)),
-    )
 }
 
 /// Retry transient failures up to the acquisition bound.

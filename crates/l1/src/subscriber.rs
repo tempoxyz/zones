@@ -521,7 +521,7 @@ where
 
         let url: url::Url = self.config.l1_rpc_url.parse().map_err(eyre::Report::from)?;
         let mut conn_config =
-            crate::rpc::rpc_connection_config(self.config.retry_connection_interval);
+            crate::rpc::persistent_connection_config(self.config.retry_connection_interval);
 
         if !url.username().is_empty() {
             let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());

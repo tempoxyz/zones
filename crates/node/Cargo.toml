@@ -69,7 +69,6 @@ alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
 alloy-rlp.workspace = true
-alloy-rpc-client.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-signer-local.workspace = true
