@@ -16,8 +16,9 @@ node contrib/bench/prepare-tempo-runtimes.mjs "$TEMPO_ROOT" crates/contracts/out
 
 This embeds the local ZonePortal, Verifier, and ZoneMessenger bytecode into every
 runtime set in the benchmark Tempo checkout, including future fork-prefixed
-sets. Genesis and fork upgrades therefore install the same contracts. Unknown
-source formats or incomplete sets fail preparation instead of silently leaving
+sets, including forks that upgrade only one of the three contracts. Genesis and
+fork upgrades therefore install the same contracts. Unknown source formats or
+missing contract definitions fail preparation instead of silently leaving
 an upgrade unpatched. The post-block bytecode checks on both validators remain
 mandatory.
 
