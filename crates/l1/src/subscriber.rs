@@ -12,11 +12,10 @@ use crate::{
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::stream;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
 };
-use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-use tempo_primitives::is_tip20_prefix;
+use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 
 /// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
 /// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
@@ -483,22 +482,9 @@ const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 
 type L1ProcessedEvents = (
     L1PortalEvents,
-    HashSet<Address>,
     Option<Vec<alloy_primitives::Log>>,
     Vec<FinalizedBatchSubmission>,
 );
-
-fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
-    (address == TIP403_REGISTRY_ADDRESS
-        || (is_tip20_prefix(address) && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH)))
-    .then_some(TIP403_REGISTRY_ADDRESS)
-}
-
-fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Address> {
-    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
-
-    (topic0 == Some(&TokenEnabled::SIGNATURE_HASH)).then_some(TIP403_REGISTRY_ADDRESS)
-}
 
 /// Sink for leadership transitions decoded from verified finalized receipts.
 ///
@@ -739,14 +725,11 @@ where
     ///
     /// Callers provide the next block number and receive the next cursor after
     /// a successful sync.
-    pub(crate) async fn sync_to_finalized<L1>(
+    pub(crate) async fn sync_to_finalized(
         &self,
-        l1_provider: &L1,
+        l1_provider: &impl Provider<TempoNetwork>,
         mut next_block: u64,
-    ) -> Result<u64, L1SubscriberError>
-    where
-        L1: Provider<TempoNetwork> + Clone + 'static,
-    {
+    ) -> Result<u64, L1SubscriberError> {
         let mut finalized = self.finalized_block_number(l1_provider).await?;
         loop {
             self.block_tracker.record_finalized_target(finalized);
@@ -792,14 +775,11 @@ where
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
     /// always based on the `finalized` tag read by [`Self::sync_to_finalized`].
-    pub(crate) async fn follow_finalized<L1>(
+    pub(crate) async fn follow_finalized(
         &self,
-        l1_provider: &L1,
+        l1_provider: &impl Provider<TempoNetwork>,
         mut stream: HeaderStream,
-    ) -> Result<(), L1SubscriberError>
-    where
-        L1: Provider<TempoNetwork> + Clone + 'static,
-    {
+    ) -> Result<(), L1SubscriberError> {
         let mut next_block = self.next_block_to_sync()?;
 
         // Subscribe before the initial sync so a head published while catching
@@ -820,15 +800,12 @@ where
     /// Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
-    async fn backfill<L1>(
+    async fn backfill(
         &self,
-        l1_provider: &L1,
+        l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
-    ) -> Result<(), L1SubscriberError>
-    where
-        L1: Provider<TempoNetwork> + Clone + 'static,
-    {
+    ) -> Result<(), L1SubscriberError> {
         let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to, true);
 
         let mut processed = 0u64;
@@ -836,19 +813,23 @@ where
 
         while let Some((sealed, processed_events, account_roots)) = blocks.try_next().await? {
             let block_number = sealed.number();
-            let (events, invalidated, portal_logs, finalized_batches) = processed_events;
+            let (events, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let anchor = sealed.num_hash();
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
-            if let Some(verified) = &self.verified_l1_state_cache {
-                verified
-                    .record_authenticated_roots(anchor, account_roots)
-                    .map_err(L1SubscriberError::fatal_from_err(
-                        block_number,
-                        "authenticated storage-root publication",
-                    ))?;
-            }
+            let root_changes = if let Some(verified) = &self.verified_l1_state_cache {
+                Some(
+                    verified
+                        .record_authenticated_roots(anchor, account_roots)
+                        .map_err(L1SubscriberError::fatal_from_err(
+                            block_number,
+                            "authenticated storage-root publication",
+                        ))?,
+                )
+            } else {
+                None
+            };
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.leadership_sink {
@@ -915,7 +896,9 @@ where
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
             self.apply_enabled_token_events(&events);
-            self.update_l1_state_anchor(block_number, &invalidated);
+            if let Some(accounts) = root_changes {
+                self.update_l1_state_anchor(block_number, accounts);
+            }
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
             }
@@ -950,9 +933,9 @@ where
     ///
     /// RPC work is pipelined up to the configured concurrency. When `authenticate_roots` is true,
     /// Portal and TIP-403 account roots are authenticated concurrently with the block receipts.
-    fn fetch_l1_blocks<'a, L1>(
+    fn fetch_l1_blocks<'a>(
         &'a self,
-        l1_provider: &'a L1,
+        l1_provider: &'a impl Provider<TempoNetwork>,
         range: RangeInclusive<u64>,
         authenticate_roots: bool,
     ) -> impl Stream<
@@ -965,17 +948,15 @@ where
             L1SubscriberError,
         >,
     > + Send
-    + 'a
-    where
-        L1: Provider<TempoNetwork> + Clone + 'static,
-    {
+    + 'a {
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.block_tracker.clone();
-        let verified_l1_state_cache = self.verified_l1_state_cache.clone();
+        let should_authenticate_roots =
+            authenticate_roots && self.verified_l1_state_cache.is_some();
         let portal_address = self.config.portal_address;
         let rpc_client = L1RpcClient::from_provider(
-            l1_provider.clone().erased(),
+            l1_provider.root().clone().erased(),
             tokio::runtime::Handle::current(),
         );
 
@@ -984,7 +965,6 @@ where
                 let provider = l1_provider;
                 let subscriber_metrics = subscriber_metrics.clone();
                 let block_tracker = block_tracker.clone();
-                let verified_l1_state_cache = verified_l1_state_cache.clone();
                 let rpc_client = rpc_client.clone();
                 async move {
                     block_tracker.wait_for_capacity(block_number).await?;
@@ -1010,7 +990,7 @@ where
                         header_resp.logs_bloom(),
                     );
                     let account_roots = async {
-                        if !authenticate_roots || verified_l1_state_cache.is_none() {
+                        if !should_authenticate_roots {
                             return Ok::<_, L1SubscriberError>(BTreeMap::new());
                         }
                         let targets =
@@ -1096,10 +1076,10 @@ where
         }
     }
 
-    async fn recover_deferred_work<L1>(&self, l1_provider: &L1) -> Result<(), L1SubscriberError>
-    where
-        L1: Provider<TempoNetwork> + Clone + 'static,
-    {
+    async fn recover_deferred_work(
+        &self,
+        l1_provider: &impl Provider<TempoNetwork>,
+    ) -> Result<(), L1SubscriberError> {
         let Some(from) = self.config.deferred_work_start else {
             return Ok(());
         };
@@ -1114,7 +1094,7 @@ where
 
         let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number, false);
         let mut deferred: Option<DeferredPortalWork> = None;
-        while let Some((header, (events, _, _, _), _)) = blocks.try_next().await? {
+        while let Some((header, (events, _, _), _)) = blocks.try_next().await? {
             let block = L1BlockDeposits { header, events };
             if let Some(deferred) = &mut deferred {
                 deferred.push(block);
@@ -1138,7 +1118,7 @@ where
         Ok(())
     }
 
-    /// Extract portal events and raw-cache mutation barriers from fetched receipts.
+    /// Extract portal events and optional evidence from fetched receipts.
     ///
     /// A decode failure of a portal log is an error for the whole block. A silently dropped
     /// event would diverge this node from its peers.
@@ -1150,7 +1130,6 @@ where
         let block_number = block.number;
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
-        let mut invalidated = HashSet::new();
         let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
         let finalized_batches = if self.finalized_batch_submissions.is_some() {
             extract_finalized_batch_submissions(block, portal_address, receipts)
@@ -1167,29 +1146,17 @@ where
                     if retain_receipt_logs && let Some(logs) = &mut portal_logs {
                         logs.push(log.inner.clone());
                     }
-                    invalidated.insert(address);
-                    if let Some(address) =
-                        portal_event_cache_invalidation_address(log.topics().first())
-                    {
-                        invalidated.insert(address);
-                    }
                     portal_events
                         .push_log(log, block_number)
                         .wrap_err_with(|| {
                             format!("failed to decode a portal event in L1 block {block_number}")
                         })?;
-                } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
-                    invalidated.extend([address, log.address()]);
                 }
             }
         }
 
-        // Enabling may migrate token-local policy storage into TIP-403.
-        for event in &portal_events.enabled_tokens {
-            invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
-        }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs, finalized_batches))
+        Ok((portal_events, portal_logs, finalized_batches))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -1248,11 +1215,11 @@ where
     pub(crate) fn update_l1_state_anchor(
         &self,
         number: u64,
-        invalidated_accounts: &HashSet<Address>,
+        invalidated_accounts: BTreeSet<Address>,
     ) {
         self.l1_state_cache
             .lock()
-            .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
+            .invalidate_and_set_anchor(number, invalidated_accounts);
     }
 }
 
@@ -1315,29 +1282,4 @@ pub fn verify_receipts_against_header(
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy_primitives::address;
-
-    #[test]
-    fn token_policy_updates_invalidate_the_registry() {
-        let token = address!("20C0000000000000000000000000000000000999");
-
-        assert_eq!(
-            cache_invalidation_address(token, Some(&TransferPolicyUpdate::SIGNATURE_HASH)),
-            Some(TIP403_REGISTRY_ADDRESS)
-        );
-    }
-
-    #[test]
-    fn token_enabled_events_invalidate_the_registry() {
-        assert_eq!(
-            portal_event_cache_invalidation_address(Some(&TokenEnabled::SIGNATURE_HASH)),
-            Some(TIP403_REGISTRY_ADDRESS)
-        );
-        assert_eq!(portal_event_cache_invalidation_address(None), None);
-    }
 }

@@ -33,12 +33,6 @@ const PROOF_RPC_CONCURRENCY: usize = 8;
 /// Entries remain unverified until finalization drains the journal through multiproof validation.
 type UnverifiedL1Reads = BTreeMap<u64, BTreeMap<StorageReadKey, B256>>;
 
-#[derive(Debug)]
-struct VerifiedL1StateCacheWithMetrics {
-    state: Mutex<VerifiedL1StateCacheInner>,
-    metrics: crate::metrics::VerifiedL1StateCacheMetrics,
-}
-
 /// Shared authenticated account roots and proved slot values.
 ///
 /// The slot cache contains only values that passed proof verification. Presence under
@@ -79,21 +73,36 @@ impl VerifiedL1StateCache {
     }
 
     /// Records account storage roots authenticated against one sealed finalized header.
+    ///
+    /// Returns accounts whose root differs from the immediately preceding authenticated block, or
+    /// whose parent root is unavailable.
     pub(crate) fn record_authenticated_roots(
         &self,
         block: NumHash,
         roots: impl IntoIterator<Item = (Address, B256)>,
-    ) -> Result<()> {
+    ) -> Result<BTreeSet<Address>> {
         let roots = roots.into_iter().collect::<Vec<_>>();
-        self.0
-            .state
-            .lock()
-            .record_roots(block, roots.iter().copied())?;
+        let changed = {
+            let mut state = self.0.state.lock();
+            let changed = roots
+                .iter()
+                .filter_map(|&(account, root)| {
+                    state
+                        .root_changed_from_parent(block.number, account, root)
+                        .then_some(account)
+                })
+                .collect();
+            state.commit_payload(
+                roots.iter().map(|&(account, root)| (block, account, root)),
+                std::iter::empty::<((StorageReadKey, B256), B256)>(),
+            )?;
+            changed
+        };
         self.0
             .metrics
             .authenticated_account_roots
             .increment(roots.len() as u64);
-        Ok(())
+        Ok(changed)
     }
 
     /// Returns a proved slot value when the exact block authenticates its cache key's root.
@@ -127,6 +136,12 @@ impl VerifiedL1StateCache {
 }
 
 #[derive(Debug)]
+struct VerifiedL1StateCacheWithMetrics {
+    state: Mutex<VerifiedL1StateCacheInner>,
+    metrics: crate::metrics::VerifiedL1StateCacheMetrics,
+}
+
+#[derive(Debug)]
 struct VerifiedL1StateCacheInner {
     blocks: BTreeMap<u64, AuthenticatedBlockRoots>,
     slots: LruMap<(StorageReadKey, B256), B256>,
@@ -134,55 +149,19 @@ struct VerifiedL1StateCacheInner {
 }
 
 impl VerifiedL1StateCacheInner {
-    fn record_roots(
-        &mut self,
-        block: NumHash,
-        roots: impl IntoIterator<Item = (Address, B256)>,
-    ) -> Result<()> {
-        let roots = collect_unique_roots(roots)?;
-        if let Some(existing) = self.blocks.get_mut(&block.number) {
-            ensure!(
-                existing.hash == block.hash,
-                "conflicting finalized hash at Tempo block {}: cached {}, new {}",
-                block.number,
-                existing.hash,
-                block.hash
-            );
-            for (account, root) in roots {
-                if let Some(cached) = existing.roots.get(&account) {
-                    ensure!(
-                        *cached == root,
-                        "conflicting authenticated storage root at block {} for account {}: cached {}, new {}",
-                        block.number,
-                        account,
-                        cached,
-                        root
-                    );
-                } else {
-                    existing.roots.insert(account, root);
-                }
-            }
-            return Ok(());
-        }
-
-        self.blocks.insert(
-            block.number,
-            AuthenticatedBlockRoots {
-                hash: block.hash,
-                roots,
-            },
-        );
-        while self.blocks.len() > self.root_capacity {
-            self.blocks.pop_first();
-        }
-        Ok(())
-    }
-
     fn storage_root(&self, block: NumHash, account: Address) -> Option<B256> {
         let cached = self.blocks.get(&block.number)?;
         (cached.hash == block.hash)
             .then(|| cached.roots.get(&account).copied())
             .flatten()
+    }
+
+    fn root_changed_from_parent(&self, block_number: u64, account: Address, root: B256) -> bool {
+        block_number
+            .checked_sub(1)
+            .and_then(|parent| self.blocks.get(&parent))
+            .and_then(|block| block.roots.get(&account))
+            .is_none_or(|parent_root| *parent_root != root)
     }
 
     fn commit_payload(
@@ -192,19 +171,23 @@ impl VerifiedL1StateCacheInner {
     ) -> Result<()> {
         // Normalize and reject conflicts before touching either cache. This keeps root and slot
         // publication atomic even when one payload contains duplicate proof material.
-        let mut roots_by_block = BTreeMap::<u64, (B256, BTreeMap<Address, B256>)>::new();
+        let mut roots_by_block = BTreeMap::<u64, AuthenticatedBlockRoots>::new();
         for (block, account, root) in roots {
-            let (hash, accounts) = roots_by_block
-                .entry(block.number)
-                .or_insert_with(|| (block.hash, BTreeMap::new()));
+            let block_roots =
+                roots_by_block
+                    .entry(block.number)
+                    .or_insert_with(|| AuthenticatedBlockRoots {
+                        hash: block.hash,
+                        roots: BTreeMap::new(),
+                    });
             ensure!(
-                *hash == block.hash,
+                block_roots.hash == block.hash,
                 "conflicting finalized hashes supplied at Tempo block {}: {} and {}",
                 block.number,
-                *hash,
+                block_roots.hash,
                 block.hash
             );
-            if let Some(previous) = accounts.insert(account, root) {
+            if let Some(previous) = block_roots.roots.insert(account, root) {
                 ensure!(
                     previous == root,
                     "conflicting authenticated roots supplied at block {} for account {account}: {previous} and {root}",
@@ -228,14 +211,15 @@ impl VerifiedL1StateCacheInner {
             }
         }
 
-        for (&number, &(hash, ref accounts)) in &roots_by_block {
+        for (&number, block_roots) in &roots_by_block {
             if let Some(existing) = self.blocks.get(&number) {
                 ensure!(
-                    existing.hash == hash,
-                    "conflicting finalized hash at Tempo block {number}: cached {}, new {hash}",
-                    existing.hash
+                    existing.hash == block_roots.hash,
+                    "conflicting finalized hash at Tempo block {number}: cached {}, new {}",
+                    existing.hash,
+                    block_roots.hash
                 );
-                for (&account, &root) in accounts {
+                for (&account, &root) in &block_roots.roots {
                     if let Some(cached) = existing.roots.get(&account) {
                         ensure!(
                             *cached == root,
@@ -246,7 +230,7 @@ impl VerifiedL1StateCacheInner {
             }
         }
         for (&(storage, storage_root), value) in &unique_slots {
-            if let Some(cached) = self.slots.get(&(storage, storage_root)) {
+            if let Some(cached) = self.slots.peek(&(storage, storage_root)) {
                 ensure!(
                     cached == value,
                     "conflicting proved value for account {} root {} slot {}: cached {}, new {}",
@@ -259,15 +243,15 @@ impl VerifiedL1StateCacheInner {
             }
         }
 
-        for (number, (hash, accounts)) in roots_by_block {
+        for (number, block_roots) in roots_by_block {
             let entry = self
                 .blocks
                 .entry(number)
                 .or_insert_with(|| AuthenticatedBlockRoots {
-                    hash,
+                    hash: block_roots.hash,
                     roots: BTreeMap::new(),
                 });
-            entry.roots.extend(accounts);
+            entry.roots.extend(block_roots.roots);
         }
         while self.blocks.len() > self.root_capacity {
             self.blocks.pop_first();
@@ -284,21 +268,6 @@ impl VerifiedL1StateCacheInner {
 struct AuthenticatedBlockRoots {
     hash: B256,
     roots: BTreeMap<Address, B256>,
-}
-
-/// One account and its requested slot values authenticated by an EIP-1186 proof.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AuthenticatedAccountState {
-    /// Authenticated storage-trie root, normalized for an absent account.
-    pub(crate) storage_root: B256,
-    /// Authenticated values for every requested raw slot.
-    pub(crate) slots: BTreeMap<B256, B256>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TrustedL1Anchor {
-    block: NumHash,
-    state_root: B256,
 }
 
 /// Payload-attempt-scoped reader that consumes verified hits and journals provisional RPC reads.
@@ -355,9 +324,9 @@ impl PayloadL1StateProvider {
         }
         let started = std::time::Instant::now();
         let result = self.rpc_client.run_blocking(verify_payload_reads(
-            self.rpc_client.clone(),
-            verified.clone(),
-            self.anchors.clone(),
+            &self.rpc_client,
+            verified,
+            &self.anchors,
             unverified_reads,
         ));
         verified
@@ -430,20 +399,38 @@ impl L1StorageReader for PayloadL1StateProvider {
     }
 }
 
+/// One account and its requested slot values authenticated by an EIP-1186 proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthenticatedAccountState {
+    /// Authenticated storage-trie root, normalized for an absent account.
+    pub(crate) storage_root: B256,
+    /// Authenticated values for every requested raw slot.
+    pub(crate) slots: BTreeMap<B256, B256>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TrustedL1Anchor {
+    block: NumHash,
+    state_root: B256,
+}
+
 /// Authenticates an `eth_getMultiProof` response against one global state root.
 pub(crate) fn authenticate_multi_proof(
     state_root: B256,
     targets: &L1ProofTargets,
     responses: Vec<EIP1186AccountProofResponse>,
 ) -> Result<BTreeMap<Address, AuthenticatedAccountState>> {
-    let mut remaining = targets.clone();
     let mut authenticated = BTreeMap::new();
 
     for response in responses {
         let address = response.address;
-        let requested = remaining
-            .remove(&address)
-            .ok_or_else(|| eyre::eyre!("unexpected or duplicate account proof for {address}"))?;
+        ensure!(
+            !authenticated.contains_key(&address),
+            "duplicate account proof for {address}"
+        );
+        let requested = targets
+            .get(&address)
+            .ok_or_else(|| eyre::eyre!("unexpected account proof for {address}"))?;
         let proof = AccountProof::from_eip1186_proof(response);
         ensure!(proof.address == address, "account proof address changed");
         proof
@@ -478,9 +465,9 @@ pub(crate) fn authenticate_multi_proof(
     }
 
     ensure!(
-        remaining.is_empty(),
+        authenticated.len() == targets.len(),
         "proof response omitted {} requested account(s)",
-        remaining.len()
+        targets.len() - authenticated.len()
     );
     Ok(authenticated)
 }
@@ -494,16 +481,16 @@ pub(crate) fn account_root_targets(accounts: impl IntoIterator<Item = Address>) 
 }
 
 async fn verify_payload_reads(
-    rpc_client: L1RpcClient,
-    verified: VerifiedL1StateCache,
-    anchors: Arc<BTreeMap<u64, TrustedL1Anchor>>,
+    rpc_client: &L1RpcClient,
+    verified: &VerifiedL1StateCache,
+    anchors: &BTreeMap<u64, TrustedL1Anchor>,
     unverified_reads: UnverifiedL1Reads,
 ) -> Result<usize, L1ReadValidationError> {
     let target_count = unverified_reads.values().map(BTreeMap::len).sum();
     let requests = unverified_reads
         .into_iter()
         .map(|(block_number, reads)| {
-            let anchor = anchors.get(&block_number).cloned().ok_or_else(|| {
+            let anchor = anchors.get(&block_number).copied().ok_or_else(|| {
                 L1ReadValidationError::Integrity(format!(
                     "missing trusted Tempo header for block {block_number}"
                 ))
@@ -517,28 +504,23 @@ async fn verify_payload_reads(
         .collect::<std::result::Result<Vec<_>, L1ReadValidationError>>()?;
 
     let batches = stream::iter(requests)
-        .map(|(anchor, reads, targets)| {
-            let rpc_client = rpc_client.clone();
-            async move {
-                let block = anchor.block;
-                let responses = rpc_client
-                    .get_multi_proof(BlockId::hash(block.hash), &targets)
-                    .await
-                    .map_err(|source| L1ReadValidationError::Availability {
-                        block_number: block.number,
-                        source,
-                    })?;
-                let authenticated =
-                    authenticate_multi_proof(anchor.state_root, &targets, responses).map_err(
-                        |error| {
-                            L1ReadValidationError::Integrity(format!(
-                                "proof verification failed at Tempo block {}: {error}",
-                                block.number
-                            ))
-                        },
-                    )?;
-                Ok::<_, L1ReadValidationError>((block, reads, authenticated))
-            }
+        .map(|(anchor, reads, targets)| async move {
+            let block = anchor.block;
+            let responses = rpc_client
+                .get_multi_proof(BlockId::hash(block.hash), &targets)
+                .await
+                .map_err(|source| L1ReadValidationError::Availability {
+                    block_number: block.number,
+                    source,
+                })?;
+            let authenticated = authenticate_multi_proof(anchor.state_root, &targets, responses)
+                .map_err(|error| {
+                    L1ReadValidationError::Integrity(format!(
+                        "proof verification failed at Tempo block {}: {error}",
+                        block.number
+                    ))
+                })?;
+            Ok::<_, L1ReadValidationError>((block, reads, authenticated))
         })
         .buffer_unordered(PROOF_RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -571,21 +553,6 @@ async fn verify_payload_reads(
         .commit_payload(roots, slots)
         .map_err(|error| L1ReadValidationError::Integrity(error.to_string()))?;
     Ok(target_count)
-}
-
-fn collect_unique_roots(
-    roots: impl IntoIterator<Item = (Address, B256)>,
-) -> Result<BTreeMap<Address, B256>> {
-    let mut unique = BTreeMap::new();
-    for (account, root) in roots {
-        if let Some(previous) = unique.insert(account, root) {
-            ensure!(
-                previous == root,
-                "conflicting authenticated roots supplied for account {account}: {previous} and {root}"
-            );
-        }
-    }
-    Ok(unique)
 }
 
 /// Failure while authenticating the L1 values consumed by a payload.
@@ -654,16 +621,54 @@ mod tests {
         state
             .commit_payload([(block_a, account, root_a)], [((storage, root_a), value)])
             .unwrap();
-        state
-            .record_authenticated_roots(block_b, [(account, root_a)])
-            .unwrap();
-        state
-            .record_authenticated_roots(block_c, [(account, root_b)])
-            .unwrap();
+        let changed_b = state.record_authenticated_roots(block_b, [(account, root_a)]);
+        assert!(changed_b.unwrap().is_empty());
+        let changed_c = state.record_authenticated_roots(block_c, [(account, root_b)]);
+        assert_eq!(changed_c.unwrap(), BTreeSet::from([account]));
 
         assert_eq!(state.get(block_a, storage), Some(value));
         assert_eq!(state.get(block_b, storage), Some(value));
         assert_eq!(state.get(block_c, storage), None);
+    }
+
+    #[test]
+    fn authenticated_root_changes_drive_ordinary_cache_invalidation() {
+        use crate::state::L1StateCache;
+
+        let verified = VerifiedL1StateCache::with_limits(10, 10);
+        let ordinary = L1StateCache::new();
+        let account = Address::repeat_byte(0x11);
+        let slot = B256::with_last_byte(1);
+        let root_a = B256::with_last_byte(0xaa);
+        let root_b = B256::with_last_byte(0xbb);
+        let value = B256::with_last_byte(0x42);
+
+        let changed = verified
+            .record_authenticated_roots(
+                NumHash::new(1, B256::with_last_byte(1)),
+                [(account, root_a)],
+            )
+            .unwrap();
+        ordinary.lock().invalidate_and_set_anchor(1, changed);
+        ordinary.lock().set(account, slot, 1, value);
+
+        let changed = verified
+            .record_authenticated_roots(
+                NumHash::new(2, B256::with_last_byte(2)),
+                [(account, root_a)],
+            )
+            .unwrap();
+        ordinary.lock().invalidate_and_set_anchor(2, changed);
+        assert_eq!(ordinary.lock().get(account, slot, 2), Some(value));
+
+        let changed = verified
+            .record_authenticated_roots(
+                NumHash::new(3, B256::with_last_byte(3)),
+                [(account, root_b)],
+            )
+            .unwrap();
+        ordinary.lock().invalidate_and_set_anchor(3, changed);
+        assert_eq!(ordinary.lock().get(account, slot, 3), None);
     }
 
     #[test]
