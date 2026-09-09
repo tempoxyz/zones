@@ -35,7 +35,7 @@ pub(crate) type TestContext =
 
 /// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
-    test_context_with_hardfork(TempoHardfork::T12)
+    test_context_with_hardfork(TempoHardfork::T13)
 }
 
 /// Create a test EVM context with the specified hardfork.

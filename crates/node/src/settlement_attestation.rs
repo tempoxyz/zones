@@ -4,7 +4,7 @@ use std::{future::Future, time::Duration};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
-use alloy_primitives::{B256, Bytes, Sealable as _, U256};
+use alloy_primitives::{B256, Sealable as _, U256};
 use alloy_provider::Provider as _;
 use alloy_sol_types::{SolEvent as _, SolValue as _};
 use eyre::{OptionExt as _, WrapErr as _};
@@ -20,6 +20,7 @@ use tempo_zone_contracts::{
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 use zone_p2p::P2pCommand;
+use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 
 use crate::replication::AttestationContext;
 use zone_sequencer::{
@@ -150,7 +151,7 @@ where
                 match log.topics().first().copied() {
                     Some(TempoAdvanced::SIGNATURE_HASH) => {
                         let event = TempoAdvanced::decode_log(log).wrap_err_with(|| {
-                            format!("invalid post-T12 TempoAdvanced log in block {number}")
+                            format!("invalid post-T13 TempoAdvanced log in block {number}")
                         })?;
                         anchor_hash = Some(event.tempoBlockHash);
                         tempo_block_number = Some(event.tempoBlockNumber);
@@ -303,7 +304,7 @@ where
         tokenEnablementTransitionHash: settlement_abi
             .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
-        verifierConfigHash: alloy_primitives::keccak256(Bytes::new()),
+        verifierConfigHash: alloy_primitives::keccak256(NITRO_VERIFIER_CONFIG_V1),
     }))
 }
 
@@ -643,7 +644,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::Log;
+    use alloy_primitives::{Bytes, Log};
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_provider::test_utils::MockEthProvider;
@@ -712,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_batch_skips_checkpoint_only_blocks_across_t12() {
+    fn previous_batch_skips_checkpoint_only_blocks_across_t13() {
         let provider = MockEthProvider::<TempoPrimitives>::new();
 
         let mut first_boundary_header = TempoHeader::default();
@@ -797,7 +798,7 @@ mod tests {
         let previous = previous_batch(&provider, 4).unwrap();
         assert_eq!(previous, (first_boundary_hash, first_deposit_hash, 7, 0));
         assert_eq!(
-            SettlementAbi::T12.token_transition_hash(previous.3, commitments.processed_token_count),
+            SettlementAbi::T13.token_transition_hash(previous.3, commitments.processed_token_count),
             alloy_primitives::keccak256((0_u64, 15_u64).abi_encode())
         );
     }

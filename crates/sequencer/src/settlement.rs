@@ -8,9 +8,9 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is currently **skipped** by the stub verifier. Both direct
-//! and ancestry submissions use empty proof bytes until real proof generation is
-//! implemented.
+//! Proof validation is **skipped** by the pre-T11 stub verifier. When a settlement prover is
+//! configured, direct and ancestry submissions carry its Nitro NSM attestation. The unconfigured
+//! compatibility path continues to submit empty proof bytes.
 //!
 //! # Anchor modes
 //!
@@ -56,6 +56,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
+use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
@@ -332,12 +333,11 @@ impl BatchSubmitter {
     ///   recent anchor block is used and ancestry headers are collected (for
     ///   future prover integration).
     ///
-    /// `verifierConfig` and `proof` are empty until real proof generation is
-    /// implemented.
+    /// `verifierConfig` selects the Nitro verifier policy. Configured settlement includes the
+    /// prover's Nitro attestation; the pre-T11 unconfigured path keeps `proof` empty.
     ///
     /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
     /// settlement quorum is cancelled when the leader generation shuts down.
-    // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = prepared.batch.tempo_block_number,
@@ -350,10 +350,12 @@ impl BatchSubmitter {
     pub async fn submit_batch(
         &self,
         prepared: &PreparedBatch,
+        proof_bundle: Option<&ProofBundle>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
+        let (verifier_config, proof) = settlement_proof(proof_bundle)?;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -370,7 +372,6 @@ impl BatchSubmitter {
             nextProcessedTokenCount: batch.next_processed_token_count,
         };
 
-        let verifier_config = Bytes::new();
         let signer = self.signer.as_ref();
         let metadata = self
             .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
@@ -481,7 +482,7 @@ impl BatchSubmitter {
                         deposit_transition,
                         batch.withdrawal_queue_hash,
                         verifier_config,
-                        Bytes::new(),
+                        proof,
                         U256::from(batch.zone_height),
                         signatures,
                     )
@@ -494,7 +495,7 @@ impl BatchSubmitter {
                 }
                 tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
             }
-            SettlementAbi::T12 => {
+            SettlementAbi::T13 => {
                 let mut submission = self
                     .portal
                     .submitBatch_1(
@@ -505,7 +506,7 @@ impl BatchSubmitter {
                         token_transition,
                         batch.withdrawal_queue_hash,
                         verifier_config,
-                        Bytes::new(),
+                        proof,
                         U256::from(batch.zone_height),
                         signatures,
                     )
@@ -836,7 +837,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            attestation.verifierConfigHash == alloy_primitives::keccak256(Bytes::new()),
+            attestation.verifierConfigHash == keccak256(NITRO_VERIFIER_CONFIG_V1),
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -1281,27 +1282,27 @@ pub struct WithdrawalPage {
 /// Settlement ABI selected by the fork rules of the batch's imported Tempo block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementAbi {
-    /// Pre-T12 selector and EIP-712 statement.
+    /// Pre-T13 selector and EIP-712 statement.
     Legacy,
-    /// T12 selector and token-enablement-bound EIP-712 statement.
-    T12,
+    /// T13 selector and token-enablement-bound EIP-712 statement.
+    T13,
 }
 
 impl SettlementAbi {
     /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
     pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
-        let t12_active = provider
-            .is_hardfork_active(TempoHardfork::T12)
+        let t13_active = provider
+            .is_hardfork_active(TempoHardfork::T13)
             .await
             .wrap_err("failed reading the live Tempo L1 hardfork")?;
-        Ok(if t12_active { Self::T12 } else { Self::Legacy })
+        Ok(if t13_active { Self::T13 } else { Self::Legacy })
     }
 
     /// Hash the token transition exactly as the selected settlement statement expects.
     pub fn token_transition_hash(self, previous: u64, next: u64) -> B256 {
         match self {
             Self::Legacy => B256::ZERO,
-            Self::T12 => keccak256((previous, next).abi_encode()),
+            Self::T13 => keccak256((previous, next).abi_encode()),
         }
     }
 }
@@ -1455,6 +1456,26 @@ struct SettlementAttestationInput<'a> {
     block_transition: &'a BlockTransition,
     deposit_transition: &'a DepositQueueTransition,
     verifier_config: &'a Bytes,
+}
+
+fn settlement_proof(proof_bundle: Option<&ProofBundle>) -> Result<(Bytes, Bytes)> {
+    let Some(proof_bundle) = proof_bundle else {
+        return Ok((Bytes::from_static(NITRO_VERIFIER_CONFIG_V1), Bytes::new()));
+    };
+    eyre::ensure!(
+        proof_bundle.verifier_config.as_ref() == NITRO_VERIFIER_CONFIG_V1,
+        "prover returned unsupported verifier config 0x{}; expected 0x{}",
+        alloy_primitives::hex::encode(&proof_bundle.verifier_config),
+        alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
+    );
+    eyre::ensure!(
+        !proof_bundle.proof.is_empty(),
+        "prover returned an empty Nitro proof"
+    );
+    Ok((
+        proof_bundle.verifier_config.clone(),
+        proof_bundle.proof.clone(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1698,7 +1719,7 @@ pub(crate) fn read_zone_block_snapshot<P: ZoneSequencerProvider>(
             let (block_number, deposit_hash, deposit_number, token_count) = match *topic {
                 TempoAdvanced::SIGNATURE_HASH => {
                     let event = TempoAdvanced::decode_log(log).map_err(|err| {
-                        eyre::eyre!("invalid post-T12 TempoAdvanced log in block {number}: {err}")
+                        eyre::eyre!("invalid post-T13 TempoAdvanced log in block {number}: {err}")
                     })?;
                     (
                         event.tempoBlockNumber,
@@ -1951,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_bindings_keep_legacy_and_t12_selectors_distinct() {
+    fn settlement_bindings_keep_legacy_and_t13_selectors_distinct() {
         let legacy: [u8; 4] = keccak256(
             "submitBatch(uint64,uint64,(bytes32,bytes32),(bytes32,bytes32,uint64,uint64),bytes32,bytes,bytes,uint256,bytes[])"
         )[..4]
@@ -1964,31 +1985,31 @@ mod tests {
     #[tokio::test]
     async fn settlement_abi_follows_live_l1_hardfork() {
         let legacy = Asserter::new();
-        legacy.push_success(&serde_json::json!({ "active": "T11" }));
+        legacy.push_success(&serde_json::json!({ "active": "T12" }));
         assert_eq!(
             SettlementAbi::from_l1(&mock_l1(legacy)).await.unwrap(),
             SettlementAbi::Legacy
         );
 
-        let t12 = Asserter::new();
-        t12.push_success(&serde_json::json!({ "active": "T12" }));
+        let t13 = Asserter::new();
+        t13.push_success(&serde_json::json!({ "active": "T13" }));
         assert_eq!(
-            SettlementAbi::from_l1(&mock_l1(t12)).await.unwrap(),
-            SettlementAbi::T12
+            SettlementAbi::from_l1(&mock_l1(t13)).await.unwrap(),
+            SettlementAbi::T13
         );
     }
 
     #[test]
-    fn t12_uses_token_transition_for_legacy_boundary() {
+    fn t13_uses_token_transition_for_legacy_boundary() {
         assert_eq!(
             SettlementAbi::Legacy.token_transition_hash(0, 0),
             B256::ZERO
         );
         assert_eq!(
-            SettlementAbi::T12.token_transition_hash(0, 0),
+            SettlementAbi::T13.token_transition_hash(0, 0),
             keccak256((0_u64, 0_u64).abi_encode())
         );
-        assert_ne!(SettlementAbi::T12.token_transition_hash(0, 0), B256::ZERO);
+        assert_ne!(SettlementAbi::T13.token_transition_hash(0, 0), B256::ZERO);
     }
 
     fn test_prepared_batch(zone_height: u64, tempo_block_number: u64) -> PreparedBatch {
@@ -2541,7 +2562,7 @@ mod tests {
             ),
             tokenEnablementTransitionHash: B256::ZERO,
             withdrawalQueueHash: batch.withdrawal_queue_hash,
-            verifierConfigHash: keccak256(Bytes::new()),
+            verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
         };
         let certificate = SettlementCertificate {
             height: batch.zone_height,
@@ -2564,6 +2585,19 @@ mod tests {
                 .to_string()
                 .contains("certificate anchor block changed")
         );
+    }
+
+    #[test]
+    fn settlement_proof_uses_attested_bundle_bytes() {
+        let bundle = ProofBundle {
+            verifier_config: Bytes::from_static(NITRO_VERIFIER_CONFIG_V1),
+            proof: Bytes::from_static(&[0xaa, 0xbb]),
+        };
+
+        let (verifier_config, proof) = settlement_proof(Some(&bundle)).unwrap();
+
+        assert_eq!(verifier_config.as_ref(), NITRO_VERIFIER_CONFIG_V1);
+        assert_eq!(proof.as_ref(), [0xaa, 0xbb]);
     }
 
     #[tokio::test]

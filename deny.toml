@@ -14,6 +14,9 @@ ignore = [
   # https://rustsec.org/advisories/RUSTSEC-2026-0247 bitmaps is unmaintained
   # and is pulled in transitively by reth through imbl with no maintained release available.
   "RUSTSEC-2026-0247",
+  # https://rustsec.org/advisories/RUSTSEC-2021-0127 serde_cbor is unmaintained
+  # and is pulled in transitively by aws-nitro-enclaves-nsm-api with no safe upgrade available.
+  "RUSTSEC-2021-0127",
 ]
 
 # This section is considered when running `cargo deny check bans`.

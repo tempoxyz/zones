@@ -131,9 +131,9 @@ fn zone_inbox_z1_surface() -> eyre::Result<AbiSurface> {
     Ok(AbiSurface::from_abi(&abi))
 }
 
-fn zone_portal_t12_surface() -> eyre::Result<AbiSurface> {
+fn zone_portal_t13_surface() -> eyre::Result<AbiSurface> {
     let abi = AbiProjection {
-        retired: tempo_zone_contracts::ZonePortalPreT12Retired::abi::contract(),
+        retired: tempo_zone_contracts::ZonePortalPreT13Retired::abi::contract(),
     }
     .apply(tempo_zone_contracts::ZonePortal::abi::contract())?;
     Ok(AbiSurface::from_abi(&abi))
@@ -163,7 +163,7 @@ const INTERFACES: &[InterfaceSpec] = &[
         name: "ZonePortal",
         artifact_name: "IZonePortal",
         source: "IZone.sol",
-        rust: zone_portal_t12_surface,
+        rust: zone_portal_t13_surface,
         ignored_functions: &[],
     },
 ];

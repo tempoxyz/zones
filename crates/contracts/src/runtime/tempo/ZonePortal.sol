@@ -235,7 +235,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Appended after all T10 storage for upgrade safety.
     uint64 public lastProcessedEnabledTokenCount;
 
-    /// @notice Whether the T12 token cursor has been authenticated by an operational batch.
+    /// @notice Whether the T13 token cursor has been authenticated by an operational batch.
     bool public tokenEnablementCursorInitialized;
 
     /*//////////////////////////////////////////////////////////////
