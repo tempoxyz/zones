@@ -2288,6 +2288,28 @@ async fn test_global_pause_stops_and_resumes_block_production() -> eyre::Result<
         "the Zone imported the pause block instead of stopping before it"
     );
 
+    // Governance continues on L1 while the Zone anchor and block height remain frozen.
+    let token = l1
+        .create_tip20("PausedUSD", "pUSD", B256::with_last_byte(0x7f))
+        .await?;
+    l1.enable_token_on_portal(portal_address, token).await?;
+    let governance_block = l1.provider().get_block_number().await?;
+    poll_until(
+        L1_TIMEOUT,
+        Duration::from_millis(100),
+        "governance update during the production pause",
+        || async {
+            Ok((tracker
+                .control_plane_latest()
+                .is_some_and(|block| block.number >= governance_block)
+                && zone.enabled_tokens().read().contains(&token))
+            .then_some(token))
+        },
+    )
+    .await?;
+    assert_eq!(zone_provider.get_block_number().await?, frozen_head);
+    assert_eq!(zone.tempo_block_number().await?, frozen_anchor);
+
     let resume_receipt = portal.resume().send().await?.get_receipt().await?;
     eyre::ensure!(resume_receipt.status(), "global resume transaction failed");
     eyre::ensure!(!portal.paused().call().await?, "portal should be resumed");
