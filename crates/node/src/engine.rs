@@ -60,11 +60,12 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, FinalizedTarget, L1BlockDeposits,
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Full-block production permit backed by the effective leadership schedule.
+/// Local block production permit backed by the effective leadership schedule.
 ///
-/// Full blocks require the leader assigned to their imported Tempo header. Checkpoint-only blocks
-/// are leader-neutral and bypass this permit. An optimistic override is open-ended until the next
-/// finalized portal transition supplies the ordinary-authority boundary.
+/// Full blocks require the leader assigned to their imported Tempo header. Although checkpoint-only
+/// blocks are leader-neutral during validation, local production must stop at leadership boundaries
+/// so promotion cannot race the outgoing leader's remaining blocks. An optimistic override is
+/// open-ended until the next finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -80,7 +81,7 @@ impl ProductionPermit {
         }
     }
 
-    /// Decide whether this node may produce the full zone block embedding `tempo_anchor`.
+    /// Decide whether this node may locally produce a block importing `tempo_anchor`.
     ///
     /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
     pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
@@ -121,10 +122,10 @@ trait AvailableBlockDrain {
     /// Returns the next available block without consuming it.
     fn next_available(&self) -> eyre::Result<Option<Self::Block>>;
 
-    /// Checks the leadership permit for one available block.
+    /// Checks the leadership permit and bounds a checkpoint batch to the permitted prefix.
     ///
     /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
-    fn permit(&self, block: &Self::Block) -> Option<EngineExit>;
+    fn permit(&self, block: &mut Self::Block) -> Option<EngineExit>;
 
     /// Completes and consumes one block.
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()>;
@@ -147,10 +148,10 @@ where
         if stop.is_cancelled() {
             return Ok(Some(EngineExit::Cancelled));
         }
-        let Some(block) = drain.next_available()? else {
+        let Some(mut block) = drain.next_available()? else {
             return Ok(None);
         };
-        if let Some(exit) = drain.permit(&block) {
+        if let Some(exit) = drain.permit(&mut block) {
             return Ok(Some(exit));
         }
         drain.advance_one(block).await?;
@@ -477,12 +478,10 @@ impl AvailableBlockDrain for ZoneEngine {
         }))
     }
 
-    fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
-        self.production_permit.as_ref().and_then(|permit| {
-            block
-                .leader_anchor()
-                .and_then(|anchor| permit.check(anchor))
-        })
+    fn permit(&self, block: &mut Self::Block) -> Option<EngineExit> {
+        self.production_permit
+            .as_ref()
+            .and_then(|permit| block.apply_permit(permit))
     }
 
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -497,14 +496,25 @@ struct AvailableTempoImport {
 }
 
 impl AvailableTempoImport {
-    /// Tempo anchor whose leader must produce this Zone block.
+    /// Fence local production at the first unowned anchor, splitting checkpoint batches when needed.
     ///
-    /// Checkpoint-only blocks have no designated leader. A full block imports exactly one Tempo
-    /// header, whose effective leader supplies its production authority.
-    fn leader_anchor(&self) -> Option<u64> {
-        self.checkpoint_headers
-            .is_empty()
-            .then(|| self.l1_block.header.number())
+    /// The outgoing leader must leave the incoming leader's anchors queued. Otherwise, importing a
+    /// checkpoint spanning the transition can promote the incoming leader while the outgoing engine
+    /// is still draining its backlog, giving both engines different canonical parents.
+    fn apply_permit(&mut self, permit: &ProductionPermit) -> Option<EngineExit> {
+        if let Some(exit) = permit.check(self.l1_block.header.number()) {
+            return Some(exit);
+        }
+        for (index, header) in self.checkpoint_headers.iter().enumerate() {
+            if let Some(exit) = permit.check(header.number()) {
+                if index == 0 {
+                    return Some(exit);
+                }
+                self.checkpoint_headers.truncate(index);
+                break;
+            }
+        }
+        None
     }
 }
 
@@ -641,8 +651,22 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_import_is_not_leader_restricted() {
-        let available = AvailableTempoImport {
+    fn checkpoint_import_stops_at_each_leadership_boundary() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+        use zone_p2p::LeadershipState;
+
+        let outgoing = PrivateKey::from_seed(1).public_key();
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, outgoing.clone(), 0));
+        schedule
+            .publish(LeadershipState::new(2, incoming.clone(), 100))
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(3, outgoing.clone(), 105))
+            .unwrap();
+        let outgoing_permit = ProductionPermit::new(schedule.clone(), outgoing);
+        let incoming_permit = ProductionPermit::new(schedule, incoming);
+        let mut available = AvailableTempoImport {
             l1_block: L1BlockDeposits {
                 header: header(90, 90),
                 events: Default::default(),
@@ -650,7 +674,61 @@ mod tests {
             checkpoint_headers: (90..=110).map(|number| header(number, number)).collect(),
         };
 
-        assert_eq!(available.leader_anchor(), None);
+        // B cannot skip A's unimported prefix, even though the queued tip belongs to A again.
+        assert_eq!(
+            available.apply_permit(&incoming_permit),
+            Some(EngineExit::Demoted {
+                tempo_anchor: 90,
+                epoch: 1,
+            })
+        );
+        assert_eq!(available.checkpoint_headers.len(), 21);
+        assert_eq!(available.apply_permit(&outgoing_permit), None);
+        assert_eq!(available.checkpoint_headers.len(), 10);
+        assert_eq!(available.checkpoint_headers.last().unwrap().number(), 99);
+
+        // After A's prefix is canonical, only B can produce the next checkpoint batch.
+        available.l1_block.header = header(100, 100);
+        available.checkpoint_headers = (100..=110).map(|number| header(number, number)).collect();
+        assert_eq!(
+            available.apply_permit(&outgoing_permit),
+            Some(EngineExit::Demoted {
+                tempo_anchor: 100,
+                epoch: 2,
+            })
+        );
+        assert_eq!(available.checkpoint_headers.len(), 11);
+        assert_eq!(available.apply_permit(&incoming_permit), None);
+        assert_eq!(available.checkpoint_headers.len(), 5);
+        assert_eq!(available.checkpoint_headers.last().unwrap().number(), 104);
+
+        // Once A owns the entire suffix, batching can proceed without truncation.
+        available.l1_block.header = header(105, 105);
+        available.checkpoint_headers = (105..=110).map(|number| header(number, number)).collect();
+        assert_eq!(available.apply_permit(&outgoing_permit), None);
+        assert_eq!(available.checkpoint_headers.len(), 6);
+    }
+
+    #[test]
+    fn uninitialized_leadership_fences_checkpoint_import() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+        let permit = ProductionPermit::new(
+            LeadershipSchedule::uninitialized(),
+            PrivateKey::from_seed(1).public_key(),
+        );
+        let mut available = AvailableTempoImport {
+            l1_block: L1BlockDeposits {
+                header: header(90, 90),
+                events: Default::default(),
+            },
+            checkpoint_headers: vec![header(90, 90), header(91, 91)],
+        };
+        assert_eq!(
+            available.apply_permit(&permit),
+            Some(EngineExit::Fenced { tempo_anchor: 90 })
+        );
+        assert_eq!(available.checkpoint_headers.len(), 2);
     }
 
     #[test]
@@ -818,10 +896,10 @@ mod tests {
             Ok(self.pending.front().copied())
         }
 
-        fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+        fn permit(&self, block: &mut Self::Block) -> Option<EngineExit> {
             self.denied
                 .iter()
-                .find(|(denied, _)| denied == block)
+                .find(|(denied, _)| *denied == *block)
                 .map(|(_, exit)| exit.clone())
         }
 
