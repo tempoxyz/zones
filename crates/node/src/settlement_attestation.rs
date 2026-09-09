@@ -1,17 +1,19 @@
 //! Batch-boundary settlement attestation construction and leader-side proposal recovery.
 
-use std::{future::Future, time::Duration};
+use std::{collections::HashMap, future::Future, time::Duration};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{B256, Sealable as _, U256};
-use alloy_provider::Provider as _;
+use alloy_provider::{DynProvider, Provider as _};
+use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent as _, SolValue as _};
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::StreamExt as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
+use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneOutbox, LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -22,11 +24,48 @@ use tracing::{debug, info};
 use zone_p2p::P2pCommand;
 use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 
-use crate::replication::AttestationContext;
 use zone_sequencer::{
-    SettlementAbi,
-    attestation::{SettlementAttestation, SignedSettlementAttestation},
+    BatchAnchorConfig, SettlementAbi,
+    attestation::{
+        AttestationDomain, AttestationStore, SettlementAttestation, SignedSettlementAttestation,
+    },
 };
+
+/// Shared signing and L1-validation context for settlement attestations.
+#[derive(Clone)]
+pub(crate) struct AttestationContext {
+    pub(crate) domain: AttestationDomain,
+    /// Portal sequencer-set version validated against the manifest at startup.
+    pub(crate) pinned_sequencer_set_version: Option<u64>,
+    /// `None` on an rpc-only member: it holds no individual key and never signs.
+    pub(crate) signer: Option<PrivateKeySigner>,
+    pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+    pub(crate) store: AttestationStore,
+    pub(crate) l1_provider: DynProvider<TempoNetwork>,
+    pub(crate) anchor_config: BatchAnchorConfig,
+}
+
+impl AttestationContext {
+    pub(crate) fn new(
+        domain: AttestationDomain,
+        pinned_sequencer_set_version: Option<u64>,
+        signer: Option<PrivateKeySigner>,
+        addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+        store: AttestationStore,
+        l1_provider: DynProvider<TempoNetwork>,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
+        Self {
+            domain,
+            pinned_sequencer_set_version,
+            signer,
+            addresses,
+            store,
+            l1_provider,
+            anchor_config,
+        }
+    }
+}
 
 /// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
 const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);

@@ -51,6 +51,80 @@ pub struct AuthenticatedPortalLogs {
     pub logs: Vec<alloy_primitives::Log>,
 }
 
+/// One `BatchSubmitted` event from a receipt-verified finalized Tempo block.
+#[derive(Debug, Clone)]
+pub struct FinalizedBatchSubmission {
+    /// Finalized Tempo block containing the accepted submission.
+    pub block: NumHash,
+    /// Receipt-trie position of the transaction containing the accepted submission.
+    pub transaction_index: u64,
+    /// Receipt-local log position used to distinguish multiple submissions in one transaction.
+    pub log_index: u64,
+    /// Event emitted after the Portal accepted the submission.
+    pub event: crate::abi::BatchSubmitted,
+    /// Whether the accepted submission uses the pre-T13 ABI without a token cursor.
+    pub is_legacy: bool,
+}
+
+/// Extract `BatchSubmitted` events using receipt ordering rather than RPC metadata.
+///
+/// Callers must verify `receipts` against the supplied block's receipt root first.
+pub fn extract_finalized_batch_submissions(
+    block: NumHash,
+    portal_address: Address,
+    receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+) -> Vec<FinalizedBatchSubmission> {
+    let mut submissions = Vec::new();
+    for (transaction_index, receipt) in receipts.iter().enumerate() {
+        for (log_index, log) in receipt.logs().iter().enumerate() {
+            if log.address() != portal_address {
+                continue;
+            }
+            let (event, is_legacy) =
+                if log.topic0() == Some(&crate::abi::BatchSubmitted::SIGNATURE_HASH) {
+                    (
+                        crate::abi::BatchSubmitted::decode_log(&log.inner).map(|event| event.data),
+                        false,
+                    )
+                } else if log.topic0() == Some(&crate::abi::LegacyBatchSubmitted::SIGNATURE_HASH) {
+                    (
+                        crate::abi::LegacyBatchSubmitted::decode_log(&log.inner).map(|event| {
+                            let event = event.data;
+                            crate::abi::BatchSubmitted {
+                                withdrawalBatchIndex: event.withdrawalBatchIndex,
+                                withdrawalQueueIndex: event.withdrawalQueueIndex,
+                                nextProcessedDepositQueueHash: event.nextProcessedDepositQueueHash,
+                                nextBlockHash: event.nextBlockHash,
+                                withdrawalQueueHash: event.withdrawalQueueHash,
+                                lastProcessedDepositNumber: event.lastProcessedDepositNumber,
+                                lastProcessedEnabledTokenCount: 0,
+                            }
+                        }),
+                        true,
+                    )
+                } else {
+                    continue;
+                };
+            match event {
+                Ok(event) => submissions.push(FinalizedBatchSubmission {
+                    block,
+                    transaction_index: transaction_index as u64,
+                    log_index: log_index as u64,
+                    event,
+                    is_legacy,
+                }),
+                Err(err) => warn!(
+                    target: "zone::l1::subscriber",
+                    block_number = block.number,
+                    error = ?err,
+                    "Could not decode finalized batch submission for observer"
+                ),
+            }
+        }
+    }
+    submissions
+}
+
 /// Number of consumed Tempo blocks whose authenticated Portal logs remain available to
 /// asynchronous observers such as the checker ExEx.
 const RECENT_PORTAL_EVIDENCE_BLOCKS: u64 = 256;
@@ -405,6 +479,7 @@ type L1ProcessedEvents = (
     L1PortalEvents,
     HashSet<Address>,
     Option<Vec<alloy_primitives::Log>>,
+    Vec<FinalizedBatchSubmission>,
 );
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
@@ -464,6 +539,9 @@ pub struct L1Subscriber<P> {
     pub(crate) block_tracker: L1BlockTracker,
     /// Optional sink for leadership transitions.
     pub(crate) leadership_sink: Option<Arc<dyn LeadershipSink>>,
+    /// Optional observational channel for finalized accepted batch submissions.
+    pub(crate) finalized_batch_submissions:
+        Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
     /// Private encryption keys bound by finalized Portal rotation events.
     pub(crate) encryption_keys: Option<EncryptionKeyRing>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -515,6 +593,7 @@ where
         l1_state_cache: L1StateCache,
         block_tracker: L1BlockTracker,
         leadership_sink: Option<Arc<dyn LeadershipSink>>,
+        finalized_batch_submissions: Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
         encryption_keys: Option<EncryptionKeyRing>,
     ) -> Self {
         Self {
@@ -525,6 +604,7 @@ where
             l1_state_cache,
             block_tracker,
             leadership_sink,
+            finalized_batch_submissions,
             encryption_keys,
             subscriber_metrics: Default::default(),
         }
@@ -737,7 +817,7 @@ where
 
         while let Some((sealed, processed_events)) = blocks.try_next().await? {
             let block_number = sealed.number();
-            let (events, invalidated, portal_logs) = processed_events;
+            let (events, invalidated, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let anchor = sealed.num_hash();
@@ -790,6 +870,20 @@ where
             } else {
                 self.block_tracker
                     .record_with_portal_events(anchor, events.clone())?;
+            }
+            if let Some(sender) = &self.finalized_batch_submissions {
+                for submission in finalized_batches {
+                    sender
+                        .send(submission)
+                        .await
+                        .map_err(|_| L1SubscriberError::Fatal {
+                            block_number,
+                            stage: "finalized batch observer delivery",
+                            source: eyre::eyre!(
+                                "finalized batch submission observer is unavailable"
+                            ),
+                        })?;
+                }
             }
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
@@ -873,7 +967,7 @@ where
                     })?;
                     // Abort before enqueueing work or advancing caches if a portal log fails to decode.
                     let processed_events = self
-                        .extract_events(block_number, &receipts)
+                        .extract_events(NumHash::new(block_number, block_hash), &receipts)
                         .inspect_err(|_| {
                             subscriber_metrics.decode_fence_failures.increment(1);
                         })
@@ -954,7 +1048,7 @@ where
 
         let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number);
         let mut deferred: Option<DeferredPortalWork> = None;
-        while let Some((header, (events, _, _))) = blocks.try_next().await? {
+        while let Some((header, (events, _, _, _))) = blocks.try_next().await? {
             let block = L1BlockDeposits { header, events };
             if let Some(deferred) = &mut deferred {
                 deferred.push(block);
@@ -984,13 +1078,19 @@ where
     /// event would diverge this node from its peers.
     pub(crate) fn extract_events(
         &self,
-        block_number: u64,
+        block: NumHash,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> eyre::Result<L1ProcessedEvents> {
+        let block_number = block.number;
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
         let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
+        let finalized_batches = if self.finalized_batch_submissions.is_some() {
+            extract_finalized_batch_submissions(block, portal_address, receipts)
+        } else {
+            Vec::new()
+        };
 
         for receipt in receipts {
             let retain_receipt_logs = portal_logs.is_some() && receipt.status();
@@ -1023,7 +1123,7 @@ where
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs))
+        Ok((portal_events, invalidated, portal_logs, finalized_batches))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {

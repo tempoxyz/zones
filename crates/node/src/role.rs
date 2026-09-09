@@ -49,11 +49,11 @@ mod zone_transaction_pool_alias {
 
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
+    follower::{BlockSyncP2p, FollowerBlockSync, FollowerBlockSyncContext, PeerTipRegistry},
     replication::{
-        AttestationContext, BroadcasterShutdown, PeerTipRegistry, broadcast_persisted_blocks,
-        collect_follower_settlement_signatures, run_follower_block_sync,
+        BroadcasterShutdown, broadcast_persisted_blocks, collect_follower_settlement_signatures,
     },
-    settlement_attestation::collect_leader_settlements,
+    settlement_attestation::{AttestationContext, collect_leader_settlements},
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
 };
 
@@ -128,13 +128,6 @@ pub(crate) struct EventSinks {
     inner: Arc<std::sync::Mutex<GenerationSinks>>,
 }
 
-#[derive(Default)]
-struct GenerationSinks {
-    sync: Option<mpsc::Sender<P2pEvent>>,
-    transactions: Option<mpsc::Sender<P2pEvent>>,
-    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
-}
-
 impl EventSinks {
     fn install(
         &self,
@@ -171,6 +164,13 @@ impl EventSinks {
             .backfill_responses
             .clone()
     }
+}
+
+#[derive(Default)]
+struct GenerationSinks {
+    sync: Option<mpsc::Sender<P2pEvent>>,
+    transactions: Option<mpsc::Sender<P2pEvent>>,
+    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
 }
 
 /// Long-lived P2P event demultiplexer for non-backfill protocols.
@@ -887,31 +887,25 @@ where
             sinks.install(sync_tx, Some(transactions_tx), Some(backfill_tx));
 
             let follower_token = token.clone();
-            let provider = context.provider.clone();
-            let engine = context.engine_handle.clone();
-            let commands = context.commands.clone();
-            let backfill_commands = context.backfill_commands.clone();
-            let tracker = context.l1_block_tracker.clone();
-            let queue = context.deposit_queue.clone();
-            let attestation = context.attestation.clone();
-            let schedule = context.schedule.clone();
-            let peer_tips = context.peer_tips.clone();
+            let sync_context = FollowerBlockSyncContext {
+                provider: context.provider.clone(),
+                engine: context.engine_handle.clone(),
+                l1_block_tracker: context.l1_block_tracker.clone(),
+                deposit_queue: context.deposit_queue.clone(),
+                attestation: context.attestation.clone(),
+                schedule: context.schedule.clone(),
+                peer_tips: context.peer_tips.clone(),
+            };
+            let sync_p2p = BlockSyncP2p {
+                events: sync_rx,
+                commands: context.commands.clone(),
+                backfill_responses: backfill_rx,
+                backfill_commands: context.backfill_commands.clone(),
+            };
             tasks.spawn(async move {
-                run_follower_block_sync(
-                    provider,
-                    engine,
-                    sync_rx,
-                    commands,
-                    backfill_commands,
-                    backfill_rx,
-                    tracker,
-                    queue,
-                    attestation,
-                    schedule,
-                    peer_tips,
-                    follower_token.clone(),
-                )
-                .await;
+                FollowerBlockSync::new(sync_context, sync_p2p, follower_token.clone())
+                    .run()
+                    .await;
                 if follower_token.is_cancelled() {
                     TaskEnd::Ended("follower-block-sync (cancelled)")
                 } else {

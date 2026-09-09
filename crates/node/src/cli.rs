@@ -19,8 +19,8 @@ use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -277,8 +277,12 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
-        "--sequencer.enable-prover requires a promotable sequencer node"
+        !args.enable_prover || should_sequence_blocks || rpc_only,
+        "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
+    );
+    eyre::ensure!(
+        !args.enable_prover || !should_sequence_blocks || args.prover_address.is_some(),
+        "settlement proving requires --sequencer.prover-address for Nitro attestation"
     );
 
     if should_sequence_blocks {
@@ -300,6 +304,15 @@ async fn configure_sequencing(
             },
             enable_prover: args.enable_prover,
             prover_address: args.prover_address.clone(),
+        });
+    } else if args.enable_prover {
+        node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
+            zone_id,
+            batch_anchor_config: BatchAnchorConfig::default(),
+            prover_runtime: args
+                .prover_address
+                .clone()
+                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
         });
     }
     if let Some(config) = p2p_config {
@@ -570,12 +583,9 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Require SPF validation and a Nitro NSM attestation before settlement.
-    #[arg(
-        long = "sequencer.enable-prover",
-        env = "SEQUENCER_ENABLE_PROVER",
-        requires = "prover_address"
-    )]
+    /// Require Nitro-attested SPF validation for settlement, or run observational SPF validation
+    /// on an rpc_only follower.
+    #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
     /// Send witnesses to a remote Nitro prover capable of producing settlement attestations.

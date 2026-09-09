@@ -101,8 +101,8 @@ pub(crate) fn assert_cp_proof_valid(
     ephemeral_pub: &AffinePoint,
     sequencer_pub: &AffinePoint,
 ) {
-    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_s.0.into());
-    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_c.0.into());
+    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof.s.0.into());
+    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof.c.0.into());
     let shared_pt =
         recover_point(&dec.proof.shared_secret.0, dec.proof.shared_secret_y_parity).unwrap();
 

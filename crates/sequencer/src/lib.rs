@@ -36,7 +36,10 @@ pub use encryption_key::{
     register_encryption_key,
 };
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
-pub use prover::SettlementProverConfig;
+pub use prover::{
+    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProverConfig, ShadowProofAnchor, ShadowProver,
+    ShadowProverConfig, spawn_shadow_prover,
+};
 pub use settlement::{
     BatchAnchor, BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatch,
     SettlementAbi, resolve_portal_zone_anchor,
