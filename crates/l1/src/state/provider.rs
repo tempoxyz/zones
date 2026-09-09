@@ -120,19 +120,17 @@ impl L1RpcClient {
                     config.l1_rpc_url
                 )
             })?;
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_client(client)
-            .erased();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>().connect_client(client);
         Ok(Self::from_provider(provider, runtime_handle))
     }
 
     /// Create an L1 RPC client from pre-constructed components.
     pub fn from_provider(
-        provider: DynProvider<TempoNetwork>,
+        provider: impl Provider<TempoNetwork> + 'static,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
-            provider,
+            provider: provider.erased(),
             runtime_handle,
         }
     }
@@ -306,6 +304,33 @@ impl L1StateProvider {
                 }
             }
         }
+    }
+
+    /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
+    ///
+    /// Same cache semantics as [`get_storage`](Self::get_storage), but performs one asynchronous
+    /// transport operation rather than using the synchronous outer attempt loop.
+    pub async fn get_storage_async(
+        &self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256> {
+        {
+            let mut cache = self.cache.lock();
+            if let Some(value) = cache.get(address, slot, block_number) {
+                return Ok(value);
+            }
+        }
+
+        warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
+
+        let value = self
+            .rpc_client
+            .get_storage_async(address, slot, BlockId::number(block_number))
+            .await?;
+        self.cache.lock().set(address, slot, block_number, value);
+        Ok(value)
     }
 
     /// Returns the trust-neutral RPC client used by this provider.

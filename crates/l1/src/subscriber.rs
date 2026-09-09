@@ -955,10 +955,12 @@ where
         let should_authenticate_roots =
             authenticate_roots && self.verified_l1_state_cache.is_some();
         let portal_address = self.config.portal_address;
-        let rpc_client = L1RpcClient::from_provider(
-            l1_provider.root().clone().erased(),
-            tokio::runtime::Handle::current(),
-        );
+        let rpc_client = should_authenticate_roots.then(|| {
+            L1RpcClient::from_provider(
+                l1_provider.root().clone(),
+                tokio::runtime::Handle::current(),
+            )
+        });
 
         stream::iter(range)
             .map(move |block_number| {
@@ -990,9 +992,9 @@ where
                         header_resp.logs_bloom(),
                     );
                     let account_roots = async {
-                        if !should_authenticate_roots {
+                        let Some(rpc_client) = rpc_client else {
                             return Ok::<_, L1SubscriberError>(BTreeMap::new());
-                        }
+                        };
                         let targets =
                             account_root_targets([portal_address, TIP403_REGISTRY_ADDRESS]);
                         let responses = rpc_client
