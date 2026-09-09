@@ -3,21 +3,24 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
 use reth_chainspec::EthChainSpec as _;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::{info, warn};
+use tempo_alloy::TempoNetwork;
 use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
+use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
+    ZoneShadowProverAddOnsConfig, dev::DevCommand, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
@@ -96,10 +99,24 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<ZoneChainSpec>| {
+    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+        Ok(url) if !url.is_empty() => {
+            let url = url
+                .parse()
+                .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
+            Some(url)
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
+    };
+
+    let components = move |spec: Arc<ZoneChainSpec>| {
+        let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
         (
-            ZoneEvmConfig::new_without_l1(spec.clone()),
-            TempoConsensus::new(spec),
+            evm_config,
+            TempoConsensus::new(spec)
+                .with_allow_equal_timestamps(true)
+                .with_allowed_future_block_time_millis(100),
         )
     };
 
@@ -110,7 +127,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        validate_l1_rpc_url(&args.l1_rpc_url)?;
         let (zone_id, portal_address) = genesis_identity(&builder.config().chain, &args);
 
         let manifest_mode = args.sequencer_manifest.is_some();
@@ -184,6 +200,23 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     })
 }
 
+/// Creates the EVM config used by CLI subcommands.
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_config: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_config else {
+        return ZoneEvmConfig::new_without_l1(chain_spec);
+    };
+
+    let portal_address = tempo_precompiles::zone_factory::portal_address(chain_spec.zone_id());
+    let cache = L1StateCache::default();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_http(l1_rpc_url)
+        .erased();
+    let runtime_handle = tokio::runtime::Handle::current();
+    let config = L1StateProviderConfig::default();
+    let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+    ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
+}
+
 /// Load and attach all sequencer resources to the node.
 async fn configure_sequencing(
     args: &ZoneArgs,
@@ -229,8 +262,8 @@ async fn configure_sequencing(
         ));
     }
     eyre::ensure!(
-        !args.enable_prover || should_sequence_blocks,
-        "--sequencer.enable-prover requires a promotable sequencer node"
+        !args.enable_prover || should_sequence_blocks || rpc_only,
+        "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
     );
 
     if should_sequence_blocks {
@@ -252,6 +285,15 @@ async fn configure_sequencing(
             },
             enable_prover: args.enable_prover,
             prover_address: args.prover_address.clone(),
+        });
+    } else if args.enable_prover {
+        node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
+            zone_id,
+            batch_anchor_config: BatchAnchorConfig::default(),
+            prover_runtime: args
+                .prover_address
+                .clone()
+                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
         });
     }
     if let Some(config) = p2p_config {
@@ -318,7 +360,11 @@ async fn load_decryption_keys(
 #[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
     /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
-    #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
+    #[arg(
+        long = "l1.rpc-url",
+        env = "L1_RPC_URL",
+        value_parser = parse_l1_rpc_url
+    )]
     pub l1_rpc_url: String,
 
     /// Deprecated compatibility option. Ignored; the portal is derived from genesis.
@@ -514,7 +560,8 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Validate finalized batch candidates with the SPF without changing settlement.
+    /// Validate finalized batch candidates with the SPF without changing settlement. On an
+    /// rpc_only follower, candidates are recovered from finalized L1 submissions.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
@@ -549,16 +596,17 @@ fn validate_p2p_transaction_size_limit(
     Ok(())
 }
 
-fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
+fn parse_l1_rpc_url(l1_rpc_url: &str) -> Result<String, String> {
     let url: url::Url = l1_rpc_url
         .parse()
-        .map_err(|err| eyre::eyre!("failed parsing --l1.rpc-url as URL: {err}"))?;
-    eyre::ensure!(
-        matches!(url.scheme(), "ws" | "wss"),
-        "--l1.rpc-url must use ws:// or wss://, got `{}`",
-        url.scheme()
-    );
-    Ok(())
+        .map_err(|err| format!("failed parsing --l1.rpc-url as URL: {err}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err(format!(
+            "--l1.rpc-url must use ws:// or wss://, got `{}`",
+            url.scheme()
+        ));
+    }
+    Ok(l1_rpc_url.to_owned())
 }
 
 fn genesis_identity(chain: &ZoneChainSpec, args: &ZoneArgs) -> (u32, Address) {
@@ -583,7 +631,7 @@ mod tests {
 
     use super::{
         Role, ZoneArgs, ZoneCli, genesis_identity, load_decryption_keys, load_sequencer_signer,
-        validate_l1_rpc_url, validate_p2p_transaction_size_limit,
+        parse_l1_rpc_url, validate_p2p_transaction_size_limit,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -591,6 +639,39 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[tokio::test]
+    async fn replay_portal_follows_the_loaded_chain_spec() {
+        use alloy_evm::EvmFactory;
+        use alloy_primitives::address;
+        use reth_chainspec::EthChainSpec as _;
+        use reth_evm::ConfigureEvm;
+        use tempo_chainspec::spec::DEV;
+        use zone_primitives::constants::zone_chain_id;
+
+        // Inspect the EVM's actual L1 provider without making an RPC request.
+        for parent in [4217, 42431, 31318] {
+            for (zone_id, expected) in [
+                (7, address!("5AD0000000000000000000000000000000000007")),
+                (8, address!("5AD0000000000000000000000000000000000008")),
+            ] {
+                let mut genesis = DEV.genesis().clone();
+                genesis.config.chain_id = zone_chain_id(parent, zone_id).unwrap();
+                let spec = super::ZoneChainSpec::from_genesis_with_l1(genesis, &DEV).unwrap();
+                let config = super::cli_evm_config(
+                    std::sync::Arc::new(spec),
+                    Some("http://127.0.0.1:1".parse().unwrap()),
+                );
+                let evm = config
+                    .evm_factory()
+                    .create_evm(revm::database::EmptyDB::default(), Default::default());
+                assert_eq!(
+                    evm.ctx().journaled_state.database.l1_state().portal(),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
@@ -661,12 +742,9 @@ mod tests {
             "0x0000000000000000000000000000000000000001",
             "--zone.id",
             "7",
-            "--block.interval-ms",
-            "500",
         ])
         .unwrap();
         assert_eq!(parsed.zone.zone_id, Some(7));
-        assert_eq!(parsed.zone.block_interval_ms, Some(500));
     }
 
     #[test]
@@ -1024,13 +1102,13 @@ mod tests {
 
     #[test]
     fn l1_rpc_url_accepts_websocket_schemes() {
-        validate_l1_rpc_url("ws://localhost:8546").unwrap();
-        validate_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
+        parse_l1_rpc_url("ws://localhost:8546").unwrap();
+        parse_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
     }
 
     #[test]
     fn l1_rpc_url_rejects_non_websocket_schemes() {
-        assert!(validate_l1_rpc_url("http://localhost:8545").is_err());
-        assert!(validate_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
+        assert!(parse_l1_rpc_url("http://localhost:8545").is_err());
+        assert!(parse_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
     }
 }

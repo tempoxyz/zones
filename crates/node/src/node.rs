@@ -5,9 +5,8 @@
 
 use crate::{
     ZoneEngine,
-    replication::{
-        AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, PeerTipRegistry, serve_backfill_requests,
-    },
+    follower::PeerTipRegistry,
+    replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
         canonical_recovery_height, route_backfill_requests, route_backfill_responses,
@@ -18,12 +17,14 @@ use crate::{
         ZoneApiServer as _, ZoneRpc, ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config,
         start_redacted_rpc,
     },
+    settlement_attestation::AttestationContext,
+    shadow_prover::RpcFollowerShadowProver,
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, U256};
-use alloy_provider::Provider as _;
+use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
@@ -51,11 +52,16 @@ use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
     BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
 };
+use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     Pool, PoolTransaction, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroU32,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use tempo_alloy::TempoNetwork;
 use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
@@ -73,6 +79,7 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -82,8 +89,8 @@ use zone_l1::{
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
-    BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pConfig, P2pNetworkId,
-    ZoneManifest, spawn_p2p,
+    BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pCommand, P2pConfig,
+    P2pNetworkId, P2pPeerId, ZoneManifest, spawn_p2p,
 };
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
@@ -93,7 +100,7 @@ use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
+    ZoneSequencerConfig, attestation::AttestationDomain, spawn_shadow_prover, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -192,6 +199,35 @@ pub struct ZoneSequencerAddOnsConfig {
     pub prover_address: Option<String>,
 }
 
+/// Execution mode for the detached shadow prover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProverRuntime {
+    /// Execute the SPF in this process.
+    InProcess,
+    /// Send witnesses to the prover at the given `HOST:PORT` address.
+    Remote(String),
+}
+
+impl ProverRuntime {
+    fn remote_address(&self) -> Option<&str> {
+        match self {
+            Self::InProcess => None,
+            Self::Remote(address) => Some(address),
+        }
+    }
+}
+
+/// Configuration for detached shadow proving that does not require sequencer keys.
+#[derive(Debug, Clone)]
+pub struct ZoneShadowProverAddOnsConfig {
+    /// Zone ID bound into SPF public inputs.
+    pub zone_id: u32,
+    /// EIP-2935 history settings used to recover recently finalized submissions.
+    pub batch_anchor_config: BatchAnchorConfig,
+    /// Where to execute the SPF.
+    pub prover_runtime: ProverRuntime,
+}
+
 /// Configuration for the Zone redacted RPC server extension.
 #[derive(Debug, Clone, Default)]
 pub struct ZoneRedactedRpcConfig {
@@ -219,6 +255,8 @@ pub struct ZoneNode {
     enabled_tokens: EnabledTokenRegistry,
     /// L1 anchors independently observed and applied by the subscriber.
     l1_block_tracker: L1BlockTracker,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    encryption_keys: Option<EncryptionKeyRing>,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
     /// Number of zone blocks between withdrawal batch boundaries.
@@ -229,6 +267,8 @@ pub struct ZoneNode {
     redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Optional detached shadow prover config.
+    shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
@@ -251,13 +291,8 @@ impl ZoneNode {
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
-            enabled_tokens: enabled_tokens.clone(),
-            l1_state_cache: l1_state_cache.clone(),
-            block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
-            leadership_sink: None,
-            encryption_keys: None,
             retain_portal_evidence: false,
         };
 
@@ -275,11 +310,13 @@ impl ZoneNode {
             l1_state_cache,
             enabled_tokens,
             l1_block_tracker,
+            encryption_keys: None,
             portal_address,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
             redacted_rpc_config: ZoneRedactedRpcConfig::default(),
             sequencer_config: None,
+            shadow_prover_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
         }
@@ -310,13 +347,18 @@ impl ZoneNode {
         self
     }
 
+    /// Enable detached shadow proving without configuring block production or settlement keys.
+    pub fn with_shadow_prover(mut self, config: ZoneShadowProverAddOnsConfig) -> Self {
+        self.shadow_prover_config = Some(config);
+        self
+    }
+
     /// Add private keys that may be referenced by finalized encrypted deposits.
     pub fn with_deposit_decryption_keys(
         mut self,
         keys: impl IntoIterator<Item = SecretKey>,
     ) -> Self {
         let ring = self
-            .l1_config
             .encryption_keys
             .get_or_insert_with(EncryptionKeyRing::default);
         for key in keys {
@@ -395,7 +437,7 @@ impl ZoneNode {
 
     /// Returns the shared encrypted-deposit key ring, when configured.
     pub fn deposit_decryption_keys(&self) -> Option<EncryptionKeyRing> {
-        self.l1_config.encryption_keys.clone()
+        self.encryption_keys.clone()
     }
 }
 
@@ -424,12 +466,22 @@ where
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
+    /// Shared L1 state cache updated by the subscriber.
+    l1_state_cache: L1StateCache,
+    /// Shared registry of tokens enabled for this zone.
+    enabled_tokens: EnabledTokenRegistry,
+    /// L1 anchors independently observed and applied by the subscriber.
+    l1_block_tracker: L1BlockTracker,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    encryption_keys: Option<EncryptionKeyRing>,
     /// ZonePortal address on L1.
     portal_address: Address,
     /// Redacted RPC configuration.
     redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Detached shadow prover configuration.
+    shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
@@ -454,9 +506,14 @@ where
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
+        l1_state_cache: L1StateCache,
+        enabled_tokens: EnabledTokenRegistry,
+        l1_block_tracker: L1BlockTracker,
+        encryption_keys: Option<EncryptionKeyRing>,
         portal_address: Address,
         redacted_rpc_config: ZoneRedactedRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+        shadow_prover_config: Option<ZoneShadowProverAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
     ) -> Self {
@@ -471,13 +528,31 @@ where
             ),
             deposit_queue,
             l1_config,
+            l1_state_cache,
+            enabled_tokens,
+            l1_block_tracker,
+            encryption_keys,
             portal_address,
             redacted_rpc_config,
             sequencer_config,
+            shadow_prover_config,
             p2p_config,
             external_deposit_consumer,
         }
     }
+}
+
+/// P2P services that continue running after the network is initialized.
+struct P2PRuntime {
+    sinks: EventSinks,
+    commands: Sender<P2pCommand>,
+    backfill_commands: Sender<BackfillCommand>,
+    attestation: AttestationContext,
+    schedule: LeadershipSchedule,
+    local_ed25519_public_key: P2pPeerId,
+    role_status: SharedRoleStatus,
+    peer_tips: PeerTipRegistry,
+    backfill_requests_rx: Receiver<BackfillRequest>,
 }
 
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
@@ -524,7 +599,7 @@ where
         let chain_spec = ctx.node.provider().chain_spec();
         let chain_id = chain_spec.genesis().config.chain_id;
         let genesis_zone_id = chain_spec.zone_id();
-        // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
+        // The CLI derives a nonzero portal address. Programmatic test/dev nodes use zero as an
         // explicit sentinel because they have no on-chain portal to bind against.
         if self.portal_address.is_zero() {
             warn!(
@@ -556,15 +631,45 @@ where
                     portal_zone_id,
                 )?;
             }
+            if let Some(config) = self.shadow_prover_config.as_ref() {
+                validate_configured_zone_id(
+                    "shadow prover configuration",
+                    config.zone_id,
+                    portal_zone_id,
+                )?;
+            }
             if let Some(config) = self.p2p_config.as_ref() {
                 validate_configured_zone_id("P2P configuration", config.zone_id(), portal_zone_id)?;
             }
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
         }
 
+        let effective_shadow_prover_config = self.shadow_prover_config.clone().or_else(|| {
+            self.sequencer_config
+                .as_ref()
+                .filter(|config| config.enable_prover)
+                .map(|config| ZoneShadowProverAddOnsConfig {
+                    zone_id: config.zone_id,
+                    batch_anchor_config: config.batch_anchor_config,
+                    prover_runtime: config
+                        .prover_address
+                        .clone()
+                        .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+                })
+        });
+        let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+        let mut finalized_batch_submission_sender = None;
+        let mut finalized_batch_submissions = None;
+        if rpc_only && effective_shadow_prover_config.is_some() {
+            let (sender, receiver) =
+                tokio::sync::mpsc::channel(zone_sequencer::SHADOW_PROVER_QUEUE_CAPACITY);
+            finalized_batch_submission_sender = Some(sender);
+            finalized_batch_submissions = Some(receiver);
+        }
+
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
-        if let Some(keys) = self.l1_config.encryption_keys.clone() {
+        if let Some(keys) = self.encryption_keys.clone() {
             self.resolve_and_seed_encryption_keys(&l1_provider, tempo_block_number, &keys)
                 .await?;
         }
@@ -573,167 +678,104 @@ where
         // snapshot at the local Tempo anchor, and install the transition sink before
         // the subscriber starts so no block is ever consumed ahead of its
         // leadership transition.
-        if let Some(p2p) = self.p2p_config.as_ref() {
-            let schedule = p2p.leadership();
-            let snapshot_anchor = tempo_block_number;
-            // Freeze the replay/live boundary before the subscriber starts. Historical identities
-            // may authenticate transitions that were already finalized when this process began,
-            // but must never authorize a leader selected later.
-            let finalized_replay_boundary = async {
-                l1_provider
-                    .get_header_by_number(BlockNumberOrTag::Finalized)
-                    .await
-                    .map_err(|err| {
-                        eyre::eyre!("failed reading finalized L1 replay boundary: {err}")
-                    })?
-                    .map(|header| header.number())
-                    .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
-            };
-            let (historical_replay_through, ()) = tokio::try_join!(
-                finalized_replay_boundary,
-                seed_leadership_schedule(
+        let leadership_sink: Option<Arc<dyn LeadershipSink>> =
+            if let Some(p2p) = self.p2p_config.as_ref() {
+                let schedule = p2p.leadership();
+                let snapshot_anchor = tempo_block_number;
+                // Freeze the replay/live boundary before the subscriber starts. Historical identities
+                // may authenticate transitions that were already finalized when this process began,
+                // but must never authorize a leader selected later.
+                let finalized_replay_boundary = async {
+                    l1_provider
+                        .get_header_by_number(BlockNumberOrTag::Finalized)
+                        .await
+                        .map_err(|err| {
+                            eyre::eyre!("failed reading finalized L1 replay boundary: {err}")
+                        })?
+                        .map(|header| header.number())
+                        .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
+                };
+                let (historical_replay_through, ()) = tokio::try_join!(
+                    finalized_replay_boundary,
+                    seed_leadership_schedule(
+                        &l1_provider,
+                        self.portal_address,
+                        snapshot_anchor,
+                        p2p.manifest(),
+                        &schedule,
+                    ),
+                )?;
+                // Seed the applied anchor from the persisted checkpoint so it targets the leader
+                // of the next anchor from the very start (and not after the first post-restart block)
+                schedule.record_applied_anchor(snapshot_anchor);
+                install_manifest_forced_recovery(
+                    ctx.node.provider(),
                     &l1_provider,
                     self.portal_address,
                     snapshot_anchor,
                     p2p.manifest(),
                     &schedule,
-                ),
-            )?;
-            // Seed the applied anchor from the persisted checkpoint so it targets the leader
-            // of the next anchor from the very start (and not after the first post-restart block)
-            schedule.record_applied_anchor(snapshot_anchor);
-            install_manifest_forced_recovery(
-                ctx.node.provider(),
-                &l1_provider,
-                self.portal_address,
-                snapshot_anchor,
-                p2p.manifest(),
-                &schedule,
-            )
-            .await?;
-            self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
-                schedule,
-                manifest: p2p.manifest().clone(),
-                historical_replay_through,
-            }));
-        }
+                )
+                .await?;
+                Some(Arc::new(ScheduleLeadershipSink {
+                    schedule,
+                    manifest: p2p.manifest().clone(),
+                    historical_replay_through,
+                }))
+            } else {
+                None
+            };
 
-        L1Subscriber::spawn(
+        let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
             ctx.node.provider().clone(),
             self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
+            self.enabled_tokens.clone(),
+            self.l1_state_cache.clone(),
+            self.l1_block_tracker.clone(),
+            leadership_sink,
+            finalized_batch_submission_sender,
+            self.encryption_keys.clone(),
         );
+        let task_executor = ctx.node.task_executor().clone();
+        task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
-        let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
-        let mut p2p_runtime = None;
-        if let Some(config) = self.p2p_config.take() {
-            let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
-            let attestation_domain = AttestationDomain {
-                l1_chain_id,
-                portal_address: self.portal_address,
-                zone_id: genesis_zone_id,
-            };
-            let anchor_config = self
-                .sequencer_config
-                .as_ref()
-                .map(|config| config.batch_anchor_config)
-                .unwrap_or_default();
-            // The manifest decides who this node collects settlement signatures from; the portal
-            // decides whose signatures count and how many are needed. Reconcile them before any
-            // role task starts, so a disagreement fails at startup instead of stalling
-            // settlement at the next batch boundary.
-            let pinned_sequencer_set_version =
-                crate::settlement_attestation::validate_registered_sequencer_set(
-                    config.manifest(),
-                    self.portal_address,
+        let p2p_runtime = if let Some(config) = self.p2p_config.take() {
+            Some(
+                Self::start_p2p(
+                    config,
                     &l1_provider,
+                    l1_chain_id,
+                    genesis_zone_id,
+                    self.portal_address,
+                    self.sequencer_config
+                        .as_ref()
+                        .map(|config| config.batch_anchor_config)
+                        .or_else(|| {
+                            effective_shadow_prover_config
+                                .as_ref()
+                                .map(|config| config.batch_anchor_config)
+                        })
+                        .unwrap_or_default(),
+                    self.l1_config.l1_rpc_url.clone(),
+                    self.l1_config.retry_connection_interval,
+                    self.encryption_keys.clone().unwrap_or_default(),
+                    &task_executor,
+                    &sequencer_rpc_slot,
                 )
-                .await?;
-            // Every node holds an attestation store so it can be promoted anytime.
-            let attestation = AttestationContext::new(
-                attestation_domain,
-                pinned_sequencer_set_version,
-                config.block_attestation_signer(),
-                config.block_attestation_addresses(),
-                AttestationStore::default(),
-                l1_provider.clone(),
-                anchor_config,
-            );
-            let schedule = config.leadership();
-            let local_ed25519_public_key = config.ed25519_public_key();
-            let manifest = config.manifest().clone();
-            let local_secp256k1_address = config.secp256k1_address();
-            let individual_signer = config.block_attestation_signer();
-            // Created before the network starts so requests arriving ahead of the serving
-            // task (spawned once the provider exists) buffer instead of dropping.
-            let (backfill_requests_tx, backfill_requests_rx) =
-                tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
-            let (sinks, commands, backfill_commands) =
-                Self::launch_p2p_network(config, network_id, &task_executor, backfill_requests_tx)?;
-
-            // Operator RPC handles: every quorum member holds a wallet-backed L1 provider
-            // signing with its individual key so any of them can relay setLeader. An rpc-only
-            // standby holds no individual key, so it cannot relay and gets no provider.
-            let role_status: SharedRoleStatus = Default::default();
-            let peer_tips = PeerTipRegistry::default();
-            let relayer = match individual_signer {
-                Some(signer) => {
-                    use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
-                    let provider =
-                        alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                            .with_nonce_key_filler()
-                            .wallet(alloy_network::EthereumWallet::from(signer))
-                            .connect_with_config(
-                                &self.l1_config.l1_rpc_url,
-                                rpc_connection_config(self.l1_config.retry_connection_interval),
-                            )
-                            .await?
-                            .erased();
-                    if !provider.client().is_local()
-                        && let Some(avg_block_time) =
-                            Chain::from_id(l1_chain_id).average_blocktime_hint()
-                    {
-                        provider
-                            .client()
-                            .set_poll_interval(avg_block_time.mul_f32(0.6));
-                    }
-                    Some(provider)
-                }
-                None => None,
-            };
-            sequencer_rpc_slot
-                .set(SequencerRpcContext::new(
-                    schedule.clone(),
-                    role_status.clone(),
-                    peer_tips.clone(),
-                    manifest,
-                    pinned_sequencer_set_version,
-                    local_secp256k1_address,
-                    local_ed25519_public_key.clone(),
-                    relayer,
-                    self.l1_config.encryption_keys.clone().unwrap_or_default(),
-                ))
-                .expect("the sequencer RPC context is installed exactly once");
-            p2p_runtime = Some((
-                sinks,
-                commands,
-                backfill_commands,
-                attestation,
-                schedule,
-                local_ed25519_public_key,
-                role_status,
-                peer_tips,
-                backfill_requests_rx,
-            ));
-        } else if let Some(ref config) = self.sequencer_config {
-            // Legacy single-sequencer mode keeps the static engine.
-            let sequencer_addr = config.sequencer_signer.address();
-            self.spawn_zone_engine(&ctx, sequencer_addr)?;
-        }
+                .await?,
+            )
+        } else {
+            if let Some(ref config) = self.sequencer_config {
+                // Legacy single-sequencer mode keeps the static engine.
+                let sequencer_addr = config.sequencer_signer.address();
+                self.spawn_zone_engine(&ctx, sequencer_addr)?;
+            }
+            None
+        };
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
         let max_response_size = ctx
@@ -780,17 +822,43 @@ where
                 Ok(())
             })
             .await?;
-        let prover_config = self
-            .sequencer_config
-            .as_ref()
-            .filter(|config| config.enable_prover)
-            .map(|config| ShadowProverConfig {
-                parent_chain_id: l1_chain_id,
-                zone_id: config.zone_id,
-                chain_spec: evm_chain_spec,
-                debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
-                prover_address: config.prover_address.clone(),
-            });
+        let prover_config =
+            effective_shadow_prover_config
+                .as_ref()
+                .map(|config| ShadowProverConfig {
+                    parent_chain_id: l1_chain_id,
+                    zone_id: config.zone_id,
+                    chain_spec: evm_chain_spec,
+                    debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+                    prover_address: config
+                        .prover_runtime
+                        .remote_address()
+                        .map(ToOwned::to_owned),
+                });
+
+        if let (Some(config), Some(runtime_config), Some(submissions)) = (
+            effective_shadow_prover_config.as_ref(),
+            prover_config.clone(),
+            finalized_batch_submissions,
+        ) {
+            let prover = spawn_shadow_prover(
+                runtime_config,
+                self.portal_address,
+                config.batch_anchor_config,
+                provider.clone(),
+                l1_provider.clone(),
+            );
+            task_executor.spawn_critical_task(
+                "rpc-follower-shadow-prover",
+                RpcFollowerShadowProver::new(
+                    self.portal_address,
+                    provider.clone(),
+                    l1_provider.clone(),
+                    prover,
+                )
+                .run(submissions),
+            );
+        }
 
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
@@ -798,13 +866,13 @@ where
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
-            self.l1_config.enabled_tokens.clone(),
+            self.enabled_tokens.clone(),
             chain_id,
             max_response_size,
         )
         .await?;
 
-        if let Some((
+        if let Some(P2PRuntime {
             sinks,
             commands,
             backfill_commands,
@@ -814,7 +882,7 @@ where
             role_status,
             peer_tips,
             backfill_requests_rx,
-        )) = p2p_runtime
+        }) = p2p_runtime
         {
             // Backfill serving is role-neutral: every role serves the same canonical
             // provider, so the server outlives role generations and a leadership handoff
@@ -847,9 +915,9 @@ where
                 payload_builder,
                 chain_spec: provider.chain_spec(),
                 deposit_queue: self.deposit_queue.clone(),
-                l1_block_tracker: self.l1_config.block_tracker.clone(),
+                l1_block_tracker: self.l1_block_tracker.clone(),
                 // Follower-only nodes have no private keys and never construct an engine.
-                encryption_keys: self.l1_config.encryption_keys.clone().unwrap_or_default(),
+                encryption_keys: self.encryption_keys.clone().unwrap_or_default(),
                 commands,
                 backfill_commands,
                 attestation,
@@ -1071,17 +1139,15 @@ async fn seed_leadership_schedule(
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    // All three describe the same transition at the same block and have no data dependency
-    // on each other, so they go out as one batch rather than three serial round trips on the
-    // startup path.
-    let leader_call = portal.leader().block(block_id);
-    let epoch_call = portal.leaderEpoch().block(block_id);
-    let activation_call = portal.leaderActivationTempoBlock().block(block_id);
-    let (leader, epoch, activation) = tokio::try_join!(
-        leader_call.call(),
-        epoch_call.call(),
-        activation_call.call(),
-    )?;
+    // Read the complete transition atomically at the authenticated snapshot.
+    let (leader, epoch, activation) = l1_provider
+        .multicall()
+        .block(block_id)
+        .add(portal.leader())
+        .add(portal.leaderEpoch())
+        .add(portal.leaderActivationTempoBlock())
+        .aggregate()
+        .await?;
     eyre::ensure!(
         !leader.is_zero(),
         "portal {portal_address} has no leader at finalized L1 snapshot block {snapshot_anchor}"
@@ -1123,6 +1189,104 @@ where
             >,
         >,
 {
+    async fn start_p2p(
+        config: P2pConfig,
+        l1_provider: &DynProvider<TempoNetwork>,
+        l1_chain_id: u64,
+        genesis_zone_id: u32,
+        portal_address: Address,
+        anchor_config: BatchAnchorConfig,
+        l1_rpc_url: String,
+        retry_connection_interval: Duration,
+        encryption_keys: EncryptionKeyRing,
+        task_executor: &TaskExecutor,
+        sequencer_rpc_slot: &Arc<OnceLock<SequencerRpcContext>>,
+    ) -> eyre::Result<P2PRuntime> {
+        let network_id = P2pNetworkId::new(l1_chain_id, portal_address);
+        let attestation_domain = AttestationDomain {
+            l1_chain_id,
+            portal_address,
+            zone_id: genesis_zone_id,
+        };
+        let pinned_sequencer_set_version =
+            crate::settlement_attestation::validate_registered_sequencer_set(
+                config.manifest(),
+                portal_address,
+                l1_provider,
+            )
+            .await?;
+        let attestation = AttestationContext::new(
+            attestation_domain,
+            pinned_sequencer_set_version,
+            config.block_attestation_signer(),
+            config.block_attestation_addresses(),
+            AttestationStore::default(),
+            l1_provider.clone(),
+            anchor_config,
+        );
+        let schedule = config.leadership();
+        let local_ed25519_public_key = config.ed25519_public_key();
+        let manifest = config.manifest().clone();
+        let local_secp256k1_address = config.secp256k1_address();
+        let individual_signer = config.block_attestation_signer();
+        let (backfill_requests_tx, backfill_requests_rx) =
+            tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
+        let (sinks, commands, backfill_commands) =
+            Self::launch_p2p_network(config, network_id, task_executor, backfill_requests_tx)?;
+
+        let role_status: SharedRoleStatus = Default::default();
+        let peer_tips = PeerTipRegistry::default();
+        let relayer = match individual_signer {
+            Some(signer) => {
+                use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
+                let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                    .with_nonce_key_filler()
+                    .wallet(alloy_network::EthereumWallet::from(signer))
+                    .connect_with_config(
+                        &l1_rpc_url,
+                        rpc_connection_config(retry_connection_interval),
+                    )
+                    .await?
+                    .erased();
+                if !provider.client().is_local()
+                    && let Some(avg_block_time) =
+                        Chain::from_id(l1_chain_id).average_blocktime_hint()
+                {
+                    provider
+                        .client()
+                        .set_poll_interval(avg_block_time.mul_f32(0.6));
+                }
+                Some(provider)
+            }
+            None => None,
+        };
+        sequencer_rpc_slot
+            .set(SequencerRpcContext::new(
+                schedule.clone(),
+                role_status.clone(),
+                peer_tips.clone(),
+                manifest,
+                pinned_sequencer_set_version,
+                local_secp256k1_address,
+                local_ed25519_public_key.clone(),
+                relayer,
+                encryption_keys,
+            ))
+            .expect("the sequencer RPC context is installed exactly once");
+
+        Ok(P2PRuntime {
+            sinks,
+            commands,
+            backfill_commands,
+            attestation,
+            schedule,
+            local_ed25519_public_key,
+            role_status,
+            peer_tips,
+            backfill_requests_rx,
+        })
+    }
+
     /// Start the Commonware network and the long-lived P2P event demultiplexer.
     ///
     /// Role-specific consumers are attached later by the role controller through the returned
@@ -1270,7 +1434,7 @@ where
             "Discovered enabled tokens from L1"
         );
 
-        let mut registry = self.l1_config.enabled_tokens.write();
+        let mut registry = self.enabled_tokens.write();
         registry.clear();
         registry.extend(enabled_tokens);
         Ok(())
@@ -1352,11 +1516,10 @@ where
             ctx.beacon_engine_handle.clone(),
             ctx.node.payload_builder_handle().clone(),
             self.deposit_queue.clone(),
-            self.l1_config.block_tracker.clone(),
+            self.l1_block_tracker.clone(),
             last_header,
             fee_recipient,
-            self.l1_config
-                .encryption_keys
+            self.encryption_keys
                 .clone()
                 .expect("sequencer mode configures deposit decryption keys"),
             self.portal_address,
@@ -1553,9 +1716,14 @@ where
         ZoneAddOns::new(
             self.deposit_queue.clone(),
             self.l1_config.clone(),
+            self.l1_state_cache.clone(),
+            self.enabled_tokens.clone(),
+            self.l1_block_tracker.clone(),
+            self.encryption_keys.clone(),
             self.portal_address,
             self.redacted_rpc_config.clone(),
             self.sequencer_config.clone(),
+            self.shadow_prover_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
         )
@@ -1639,7 +1807,9 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(TempoConsensus::new(ctx.chain_spec()))
+        Ok(TempoConsensus::new(ctx.chain_spec())
+            .with_allow_equal_timestamps(true)
+            .with_allowed_future_block_time_millis(100))
     }
 }
 

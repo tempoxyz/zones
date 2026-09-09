@@ -29,11 +29,12 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, ErrorCode, PROTOCOL_VERSION, ProverConnection, VerifyRequest,
+    VerifyResponse,
 };
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
@@ -43,11 +44,18 @@ use zone_spf::{
 
 use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
 
-/// Number of candidates allowed to wait behind the active validation.
-const SHADOW_PROVER_QUEUE_CAPACITY: usize = 2;
+/// Number of shadow proof candidates allowed to wait behind the active validation.
+pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
 
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
+
+/// Typed error context for an SPF rejection or a mismatch in its output.
+/// Errors without this context mean validation could not complete and must not
+/// count as a rejected candidate (for example, when the remote prover restarts).
+#[derive(Debug, thiserror::Error)]
+#[error("prover validation failed")]
+struct ValidationFailure;
 
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
@@ -78,8 +86,17 @@ impl fmt::Debug for ShadowProverConfig {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ShadowProver {
+pub struct ShadowProver {
     sender: mpsc::Sender<ProverJob>,
+}
+
+/// Exact Tempo anchor committed by a finalized batch submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowProofAnchor {
+    /// Tempo block number used as the EIP-2935 anchor.
+    pub number: u64,
+    /// Canonical hash of the Tempo anchor block.
+    pub hash: B256,
 }
 
 #[derive(Debug)]
@@ -87,6 +104,7 @@ struct ProverJob {
     from: u64,
     to: u64,
     batch: BatchData,
+    anchor: Option<ShadowProofAnchor>,
     enqueued_at: Instant,
 }
 
@@ -163,7 +181,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
     }
 }
 
-pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
+pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
     portal: Address,
     anchor_config: BatchAnchorConfig,
@@ -201,20 +219,35 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                 Ok(stats) => {
                     metrics.validation_success_total.increment(1);
                     metrics.witness_bytes.record(stats.witness_bytes as f64);
+                    metrics.witness_bytes_last.set(stats.witness_bytes as f64);
                     metrics.batch_size_blocks.record(stats.blocks as f64);
+                    metrics.batch_size_blocks_last.set(stats.blocks as f64);
                     metrics.deposits_per_batch.record(stats.deposits as f64);
+                    metrics.deposits_per_batch_last.set(stats.deposits as f64);
                     metrics
                         .withdrawals_per_batch
                         .record(stats.withdrawals as f64);
                     metrics
+                        .withdrawals_per_batch_last
+                        .set(stats.withdrawals as f64);
+                    metrics
                         .transactions_per_batch
                         .record(stats.transactions as f64);
+                    metrics
+                        .transactions_per_batch_last
+                        .set(stats.transactions as f64);
                     metrics
                         .zone_state_nodes
                         .record(stats.zone_state_nodes as f64);
                     metrics
+                        .zone_state_nodes_last
+                        .set(stats.zone_state_nodes as f64);
+                    metrics
                         .tempo_state_nodes
                         .record(stats.tempo_state_nodes as f64);
+                    metrics
+                        .tempo_state_nodes_last
+                        .set(stats.tempo_state_nodes as f64);
                     info!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
@@ -232,7 +265,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         "Shadow prover validated finalized batch candidate"
                     );
                 }
-                Err(err) => {
+                Err(err) if err.is::<ValidationFailure>() => {
                     metrics.validation_failure_total.increment(1);
                     error!(
                         target: "zone::sequencer::prover",
@@ -243,6 +276,19 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         elapsed_ms = started.elapsed().as_millis(),
                         error = ?err,
                         "Shadow prover failed to validate finalized batch candidate"
+                    );
+                }
+                Err(err) => {
+                    metrics.operational_failure_total.increment(1);
+                    warn!(
+                        target: "zone::sequencer::prover",
+                        zone_from = job.from,
+                        zone_to = job.to,
+                        prev_block_hash = %job.batch.prev_block_hash,
+                        next_block_hash = %job.batch.next_block_hash,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        error = ?err,
+                        "Shadow prover could not complete finalized batch candidate validation"
                     );
                 }
             }
@@ -259,6 +305,7 @@ impl ShadowProver {
             from,
             to,
             batch: batch.clone(),
+            anchor: None,
             enqueued_at: Instant::now(),
         }) {
             error!(
@@ -275,6 +322,27 @@ impl ShadowProver {
                 },
             );
         }
+    }
+
+    /// Queue a finalized candidate, waiting for capacity so authoritative L1 evidence is not
+    /// dropped while another proof is running.
+    pub async fn enqueue_with_anchor(
+        &self,
+        from: u64,
+        to: u64,
+        batch: BatchData,
+        anchor: ShadowProofAnchor,
+    ) -> Result<()> {
+        self.sender
+            .send(ProverJob {
+                from,
+                to,
+                batch,
+                anchor: Some(anchor),
+                enqueued_at: Instant::now(),
+            })
+            .await
+            .map_err(|_| eyre::eyre!("shadow prover queue is unavailable"))
     }
 }
 
@@ -317,6 +385,10 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .zone_inputs_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
+    if job.anchor.is_some() {
+        validate_settlement_boundary(&zone_inputs.blocks)?;
+    }
+
     let started = Instant::now();
     let (zone_state_witness, tempo_reads) =
         zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
@@ -351,13 +423,23 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             final_tempo_header.number()
         );
 
-        let anchor = resolve_anchor(
-            &context.l1_provider,
-            final_tempo_header.number(),
-            final_tempo_header.hash_slow(),
-            context.anchor_config,
-        )
-        .await?;
+        let anchor = if let Some(anchor) = job.anchor {
+            resolve_exact_anchor(
+                &context.l1_provider,
+                final_tempo_header.number(),
+                final_tempo_header.hash_slow(),
+                anchor,
+            )
+            .await?
+        } else {
+            resolve_anchor(
+                &context.l1_provider,
+                final_tempo_header.number(),
+                final_tempo_header.hash_slow(),
+                context.anchor_config,
+            )
+            .await?
+        };
         Ok::<_, eyre::Report>((initial_tempo_header, final_tempo_header, anchor))
     }
     .await?;
@@ -400,14 +482,15 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
             .await
             .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")?
+            .context("SPF rejected generated witness")
+            .context(ValidationFailure)?
     };
     metrics
         .spf_execution_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
+    compare_output(&output, &job.batch, job.batch.prev_block_hash).context(ValidationFailure)?;
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -433,6 +516,29 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     })
+}
+
+/// Require an L1-settled range to close exactly one withdrawal snapshot at its final block.
+fn validate_settlement_boundary(blocks: &[ZoneBlock]) -> Result<()> {
+    let (final_block, intermediate_blocks) = blocks
+        .split_last()
+        .ok_or_eyre("settled Zone range contains no blocks")?;
+
+    if let Some(block) = intermediate_blocks
+        .iter()
+        .find(|block| block.finalize_withdrawal_batch_count.is_some())
+    {
+        bail!(
+            "intermediate Zone block {} contains finalizeWithdrawalBatch",
+            block.number
+        );
+    }
+    ensure!(
+        final_block.finalize_withdrawal_batch_count.is_some(),
+        "final Zone block {} does not contain finalizeWithdrawalBatch",
+        final_block.number
+    );
+    Ok(())
 }
 
 async fn verify_remotely(
@@ -530,7 +636,12 @@ async fn verify_remotely(
                     request.request_id
                 );
             }
-            bail!("remote prover rejected request ({code:?}): {message}")
+            let error = eyre::eyre!("remote prover rejected request ({code:?}): {message}");
+            Err(if code == ErrorCode::VerificationFailed {
+                error.wrap_err(ValidationFailure)
+            } else {
+                error
+            })
         }
     }
 }
@@ -876,6 +987,57 @@ async fn resolve_anchor(
         anchor_number > checkpoint_number,
         "Tempo ancestry anchor {anchor_number} does not follow checkpoint {checkpoint_number}"
     );
+    resolve_ancestry_anchor(
+        provider,
+        checkpoint_number,
+        checkpoint_hash,
+        anchor_number,
+        None,
+    )
+    .await
+}
+
+async fn resolve_exact_anchor(
+    provider: &DynProvider<TempoNetwork>,
+    checkpoint_number: u64,
+    checkpoint_hash: B256,
+    anchor: ShadowProofAnchor,
+) -> Result<Anchor> {
+    ensure!(
+        anchor.number >= checkpoint_number,
+        "submitted Tempo anchor {} precedes checkpoint {checkpoint_number}",
+        anchor.number
+    );
+    if anchor.number == checkpoint_number {
+        ensure!(
+            anchor.hash == checkpoint_hash,
+            "submitted direct Tempo anchor hash {} does not match checkpoint hash {checkpoint_hash}",
+            anchor.hash
+        );
+        return Ok(Anchor {
+            number: anchor.number,
+            hash: anchor.hash,
+            ancestry_headers: Vec::new(),
+        });
+    }
+
+    resolve_ancestry_anchor(
+        provider,
+        checkpoint_number,
+        checkpoint_hash,
+        anchor.number,
+        Some(anchor.hash),
+    )
+    .await
+}
+
+async fn resolve_ancestry_anchor(
+    provider: &DynProvider<TempoNetwork>,
+    checkpoint_number: u64,
+    checkpoint_hash: B256,
+    anchor_number: u64,
+    expected_anchor_hash: Option<B256>,
+) -> Result<Anchor> {
     let mut expected_parent = checkpoint_hash;
     let mut ancestry_headers = Vec::with_capacity((anchor_number - checkpoint_number) as usize);
     for number in checkpoint_number + 1..=anchor_number {
@@ -887,6 +1049,13 @@ async fn resolve_anchor(
         );
         expected_parent = header.hash_slow();
         ancestry_headers.push(Bytes::from(alloy_rlp::encode(&header)));
+    }
+    if let Some(expected_anchor_hash) = expected_anchor_hash {
+        ensure!(
+            expected_parent == expected_anchor_hash,
+            "submitted Tempo anchor {} hash {expected_anchor_hash} does not match canonical hash {expected_parent}",
+            anchor_number
+        );
     }
     Ok(Anchor {
         number: anchor_number,
@@ -970,4 +1139,107 @@ fn witness_size(witness: &BatchWitness) -> usize {
                         .sum::<usize>()
             })
             .sum::<usize>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_provider::ProviderBuilder;
+    use alloy_transport::mock::Asserter;
+
+    fn zone_block(number: u64, finalizes_withdrawals: bool) -> ZoneBlock {
+        ZoneBlock {
+            number,
+            parent_hash: B256::ZERO,
+            timestamp: 0,
+            timestamp_millis_part: 0,
+            beneficiary: Address::ZERO,
+            tempo_header_rlp: Bytes::new(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: finalizes_withdrawals
+                .then_some(alloy_primitives::U256::ZERO),
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        }
+    }
+
+    fn mocked_l1_provider() -> DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(Asserter::new())
+            .erased()
+    }
+
+    #[tokio::test]
+    async fn exact_direct_anchor_uses_committed_hash_without_tip_lookup() {
+        let hash = B256::repeat_byte(0x42);
+        let anchor = resolve_exact_anchor(
+            &mocked_l1_provider(),
+            10,
+            hash,
+            ShadowProofAnchor { number: 10, hash },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(anchor.number, 10);
+        assert_eq!(anchor.hash, hash);
+        assert!(anchor.ancestry_headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_direct_anchor_rejects_different_committed_hash() {
+        let result = resolve_exact_anchor(
+            &mocked_l1_provider(),
+            10,
+            B256::repeat_byte(0x42),
+            ShadowProofAnchor {
+                number: 10,
+                hash: B256::repeat_byte(0x43),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn exact_anchor_rejects_number_before_checkpoint() {
+        let result = resolve_exact_anchor(
+            &mocked_l1_provider(),
+            10,
+            B256::repeat_byte(0x42),
+            ShadowProofAnchor {
+                number: 9,
+                hash: B256::repeat_byte(0x41),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn settlement_boundary_requires_finalization_in_final_block() {
+        validate_settlement_boundary(&[zone_block(10, false), zone_block(11, true)]).unwrap();
+
+        let err = validate_settlement_boundary(&[zone_block(10, false), zone_block(11, false)])
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("final Zone block 11 does not contain finalizeWithdrawalBatch")
+        );
+    }
+
+    #[test]
+    fn settlement_boundary_rejects_intermediate_finalization() {
+        let err = validate_settlement_boundary(&[zone_block(10, true), zone_block(11, true)])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("intermediate Zone block 10 contains finalizeWithdrawalBatch")
+        );
+    }
 }

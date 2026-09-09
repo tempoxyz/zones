@@ -11,7 +11,7 @@ variable "PROVER_EIF_CONTEXT" {
 }
 
 group "default" {
-  targets = ["tempo-zone", "tempo-zone-xtask"]
+  targets = ["tempo-zone", "tempo-zone-xtask", "tempo-zone-prover-utils"]
 }
 
 target "docker-metadata" {}
@@ -70,9 +70,37 @@ target "tempo-zone-prover-enclave" {
   platforms = ["linux/amd64"]
 }
 
+target "tempo-zone-prover-utils" {
+  inherits = ["docker-metadata"]
+  dockerfile = "docker/Dockerfile.prover-utils"
+  context = "."
+  contexts = {
+    chef = "target:prover-chef"
+  }
+  args = {
+    CHEF_IMAGE = "chef"
+    RUST_PROFILE = "release"
+  }
+  platforms = ["linux/amd64"]
+}
+
+# Build a matched Nitro guest kernel and NSM module from AWS's bootstrap sources. Keep this
+# source pinned: changing it changes the EIF kernel and its PCR measurements.
+target "nitro-enclaves-kernel" {
+  context = "https://github.com/aws/aws-nitro-enclaves-sdk-bootstrap.git#f718dea60a9d9bb8b8682fd852ad793912f3c5db"
+  target = "artifacts"
+  args = {
+    TARGET = "kernel"
+  }
+  platforms = ["linux/amd64"]
+}
+
 target "tempo-zone-prover-eif-builder" {
   dockerfile = "docker/Dockerfile.prover-eif-builder"
   context = "."
+  contexts = {
+    nitro-kernel = "target:nitro-enclaves-kernel"
+  }
   platforms = ["linux/amd64"]
 }
 

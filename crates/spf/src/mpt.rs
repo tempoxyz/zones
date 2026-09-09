@@ -130,10 +130,9 @@ impl StatelessSparseTrie {
             for (hashed_address, storage) in storage_updates {
                 let current_account = self.trie_account(hashed_address)?;
                 let has_revealed_storage = self.inner.storage_trie_ref(&hashed_address).is_some();
-                if !storage.wiped
-                    && current_account
-                        .as_ref()
-                        .is_some_and(|account| account.storage_root != EMPTY_ROOT_HASH)
+                if current_account
+                    .as_ref()
+                    .is_some_and(|account| account.storage_root != EMPTY_ROOT_HASH)
                     && !has_revealed_storage
                 {
                     return Err(StatelessSparseTrieError::IncompleteStateUpdate);
@@ -143,11 +142,6 @@ impl StatelessSparseTrie {
                     .inner
                     .take_storage_trie(&hashed_address)
                     .unwrap_or_else(RevealableSparseTrie::revealed_empty);
-                if storage.wiped {
-                    storage_trie
-                        .wipe()
-                        .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)?;
-                }
 
                 let mut updates = storage
                     .storage

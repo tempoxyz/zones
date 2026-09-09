@@ -334,7 +334,7 @@ impl ZoneEngine {
 
         // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
         // fork cannot predate it. Use wall-clock time to avoid backdating transactions during
-        // catch-up, and advance by at least one millisecond to keep consecutive blocks monotonic.
+        // catch-up, while allowing multiple blocks in the same millisecond.
         let wall_clock_timestamp_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_millis()
@@ -447,7 +447,7 @@ fn zone_timestamp_millis(
 ) -> u64 {
     l1_timestamp_millis
         .max(wall_clock_timestamp_millis)
-        .max(parent_timestamp_millis.saturating_add(1))
+        .max(parent_timestamp_millis)
 }
 
 #[cfg(test)]
@@ -467,8 +467,8 @@ mod tests {
     }
 
     #[test]
-    fn zone_timestamp_advances_past_parent_when_catching_up_in_same_millisecond() {
-        assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_001);
+    fn zone_timestamp_allows_parent_timestamp_when_catching_up_in_same_millisecond() {
+        assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
     }
 
     struct PausedDrain {

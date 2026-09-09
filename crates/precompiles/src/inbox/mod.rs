@@ -20,9 +20,11 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolType, SolValue};
+use alloy_sol_types::{SolCall, SolValue};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
+    dispatch::abi_decoder_config_for_spec,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
@@ -36,7 +38,7 @@ use tempo_zone_contracts::{
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
-    AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
+    ZonePrecompileError, ZoneResult, aes_gcm, chaum_pedersen,
     ecies::{ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, hkdf_info, hkdf_sha256},
     execution::NoCallRules,
     outbox::ZoneOutbox,
@@ -378,25 +380,20 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
     type Error = ZonePrecompileError;
 
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
+        let config = abi_decoder_config_for_spec(TempoHardfork::latest());
+
         match queued.depositType {
             DepositType::WithdrawalBounceBack => {
-                decode_canonical(&queued.depositData).map(Self::WithdrawalBounceBack)
+                WithdrawalBounceBackDeposit::abi_decode_with_config(&queued.depositData, config)
+                    .map(Self::WithdrawalBounceBack)
             }
-            DepositType::Deposit => decode_canonical(&queued.depositData).map(Self::Deposit),
+            DepositType::Deposit => {
+                Deposit::abi_decode_with_config(&queued.depositData, config).map(Self::Deposit)
+            }
             _ => return Err(ZonePrecompileError::MalformedCalldata),
         }
         .map_err(|_| ZonePrecompileError::MalformedCalldata)
     }
-}
-
-fn decode_canonical<T>(encoded: &[u8]) -> alloy_sol_types::Result<T>
-where
-    T: SolValue + From<<T::SolType as SolType>::RustType>,
-{
-    let value = T::abi_decode(encoded)?;
-    (value.abi_encode().as_slice() == encoded)
-        .then_some(value)
-        .ok_or(alloy_sol_types::Error::ReserMismatch)
 }
 
 fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
@@ -409,16 +406,15 @@ fn recover_encrypted_payload(
     decryption: &DecryptionData,
     (key_x, key_y_parity): (B256, u8),
 ) -> ZoneResult<Option<(Address, B256)>> {
-    ChaumPedersenVerify::verify_chaum_pedersen_gas()?;
-    if !ChaumPedersenVerify::verify(
+    chaum_pedersen::charge_gas()?;
+    if !chaum_pedersen::verify(
         &deposit.encrypted.ephemeralPubkeyX.0,
         deposit.encrypted.ephemeralPubkeyYParity,
         &decryption.sharedSecret.0,
         decryption.sharedSecretYParity,
         &key_x.0,
         key_y_parity,
-        &decryption.cpProof.s.0,
-        &decryption.cpProof.c.0,
+        &decryption.cpProof,
     ) {
         return Ok(None);
     }
@@ -430,8 +426,8 @@ fn recover_encrypted_payload(
         &deposit.sender,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
-    AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
-    let (plaintext, valid) = AesGcmDecrypt::decrypt(
+    aes_gcm::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
+    let (plaintext, valid) = aes_gcm::decrypt(
         &key,
         &deposit.encrypted.nonce.0,
         &deposit.encrypted.ciphertext,
