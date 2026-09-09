@@ -92,6 +92,17 @@ const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// map overhead while covering more than the current Zone E recovery gap.
 const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
+/// Refuse recovery ranges that cannot fit in the bounded ancestry cache.
+/// Oversized gaps require operator recovery rather than an unbounded allocation.
+pub(crate) fn validate_ancestry_range(from: u64, to: u64) -> Result<()> {
+    eyre::ensure!(
+        to.saturating_sub(from) < u64::from(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY),
+        "L1 ancestry range {from}..={to} exceeds the recovery limit of {} headers; operator recovery is required; automatic ancestry replay across this gap is unsupported",
+        DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY
+    );
+    Ok(())
+}
+
 /// Bounded gas for one `submitBatch` call when gas estimation is unavailable.
 ///
 /// Estimation against state N cannot see hash(N) in EIP-2935, but a transaction submitted after
@@ -892,6 +903,8 @@ impl BatchSubmitter {
         if to <= from {
             return Ok(Vec::new());
         }
+
+        validate_ancestry_range(from, to)?;
 
         // Snapshot the cache without changing its LRU order. Network requests
         // and validation happen after the read lock is released.
@@ -2069,6 +2082,22 @@ mod tests {
         assert!(BatchAnchorConfig::new(0, 0).is_err());
         assert!(BatchAnchorConfig::new(10, 10).is_err());
         assert!(BatchAnchorConfig::new(10, 11).is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_ancestry_is_rejected_before_fetching_headers() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let error = submitter
+            .fetch_ancestry_headers(10, u64::MAX)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds the recovery limit"));
+        assert!(submitter.ancestry_header_cache.read().is_empty());
+        assert!(asserter.read_q().is_empty());
     }
 
     #[tokio::test]

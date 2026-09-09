@@ -20,7 +20,8 @@ struct L1BlockTrackerState {
     recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
-    portal_pause: Option<(u64, bool)>,
+    portal_pause: Option<(NumHash, bool)>,
+    control_plane: Option<NumHash>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +144,61 @@ impl L1BlockTracker {
         self.state.read().latest
     }
 
+    /// Highest finalized block whose governance events and cache invalidations are applied.
+    /// This cursor advances independently of the queue consumed by Zone blocks.
+    pub fn control_plane_latest(&self) -> Option<NumHash> {
+        self.state.read().control_plane
+    }
+
+    fn initialize_control_plane(&self, checkpoint: NumHash) {
+        self.state.write().control_plane.get_or_insert(checkpoint);
+    }
+
+    fn validate_control_plane_block(&self, block: NumHash, parent_hash: B256) -> eyre::Result<()> {
+        let state = self.state.read();
+        if let Some(observed) = state.observed.get(&block.number) {
+            eyre::ensure!(
+                observed.hash == block.hash,
+                "control-plane block conflicts with retained L1 anchor {}",
+                block.number
+            );
+        }
+        if let Some(previous) = state.control_plane {
+            eyre::ensure!(
+                block.number == previous.number.saturating_add(1) && parent_hash == previous.hash,
+                "non-contiguous finalized control-plane block: previous {previous:?}, new {block:?}"
+            );
+        }
+        Ok(())
+    }
+
+    fn record_control_plane(&self, block: NumHash) {
+        self.state.write().control_plane = Some(block);
+        self.changed.send_replace(());
+    }
+
+    async fn wait_for_control_plane(&self, block: NumHash) -> eyre::Result<()> {
+        let mut changed = self.changed.subscribe();
+        loop {
+            if let Some(latest) = self.control_plane_latest() {
+                if latest.number == block.number {
+                    eyre::ensure!(
+                        latest.hash == block.hash,
+                        "queued L1 anchor conflicts with finalized control-plane block {}",
+                        block.number
+                    );
+                }
+                if latest.number >= block.number {
+                    return Ok(());
+                }
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
+        }
+    }
+
     /// Return whether finalized Portal state currently pauses block production.
     pub fn portal_paused(&self) -> bool {
         self.state
@@ -151,27 +207,53 @@ impl L1BlockTracker {
             .is_some_and(|(_, paused)| paused)
     }
 
-    /// Apply a finalized Portal pause observation unless a newer block was already observed.
-    ///
-    /// Returns whether the effective pause value changed.
-    pub fn observe_portal_pause(&self, block_number: u64, paused: bool) -> bool {
-        let mut state = self.state.write();
-        if state
-            .portal_pause
-            .is_some_and(|(current, _)| current > block_number)
-        {
-            return false;
-        }
+    /// Reject missing code once the Portal has been observed on finalized L1.
+    pub fn validate_portal_absence(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.state.read().portal_pause.is_none(),
+            "finalized Portal code disappeared after deployment; preserving the previous pause state"
+        );
+        Ok(())
+    }
 
+    /// Apply an exact finalized Portal snapshot, rejecting contradictory observations.
+    /// Returns whether the effective pause value changed. Older observations are ignored.
+    pub fn observe_portal_pause(&self, block: NumHash, paused: bool) -> eyre::Result<bool> {
+        let mut state = self.state.write();
+        if let Some((current, current_paused)) = state.portal_pause {
+            if current.number > block.number {
+                return Ok(false);
+            }
+            if current.number == block.number {
+                eyre::ensure!(
+                    current.hash == block.hash,
+                    "conflicting finalized Portal block hashes at height {}",
+                    block.number
+                );
+                eyre::ensure!(
+                    current_paused == paused,
+                    "contradictory Portal pause observations for block {}",
+                    block.hash
+                );
+                return Ok(false);
+            }
+        }
+        if let Some(observation) = state.observed.get(&block.number) {
+            eyre::ensure!(
+                observation.hash == block.hash,
+                "Portal snapshot conflicts with authenticated L1 block {}",
+                block.number
+            );
+        }
         let changed = state
             .portal_pause
             .map_or(paused, |(_, current)| current != paused);
-        state.portal_pause = Some((block_number, paused));
+        state.portal_pause = Some((block, paused));
         drop(state);
         if changed {
             self.changed.send_replace(());
         }
-        changed
+        Ok(changed)
     }
 
     /// Subscribe to validated L1-state changes, including portal pause transitions.
@@ -333,6 +415,13 @@ impl L1BlockTracker {
         portal_evidence: Option<AuthenticatedPortalLogs>,
     ) -> eyre::Result<()> {
         let mut state = self.state.write();
+        if let Some((snapshot, _)) = state.portal_pause {
+            eyre::ensure!(
+                snapshot.number != block.number || snapshot.hash == block.hash,
+                "authenticated L1 block {} conflicts with the finalized Portal snapshot",
+                block.number
+            );
+        }
         if let Some(observation) = state.observed.get(&block.number) {
             eyre::ensure!(
                 observation.hash == block.hash,
@@ -465,10 +554,19 @@ pub struct L1SubscriberConfig {
     pub retain_portal_evidence: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SubscriberMode {
+    #[default]
+    Combined,
+    ControlPlane,
+    Anchors,
+}
+
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
 pub struct L1Subscriber<P> {
     pub(crate) config: L1SubscriberConfig,
+    pub(crate) mode: SubscriberMode,
     pub(crate) zone_provider: P,
     /// Finalized L1 blocks retained until a Zone consumer processes them.
     pub(crate) deposit_queue: DepositQueue,
@@ -539,6 +637,7 @@ where
     ) -> Self {
         Self {
             config,
+            mode: SubscriberMode::Combined,
             zone_provider,
             deposit_queue,
             enabled_tokens,
@@ -549,6 +648,24 @@ where
             encryption_keys,
             subscriber_metrics: Default::default(),
         }
+    }
+
+    /// Separate continuously applied governance state from bounded execution history.
+    /// The anchor reader waits for governance application before releasing each block.
+    pub fn split_control_plane(mut self) -> (Self, Self)
+    where
+        P: Clone,
+    {
+        let mut control = self.clone();
+        control.mode = SubscriberMode::ControlPlane;
+        control.subscriber_metrics =
+            L1SubscriberMetrics::new_with_labels(&[("reader", "control_plane")]);
+        self.mode = SubscriberMode::Anchors;
+        // These sinks have exactly one writer. Historical anchor replay must not rewind them.
+        self.leadership_sink = None;
+        self.encryption_keys = None;
+        self.finalized_batch_submissions = None;
+        (control, self)
     }
 
     /// Connect to the L1 node.
@@ -628,6 +745,21 @@ where
     /// Resolve the first L1 block that has not already been ingested.
     pub(crate) fn next_block_to_sync(&self) -> Result<u64, L1SubscriberError> {
         let resolved = self.resolve_start_block()?;
+        if self.mode == SubscriberMode::ControlPlane {
+            let checkpoint = self
+                .zone_provider
+                .latest()
+                .map_err(eyre::Report::from)?
+                .tempo_num_hash()
+                .map_err(eyre::Report::from)?;
+            self.block_tracker.initialize_control_plane(checkpoint);
+            return Ok(self
+                .block_tracker
+                .control_plane_latest()
+                .expect("initialized above")
+                .number
+                .saturating_add(1));
+        }
         let queued = self
             .deposit_queue
             .last_enqueued()
@@ -736,6 +868,7 @@ where
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.block_tracker.clone();
+        let retain_anchors = self.mode != SubscriberMode::ControlPlane;
 
         let mut fetched = stream::iter(from..=to)
             .map(move |block_number| {
@@ -743,7 +876,9 @@ where
                 let subscriber_metrics = subscriber_metrics.clone();
                 let block_tracker = block_tracker.clone();
                 async move {
-                    block_tracker.wait_for_capacity(block_number).await?;
+                    if retain_anchors {
+                        block_tracker.wait_for_capacity(block_number).await?;
+                    }
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
                     let header_resp =
@@ -757,6 +892,16 @@ where
                         .inspect_err(|_| {
                             fetch_failures.increment(1);
                         })?;
+                    if header_resp.number() != block_number {
+                        return Err(L1SubscriberError::Fatal {
+                            block_number,
+                            stage: "L1 header number validation",
+                            source: eyre::eyre!(
+                                "requested L1 block {block_number}, received {}",
+                                header_resp.number()
+                            ),
+                        });
+                    }
                     let block_hash = header_resp.hash();
                     let block = NumHash::new(block_number, block_hash);
                     let expected_receipts_root = header_resp.receipts_root();
@@ -813,6 +958,17 @@ where
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
+            let parent_hash = sealed.parent_hash();
+            if self.mode == SubscriberMode::ControlPlane {
+                self.block_tracker
+                    .validate_control_plane_block(anchor, parent_hash)
+                    .map_err(L1SubscriberError::fatal_from_err(
+                        block_number,
+                        "control-plane continuity",
+                    ))?;
+            } else if self.mode == SubscriberMode::Anchors {
+                self.block_tracker.wait_for_control_plane(anchor).await?;
+            }
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
@@ -850,25 +1006,34 @@ where
             // engine, so reversing this order could let it start the pause block first.
             if let Some(transition) = portal_pause {
                 self.block_tracker
-                    .observe_portal_pause(block_number, transition.is_paused());
+                    .observe_portal_pause(anchor, transition.is_paused())
+                    .map_err(L1SubscriberError::fatal_from_err(
+                        block_number,
+                        "portal pause observation",
+                    ))?;
             }
-            let appended = self
-                .deposit_queue
-                .try_enqueue_sealed(sealed, events.clone())
-                .wrap_err_with(|| {
-                    format!("unexpected discontinuity while enqueueing L1 block {block_number}")
-                })?;
-            if let Some((parent_hash, logs)) = portal_evidence {
-                self.block_tracker.record_with_portal_evidence(
-                    anchor,
-                    parent_hash,
-                    events.clone(),
-                    logs,
-                )?;
+            let appended = if retain_anchors {
+                let appended = self
+                    .deposit_queue
+                    .try_enqueue_sealed(sealed, events.clone())
+                    .wrap_err_with(|| {
+                        format!("unexpected discontinuity while enqueueing L1 block {block_number}")
+                    })?;
+                if let Some((parent_hash, logs)) = portal_evidence {
+                    self.block_tracker.record_with_portal_evidence(
+                        anchor,
+                        parent_hash,
+                        events.clone(),
+                        logs,
+                    )?;
+                } else {
+                    self.block_tracker
+                        .record_with_portal_events(anchor, events.clone())?;
+                }
+                appended
             } else {
-                self.block_tracker
-                    .record_with_portal_events(anchor, events.clone())?;
-            }
+                false
+            };
             if let Some(sender) = &self.finalized_batch_submissions {
                 for submission in finalized_batches {
                     sender
@@ -885,8 +1050,13 @@ where
             }
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
-            self.apply_enabled_token_events(&events);
-            self.update_l1_state_anchor(block_number, &invalidated);
+            if self.mode != SubscriberMode::Anchors {
+                self.apply_enabled_token_events(&events);
+                self.update_l1_state_anchor(block_number, &invalidated);
+            }
+            if self.mode == SubscriberMode::ControlPlane {
+                self.block_tracker.record_control_plane(anchor);
+            }
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
             }

@@ -369,7 +369,14 @@ async fn test_paused_followers_reject_modified_leader_blocks_and_quorum() -> eyr
     eyre::ensure!(
         cluster.nodes[0]
             .l1_block_tracker()
-            .observe_portal_pause(u64::MAX, false),
+            .observe_portal_pause(
+                alloy_eips::NumHash::new(
+                    u64::MAX,
+                    alloy_primitives::B256::with_last_byte(u64::MAX as u8)
+                ),
+                false
+            )
+            .unwrap(),
         "leader pause override did not change its local gate"
     );
     let attack_target = leader_head + 8;

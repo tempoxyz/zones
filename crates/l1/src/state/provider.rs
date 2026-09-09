@@ -42,7 +42,8 @@ pub struct L1StateProviderConfig {
     /// Interval between WebSocket reconnection attempts.
     /// Defaults to 100ms.
     pub retry_connection_interval: std::time::Duration,
-    /// Maximum number of synchronous RPC attempts per cache miss. `None` retries indefinitely.
+    /// Maximum number of synchronous RPC attempts per cache miss. Defaults to three.
+    /// `None` explicitly opts into indefinite retries, which can stall on pruned historical state.
     pub max_sync_attempts: Option<NonZeroU32>,
 }
 
@@ -55,7 +56,7 @@ impl Default for L1StateProviderConfig {
             max_retries: 10,
             initial_backoff_ms: 20,
             retry_connection_interval: std::time::Duration::from_millis(100),
-            max_sync_attempts: None,
+            max_sync_attempts: NonZeroU32::new(3),
         }
     }
 }
@@ -163,10 +164,9 @@ impl L1StateProvider {
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
-    /// On cache miss it retries the RPC call indefinitely until the value is fetched. The
-    /// transport layer handles backoff internally via [`RetryBackoffLayer`], so retries here
-    /// are immediate. This ensures a transient L1 RPC outage stalls block production rather
-    /// than bricking the chain with a hard precompile error.
+    /// On cache miss it retries up to the configured synchronous attempt limit. The transport
+    /// layer handles backoff internally via [`RetryBackoffLayer`]. Exhaustion returns a storage
+    /// availability error; catch-up against a pruned endpoint must not block a thread forever.
     ///
     /// # Panics
     ///
@@ -208,7 +208,7 @@ impl L1StateProvider {
                         .is_some_and(|max_attempts| attempt >= max_attempts.get())
                     {
                         return Err(eyre::eyre!(
-                            "L1 storage RPC fetch failed after {attempt} attempts for address={address} slot={slot} block={block_number}: {rpc_err}"
+                            "L1 storage RPC fetch failed after {attempt} attempts for address={address} slot={slot} block={block_number}: {rpc_err}; historical catch-up requires archive-capable L1 access"
                         ));
                     }
                     warn!(%address, %slot, block_number, %rpc_err, ?elapsed, attempt, "L1 storage RPC fetch failed, retrying");
@@ -281,6 +281,29 @@ impl L1StorageReader for L1StateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_attempt_limit_stops_on_pruned_historical_state() {
+        let asserter = alloy_transport::mock::Asserter::new();
+        for _ in 0..3 {
+            asserter.push_failure_msg("historical state has been pruned");
+        }
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let reader = L1StateProvider::new_raw(
+            L1StateProviderConfig::default(),
+            L1StateCache::default(),
+            provider,
+            tokio::runtime::Handle::current(),
+        );
+        let error = reader
+            .get_storage(Address::ZERO, B256::ZERO, 7)
+            .unwrap_err();
+        assert!(error.to_string().contains("after 3 attempts"));
+        assert!(error.to_string().contains("archive-capable L1 access"));
+        assert!(asserter.read_q().is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn finite_sync_attempt_limit_returns_diagnostic_error() {

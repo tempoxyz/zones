@@ -41,6 +41,7 @@ pub(crate) struct AttestationContext {
     pub(crate) store: AttestationStore,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) anchor_config: BatchAnchorConfig,
+    pub(crate) l1_block_tracker: zone_l1::L1BlockTracker,
 }
 
 impl AttestationContext {
@@ -52,6 +53,7 @@ impl AttestationContext {
         store: AttestationStore,
         l1_provider: DynProvider<TempoNetwork>,
         anchor_config: BatchAnchorConfig,
+        l1_block_tracker: zone_l1::L1BlockTracker,
     ) -> Self {
         Self {
             domain,
@@ -61,6 +63,7 @@ impl AttestationContext {
             store,
             l1_provider,
             anchor_config,
+            l1_block_tracker,
         }
     }
 }
@@ -502,6 +505,9 @@ pub(crate) async fn collect_leader_settlements<P>(
                 last_scanned = head;
             }
             _ = retry.tick(), if pending_boundary.is_some() => {
+                if context.l1_block_tracker.portal_paused() {
+                    continue;
+                }
                 let number = pending_boundary.expect("guarded by is_some");
                 match propose_settlement(&provider, number, &commands, &context).await {
                     Ok(true) => {}
@@ -623,6 +629,7 @@ async fn propose_settlement<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
+    ensure_settlement_proposal_allowed(&context.l1_block_tracker)?;
     let Some(attestation) = build_settlement_attestation(provider, number, context, None).await?
     else {
         return Ok(false);
@@ -631,12 +638,18 @@ where
         .signer
         .as_ref()
         .ok_or_eyre("this node holds no individual secp256k1 key, so it cannot settle")?;
+    // Validation reads L1 asynchronously; a pause may finalize during those reads.
+    ensure_settlement_proposal_allowed(&context.l1_block_tracker)?;
     let signed =
         SignedSettlementAttestation::sign(attestation.clone(), context.domain, signer_key)?;
     let signer = signed.recover_signer(context.domain)?;
     let (_, signatures) = context
         .store
         .insert_settlement(context.domain, signer, signed);
+    eyre::ensure!(
+        signatures > 0,
+        "settlement proposal was already submitted or exceeds the pending proposal limit"
+    );
     commands
         .send(P2pCommand::BroadcastSettlementProposal(
             attestation.encode(),
@@ -645,6 +658,14 @@ where
         .wrap_err("P2P command channel closed")?;
     info!(target: "zone::p2p", height = number, %signer, signatures, "Signed and broadcast settlement proposal");
     Ok(true)
+}
+
+fn ensure_settlement_proposal_allowed(tracker: &zone_l1::L1BlockTracker) -> eyre::Result<()> {
+    eyre::ensure!(
+        !tracker.portal_paused(),
+        "portal is paused; deferring settlement proposal"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -659,6 +680,54 @@ mod tests {
     use tempo_alloy::TempoNetwork;
     use zone_p2p::ZoneManifest;
     use zone_sequencer::attestation::AttestationStore;
+
+    #[tokio::test]
+    async fn paused_leader_does_not_sign_or_broadcast_on_retries() {
+        let provider =
+            reth_provider::test_utils::MockEthProvider::<tempo_primitives::TempoPrimitives>::new();
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(Asserter::new())
+            .erased();
+        let tracker = zone_l1::L1BlockTracker::default();
+        tracker
+            .observe_portal_pause(alloy_eips::NumHash::new(10, B256::repeat_byte(1)), true)
+            .unwrap();
+        let store = AttestationStore::default();
+        let context = AttestationContext::new(
+            AttestationDomain {
+                l1_chain_id: 1337,
+                portal_address: alloy_primitives::Address::repeat_byte(1),
+                zone_id: 7,
+            },
+            None,
+            Some(PrivateKeySigner::random()),
+            HashMap::new(),
+            store.clone(),
+            l1_provider,
+            BatchAnchorConfig::default(),
+            tracker,
+        );
+        let (commands, mut receiver) = mpsc::channel(1);
+        for _ in 0..10 {
+            let error = propose_settlement(&provider, 10, &commands, &context)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("portal is paused"));
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                store.wait_for_settlement(10, 1, &shutdown)
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[test]
     fn settlement_anchor_accepts_current_tip_and_rejects_future() {

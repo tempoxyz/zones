@@ -145,6 +145,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
     set_tempo_checkpoint(&zone_provider, checkpoint);
 
     L1Subscriber {
+        mode: Default::default(),
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
@@ -186,13 +187,56 @@ fn l1_block_tracker_keeps_the_newest_portal_pause_state() {
     let tracker = L1BlockTracker::default();
 
     assert!(!tracker.portal_paused());
-    assert!(tracker.observe_portal_pause(11, true));
+    assert!(
+        tracker
+            .observe_portal_pause(
+                alloy_eips::NumHash::new(11, alloy_primitives::B256::with_last_byte(11)),
+                true
+            )
+            .unwrap()
+    );
     assert!(tracker.portal_paused());
 
-    assert!(!tracker.observe_portal_pause(10, false));
+    assert!(
+        !tracker
+            .observe_portal_pause(
+                alloy_eips::NumHash::new(10, alloy_primitives::B256::with_last_byte(10)),
+                false
+            )
+            .unwrap()
+    );
     assert!(tracker.portal_paused());
 
-    assert!(tracker.observe_portal_pause(12, false));
+    assert!(
+        tracker
+            .observe_portal_pause(
+                alloy_eips::NumHash::new(12, alloy_primitives::B256::with_last_byte(12)),
+                false
+            )
+            .unwrap()
+    );
+    assert!(!tracker.portal_paused());
+}
+
+#[test]
+fn l1_block_tracker_rejects_conflicting_pause_snapshots() {
+    let tracker = L1BlockTracker::default();
+    let block = NumHash::new(11, B256::repeat_byte(1));
+    assert!(tracker.observe_portal_pause(block, true).unwrap());
+    assert!(!tracker.observe_portal_pause(block, true).unwrap());
+    assert!(tracker.observe_portal_pause(block, false).is_err());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(11, B256::repeat_byte(2)), false)
+            .is_err()
+    );
+    assert!(tracker.portal_paused());
+    assert!(tracker.validate_portal_absence().is_err());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(12, B256::repeat_byte(3)), false)
+            .unwrap()
+    );
     assert!(!tracker.portal_paused());
 }
 
@@ -201,14 +245,24 @@ async fn l1_block_tracker_notifies_pause_state_subscribers() {
     let tracker = L1BlockTracker::default();
     let mut changes = tracker.subscribe_changes();
 
-    tracker.observe_portal_pause(11, true);
+    tracker
+        .observe_portal_pause(
+            alloy_eips::NumHash::new(11, alloy_primitives::B256::with_last_byte(11)),
+            true,
+        )
+        .unwrap();
     changes
         .changed()
         .await
         .expect("pause-state subscription must remain open");
     assert!(tracker.portal_paused());
 
-    tracker.observe_portal_pause(12, false);
+    tracker
+        .observe_portal_pause(
+            alloy_eips::NumHash::new(12, alloy_primitives::B256::with_last_byte(12)),
+            false,
+        )
+        .unwrap();
     changes
         .changed()
         .await
@@ -2035,4 +2089,179 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
     assert_eq!(subscriber.block_tracker.latest(), None);
+}
+
+#[tokio::test]
+async fn subscriber_rejects_the_wrong_header_number_before_publishing() {
+    let subscriber = test_subscriber(9);
+    let asserter = Asserter::new();
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(make_test_header(10))));
+    asserter.push_success(&Some(header_response(make_test_header(11))));
+    let error = subscriber
+        .sync_finalized_once(&provider, 10)
+        .await
+        .unwrap_err();
+    assert!(!error.should_retry());
+    assert!(
+        error
+            .to_string()
+            .contains("requested L1 block 10, received 11")
+    );
+    assert!(subscriber.block_tracker.latest().is_none());
+    assert!(subscriber.deposit_queue.last_enqueued().is_none());
+    assert!(!subscriber.block_tracker.portal_paused());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn control_plane_advances_past_paused_execution_lookahead() {
+    let checkpoint = seal(make_test_header(0)).num_hash();
+    let mut subscriber = test_subscriber_with_checkpoint(checkpoint);
+    let portal = subscriber.config.portal_address;
+    let tracker = subscriber.block_tracker.clone();
+    tracker.initialize_consumed_through(0);
+    tracker.observe_portal_pause(checkpoint, true).unwrap();
+    let queue = subscriber.deposit_queue.clone();
+    let sink = Arc::new(RecordingLeadershipSink {
+        queue: queue.clone(),
+        seen: Default::default(),
+        fail: false,
+    });
+    subscriber.leadership_sink = Some(sink.clone());
+    let private_key = k256::SecretKey::from_slice(&[0x42; 32]).unwrap();
+    let (x, parity) =
+        crate::precompiles::ecies::compressed_x_and_parity(private_key.public_key().as_affine());
+    let keys = EncryptionKeyRing::new([private_key]);
+    subscriber.encryption_keys = Some(keys.clone());
+    let registry = subscriber.enabled_tokens.clone();
+    let cache = subscriber.l1_state_cache.clone();
+    let (control, anchors) = subscriber.split_control_plane();
+    assert_eq!(control.next_block_to_sync().unwrap(), 1);
+    let tip = MAX_L1_LOOKAHEAD_BLOCKS + 1;
+    let leader = Address::repeat_byte(2);
+    let token = Address::repeat_byte(3);
+    let logs = vec![
+        leader_updated_log(portal, Address::ZERO, leader, 2, tip),
+        encryption_key_updated_log(
+            portal,
+            x,
+            parity,
+            encryption_key_address(x, parity).unwrap(),
+            U256::from(1),
+            tip,
+        ),
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal,
+                data: abi::ZonePortal::TokenEnabled {
+                    token,
+                    name: "Token".into(),
+                    symbol: "TOK".into(),
+                    currency: "USD".into(),
+                }
+                .encode_log_data(),
+            },
+            ..Default::default()
+        },
+    ];
+    let receipt = make_receipt_with_logs(tip, B256::ZERO, logs);
+    let mut parent = checkpoint.hash;
+    let mut headers = Vec::new();
+    for number in 1..=tip {
+        let mut header = make_chained_header(number, parent);
+        if number == tip {
+            header.inner.receipts_root =
+                calculate_test_receipts_root(std::slice::from_ref(&receipt));
+            header.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+        }
+        parent = header_hash(&header);
+        headers.push(header);
+    }
+    let asserter = Asserter::new();
+    asserter.push_success(&Some(header_response(headers.last().unwrap().clone())));
+    for header in headers {
+        if header.number() == tip {
+            asserter.push_success(&Some(header_response(header)));
+            asserter.push_success(&Some(vec![receipt.clone()]));
+        } else {
+            push_header_and_empty_receipts(&asserter, header);
+        }
+    }
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        control.sync_finalized_once(&provider, 1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        tracker.control_plane_latest(),
+        Some(NumHash::new(tip, parent))
+    );
+    assert!(tracker.portal_paused());
+    assert!(!tracker.has_capacity_for(tip));
+    assert!(tracker.latest().is_none());
+    assert!(queue.last_enqueued().is_none());
+    assert_eq!(sink.seen.lock()[0].0.new_leader, leader);
+    assert!(registry.read().contains(&token));
+    assert!(keys.key(U256::from(1)).is_ok());
+    assert!(cache.lock().has_coverage_at(tip));
+    assert!(asserter.read_q().is_empty());
+
+    // The execution reader remains bounded even though governance passed its window.
+    let blocked_rpc = Asserter::new();
+    blocked_rpc.push_success(&Some(header_response(make_test_header(tip))));
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_mocked_client(blocked_rpc.clone());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            anchors.sync_finalized_once(&provider, tip)
+        )
+        .await
+        .is_err()
+    );
+    assert!(blocked_rpc.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn anchor_reader_waits_for_control_plane_before_enqueueing() {
+    let checkpoint = seal(make_test_header(9)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
+    let queue = subscriber.deposit_queue.clone();
+    let tracker = subscriber.block_tracker.clone();
+    let (control, anchors) = subscriber.split_control_plane();
+    control.next_block_to_sync().unwrap();
+    anchors.next_block_to_sync().unwrap();
+    let header = make_chained_header(10, checkpoint.hash);
+    let asserter = Asserter::new();
+    asserter.push_success(&Some(header_response(header.clone())));
+    push_header_and_empty_receipts(&asserter, header.clone());
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let pending = anchors.sync_finalized_once(&provider, 10);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut pending)
+            .await
+            .is_err()
+    );
+    assert!(queue.last_enqueued().is_none());
+    assert!(tracker.latest().is_none());
+
+    let control_rpc = Asserter::new();
+    control_rpc.push_success(&Some(header_response(header.clone())));
+    push_header_and_empty_receipts(&control_rpc, header);
+    let control_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(control_rpc);
+    control
+        .sync_finalized_once(&control_provider, 10)
+        .await
+        .unwrap();
+    pending.await.unwrap();
+    assert_eq!(queue.last_enqueued(), tracker.control_plane_latest());
 }

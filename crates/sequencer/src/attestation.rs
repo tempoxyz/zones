@@ -12,6 +12,11 @@ use alloy_sol_types::{Eip712Domain, SolStruct as _, SolValue as _, eip712_domain
 use eyre::WrapErr as _;
 use tokio::sync::{Notify, watch};
 
+// Keep a small overlap of anchor candidates so in-flight follower responses remain useful,
+// while retries and unavailable quorum cannot grow the store indefinitely.
+const MAX_SETTLEMENT_HEIGHTS: usize = 128;
+const MAX_SETTLEMENT_DIGESTS_PER_HEIGHT: usize = 8;
+
 type SettlementSignatures =
     BTreeMap<u64, BTreeMap<B256, BTreeMap<Address, SignedSettlementAttestation>>>;
 
@@ -136,6 +141,8 @@ impl Default for AttestationStore {
 
 impl AttestationStore {
     /// Insert one settlement signature per recovered signer and statement digest.
+    /// Retain at most eight anchor candidates per height and 128 unsubmitted heights.
+    /// Returns `(false, 0)` when a submitted or excess candidate is rejected.
     pub fn insert_settlement(
         &self,
         domain: AttestationDomain,
@@ -155,7 +162,38 @@ impl AttestationStore {
                 .write()
                 .expect("attestation store lock poisoned");
 
-            let signatures = all.entry(height).or_default().entry(digest).or_default();
+            if height <= *self.submitted_height.borrow()
+                || (!all.contains_key(&height) && all.len() >= MAX_SETTLEMENT_HEIGHTS)
+            {
+                return (false, 0);
+            }
+            let by_digest = all.entry(height).or_default();
+            if !by_digest.contains_key(&digest)
+                && by_digest.len() >= MAX_SETTLEMENT_DIGESTS_PER_HEIGHT
+            {
+                let (&oldest_digest, oldest) = by_digest
+                    .iter()
+                    .min_by_key(|(_, signatures)| {
+                        signatures
+                            .values()
+                            .next()
+                            .expect("nonempty signatures")
+                            .attestation
+                            .anchorBlockNumber
+                    })
+                    .expect("nonempty candidates");
+                let oldest_anchor = oldest
+                    .values()
+                    .next()
+                    .expect("nonempty signatures")
+                    .attestation
+                    .anchorBlockNumber;
+                if signed.attestation.anchorBlockNumber < oldest_anchor {
+                    return (false, 0);
+                }
+                by_digest.remove(&oldest_digest);
+            }
+            let signatures = by_digest.entry(digest).or_default();
             let inserted = signatures.insert(signer, signed).is_none();
             (inserted, signatures.len())
         };
@@ -291,10 +329,11 @@ impl AttestationStore {
 
     /// Remove all attestations covered by a confirmed batch submission.
     pub fn remove_submitted(&self, height: u64) {
-        self.settlements
+        let mut settlements = self
+            .settlements
             .write()
-            .expect("attestation store lock poisoned")
-            .retain(|settlement_height, _| *settlement_height > height);
+            .expect("attestation store lock poisoned");
+        settlements.retain(|settlement_height, _| *settlement_height > height);
         self.submitted_height.send_if_modified(|submitted| {
             if height > *submitted {
                 *submitted = height;
@@ -396,6 +435,75 @@ mod tests {
             store.insert_settlement(domain, signer.address(), signed),
             (true, 1)
         );
+    }
+
+    #[test]
+    fn retries_bound_candidates_and_reject_pruned_proposals() {
+        let store = AttestationStore::default();
+        let leader = PrivateKeySigner::random();
+        let follower = PrivateKeySigner::random();
+        let statement = |height, anchor| SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: 3,
+            zoneHeight: U256::from(height),
+            withdrawalBatchIndex: U256::from(1),
+            verifier: Address::repeat_byte(2),
+            tempoBlockNumber: 100,
+            anchorBlockNumber: anchor,
+            anchorBlockHash: B256::repeat_byte(3),
+            blockTransitionHash: B256::repeat_byte(4),
+            depositQueueTransitionHash: B256::repeat_byte(5),
+            withdrawalQueueHash: B256::repeat_byte(6),
+            verifierConfigHash: B256::repeat_byte(7),
+        };
+        let sign = |height, anchor, signer: &PrivateKeySigner| {
+            SignedSettlementAttestation::sign(statement(height, anchor), domain(), signer).unwrap()
+        };
+        for anchor in 100..200 {
+            assert_eq!(
+                store.insert_settlement(domain(), leader.address(), sign(10u64, anchor, &leader)),
+                (true, 1)
+            );
+        }
+        assert_eq!(
+            store.settlements.read().unwrap()[&10].len(),
+            MAX_SETTLEMENT_DIGESTS_PER_HEIGHT
+        );
+        assert!(
+            store
+                .insert_follower_settlement(
+                    domain(),
+                    leader.address(),
+                    follower.address(),
+                    sign(10, 100, &follower)
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .insert_follower_settlement(
+                    domain(),
+                    leader.address(),
+                    follower.address(),
+                    sign(10, 199, &follower)
+                )
+                .unwrap(),
+            2
+        );
+        assert!(store.settlement_at(10, 2).is_some());
+        for height in 11..300 {
+            store.insert_settlement(domain(), leader.address(), sign(height, 200, &leader));
+        }
+        assert_eq!(
+            store.settlements.read().unwrap().len(),
+            MAX_SETTLEMENT_HEIGHTS
+        );
+        store.remove_submitted(10);
+        assert_eq!(
+            store.insert_settlement(domain(), leader.address(), sign(10, 201, &leader)),
+            (false, 0)
+        );
+        assert!(store.settlement_at(10, 1).is_none());
     }
 
     #[test]

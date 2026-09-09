@@ -106,26 +106,31 @@ struct PendingBlocks {
 
 impl PendingBlocks {
     /// Adds a block unless its height is already present. When full, retains blocks closest to
-    /// the local head and returns the height that was dropped.
-    fn insert(&mut self, number: u64, block: PendingPeerBlock) -> Option<u64> {
-        if self.blocks.contains_key(&number) {
-            return None;
+    /// the local head and returns the height that was dropped. Conflicting blocks at an already
+    /// buffered height return an error and leave the original block intact.
+    fn insert(&mut self, number: u64, block: PendingPeerBlock) -> eyre::Result<Option<u64>> {
+        if let Some(existing) = self.blocks.get(&number) {
+            eyre::ensure!(
+                existing.block == block.block,
+                "conflicting peer blocks at pending height {number}"
+            );
+            return Ok(None);
         }
         if self.blocks.len() < MAX_PENDING_BLOCKS {
             self.blocks.insert(number, block);
-            return None;
+            return Ok(None);
         }
 
         let Some((&farthest, _)) = self.blocks.last_key_value() else {
             self.blocks.insert(number, block);
-            return None;
+            return Ok(None);
         };
         if number < farthest {
             self.blocks.pop_last();
             self.blocks.insert(number, block);
-            Some(farthest)
+            Ok(Some(farthest))
         } else {
-            Some(number)
+            Ok(Some(number))
         }
     }
 
@@ -487,8 +492,15 @@ where
             return true;
         }
         self.backfill.observe_block(number, best);
-        if let Some(dropped) = self.pending.insert(number, peer_block) {
-            tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
+        match self.pending.insert(number, peer_block) {
+            Ok(Some(dropped)) => {
+                tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(target: "zone::p2p", %err, "Rejected conflicting pending peer block");
+                self.backfill.needed = true;
+            }
         }
         if number > best.saturating_add(1) {
             info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
@@ -541,7 +553,7 @@ where
                 PeerBlockImportOutcome::Paused(Some(block)) => {
                     let block = *block;
                     let number = block.block.header.number();
-                    let dropped = self.pending.insert(number, block);
+                    let dropped = self.pending.insert(number, block)?;
                     debug_assert!(dropped.is_none());
                     return Ok(PeerBlockImportOutcome::Paused(None));
                 }
@@ -1160,7 +1172,12 @@ mod tests {
         let tracker = L1BlockTracker::default();
         ensure_settlement_signing_allowed(&tracker).unwrap();
 
-        tracker.observe_portal_pause(10, true);
+        tracker
+            .observe_portal_pause(
+                alloy_eips::NumHash::new(10, alloy_primitives::B256::with_last_byte(10)),
+                true,
+            )
+            .unwrap();
         let error = ensure_settlement_signing_allowed(&tracker)
             .expect_err("a paused follower must not use its quorum key");
         assert!(error.to_string().contains("refusing to sign"));
@@ -1397,23 +1414,47 @@ mod tests {
     }
 
     #[test]
+    fn pending_blocks_report_conflicts_and_preserve_the_original() {
+        let mut pending = PendingBlocks::default();
+        pending.insert(10, pending_block(10)).unwrap();
+        assert_eq!(pending.insert(10, pending_block(10)).unwrap(), None);
+        let mut conflict = pending_block(10);
+        conflict.block.header.inner.extra_data = vec![1].into();
+        assert!(
+            pending
+                .insert(10, conflict)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting peer blocks")
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.take_next_after(9).unwrap().block,
+            pending_block(10).block
+        );
+    }
+
+    #[test]
     fn pending_block_limit_keeps_blocks_closest_to_local_head() {
         let mut pending = PendingBlocks::default();
         for number in 100..100 + MAX_PENDING_BLOCKS as u64 {
-            assert_eq!(pending.insert(number, pending_block(number)), None);
+            assert_eq!(pending.insert(number, pending_block(number)).unwrap(), None);
         }
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);
         assert_eq!(pending.first_number(), Some(100));
 
         let farthest = 100 + MAX_PENDING_BLOCKS as u64 - 1;
-        assert_eq!(pending.insert(99, pending_block(99)), Some(farthest));
+        assert_eq!(
+            pending.insert(99, pending_block(99)).unwrap(),
+            Some(farthest)
+        );
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);
         assert!(pending.contains(99));
         assert!(!pending.contains(farthest));
 
         let farther = farthest + 1;
         assert_eq!(
-            pending.insert(farther, pending_block(farther)),
+            pending.insert(farther, pending_block(farther)).unwrap(),
             Some(farther)
         );
         assert_eq!(pending.len(), MAX_PENDING_BLOCKS);

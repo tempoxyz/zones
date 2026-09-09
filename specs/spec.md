@@ -402,10 +402,18 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `pause()`: Pause all new deposits, Zone block production, and L1 withdrawal processing for the
   public `PAUSE_DURATION` constant of 30 days. Nodes stop production at a block boundary after
   observing the pause in finalized Tempo state. Followers also retain, but do not import, peer
-  blocks and refuse settlement signatures while the pause is active. The pause expires
-  automatically and cannot be extended while active. Production and follower import resume after
-  an admin resume or automatic expiry and catch up the finalized Tempo anchors and buffered peer
-  blocks accumulated during the pause.
+  blocks and refuse settlement signatures while the pause is active. Leaders also defer new
+  settlement signatures and broadcasts. The pause expires automatically and cannot be extended
+  while active. After an admin resume or automatic expiry, nodes attempt to catch up finalized
+  Tempo anchors and buffered peer blocks. Historical catch-up requires an archive-capable L1
+  endpoint; synchronous storage reads stop with a diagnostic after three failed attempts by
+  default. Settlement and prover ancestry ranges are limited to 262,144 headers including the
+  starting checkpoint, and larger gaps require operator recovery. Automatic recovery across a
+  full 30-day production freeze is not currently supported. Finalized leadership, key rotation,
+  token, and cache updates continue independently of the bounded execution queue while paused.
+  Nodes refuse startup beyond that queue's lookahead if the finalized leader epoch has changed,
+  unless coordinated manifest forced recovery is configured. Replacing an unavailable leader
+  still requires that recovery procedure for the missing historical anchors.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one

@@ -116,22 +116,24 @@ async fn refresh_portal_pause(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
     let block_number = header.number();
-    let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+    let block_id = alloy_rpc_types_eth::BlockId::hash_canonical(header.hash);
     let code = l1_provider
         .get_code_at(portal_address)
         .block_id(block_id)
         .await?;
     // A newly deployed portal may exist at latest but not yet at the finalized checkpoint.
-    let paused = if code.is_empty() {
-        false
-    } else {
-        ZonePortal::new(portal_address, l1_provider)
-            .paused()
-            .block(block_id)
-            .call()
-            .await?
-    };
-    let changed = l1_block_tracker.observe_portal_pause(block_number, paused);
+    if code.is_empty() {
+        // Do not advance the watermark for an undeployed Portal. In particular, a missing-code
+        // response must never reopen a Portal whose deployment was already observed.
+        return l1_block_tracker.validate_portal_absence();
+    }
+    let paused = ZonePortal::new(portal_address, l1_provider)
+        .paused()
+        .block(block_id)
+        .call()
+        .await?;
+    let changed = l1_block_tracker
+        .observe_portal_pause(alloy_eips::NumHash::new(block_number, header.hash), paused)?;
     if changed {
         info!(
             target: "zone::engine",
@@ -800,6 +802,15 @@ where
                         &schedule,
                     ),
                 )?;
+                validate_stale_leadership_startup(
+                    &l1_provider,
+                    self.portal_address,
+                    snapshot_anchor,
+                    historical_replay_through,
+                    schedule.latest_observed_epoch().unwrap_or(1),
+                    p2p.manifest().forced_recovery().is_some(),
+                )
+                .await?;
                 // Seed the applied anchor from the persisted checkpoint so it targets the leader
                 // of the next anchor from the very start (and not after the first post-restart block)
                 schedule.record_applied_anchor(snapshot_anchor);
@@ -832,6 +843,8 @@ where
             finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
+        let (control_plane, l1_subscriber) = l1_subscriber.split_control_plane();
+        task_executor.spawn_critical_task("l1-control-plane", Box::pin(control_plane.run()));
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
@@ -857,6 +870,7 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.retry_connection_interval,
                     self.encryption_keys.clone().unwrap_or_default(),
+                    self.l1_block_tracker.clone(),
                     &task_executor,
                     &sequencer_rpc_slot,
                 )
@@ -1091,6 +1105,16 @@ impl LeadershipSink for ScheduleLeadershipSink {
                 transition.epoch,
             )
         })?;
+        if self
+            .schedule
+            .latest_observed_epoch()
+            .is_none_or(|epoch| transition.epoch > epoch)
+        {
+            eyre::ensure!(
+                self.schedule.pending_transitions() < zone_l1::MAX_L1_LOOKAHEAD_BLOCKS as usize,
+                "too many unapplied leadership transitions while Zone execution is stopped; operator recovery required"
+            );
+        }
         self.schedule.publish(LeadershipState::new(
             transition.epoch,
             leader.clone(),
@@ -1197,6 +1221,47 @@ where
     Ok(())
 }
 
+/// A restart beyond the retained execution window must not silently rely on a replaced leader.
+/// A coordinated manifest recovery explicitly authorizes the missing historical anchors.
+async fn validate_stale_leadership_startup(
+    provider: &DynProvider<TempoNetwork>,
+    portal_address: Address,
+    local_anchor: u64,
+    finalized_number: u64,
+    local_epoch: u64,
+    forced_recovery: bool,
+) -> eyre::Result<()> {
+    if portal_address.is_zero()
+        || finalized_number.saturating_sub(local_anchor) <= zone_l1::MAX_L1_LOOKAHEAD_BLOCKS
+    {
+        return Ok(());
+    }
+    let header = provider
+        .get_header_by_number(finalized_number.into())
+        .await?
+        .ok_or_else(|| eyre::eyre!("missing finalized leadership snapshot {finalized_number}"))?;
+    eyre::ensure!(
+        header.number() == finalized_number,
+        "wrong finalized leadership snapshot height"
+    );
+    let block = alloy_rpc_types_eth::BlockId::hash_canonical(header.hash);
+    if provider
+        .get_code_at(portal_address)
+        .block_id(block)
+        .await?
+        .is_empty()
+    {
+        return Ok(());
+    }
+    let portal = ZonePortal::new(portal_address, provider);
+    let epoch = portal.leaderEpoch().block(block).call().await?;
+    eyre::ensure!(
+        epoch == local_epoch || forced_recovery,
+        "local Tempo anchor {local_anchor} is stale: local leadership epoch {local_epoch}, finalized epoch {epoch} at {finalized_number}; configure coordinated manifest forced recovery before restarting"
+    );
+    Ok(())
+}
+
 /// Seed the leadership schedule from the portal snapshot at the local Tempo anchor.
 ///
 /// `snapshot_anchor` is the zone's persisted checkpoint (or the genesis anchor for a fresh zone).
@@ -1293,6 +1358,7 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         encryption_keys: EncryptionKeyRing,
+        l1_block_tracker: L1BlockTracker,
         task_executor: &TaskExecutor,
         sequencer_rpc_slot: &Arc<OnceLock<SequencerRpcContext>>,
     ) -> eyre::Result<P2PRuntime> {
@@ -1317,6 +1383,7 @@ where
             AttestationStore::default(),
             l1_provider.clone(),
             anchor_config,
+            l1_block_tracker,
         );
         let schedule = config.leadership();
         let local_ed25519_public_key = config.ed25519_public_key();
@@ -2172,6 +2239,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_startup_requires_explicit_recovery_after_leader_rotation() {
+        for (current_epoch, recovery, allowed) in
+            [(1u64, false, true), (2, false, false), (2, true, true)]
+        {
+            let asserter = Asserter::new();
+            push_finalized_header(&asserter, 10_000);
+            asserter.push_success(&Bytes::from_static(&[0x00]));
+            asserter.push_success(&Bytes::from(
+                ZonePortal::leaderEpochCall::abi_encode_returns(&current_epoch),
+            ));
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(asserter.clone())
+                .erased();
+            let result = validate_stale_leadership_startup(
+                &provider,
+                Address::repeat_byte(1),
+                10,
+                10_000,
+                1,
+                recovery,
+            )
+            .await;
+            assert_eq!(result.is_ok(), allowed);
+            if let Err(error) = result {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("configure coordinated manifest forced recovery")
+                );
+            }
+            assert!(asserter.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn portal_pause_handles_deployment_after_finalized_checkpoint() {
         let asserter = Asserter::new();
         push_finalized_header(&asserter, 10);
@@ -2238,7 +2340,12 @@ mod tests {
             .erased();
         let tracker = L1BlockTracker::default();
         let portal = Address::repeat_byte(0x11);
-        tracker.observe_portal_pause(10, true);
+        tracker
+            .observe_portal_pause(
+                alloy_eips::NumHash::new(10, alloy_primitives::B256::with_last_byte(10)),
+                true,
+            )
+            .unwrap();
 
         push_finalized_header(&asserter, 11);
         asserter.push_failure_msg("code lookup unavailable");
@@ -2258,6 +2365,35 @@ mod tests {
                 .is_err()
         );
         assert!(tracker.portal_paused());
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn portal_pause_missing_code_does_not_advance_the_snapshot() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let tracker = L1BlockTracker::default();
+        let portal = Address::repeat_byte(0x11);
+        push_portal_pause_snapshot(&asserter, 10, true);
+        refresh_portal_pause(&provider, portal, &tracker)
+            .await
+            .unwrap();
+        push_finalized_header(&asserter, 12);
+        asserter.push_success(&Bytes::new());
+        assert!(
+            refresh_portal_pause(&provider, portal, &tracker)
+                .await
+                .is_err()
+        );
+        assert!(tracker.portal_paused());
+        // A valid intermediate snapshot must still be accepted after the bad response.
+        push_portal_pause_snapshot(&asserter, 11, false);
+        refresh_portal_pause(&provider, portal, &tracker)
+            .await
+            .unwrap();
+        assert!(!tracker.portal_paused());
         assert!(asserter.read_q().is_empty());
     }
 
