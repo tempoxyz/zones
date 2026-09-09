@@ -2,15 +2,21 @@ use crate::queue::DeferredPortalWork;
 
 use super::*;
 use crate::{
-    EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
+    EncryptionKeyRing,
+    metrics::L1SubscriberMetrics,
+    state::{
+        EnabledTokenRegistry, L1RpcClient, L1StateCache, VerifiedL1StateCache,
+        verified::{account_root_targets, authenticate_multi_proof},
+    },
 };
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::stream;
-use std::{collections::HashSet, ops::RangeInclusive};
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::RangeInclusive,
+};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
-
-use std::collections::BTreeMap;
 
 /// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
 /// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
@@ -535,6 +541,8 @@ pub struct L1Subscriber<P> {
     pub(crate) enabled_tokens: EnabledTokenRegistry,
     /// Shared L1 state cache updated after each finalized block.
     pub(crate) l1_state_cache: L1StateCache,
+    /// Shared authenticated account roots and payload-proved slot values.
+    pub(crate) verified_l1_state_cache: Option<VerifiedL1StateCache>,
     /// Validated and applied L1 anchors shared with follower block import.
     pub(crate) block_tracker: L1BlockTracker,
     /// Optional sink for leadership transitions.
@@ -591,6 +599,7 @@ where
         deposit_queue: DepositQueue,
         enabled_tokens: EnabledTokenRegistry,
         l1_state_cache: L1StateCache,
+        verified_l1_state_cache: Option<VerifiedL1StateCache>,
         block_tracker: L1BlockTracker,
         leadership_sink: Option<Arc<dyn LeadershipSink>>,
         finalized_batch_submissions: Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
@@ -602,6 +611,7 @@ where
             deposit_queue,
             enabled_tokens,
             l1_state_cache,
+            verified_l1_state_cache,
             block_tracker,
             leadership_sink,
             finalized_batch_submissions,
@@ -729,11 +739,14 @@ where
     ///
     /// Callers provide the next block number and receive the next cursor after
     /// a successful sync.
-    pub(crate) async fn sync_to_finalized(
+    pub(crate) async fn sync_to_finalized<L1>(
         &self,
-        l1_provider: &impl Provider<TempoNetwork>,
+        l1_provider: &L1,
         mut next_block: u64,
-    ) -> Result<u64, L1SubscriberError> {
+    ) -> Result<u64, L1SubscriberError>
+    where
+        L1: Provider<TempoNetwork> + Clone + 'static,
+    {
         let mut finalized = self.finalized_block_number(l1_provider).await?;
         loop {
             self.block_tracker.record_finalized_target(finalized);
@@ -779,11 +792,14 @@ where
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
     /// always based on the `finalized` tag read by [`Self::sync_to_finalized`].
-    pub(crate) async fn follow_finalized(
+    pub(crate) async fn follow_finalized<L1>(
         &self,
-        l1_provider: &impl Provider<TempoNetwork>,
+        l1_provider: &L1,
         mut stream: HeaderStream,
-    ) -> Result<(), L1SubscriberError> {
+    ) -> Result<(), L1SubscriberError>
+    where
+        L1: Provider<TempoNetwork> + Clone + 'static,
+    {
         let mut next_block = self.next_block_to_sync()?;
 
         // Subscribe before the initial sync so a head published while catching
@@ -804,24 +820,35 @@ where
     /// Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
-    async fn backfill(
+    async fn backfill<L1>(
         &self,
-        l1_provider: &impl Provider<TempoNetwork>,
+        l1_provider: &L1,
         from: u64,
         to: u64,
-    ) -> Result<(), L1SubscriberError> {
-        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to);
+    ) -> Result<(), L1SubscriberError>
+    where
+        L1: Provider<TempoNetwork> + Clone + 'static,
+    {
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to, true);
 
         let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
 
-        while let Some((sealed, processed_events)) = blocks.try_next().await? {
+        while let Some((sealed, processed_events, account_roots)) = blocks.try_next().await? {
             let block_number = sealed.number();
             let (events, invalidated, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let anchor = sealed.num_hash();
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
+            if let Some(verified) = &self.verified_l1_state_cache {
+                verified
+                    .record_authenticated_roots(anchor, account_roots)
+                    .map_err(L1SubscriberError::fatal_from_err(
+                        block_number,
+                        "authenticated storage-root publication",
+                    ))?;
+            }
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.leadership_sink {
@@ -921,24 +948,44 @@ where
 
     /// Fetch, authenticate, and decode an inclusive finalized L1 block range in order.
     ///
-    /// RPC work is pipelined up to the configured concurrency.
-    fn fetch_l1_blocks<'a>(
+    /// RPC work is pipelined up to the configured concurrency. When `authenticate_roots` is true,
+    /// Portal and TIP-403 account roots are authenticated concurrently with the block receipts.
+    fn fetch_l1_blocks<'a, L1>(
         &'a self,
-        l1_provider: &'a impl Provider<TempoNetwork>,
+        l1_provider: &'a L1,
         range: RangeInclusive<u64>,
+        authenticate_roots: bool,
     ) -> impl Stream<
-        Item = Result<(SealedHeader<TempoHeader>, L1ProcessedEvents), L1SubscriberError>,
+        Item = Result<
+            (
+                SealedHeader<TempoHeader>,
+                L1ProcessedEvents,
+                BTreeMap<Address, B256>,
+            ),
+            L1SubscriberError,
+        >,
     > + Send
-    + 'a {
+    + 'a
+    where
+        L1: Provider<TempoNetwork> + Clone + 'static,
+    {
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.block_tracker.clone();
+        let verified_l1_state_cache = self.verified_l1_state_cache.clone();
+        let portal_address = self.config.portal_address;
+        let rpc_client = L1RpcClient::from_provider(
+            l1_provider.clone().erased(),
+            tokio::runtime::Handle::current(),
+        );
 
         stream::iter(range)
             .map(move |block_number| {
                 let provider = l1_provider;
                 let subscriber_metrics = subscriber_metrics.clone();
                 let block_tracker = block_tracker.clone();
+                let verified_l1_state_cache = verified_l1_state_cache.clone();
+                let rpc_client = rpc_client.clone();
                 async move {
                     block_tracker.wait_for_capacity(block_number).await?;
                     let start = std::time::Instant::now();
@@ -955,19 +1002,38 @@ where
                             fetch_failures.increment(1);
                         })?;
                     let block_hash = header_resp.hash();
+                    let block = NumHash::new(block_number, block_hash);
                     let receipts = fetch_and_verify_receipts_for_header(
                         provider,
-                        NumHash::new(block_number, block_hash),
+                        block,
                         header_resp.receipts_root(),
                         header_resp.logs_bloom(),
-                    )
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
+                    );
+                    let account_roots = async {
+                        if !authenticate_roots || verified_l1_state_cache.is_none() {
+                            return Ok::<_, L1SubscriberError>(BTreeMap::new());
+                        }
+                        let targets =
+                            account_root_targets([portal_address, TIP403_REGISTRY_ADDRESS]);
+                        let responses = rpc_client
+                            .get_multi_proof(BlockId::hash(block_hash), &targets)
+                            .await?;
+                        let authenticated =
+                            authenticate_multi_proof(header_resp.state_root(), &targets, responses)
+                                .map_err(L1SubscriberError::fatal_from_err(
+                                    block_number,
+                                    "account storage-root verification",
+                                ))?;
+                        Ok(authenticated
+                            .into_iter()
+                            .map(|(account, state)| (account, state.storage_root))
+                            .collect())
+                    };
+                    let (receipts, account_roots) = tokio::try_join!(receipts, account_roots)
+                        .inspect_err(|_| fetch_failures.increment(1))?;
                     // Abort before enqueueing work or advancing caches if a portal log fails to decode.
                     let processed_events = self
-                        .extract_events(NumHash::new(block_number, block_hash), &receipts)
+                        .extract_events(block, &receipts)
                         .inspect_err(|_| {
                             subscriber_metrics.decode_fence_failures.increment(1);
                         })
@@ -984,7 +1050,7 @@ where
                         "Fetched, validated, and decoded L1 block data"
                     );
                     let sealed = SealedHeader::seal_slow(header_resp.inner.inner);
-                    Ok::<_, L1SubscriberError>((sealed, processed_events))
+                    Ok::<_, L1SubscriberError>((sealed, processed_events, account_roots))
                 }
             })
             .buffered(concurrency)
@@ -1030,10 +1096,10 @@ where
         }
     }
 
-    async fn recover_deferred_work(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> Result<(), L1SubscriberError> {
+    async fn recover_deferred_work<L1>(&self, l1_provider: &L1) -> Result<(), L1SubscriberError>
+    where
+        L1: Provider<TempoNetwork> + Clone + 'static,
+    {
         let Some(from) = self.config.deferred_work_start else {
             return Ok(());
         };
@@ -1046,9 +1112,9 @@ where
             return Ok(());
         }
 
-        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number);
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number, false);
         let mut deferred: Option<DeferredPortalWork> = None;
-        while let Some((header, (events, _, _, _))) = blocks.try_next().await? {
+        while let Some((header, (events, _, _, _), _)) = blocks.try_next().await? {
             let block = L1BlockDeposits { header, events };
             if let Some(deferred) = &mut deferred {
                 deferred.push(block);

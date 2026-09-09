@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 # zones
-zone-primitives.workspace = true
+zone-primitives = { workspace = true, features = ["serde"] }
 
 # tempo
 tempo-alloy.workspace = true

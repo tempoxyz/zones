@@ -157,6 +157,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
         deposit_queue: DepositQueue::default(),
         enabled_tokens: crate::state::EnabledTokenRegistry::default(),
         l1_state_cache: crate::L1StateCache::new(),
+        verified_l1_state_cache: None,
         block_tracker: L1BlockTracker::default(),
         leadership_sink: None,
         finalized_batch_submissions: None,

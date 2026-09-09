@@ -59,14 +59,16 @@ use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
+#[cfg(test)]
+use zone_rpc::types::TempoStorageRead as RpcTempoStorageRead;
 use zone_rpc::{
     auth::AuthContext,
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoundDecryptionKey, BoxEyreFut, BoxFut,
         DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalSequencerInfo, PeerTipInfo,
         SequencerInfoResponse, SequencerPeerInfo, SequencerProgress, SequencerReadiness,
-        SetLeaderResponse, TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness,
-        ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
+        SetLeaderResponse, ZoneExecutionWitness, ZoneInfoResponse, internal, raw_null, raw_zero,
+        to_raw,
     },
 };
 
@@ -307,14 +309,7 @@ where
                     .map_err(EthApiError::from)?;
                 Ok(ZoneExecutionWitness {
                     execution_witness: witness,
-                    tempo_reads: recorder
-                        .take_reads()
-                        .into_iter()
-                        .map(|read| RpcTempoStorageRead {
-                            account: read.account,
-                            slot: read.slot,
-                        })
-                        .collect(),
+                    tempo_reads: recorder.take_reads().into_iter().collect(),
                 })
             })
             .await

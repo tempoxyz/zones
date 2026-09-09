@@ -1,7 +1,7 @@
 //! Backpressured SPF validation and Nitro proof generation for settlement batches.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt, io,
     pin::Pin,
     sync::{Arc, OnceLock},
@@ -14,7 +14,7 @@ use alloy_eips::{BlockId, eip2718::Encodable2718 as _};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rlp::Decodable as _;
-use alloy_rpc_types_eth::{BlockNumberOrTag, EIP1186AccountProofResponse};
+use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
@@ -31,7 +31,10 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::TempoStateExt as _;
+use zone_l1::{
+    TempoStateExt as _,
+    state::{L1ProofTargets, L1RpcClient},
+};
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, ErrorCode, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
     ProverConnection, VerifyRequest, VerifyResponse,
@@ -50,7 +53,7 @@ const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
 
-type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
+type L1Reads = BTreeMap<u64, L1ProofTargets>;
 
 /// Typed error context for an SPF rejection or a mismatch in its output.
 /// Errors without this context mean validation could not complete and must not
@@ -1025,26 +1028,17 @@ async fn tempo_state_witness(
     initial_header: &TempoHeader,
     reads: L1Reads,
 ) -> Result<TempoStateWitness> {
-    let requests = reads
-        .into_iter()
-        .map(|(block, accounts)| {
-            let targets = accounts
-                .into_iter()
-                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
-                .collect::<Vec<_>>();
-            (block, targets)
-        })
-        .collect::<Vec<_>>();
-    let proofs = stream::iter(requests)
-        .map(|(block, targets)| async move {
-            provider
-                .client()
-                .request::<_, Vec<EIP1186AccountProofResponse>>(
-                    "eth_getMultiProof",
-                    (targets, BlockId::number(block)),
-                )
-                .await
-                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))
+    let rpc_client =
+        L1RpcClient::from_provider(provider.clone(), tokio::runtime::Handle::current());
+    let proofs = stream::iter(reads)
+        .map(|(block, targets)| {
+            let rpc_client = rpc_client.clone();
+            async move {
+                rpc_client
+                    .get_multi_proof(BlockId::number(block), &targets)
+                    .await
+                    .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))
+            }
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()

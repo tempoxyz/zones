@@ -6,6 +6,7 @@ use alloy_primitives::{Address, B256, U64, U256};
 use alloy_rpc_types_debug::ExecutionWitness;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
+pub use zone_primitives::StorageReadKey as TempoStorageRead;
 
 /// Shorthand for the boxed future returned by [`ZoneRpcApi`](crate::handlers::ZoneRpcApi) methods.
 ///
@@ -27,15 +28,6 @@ pub struct ZoneExecutionWitness {
     /// Deduplicated Tempo L1 storage slots accessed during replay.
     #[serde(default)]
     pub tempo_reads: Vec<TempoStorageRead>,
-}
-
-/// A Tempo L1 storage slot accessed during Zone block replay.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TempoStorageRead {
-    /// Tempo account whose storage was accessed.
-    pub account: Address,
-    /// Storage slot that was accessed.
-    pub slot: B256,
 }
 
 /// A JSON-RPC 2.0 request.

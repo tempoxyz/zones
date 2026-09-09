@@ -42,3 +42,26 @@ pub(crate) struct L1SubscriberMetrics {
     /// Number of reconnect attempts after the subscriber exits or errors.
     pub reconnects: Counter,
 }
+
+/// Metrics for storage-root-keyed payload reads and deferred proof validation.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "tempo_zone_l1_verified_state")]
+pub(crate) struct VerifiedL1StateCacheMetrics {
+    /// Payload reads served directly from the verified slot cache.
+    pub slot_cache_hits: Counter,
+
+    /// Payload reads that required an exact-anchor `eth_getStorageAt` call.
+    pub slot_cache_misses: Counter,
+
+    /// Account roots authenticated from finalized-header proofs.
+    pub authenticated_account_roots: Counter,
+
+    /// Payload miss values authenticated and committed to the verified slot cache.
+    pub proved_slots: Counter,
+
+    /// Payload proof batches rejected for availability or integrity failures.
+    pub proof_failures: Counter,
+
+    /// End-to-end deferred payload proof validation duration in seconds.
+    pub proof_duration_seconds: Histogram,
+}

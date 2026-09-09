@@ -47,8 +47,7 @@ async fn l1_provider_reads_storage_slot() {
     let block = recent_block_number().await;
 
     let value = provider
-        .get_storage_async(ZONE_PORTAL, B256::ZERO, block)
-        .await
+        .get_storage(ZONE_PORTAL, B256::ZERO, block)
         .expect("should read storage from L1 RPC");
 
     println!("ZonePortal slot 0 at block {block}: {value}");
@@ -66,14 +65,12 @@ async fn l1_provider_caches_result() {
     let block = recent_block_number().await;
 
     let v1 = provider
-        .get_storage_async(ZONE_PORTAL, B256::ZERO, block)
-        .await
+        .get_storage(ZONE_PORTAL, B256::ZERO, block)
         .unwrap();
 
     // Should be served from cache now
     let v2 = provider
-        .get_storage_async(ZONE_PORTAL, B256::ZERO, block)
-        .await
+        .get_storage(ZONE_PORTAL, B256::ZERO, block)
         .unwrap();
 
     assert_eq!(v1, v2, "cached and fresh values must match");
@@ -102,8 +99,7 @@ async fn l1_provider_reads_multiple_slots() {
 
     for (i, slot) in slots.iter().enumerate() {
         let value = provider
-            .get_storage_async(ZONE_PORTAL, *slot, block)
-            .await
+            .get_storage(ZONE_PORTAL, *slot, block)
             .expect("should read slot from L1");
         println!("ZonePortal slot[{i}] at block {block}: {value}");
     }
