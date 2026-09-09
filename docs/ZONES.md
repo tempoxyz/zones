@@ -679,11 +679,19 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 
 ### Zone Node CLI Options
 
+Node startup derives the Zone ID from the loaded genesis `chainId` and computes
+the TIP-1091 portal address from that ID. The same identity is used for L1 sync,
+sequencing, RPC, P2P, and the checker. After regenesis, replacing genesis is
+enough to select the new portal; old CLI or environment identity values are
+accepted with a deprecation warning and ignored. Existing L1 chain-ID and
+on-chain portal identity checks still apply. This requires a native TIP-1091
+portal; custom portal-address overrides are no longer supported by node startup.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--l1.rpc-url` | (required) | Certified Tempo follower WebSocket RPC URL |
-| `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
-| `--zone.id` | (deprecated) | Optional compatibility check against the zone ID encoded in the genesis chain ID. |
+| `--l1.portal-address` | (deprecated) | Ignored, including `L1_PORTAL_ADDRESS`; the portal is computed from the genesis-derived Zone ID. |
+| `--zone.id` | (deprecated) | Ignored, including `ZONE_ID`; identity comes from the genesis chain ID. |
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key-file` | (required for sequencing) | Owner-readable file or FIFO containing the sequencer private key |
 | `--deposit-decryption-keys-file` | (optional) | File containing additional historical or pre-provisioned deposit decryption keys, one hex key per line |
