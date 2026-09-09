@@ -598,7 +598,7 @@ provision_up() {
     local run_key="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
     local neobank_preset="${ZONES_BENCH_NEOBANK_PRESET:-full-journey}"
     case "$neobank_preset" in
-        encrypted-deposit|private-withdrawal|full-journey|slippage-bounce|swapped-lifecycle|swapped-redemption) ;;
+        encrypted-deposit|private-withdrawal|full-journey|full-journey-congested|slippage-bounce|swapped-lifecycle|swapped-redemption) ;;
         *) die "unsupported neobank preset for provisioning: $neobank_preset" ;;
     esac
 
@@ -697,7 +697,7 @@ provision_up() {
     (( withdrawal_amount > 0 )) || die "ZONES_BENCH_WITHDRAWAL_AMOUNT must be greater than zero"
     local required_swap_uses=0
     case "$neobank_preset" in
-        full-journey|swapped-lifecycle) required_swap_uses="$max_concurrent" ;;
+        full-journey|full-journey-congested|swapped-lifecycle) required_swap_uses="$max_concurrent" ;;
         private-withdrawal|swapped-redemption)
             local setup_journeys_per_account
             setup_journeys_per_account=$(((count + accounts - 1) / accounts))

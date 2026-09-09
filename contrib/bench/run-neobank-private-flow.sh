@@ -130,7 +130,7 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
         ;;
-    full-journey)
+    full-journey|full-journey-congested)
         scenario_file=private-flow-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
@@ -444,6 +444,15 @@ txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 for command in "$txgen_bin" awk bc cast curl jq; do
     command -v "$command" >/dev/null || die "missing $command"
 done
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == full-journey-congested ]]; then
+    command -v python3 >/dev/null || die "missing python3"
+    command -v "${TXGEN_BENCH_BIN:-bench}" >/dev/null || die "missing txgen bench sender"
+    need ZONES_BENCH_L1_GENERAL_GAS_LIMIT
+    export ZONES_BENCH_L1_GENERAL_GAS_LIMIT
+    export ZONES_BENCH_COUNT ZONES_BENCH_TPS ZONES_BENCH_MAX_CONCURRENT
+    export ZONES_BENCH_STEP_TIMEOUT ZONES_BENCH_OUTPUT ZONES_BENCH_REPORT
+    python3 "$bench_dir/full-journey-congested.py" check
+fi
 
 neobank_specs="$bench_dir/neobank"
 scenario_path="$neobank_specs/$scenario_file"
@@ -462,8 +471,11 @@ secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-neobank-auth.XXXXXX")"
 chmod 700 "$secret_dir"
 export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 auth_pid=""
+measurement_pid=""
 cleanup() {
     local status=$?
+    trap - EXIT INT TERM
+    [[ -z "$measurement_pid" ]] || { kill -TERM "$measurement_pid" 2>/dev/null || true; wait "$measurement_pid" 2>/dev/null || true; }
     [[ -z "$auth_pid" ]] || { kill -TERM "$auth_pid" 2>/dev/null || true; wait "$auth_pid" 2>/dev/null || true; }
     rm -f -- "$secret_dir/mnemonic" "$secret_dir/zone-auth.json" \
         "$secret_dir/auth-token-map.log" "$secret_dir/private-balance-request.json" \
@@ -472,7 +484,9 @@ cleanup() {
     unset ZONES_BENCH_MNEMONIC
     exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 run_setup_scenario() {
     local stage="$1" scenario="$2" count="$3" report="$4" context="${5:-}"
@@ -719,10 +733,21 @@ private_flow_parent_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
-"$txgen_bin" scenario run --scenario "$scenario_path" --count "$ZONES_BENCH_COUNT" \
-    --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
-    --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
-    --sample-instances "$sample_instances" "${scenario_report_args[@]}"
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == full-journey-congested ]]; then
+    python3 "$bench_dir/full-journey-congested.py" run -- \
+        "$txgen_bin" scenario run --scenario "$scenario_path" --count "$ZONES_BENCH_COUNT" \
+        --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
+        --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
+        "${scenario_report_args[@]}" &
+    measurement_pid=$!
+    wait "$measurement_pid"
+    measurement_pid=""
+else
+    "$txgen_bin" scenario run --scenario "$scenario_path" --count "$ZONES_BENCH_COUNT" \
+        --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
+        --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
+        --sample-instances "$sample_instances" "${scenario_report_args[@]}"
+fi
 stage_end private_flow
 private_flow_tip_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
 [[ "$private_flow_tip_block" =~ ^[0-9]+$ ]] ||
@@ -778,7 +803,9 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
     stage_end redemption_postcondition
 fi
 
-assert_scenario_report "$ZONES_BENCH_REPORT" "$ZONES_BENCH_COUNT" "private flow"
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" != full-journey-congested ]]; then
+    assert_scenario_report "$ZONES_BENCH_REPORT" "$ZONES_BENCH_COUNT" "private flow"
+fi
 
 if [[ -n "$measured_token_balance_before" ]]; then
     measured_token_balance_after="$(read_l1_uint \

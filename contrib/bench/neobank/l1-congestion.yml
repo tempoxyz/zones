@@ -1,0 +1,31 @@
+# Separate background workload; never passed to the journey reporter.
+# The nonzero ABI selector is interpreted as the high bytes of modexp's base
+# length, forcing a precompile error / full gas consumption. The random argument
+# makes expiring transactions unique, even within one second from one sender.
+# This measures gas admission pressure, not expensive computation or state bloat.
+chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
+accounts:
+  congestion:
+    mnemonic: "${ZONES_BENCH_MNEMONIC}"
+    range: [5, 6]
+artifacts:
+  Congestion: abis/congestion.json
+setup: { steps: [] }
+templates:
+  congestion:
+    type: tempo
+    from: { pool: congestion, select: random }
+    gas_limit: 2000000
+    max_fee_per_gas: ${ZONES_BENCH_L1_MAX_FEE_PER_GAS}
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "${ZONES_BENCH_DLUSD}"
+    expiring_nonce: true
+    valid_for_secs: 5
+    call:
+      to: "0x0000000000000000000000000000000000000005"
+      abi: Congestion
+      function: "congestion(bytes32)"
+      args:
+        - { random_bytes: 32 }
+mix:
+  - { template: congestion, weight: 1 }

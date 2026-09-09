@@ -15,6 +15,7 @@ on:
           - encrypted-deposit
           - private-withdrawal
           - full-journey
+          - full-journey-congested
           - slippage-bounce
           - swapped-lifecycle
           - swapped-redemption
@@ -255,7 +256,7 @@ jobs:
 
           neobank_preset="$INPUT_PRESET"
           case "$neobank_preset" in
-            encrypted-deposit|private-withdrawal|full-journey|slippage-bounce|\
+            encrypted-deposit|private-withdrawal|full-journey|full-journey-congested|slippage-bounce|\
             swapped-lifecycle|swapped-redemption) ;;
             *) echo "::error::unsupported neobank preset: $neobank_preset"; exit 1 ;;
           esac
@@ -368,6 +369,12 @@ jobs:
             echo "::error::$neobank_preset requires at least $required_accounts accounts for max-concurrent=$INPUT_MAX_CONCURRENT"
             exit 1
           fi
+          if [[ "$neobank_preset" == full-journey-congested ]]; then
+            ZONES_BENCH_COUNT="$INPUT_COUNT" \
+            ZONES_BENCH_TPS="$INPUT_TPS" \
+            ZONES_BENCH_STEP_TIMEOUT="$INPUT_STEP_TIMEOUT" \
+              python3 contrib/bench/full-journey-congested.py check
+          fi
           case "$INPUT_STATE_BLOAT_GIB" in
             0|1|10|100) ;;
             *) echo "::error::state-bloat-gib must be 0, 1, 10, or 100"; exit 1 ;;
@@ -389,7 +396,7 @@ jobs:
           fi
           required_swap_uses=0
           case "$neobank_preset" in
-            full-journey|swapped-lifecycle) required_swap_uses=$INPUT_MAX_CONCURRENT ;;
+            full-journey|full-journey-congested|swapped-lifecycle) required_swap_uses=$INPUT_MAX_CONCURRENT ;;
             private-withdrawal|swapped-redemption)
               setup_journeys_per_account=$(((INPUT_COUNT + INPUT_ACCOUNTS - 1) / INPUT_ACCOUNTS))
               callback_reservation=$((1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
@@ -924,6 +931,9 @@ jobs:
 
           unit=Journeys
           rate="Target journey starts/s"
+          if [ -s "$ZONES_BENCH_OUTPUT/congestion/summary.md" ]; then
+            cat "$ZONES_BENCH_OUTPUT/congestion/summary.md" >> "$summary"
+          fi
           snapshot_status=hit
           if [ "${ZONES_BENCH_L1_CACHE_REBUILT:-0}" = 1 ]; then
             snapshot_status=rebuilt
