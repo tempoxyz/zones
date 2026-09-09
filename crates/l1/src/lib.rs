@@ -102,5 +102,3 @@ pub use subscriber::{
 
 #[cfg(test)]
 pub(crate) use queue::PendingDeposits;
-#[cfg(test)]
-pub(crate) use subscriber::LocalTempoCheckpointReader;

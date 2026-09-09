@@ -5,11 +5,9 @@ use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
+use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
 use serde::Deserialize;
-use std::{
-    collections::{HashSet, VecDeque},
-    time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
 use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_primitives::{TempoReceipt, TempoTxType};
@@ -123,61 +121,51 @@ fn make_withdrawal_bounce_back(amount: u128) -> L1Deposit {
     })
 }
 
-struct SequenceLocalTempoCheckpointReader {
-    values: Mutex<VecDeque<NumHash>>,
-    last_value: NumHash,
+fn set_tempo_checkpoint(provider: &MockEthProvider, checkpoint: NumHash) {
+    provider.add_account(
+        crate::abi::TEMPO_STATE_ADDRESS,
+        ExtendedAccount::new(0, U256::ZERO).extend_storage([
+            (
+                B256::from(
+                    crate::precompiles::tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes(),
+                ),
+                U256::from(checkpoint.number),
+            ),
+            (
+                B256::from(crate::precompiles::tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes()),
+                U256::from_be_slice(checkpoint.hash.as_slice()),
+            ),
+        ]),
+    );
 }
 
-impl SequenceLocalTempoCheckpointReader {
-    fn new(values: impl Into<VecDeque<u64>>) -> Self {
-        let values = values
-            .into()
-            .into_iter()
-            .map(|number| NumHash::new(number, B256::with_last_byte(1)))
-            .collect::<VecDeque<_>>();
-        let last_value = values.back().copied().unwrap_or_default();
-        Self {
-            values: Mutex::new(values),
-            last_value,
-        }
-    }
-
-    fn unanchored() -> Self {
-        Self {
-            values: Mutex::new(VecDeque::from([NumHash::default()])),
-            last_value: NumHash::default(),
-        }
-    }
-}
-
-impl LocalTempoCheckpointReader for SequenceLocalTempoCheckpointReader {
-    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
-        let mut values = self.values.lock();
-        Ok(values.pop_front().unwrap_or(self.last_value))
-    }
-}
-
-fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscriber {
+fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthProvider> {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+    let zone_provider = MockEthProvider::new();
+    set_tempo_checkpoint(&zone_provider, checkpoint);
 
     L1Subscriber {
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
-            enabled_tokens: crate::state::EnabledTokenRegistry::default(),
-            l1_state_cache: crate::L1StateCache::new(),
-            block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
-            leadership_sink: None,
-            encryption_keys: None,
             retain_portal_evidence: false,
             deferred_work_start: None,
         },
-        local_state,
+        zone_provider,
         deposit_queue: DepositQueue::default(),
+        enabled_tokens: crate::state::EnabledTokenRegistry::default(),
+        l1_state_cache: crate::L1StateCache::new(),
+        block_tracker: L1BlockTracker::default(),
+        leadership_sink: None,
+        encryption_keys: None,
         subscriber_metrics: Default::default(),
     }
+}
+
+fn test_subscriber(block_number: u64) -> L1Subscriber<MockEthProvider> {
+    test_subscriber_with_checkpoint(NumHash::new(block_number, B256::with_last_byte(1)))
 }
 
 #[tokio::test]
@@ -428,7 +416,7 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
 
 #[test]
 fn subscriber_applies_state_and_records_observation() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let header = make_test_header(10);
     let sealed = seal(header);
     let anchor = sealed.num_hash();
@@ -437,23 +425,22 @@ fn subscriber_applies_state_and_records_observation() {
     let cached_value = B256::with_last_byte(2);
 
     {
-        let mut cache = subscriber.config.l1_state_cache.lock();
+        let mut cache = subscriber.l1_state_cache.lock();
         cache.invalidate_and_set_anchor(9, []);
         cache.set(cached_address, cached_slot, 9, cached_value);
     }
     subscriber.update_l1_state_anchor(10, &HashSet::new());
-    subscriber.config.block_tracker.record(anchor).unwrap();
+    subscriber.block_tracker.record(anchor).unwrap();
 
     assert_eq!(
         subscriber
-            .config
             .l1_state_cache
             .lock()
             .get(cached_address, cached_slot, 10),
         Some(cached_value)
     );
     assert_eq!(
-        subscriber.config.block_tracker.observed_hash(10),
+        subscriber.block_tracker.observed_hash(10),
         Some(anchor.hash)
     );
 }
@@ -716,24 +703,21 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 
 #[test]
 fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    let subscriber = test_subscriber(0);
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
     let stable_account = address!("0x0000000000000000000000000000000000000ABC");
     let stable_slot = B256::with_last_byte(3);
     let stable_value = B256::with_last_byte(4);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .invalidate_and_set_anchor(9, []);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
     subscriber
-        .config
         .l1_state_cache
         .lock()
         .set(stable_account, stable_slot, 10, stable_value);
@@ -741,7 +725,6 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     subscriber.update_l1_state_anchor(10, &HashSet::new());
     assert_eq!(
         subscriber
-            .config
             .l1_state_cache
             .lock()
             .get(TIP403_REGISTRY_ADDRESS, slot, 10),
@@ -749,7 +732,7 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     );
 
     subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
-    let mut cache = subscriber.config.l1_state_cache.lock();
+    let mut cache = subscriber.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
         Some(stable_value)
@@ -771,22 +754,24 @@ fn deposit_hash_chain(previous_hash: B256, deposits: &[L1Deposit]) -> B256 {
 
 #[test]
 fn test_resolve_start_block_reads_live_local_state_each_time() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new(
-        VecDeque::from([10, 11]),
-    )));
+    let subscriber = test_subscriber(10);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
+    set_tempo_checkpoint(
+        &subscriber.zone_provider,
+        NumHash::new(11, B256::with_last_byte(1)),
+    );
     assert_eq!(subscriber.resolve_start_block().unwrap(), 12);
 }
 
 #[test]
 fn test_resolve_start_block_accepts_block_zero_with_nonzero_hash() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    let subscriber = test_subscriber(0);
     assert_eq!(subscriber.resolve_start_block().unwrap(), 1);
 }
 
 #[test]
 fn test_resolve_start_block_rejects_unanchored_genesis() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::unanchored()));
+    let subscriber = test_subscriber_with_checkpoint(NumHash::default());
     assert!(
         subscriber
             .resolve_start_block()
@@ -798,7 +783,7 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 
 #[tokio::test]
 async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -835,7 +820,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         vec![10, 11, 12]
     );
     assert_eq!(
-        subscriber.config.block_tracker.observed_hash(12),
+        subscriber.block_tracker.observed_hash(12),
         Some(anchor_12.hash),
         "a queue-backed subscriber must retain observations until its consumer prunes them"
     );
@@ -844,7 +829,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
 
 #[tokio::test]
 async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
+    let subscriber = test_subscriber(10);
     let asserter = Asserter::new();
     let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_mocked_client(asserter.clone())
@@ -867,7 +852,7 @@ async fn test_subscribe_block_headers_falls_back_to_http_block_filter() {
 
 #[tokio::test]
 async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
+    let subscriber = test_subscriber(10);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -881,7 +866,7 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
 
     assert_eq!(next, 11);
     assert_eq!(
-        subscriber.config.block_tracker.finalized_target(),
+        subscriber.block_tracker.finalized_target(),
         Some(FinalizedTarget {
             number: 10,
             ready: true,
@@ -893,7 +878,7 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
 
 #[tokio::test]
 async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -925,7 +910,7 @@ async fn test_sync_finalized_once_extends_a_moving_finalized_target_until_stable
         vec![10, 11, 12]
     );
     assert_eq!(
-        subscriber.config.block_tracker.finalized_target(),
+        subscriber.block_tracker.finalized_target(),
         Some(FinalizedTarget {
             number: 12,
             ready: true,
@@ -978,7 +963,7 @@ fn test_push_log_decodes_withdrawal_bounce_back() {
 
 #[test]
 fn confirmed_token_enabled_event_updates_registry() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    let subscriber = test_subscriber(0);
     let token = address!("0x20c0000000000000000000000000000000000001");
     let events = L1PortalEvents {
         enabled_tokens: vec![EnabledToken {
@@ -992,7 +977,7 @@ fn confirmed_token_enabled_event_updates_registry() {
 
     subscriber.apply_enabled_token_events(&events);
 
-    assert!(subscriber.config.enabled_tokens.read().contains(&token));
+    assert!(subscriber.enabled_tokens.read().contains(&token));
 }
 
 #[test]
@@ -1861,7 +1846,7 @@ fn corrupt_recognized_portal_log(portal: Address) -> Log {
 
 #[test]
 fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let mut subscriber = test_subscriber(9);
     subscriber.config.retain_portal_evidence = true;
     let portal = subscriber.config.portal_address;
 
@@ -1895,12 +1880,12 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
 
 #[test]
 fn pause_events_invalidate_cached_portal_storage() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let account = address!("0x0000000000000000000000000000000000000123");
     let pause_slot = B256::with_last_byte(25);
     {
-        let mut cache = subscriber.config.l1_state_cache.lock();
+        let mut cache = subscriber.l1_state_cache.lock();
         cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
     }
     let logs = vec![
@@ -1929,18 +1914,14 @@ fn pause_events_invalidate_cached_portal_storage() {
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(
-        subscriber
-            .config
-            .l1_state_cache
-            .lock()
-            .get(portal, pause_slot, 1),
+        subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
     );
 }
 
 #[tokio::test]
 async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
 
@@ -1970,7 +1951,7 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fatal() {
         }
     ));
     assert_eq!(queue.last_enqueued(), None);
-    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.block_tracker.latest(), None);
 }
 
 #[test]
@@ -2000,7 +1981,7 @@ impl LeadershipSink for RecordingLeadershipSink {
 
 #[tokio::test]
 async fn sync_applies_leadership_transition_before_enqueueing_the_activation_block() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let mut subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
     let sink = Arc::new(RecordingLeadershipSink {
@@ -2008,7 +1989,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
         seen: parking_lot::Mutex::new(Vec::new()),
         fail: false,
     });
-    subscriber.config.leadership_sink = Some(sink.clone());
+    subscriber.leadership_sink = Some(sink.clone());
 
     let new_leader = address!("0x0000000000000000000000000000000000002222");
     let log = leader_updated_log(portal, Address::ZERO, new_leader, 2, 10);
@@ -2048,10 +2029,10 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
 
 #[tokio::test]
 async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
-    let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    let mut subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;
     let queue = subscriber.deposit_queue.clone();
-    subscriber.config.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
+    subscriber.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
         queue: queue.clone(),
         seen: parking_lot::Mutex::new(Vec::new()),
         fail: true,
@@ -2086,5 +2067,5 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
 
     // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
-    assert_eq!(subscriber.config.block_tracker.latest(), None);
+    assert_eq!(subscriber.block_tracker.latest(), None);
 }
