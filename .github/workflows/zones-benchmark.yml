@@ -614,6 +614,13 @@ jobs:
           git -C "$TEMPO_ROOT" apply --check "$GITHUB_WORKSPACE/$patch"
           git -C "$TEMPO_ROOT" apply "$GITHUB_WORKSPACE/$patch"
 
+      - name: Embed benchmark contracts in Tempo fork runtimes
+        run: |
+          set -euo pipefail
+          node --test contrib/bench/prepare-tempo-runtimes.test.mjs
+          forge build --root crates/contracts --skip test --no-lint
+          node contrib/bench/prepare-tempo-runtimes.mjs "$TEMPO_ROOT" crates/contracts/out
+
       - name: Prepare persistent build directories
         env:
           RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
@@ -688,17 +695,19 @@ jobs:
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
             --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
-          nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
-            '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
-            'jemalloc,asm-keccak,keccak-cache-global,otlp' \
-            '$ZONES_BENCH_TEMPO_REF'"
+          # Build the patched source directly: the shared Tempo binary cache is
+          # keyed by upstream SHA and must neither supply nor store this binary.
+          cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
+            --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling \
+            --no-default-features --features jemalloc,asm-keccak,keccak-cache-global,otlp \
+            --bin tempo
           cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
             --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
             echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-prover-utils"
             echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
-            echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
+            echo "TEMPO_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
           } >> "$GITHUB_ENV"
 
