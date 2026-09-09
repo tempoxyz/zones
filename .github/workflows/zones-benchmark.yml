@@ -614,6 +614,11 @@ jobs:
           git -C "$TEMPO_ROOT" apply --check "$GITHUB_WORKSPACE/$patch"
           git -C "$TEMPO_ROOT" apply "$GITHUB_WORKSPACE/$patch"
 
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
       - name: Embed benchmark contracts in Tempo fork runtimes
         run: |
           set -euo pipefail
