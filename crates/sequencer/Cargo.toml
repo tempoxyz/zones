@@ -58,6 +58,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+jsonrpsee.workspace = true
 proptest.workspace = true
 reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true

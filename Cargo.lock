@@ -14196,6 +14196,7 @@ dependencies = [
  "alloy-transport",
  "eyre",
  "futures",
+ "jsonrpsee",
  "k256",
  "metrics",
  "parking_lot",
