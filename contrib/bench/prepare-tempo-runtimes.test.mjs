@@ -31,6 +31,14 @@ test('supports Tempo revisions with only the initial runtime set', () => {
   assert.equal(replaceRuntimes(runtimes(''), artifacts).constants.length, 3);
 });
 
+test('supports a future fork that upgrades only one contract', () => {
+  const source = runtimes('') + runtimes('T12_') +
+    '\npub const T13_ZONE_PORTAL_RUNTIME: Bytes = bytes!("0x6000");';
+  const result = replaceRuntimes(source, artifacts);
+  assert.equal(result.constants.length, 7);
+  assert.ok(result.source.includes('pub const T13_ZONE_PORTAL_RUNTIME: Bytes = bytes!(\n    "0x6001"\n);'));
+});
+
 test('rejects empty, odd-length, non-hex and unlinked bytecode', () => {
   for (const object of ['', '0x', '0x123', '0xgg', '__$library$__']) {
     assert.throws(() => replaceRuntimes(runtimes(''), {
@@ -42,6 +50,6 @@ test('rejects empty, odd-length, non-hex and unlinked bytecode', () => {
 test('fails closed when upstream changes the runtime representation', () => {
   assert.throws(() => replaceRuntimes('', artifacts), /No Tempo Zone runtime/);
   assert.throws(() => replaceRuntimes(runtimes('').replace('Bytes = bytes!', 'Bytes = include_bytes!'), artifacts), /Unsupported runtime definition/);
-  assert.throws(() => replaceRuntimes(runtimes('').replace('ZONE_VERIFIER_RUNTIME', 'UNRELATED_RUNTIME'), artifacts), /Incomplete runtime set/);
+  assert.throws(() => replaceRuntimes(runtimes('').replace('ZONE_VERIFIER_RUNTIME', 'UNRELATED_RUNTIME'), artifacts), /Missing runtime constants for Verifier/);
   assert.throws(() => replaceRuntimes(runtimes('') + runtimes(''), artifacts), /Duplicate runtime constant/);
 });
