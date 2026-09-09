@@ -571,7 +571,11 @@ pub struct ZoneArgs {
     pub checker_mode: zone_checker::CheckerMode,
 
     /// Require SPF validation and a Nitro NSM attestation before settlement.
-    #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
+    #[arg(
+        long = "sequencer.enable-prover",
+        env = "SEQUENCER_ENABLE_PROVER",
+        requires = "prover_address"
+    )]
     pub enable_prover: bool,
 
     /// Send witnesses to a remote Nitro prover capable of producing settlement attestations.
@@ -654,6 +658,57 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn settlement_prover_requires_an_address() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let disabled = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert!(!disabled.zone.enable_prover);
+        assert!(disabled.zone.prover_address.is_none());
+
+        let missing_address =
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--sequencer.enable-prover"]))
+                .unwrap_err();
+        assert_eq!(
+            missing_address.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(
+            missing_address
+                .to_string()
+                .contains("--sequencer.prover-address")
+        );
+
+        let missing_enable = ZoneArgsParser::try_parse_from(
+            common
+                .into_iter()
+                .chain(["--sequencer.prover-address", "localhost:9000"]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing_enable.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let enabled = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.enable-prover",
+            "--sequencer.prover-address",
+            "localhost:9000",
+        ]))
+        .unwrap();
+        assert!(enabled.zone.enable_prover);
+        assert_eq!(
+            enabled.zone.prover_address.as_deref(),
+            Some("localhost:9000")
+        );
     }
 
     #[test]
