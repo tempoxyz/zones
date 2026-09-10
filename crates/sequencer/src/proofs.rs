@@ -18,13 +18,12 @@ use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use zone_rpc::{ZoneDebugApi, types::ZoneExecutionWitness};
 
 use crate::{ZoneSequencerProvider, resolve_portal_zone_anchor};
 
 const FORMAT_VERSION: u32 = 2;
-const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Reload the durable spool on a blocking task, then start collection until shutdown.
@@ -39,77 +38,66 @@ pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
             .await
             .context("proof store opening task panicked")??,
     );
-    let (status_tx, status_rx) = watch::channel(CollectorStatus::default());
+    let (reconciled_tx, reconciled_rx) = watch::channel(false);
     let (requests_tx, requests_rx) = mpsc::channel(16);
     let collector = ProofCollector {
         config,
         provider,
         store: store.clone(),
-        status: status_tx,
+        reconciled: reconciled_tx,
         requests: requests_rx,
     };
     let handle = ProofCollectorHandle {
         store,
-        status: status_rx,
+        reconciled: reconciled_rx,
         requests: requests_tx,
     };
-    let task = tokio::spawn(collector.run(shutdown));
+    let task = tokio::spawn(async move {
+        shutdown.run_until_cancelled(collector.run()).await;
+    });
     Ok((handle, task))
 }
 
-/// Read/prune handle shared with the shadow prover and settlement monitor.
+/// Collection and retained-witness access shared with the engine and shadow prover.
 #[derive(Clone, Debug)]
 pub struct ProofCollectorHandle {
     store: Arc<ProofStore>,
-    status: watch::Receiver<CollectorStatus>,
+    reconciled: watch::Receiver<bool>,
     requests: mpsc::Sender<CollectRequest>,
 }
 
 impl ProofCollectorHandle {
     /// Collect one executed block before it becomes canonical.
     ///
-    /// Success means the proof file and its directory have both been synced. Dropping this
-    /// future does not cancel an already queued request or authorize canonicalization.
+    /// Success means the proof file and its directory have both been synced. Each request
+    /// gets one attempt and returns its error directly. Dropping this future does not cancel
+    /// an in-flight write or authorize canonicalization.
     pub async fn collect_and_persist(&self, hash: B256) -> Result<()> {
         let (response, result) = oneshot::channel();
-        let result = async {
-            self.requests
-                .send(CollectRequest { hash, response })
-                .await
-                .context("proof collector stopped")?;
-            result.await.context("proof collector dropped request")?
-        };
-        let mut status = self.status.clone();
-        tokio::pin!(result);
-        loop {
-            if let CollectorStatus::Failed(failure) = &*status.borrow() {
-                return Err(CollectionUnavailable(failure.clone()).into());
-            }
-            tokio::select! {
-                result = &mut result => return result,
-                changed = status.changed() => { changed.context("proof collector stopped")?; }
-            }
-        }
+        self.requests
+            .send(CollectRequest { hash, response })
+            .await
+            .context("proof collector stopped")?;
+        result
+            .await
+            .context("proof collector stopped before persistence")?
     }
 
     /// Wait for a reconciled, complete inclusive range of retained proofs.
     pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
         ensure!(from <= to, "invalid proof range {from}..={to}");
-        let mut status = self.status.clone();
+        let mut reconciled = self.reconciled.clone();
         loop {
             ensure!(
                 from > self.store.state.read().pruned_through,
                 "requested proof range {from}..={to} has already been settled and pruned"
             );
-            if matches!(*status.borrow(), CollectorStatus::Ready)
+            if *reconciled.borrow()
                 && let Ok(proofs) = self.store.snapshot(from, to)
             {
                 return Ok(proofs);
             }
-            if let CollectorStatus::Failed(failure) = &*status.borrow() {
-                return Err(CollectionUnavailable(failure.clone()).into());
-            }
-            status
+            reconciled
                 .changed()
                 .await
                 .context("proof collector stopped before the requested range was available")?;
@@ -121,12 +109,12 @@ struct ProofCollector<P> {
     config: ProofCollectorConfig,
     provider: P,
     store: Arc<ProofStore>,
-    status: watch::Sender<CollectorStatus>,
+    reconciled: watch::Sender<bool>,
     requests: mpsc::Receiver<CollectRequest>,
 }
 
 impl<P: ZoneSequencerProvider> ProofCollector<P> {
-    async fn run(mut self, shutdown: CancellationToken) {
+    async fn run(mut self) {
         info!(
             target: "zone::sequencer::proofs",
             directory = %self.config.directory.display(),
@@ -136,47 +124,29 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         let mut fallback = tokio::time::interval(FALLBACK_POLL_INTERVAL);
 
         loop {
-            match self.reconcile_and_collect().await {
-                Ok(()) => {
-                    self.status.send_replace(CollectorStatus::Ready);
-                }
-                Err(error) => {
-                    error!(target: "zone::sequencer::proofs", %error, "Proof collection failed");
-                    self.status
-                        .send_replace(CollectorStatus::Failed(Arc::new(error)));
-                    if shutdown
-                        .run_until_cancelled(tokio::time::sleep(RETRY_INTERVAL))
-                        .await
-                        .is_none()
-                    {
-                        return;
-                    }
-                    continue;
-                }
-            }
-
             tokio::select! {
-                biased;
-                () = shutdown.cancelled() => return,
                 request = self.requests.recv() => {
                     let Some(request) = request else {
-                        warn!(target: "zone::sequencer::proofs", "Proof collection request channel closed");
                         return;
                     };
                     let result = self.collect_and_persist(request.hash).await;
                     let _ = request.response.send(result);
+                    continue;
                 }
                 _ = fallback.tick() => {}
                 notification = canonical.next() => {
                     let Some(notification) = notification else {
-                        warn!(target: "zone::sequencer::proofs", "Canonical state stream closed");
                         return;
                     };
                     if notification.reverted().is_some() {
-                        self.status.send_replace(CollectorStatus::Reconciling);
-                        info!(target: "zone::sequencer::proofs", "Reconciling proof spool after canonical reorg");
+                        self.reconciled.send_replace(false);
                     }
                 }
+            }
+
+            // Background errors must not prevent servicing explicit requests on the next pass.
+            if let Err(error) = self.reconcile_and_collect().await {
+                error!(target: "zone::sequencer::proofs", error = ?error, "Proof collection failed; retrying");
             }
         }
     }
@@ -195,6 +165,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             tokio::task::spawn_blocking(move || store.prune_through(anchor.block_number))
                 .await
                 .context("proof pruning task panicked")??;
+            self.reconciled.send_modify(|_| {});
         }
         let head = self.provider.best_block_number()?;
         let store = self.store.clone();
@@ -204,6 +175,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         })
         .await
         .context("proof reconciliation task panicked")??;
+        self.reconciled.send_replace(true);
 
         let start = self.store.state.read().pruned_through.saturating_add(1);
         for number in start..=head {
@@ -232,7 +204,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         tokio::task::spawn_blocking(move || store.insert(proof))
             .await
             .context("proof persistence task panicked")??;
-        self.status.send_modify(|_| {});
+        self.reconciled.send_modify(|_| {});
         info!(
             target: "zone::sequencer::proofs",
             zone_block = number,
@@ -358,21 +330,19 @@ impl ProofStore {
     fn insert(&self, proof: StoredBlockProof) -> Result<Arc<StoredBlockProof>> {
         proof.validate()?;
         let mut state = self.state.write();
-        {
-            if proof.witness.block_number <= state.pruned_through {
-                bail!(
-                    "cannot store proof for settled Zone block {}",
-                    proof.witness.block_number
-                );
-            }
-            if let Some(existing) = state.proofs.get(&proof.witness.block_number) {
-                ensure!(
-                    existing.witness.block_hash == proof.witness.block_hash,
-                    "conflicting proof already stored at Zone block {}",
-                    proof.witness.block_number
-                );
-                return Ok(existing.clone());
-            }
+        if proof.witness.block_number <= state.pruned_through {
+            bail!(
+                "cannot store proof for settled Zone block {}",
+                proof.witness.block_number
+            );
+        }
+        if let Some(existing) = state.proofs.get(&proof.witness.block_number) {
+            ensure!(
+                existing.witness.block_hash == proof.witness.block_hash,
+                "conflicting proof already stored at Zone block {}",
+                proof.witness.block_number
+            );
+            return Ok(existing.clone());
         }
 
         let path = self.directory.join(proof.file_name());
@@ -534,32 +504,9 @@ impl StoredBlockProof {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-enum CollectorStatus {
-    #[default]
-    Reconciling,
-    Ready,
-    Failed(Arc<eyre::Report>),
-}
-
 struct CollectRequest {
     hash: B256,
     response: oneshot::Sender<Result<()>>,
-}
-
-#[derive(Debug)]
-struct CollectionUnavailable(Arc<eyre::Report>);
-
-impl std::fmt::Display for CollectionUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("proof collection is unavailable")
-    }
-}
-
-impl std::error::Error for CollectionUnavailable {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref().as_ref())
-    }
 }
 
 fn sync_directory(directory: &Path) -> Result<()> {
@@ -724,11 +671,11 @@ mod tests {
         let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
         store.insert(proof(1, B256::repeat_byte(1))).unwrap();
         store.prune_through(1).unwrap();
-        let (_status_tx, status) = watch::channel(CollectorStatus::Ready);
+        let (_reconciled_tx, reconciled) = watch::channel(true);
         let (requests, _receiver) = mpsc::channel(1);
         let handle = ProofCollectorHandle {
             store,
-            status,
+            reconciled,
             requests,
         };
         let result = tokio::time::timeout(Duration::from_secs(1), handle.wait_for_range(1, 1))
@@ -743,56 +690,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_failure_preserves_the_error_chain() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
-        let error = eyre::Report::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-            .wrap_err("open proof file");
-        let (_status_tx, status) = watch::channel(CollectorStatus::Failed(Arc::new(error)));
-        let (requests, _receiver) = mpsc::channel(1);
-        let handle = ProofCollectorHandle {
-            store,
-            status,
-            requests,
-        };
-        let error = handle.wait_for_range(1, 1).await.unwrap_err();
-        assert!(error.chain().any(|source| {
-            source
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
-        }));
-    }
-
-    #[tokio::test]
-    async fn collection_request_returns_the_persistence_error() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
-        let (_status_tx, status) = watch::channel(CollectorStatus::Ready);
-        let (requests, mut receiver) = mpsc::channel::<CollectRequest>(1);
-        let handle = ProofCollectorHandle {
-            store,
-            status,
-            requests,
-        };
-        let responder = async {
-            let request = receiver.recv().await.unwrap();
-            assert_eq!(request.hash, B256::ZERO);
-            request
-                .response
-                .send(Err(std::io::Error::from(
+    async fn collection_request_returns_its_result_or_worker_exit() {
+        for outcome in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+            let (_reconciled_tx, reconciled) = watch::channel(false);
+            let (requests, mut receiver) = mpsc::channel::<CollectRequest>(1);
+            let handle = ProofCollectorHandle {
+                store,
+                reconciled,
+                requests,
+            };
+            let waiter = handle.collect_and_persist(B256::ZERO);
+            tokio::pin!(waiter);
+            let responder = async {
+                let request = receiver.recv().await.unwrap();
+                assert_eq!(request.hash, B256::ZERO);
+                // Completion depends only on the response, not background readiness.
+                match outcome {
+                    0 => {
+                        request.response.send(Ok(())).unwrap();
+                    }
+                    1 => {
+                        request
+                            .response
+                            .send(Err(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )
+                            .into()))
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            };
+            let (result, ()) = tokio::join!(waiter, responder);
+            match outcome {
+                0 => result.unwrap(),
+                1 => assert_eq!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<std::io::Error>()
+                        .unwrap()
+                        .kind(),
                     std::io::ErrorKind::PermissionDenied,
-                )
-                .into()))
-                .unwrap();
-        };
-        let (result, ()) = tokio::join!(handle.collect_and_persist(B256::ZERO), responder);
-        assert_eq!(
-            result
-                .unwrap_err()
-                .downcast_ref::<std::io::Error>()
-                .unwrap()
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+                ),
+                _ => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("proof collector stopped")
+                ),
+            }
+        }
     }
 }

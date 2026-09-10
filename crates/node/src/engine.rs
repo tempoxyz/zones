@@ -128,7 +128,11 @@ trait AvailableBlockDrain {
     fn permit(&self, block: &Self::Block) -> Option<EngineExit>;
 
     /// Completes and consumes one block.
-    async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()>;
+    async fn advance_one(
+        &mut self,
+        block: Self::Block,
+        stop: &CancellationToken,
+    ) -> eyre::Result<()>;
 }
 
 /// Drain available blocks until the queue is empty, cancellation is observed, or the
@@ -154,7 +158,7 @@ where
         if let Some(exit) = drain.permit(&block) {
             return Ok(Some(exit));
         }
-        drain.advance_one(block).await?;
+        drain.advance_one(block, stop).await?;
     }
 }
 
@@ -340,7 +344,11 @@ impl ZoneEngine {
     /// with those attributes, waits for the payload to be built, then submits
     /// via `newPayload`. Only confirms (removes) the L1 block from the
     /// deposit queue after `newPayload` succeeds.
-    async fn advance(&mut self, l1_block: L1BlockDeposits) -> eyre::Result<()> {
+    async fn advance(
+        &mut self,
+        l1_block: L1BlockDeposits,
+        stop: &CancellationToken,
+    ) -> eyre::Result<()> {
         let l1_num_hash = l1_block.header.num_hash();
 
         // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
@@ -411,9 +419,9 @@ impl ZoneEngine {
         }
 
         if let Some(collector) = &self.proof_collector {
-            collector
-                .collect_and_persist(header.hash())
+            stop.run_until_cancelled(collector.collect_and_persist(header.hash()))
                 .await
+                .ok_or_else(|| eyre::eyre!("engine stopped while waiting for witness persistence"))?
                 .wrap_err_with(|| {
                     format!("collect proofs before canonicalizing Zone block {block_number}")
                 })?;
@@ -455,8 +463,12 @@ impl AvailableBlockDrain for ZoneEngine {
             .and_then(|permit| permit.check(block.header.number()))
     }
 
-    async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
-        self.advance(block).await
+    async fn advance_one(
+        &mut self,
+        block: Self::Block,
+        stop: &CancellationToken,
+    ) -> eyre::Result<()> {
+        self.advance(block, stop).await
     }
 }
 
@@ -515,7 +527,11 @@ mod tests {
                 .map(|(_, exit)| exit.clone())
         }
 
-        async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
+        async fn advance_one(
+            &mut self,
+            block: Self::Block,
+            _stop: &CancellationToken,
+        ) -> eyre::Result<()> {
             if let Some(started) = self.first_started.take() {
                 let _ = started.send(());
                 self.release_first
