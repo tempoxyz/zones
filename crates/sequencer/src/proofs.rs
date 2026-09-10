@@ -70,15 +70,11 @@ impl ProofCollectorHandle {
     ///
     /// Success means the proof file and its directory have both been synced. Dropping this
     /// future does not cancel an already queued request or authorize canonicalization.
-    pub async fn collect_and_persist(&self, number: u64, hash: B256) -> Result<()> {
+    pub async fn collect_and_persist(&self, hash: B256) -> Result<()> {
         let (response, result) = oneshot::channel();
         let result = async {
             self.requests
-                .send(CollectRequest {
-                    number,
-                    hash,
-                    response,
-                })
+                .send(CollectRequest { hash, response })
                 .await
                 .context("proof collector stopped")?;
             result.await.context("proof collector dropped request")?
@@ -167,7 +163,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
                         warn!(target: "zone::sequencer::proofs", "Proof collection request channel closed");
                         return;
                     };
-                    let result = self.collect_and_persist(request.number, request.hash).await;
+                    let result = self.collect_and_persist(request.hash).await;
                     let _ = request.response.send(result);
                 }
                 _ = fallback.tick() => {}
@@ -218,19 +214,20 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             if self.store.contains(number, block_hash) {
                 continue;
             }
-            self.collect_and_persist(number, block_hash).await?;
+            self.collect_and_persist(block_hash).await?;
         }
         Ok(())
     }
 
-    async fn collect_and_persist(&self, number: u64, block_hash: B256) -> Result<()> {
-        if self.store.contains(number, block_hash) {
+    async fn collect_and_persist(&self, block_hash: B256) -> Result<()> {
+        if self.store.contains_hash(block_hash) {
             return Ok(());
         }
+        let proof = self.collect_block(block_hash).await?;
+        let number = proof.witness.block_number;
         if self.store.state.read().proofs.contains_key(&number) {
             self.invalidate_from(number).await?;
         }
-        let proof = self.collect_block(number, block_hash).await?;
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.insert(proof))
             .await
@@ -252,17 +249,17 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             .context("proof invalidation task panicked")?
     }
 
-    async fn collect_block(&self, number: u64, block_hash: B256) -> Result<StoredBlockProof> {
+    async fn collect_block(&self, block_hash: B256) -> Result<StoredBlockProof> {
         let witness = self
             .config
             .debug_api
             .zone_execution_witness(block_hash.into())
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))
-            .wrap_err_with(|| format!("collect witness for Zone block {number}"))?;
+            .wrap_err_with(|| format!("collect witness for Zone block {block_hash}"))?;
         ensure!(
             witness.block_hash == block_hash,
-            "collected witness does not match Zone block {number} ({block_hash})"
+            "collected witness does not match Zone block {block_hash}"
         );
         Ok(StoredBlockProof {
             format_version: FORMAT_VERSION,
@@ -409,6 +406,14 @@ impl ProofStore {
             .is_some_and(|proof| proof.witness.block_hash == hash)
     }
 
+    fn contains_hash(&self, hash: B256) -> bool {
+        self.state
+            .read()
+            .proofs
+            .values()
+            .any(|proof| proof.witness.block_hash == hash)
+    }
+
     fn snapshot(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
         ensure!(from <= to, "invalid proof range {from}..={to}");
         let state = self.state.read();
@@ -538,7 +543,6 @@ enum CollectorStatus {
 }
 
 struct CollectRequest {
-    number: u64,
     hash: B256,
     response: oneshot::Sender<Result<()>>,
 }
@@ -595,6 +599,8 @@ mod tests {
         let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
         store.insert(proof(1, hash)).unwrap();
         assert_eq!(store.snapshot(1, 1).unwrap()[0].witness.block_hash, hash);
+        assert!(store.contains_hash(hash));
+        assert!(!store.contains_hash(B256::ZERO));
         let json = fs::read_to_string(directory.path().join(proof(1, hash).file_name())).unwrap();
         let stored_json: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(stored_json["formatVersion"], FORMAT_VERSION);
@@ -606,6 +612,7 @@ mod tests {
         let reopened = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
         assert_eq!(*reopened.snapshot(1, 1).unwrap()[0], proof(1, hash));
         reopened.prune_through(1).unwrap();
+        assert!(!reopened.contains_hash(hash));
         assert!(reopened.snapshot(1, 1).is_err());
         assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
     }
@@ -769,7 +776,7 @@ mod tests {
         };
         let responder = async {
             let request = receiver.recv().await.unwrap();
-            assert_eq!(request.number, 1);
+            assert_eq!(request.hash, B256::ZERO);
             request
                 .response
                 .send(Err(std::io::Error::from(
@@ -778,7 +785,7 @@ mod tests {
                 .into()))
                 .unwrap();
         };
-        let (result, ()) = tokio::join!(handle.collect_and_persist(1, B256::ZERO), responder);
+        let (result, ()) = tokio::join!(handle.collect_and_persist(B256::ZERO), responder);
         assert_eq!(
             result
                 .unwrap_err()

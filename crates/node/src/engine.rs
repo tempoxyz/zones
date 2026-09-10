@@ -412,7 +412,7 @@ impl ZoneEngine {
 
         if let Some(collector) = &self.proof_collector {
             collector
-                .collect_and_persist(block_number, header.hash())
+                .collect_and_persist(header.hash())
                 .await
                 .wrap_err_with(|| {
                     format!("collect proofs before canonicalizing Zone block {block_number}")
