@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use alloy_consensus::{BlockHeader, Sealable as _, transaction::TxHashRef};
+use alloy_consensus::{BlockHeader, Sealable as _, Transaction as _, transaction::TxHashRef};
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256, keccak256};
@@ -23,7 +23,7 @@ use alloy_rpc_types_eth::{
 };
 use alloy_sol_types::SolCall;
 use eyre::{OptionExt as _, WrapErr};
-use futures::{StreamExt, TryStreamExt as _, stream};
+use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
@@ -56,7 +56,7 @@ use tokio::{
 use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
@@ -286,6 +286,11 @@ where
         let block_number = block.header().number();
         let block_hash = block.hash();
         let parent_hash = block.parent_hash();
+        let opening_tx_input = block
+            .body()
+            .transactions
+            .first()
+            .map(|tx| tx.input().clone());
 
         let (execution_witness, reads, initial_tempo) = self
             .eth_api
@@ -321,10 +326,14 @@ where
             .await
             .map_err(|error| operator_rpc_error(internal(error)))?;
 
-        let (initial_tempo_header, tempo_state) =
-            collect_tempo_witness(&self.l1_provider, initial_tempo, &reads)
-                .await
-                .map_err(|error| operator_rpc_error(internal(error)))?;
+        let (initial_tempo_header, tempo_state) = collect_tempo_witness(
+            &self.l1_provider,
+            initial_tempo,
+            opening_tx_input.as_ref().map(|input| input.as_ref()),
+            &reads,
+        )
+        .await
+        .map_err(|error| operator_rpc_error(internal(error)))?;
         Ok(ZoneExecutionWitness {
             block_number,
             block_hash,
@@ -336,10 +345,11 @@ where
     }
 }
 
-/// Fetch proofs at the checkpoints actually used by replay, including reads before advanceTempo.
+/// Fetch all L1 read proofs at the checkpoint selected by the opening advanceTempo transaction.
 async fn collect_tempo_witness(
     provider: &DynProvider<TempoNetwork>,
     initial_tempo: alloy_eips::NumHash,
+    opening_tx_input: Option<&[u8]>,
     reads: &HashSet<zone_evm::TempoStorageRead>,
 ) -> eyre::Result<(TempoHeader, Vec<Bytes>)> {
     let initial_header = provider
@@ -355,36 +365,37 @@ async fn collect_tempo_witness(
         initial_tempo.number
     );
 
-    let mut targets = BTreeMap::<u64, BTreeMap<Address, BTreeSet<B256>>>::new();
-    for read in reads {
-        targets
-            .entry(read.block_number)
-            .or_default()
-            .entry(read.account)
-            .or_default()
-            .insert(read.slot);
+    if reads.is_empty() {
+        return Ok((initial_header, Vec::new()));
     }
-    let proofs = stream::iter(targets)
-        .map(|(number, accounts)| async move {
-            let targets = accounts
-                .into_iter()
-                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
-                .collect::<Vec<_>>();
-            provider
-                .client()
-                .request::<_, Vec<EIP1186AccountProofResponse>>(
-                    "eth_getMultiProof",
-                    (targets, BlockId::number(number)),
-                )
-                .await
-                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {number}"))
-        })
-        .buffer_unordered(8)
-        .try_collect::<Vec<_>>()
-        .await?;
+
+    let advance = IZoneInbox::advanceTempoCall::abi_decode(
+        opening_tx_input.ok_or_eyre("Zone block has no advanceTempo transaction")?,
+    )
+    .wrap_err("decode opening advanceTempo transaction")?;
+    let tempo_header = alloy_rlp::decode_exact::<TempoHeader>(&advance.header)
+        .wrap_err("decode advanceTempo checkpoint")?;
+    let tempo_block_number = tempo_header.number();
+
+    let mut targets = BTreeMap::<Address, BTreeSet<B256>>::new();
+    for read in reads {
+        targets.entry(read.account).or_default().insert(read.slot);
+    }
+    let targets = targets
+        .into_iter()
+        .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
+    let proofs = provider
+        .client()
+        .request::<_, Vec<EIP1186AccountProofResponse>>(
+            "eth_getMultiProof",
+            (targets, BlockId::number(tempo_block_number)),
+        )
+        .await
+        .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {tempo_block_number}"))?;
 
     let mut nodes = BTreeMap::new();
-    for proof in proofs.into_iter().flatten() {
+    for proof in proofs {
         for node in proof.account_proof.into_iter().chain(
             proof
                 .storage_proof
@@ -1600,7 +1611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tempo_witness_collects_each_checkpoint_and_propagates_errors() -> eyre::Result<()> {
+    async fn tempo_witness_collects_checkpoint_proofs_and_propagates_errors() -> eyre::Result<()> {
         use alloy_provider::ProviderBuilder;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1651,19 +1662,18 @@ mod tests {
             .erased();
         let account = Address::repeat_byte(0xaa);
         let slot = B256::repeat_byte(0xbb);
-        let reads = HashSet::from([
-            zone_evm::TempoStorageRead {
-                account,
-                slot,
-                block_number: 10,
-            },
-            zone_evm::TempoStorageRead {
-                account,
-                slot,
-                block_number: 11,
-            },
-        ]);
-        let (actual_header, nodes) = collect_tempo_witness(&provider, initial, &reads).await?;
+        let reads = HashSet::from([zone_evm::TempoStorageRead { account, slot }]);
+        let mut checkpoint = TempoHeader::default();
+        checkpoint.inner.number = 10;
+        let opening_tx_input = IZoneInbox::advanceTempoCall {
+            header: alloy_rlp::encode(&checkpoint).into(),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabledTokens: Vec::new(),
+        }
+        .abi_encode();
+        let (actual_header, nodes) =
+            collect_tempo_witness(&provider, initial, Some(&opening_tx_input), &reads).await?;
         assert_eq!(actual_header, header);
         assert_eq!(
             nodes.into_iter().collect::<BTreeSet<_>>(),
@@ -1671,20 +1681,15 @@ mod tests {
         );
         {
             let requests = requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert_eq!(
-                requests
-                    .iter()
-                    .map(|request| request[1].clone())
-                    .collect::<HashSet<_>>(),
-                HashSet::from([serde_json::json!("0xa"), serde_json::json!("0xb")])
-            );
-            for request in requests.iter() {
-                assert_eq!(request[0], serde_json::json!([[account, [slot]]]));
-            }
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0][1], serde_json::json!("0xa"));
+            assert_eq!(requests[0][0], serde_json::json!([[account, [slot]]]));
         }
         fail.store(true, Ordering::Relaxed);
-        let error = collect_tempo_witness(&provider, initial, &reads)
+        let (_, nodes) = collect_tempo_witness(&provider, initial, None, &HashSet::new()).await?;
+        assert!(nodes.is_empty());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let error = collect_tempo_witness(&provider, initial, Some(&opening_tx_input), &reads)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("proof unavailable"));
@@ -1694,6 +1699,7 @@ mod tests {
                 hash: B256::ZERO,
                 ..initial
             },
+            None,
             &HashSet::new(),
         )
         .await

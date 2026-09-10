@@ -477,11 +477,7 @@ impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
         self.reads
             .lock()
             .expect("L1 read recorder lock poisoned")
-            .insert(TempoStorageRead {
-                account,
-                slot,
-                block_number,
-            });
+            .insert(TempoStorageRead { account, slot });
         Ok(value)
     }
 }
@@ -489,8 +485,6 @@ impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
 /// A Tempo L1 storage slot accessed while replaying a Zone block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TempoStorageRead {
-    /// Tempo block against which this storage read was made.
-    pub block_number: u64,
     /// Tempo account whose storage was accessed.
     pub account: Address,
     /// Storage slot that was accessed.
@@ -522,7 +516,7 @@ mod tests {
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, zone_chain_id};
 
     #[test]
-    fn l1_storage_recorder_preserves_each_read_checkpoint() {
+    fn l1_storage_recorder_deduplicates_successful_reads() {
         let account = Address::repeat_byte(0xaa);
         let slot = B256::repeat_byte(0xbb);
         let value = B256::repeat_byte(0xcc);
@@ -530,21 +524,9 @@ mod tests {
 
         assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
         assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
-        assert_eq!(reader.read_l1_storage(account, slot, 11).unwrap(), value);
         assert_eq!(
             reader.take_reads(),
-            HashSet::from_iter([
-                TempoStorageRead {
-                    account,
-                    slot,
-                    block_number: 10
-                },
-                TempoStorageRead {
-                    account,
-                    slot,
-                    block_number: 11
-                },
-            ])
+            HashSet::from_iter([TempoStorageRead { account, slot }])
         );
 
         let failing = RecordingL1StorageReader::new(MockL1Reader::failing_storage());
