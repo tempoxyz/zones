@@ -378,7 +378,7 @@ async fn recovery_witness(
         } else {
             assert_eq!(txs.len(), 1);
             assert!(
-                generated.tempo_reads.is_empty(),
+                generated.tempo_state.is_empty(),
                 "checkpoint must not read L1 state"
             );
             let call = IZoneInbox::advanceTempoHeadersCall::abi_decode(txs[0].input())?;
@@ -391,19 +391,8 @@ async fn recovery_witness(
                 None,
             )
         };
-        for read in generated.tempo_reads {
-            let proof = l1_provider
-                .get_proof(read.account, vec![read.slot])
-                .block_id(BlockId::number(header.number()))
-                .await?;
-            for node in proof.account_proof {
-                tempo_nodes.insert(keccak256(&node), node);
-            }
-            for storage in proof.storage_proof {
-                for node in storage.proof {
-                    tempo_nodes.insert(keccak256(&node), node);
-                }
-            }
+        for node in generated.tempo_state {
+            tempo_nodes.insert(keccak256(&node), node);
         }
         blocks.push(ZoneBlock {
             number,

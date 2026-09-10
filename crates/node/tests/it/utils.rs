@@ -330,6 +330,19 @@ async fn handle_test_l1_rpc_request(
         "eth_chainId" => serde_json::json!(format!("0x{chain_id:x}")),
         "eth_blockNumber" => serde_json::json!("0x0"),
         "eth_getCode" => serde_json::json!("0x01"),
+        // Synthetic SPF fixtures supply their own Tempo trie nodes; only the initial header
+        // and a successful proof RPC are needed when generating their Zone witness.
+        "eth_getMultiProof" => serde_json::json!([]),
+        "eth_getBlockByNumber" => {
+            let mut block = serde_json::to_value(TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header::new(TempoHeader::default()),
+                timestamp_millis: 0,
+            })
+            .expect("test L1 header should serialize");
+            block["transactions"] = serde_json::json!([]);
+            block["uncles"] = serde_json::json!([]);
+            block
+        }
         "eth_newBlockFilter" => serde_json::json!("0x1"),
         "eth_getFilterChanges" => serde_json::json!([]),
         "eth_uninstallFilter" => serde_json::json!(true),
