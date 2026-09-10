@@ -295,10 +295,9 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("batch extraction", started, ());
 
     let started = start_phase("Zone and Tempo state witnesses");
-    let (zone_state_witness, initial_tempo_state_witness) =
+    let (zone_state_witness, tempo_state_witness) =
         zone_witnesses(&zone_provider, from_block, to_block).await?;
-    let initial_tempo_header =
-        decode_tempo_header(&initial_tempo_state_witness.initial_tempo_header_rlp)?;
+    let initial_tempo_header = decode_tempo_header(&tempo_state_witness.initial_tempo_header_rlp)?;
     timings.record("Zone and Tempo state witnesses", started, ());
 
     let final_tempo_header = extracted
@@ -326,7 +325,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         parent_header,
         zone_blocks: extracted.iter().map(|block| block.input.clone()).collect(),
         zone_state_witness,
-        tempo_state_witness: initial_tempo_state_witness,
+        tempo_state_witness,
         tempo_ancestry_headers,
     };
 
