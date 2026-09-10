@@ -84,7 +84,7 @@ impl fmt::Debug for ShadowProverConfig {
 #[derive(Debug, Clone)]
 pub struct ShadowProver {
     sender: mpsc::Sender<ProverJob>,
-    proofs: ProofCollectorHandle,
+    _shutdown: Arc<tokio_util::sync::DropGuard>,
 }
 
 /// Exact Tempo anchor committed by a finalized batch submission.
@@ -102,7 +102,6 @@ struct ProverJob {
     to: u64,
     batch: BatchData,
     anchor: Option<ShadowProofAnchor>,
-    proofs: Vec<Arc<StoredBlockProof>>,
     enqueued_at: Instant,
 }
 
@@ -203,13 +202,19 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     };
     let metrics = ProverMetrics::default();
 
-    tokio::spawn(async move {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let progress = proofs.start_shadow_prover();
+    let shutdown_guard = Arc::new(shutdown.clone().drop_guard());
+    tokio::spawn(shutdown.run_until_cancelled_owned(async move {
         while let Some(job) = receiver.recv().await {
             metrics
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
             let started = Instant::now();
-            let result = validate_candidate(&context, &job, &metrics).await;
+            let result = match proofs.wait_for_range(job.from, job.to).await {
+                Ok(proofs) => validate_candidate(&context, &job, &proofs, &metrics).await,
+                Err(err) => Err(err),
+            };
             metrics
                 .validation_duration_seconds
                 .record(started.elapsed().as_secs_f64());
@@ -290,34 +295,24 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                     );
                 }
             }
+            progress.mark_processed(job.to);
         }
-    });
+    }));
 
-    ShadowProver { sender, proofs }
+    ShadowProver {
+        sender,
+        _shutdown: shutdown_guard,
+    }
 }
 
 impl ShadowProver {
     /// Queue a candidate without waiting for validation or queue capacity.
-    pub(crate) async fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
-        let proofs = match self.proofs.wait_for_range(from, to).await {
-            Ok(proofs) => proofs,
-            Err(err) => {
-                error!(
-                    target: "zone::sequencer::prover",
-                    zone_from = from,
-                    zone_to = to,
-                    error = %err,
-                    "Proof range unavailable; skipping finalized batch candidate"
-                );
-                return;
-            }
-        };
+    pub(crate) fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
         if let Err(err) = self.sender.try_send(ProverJob {
             from,
             to,
             batch: batch.clone(),
             anchor: None,
-            proofs,
             enqueued_at: Instant::now(),
         }) {
             error!(
@@ -351,7 +346,6 @@ impl ShadowProver {
                 to,
                 batch,
                 anchor: Some(anchor),
-                proofs: self.proofs.wait_for_range(from, to).await?,
                 enqueued_at: Instant::now(),
             })
             .await
@@ -362,6 +356,7 @@ impl ShadowProver {
 async fn validate_candidate<P: ZoneSequencerProvider>(
     context: &ProverContext<P>,
     job: &ProverJob,
+    proofs: &[Arc<StoredBlockProof>],
     metrics: &ProverMetrics,
 ) -> Result<ValidationStats> {
     ensure!(
@@ -404,11 +399,11 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     ensure!(
-        job.proofs.last().map(|proof| proof.witness.block_hash) == Some(expected_next_hash),
+        proofs.last().map(|proof| proof.witness.block_hash) == Some(expected_next_hash),
         "stored proof range does not end at candidate Zone hash {expected_next_hash}"
     );
     let (zone_state_witness, tempo_state_witness, initial_tempo_header) =
-        merge_stored_proofs(&job.proofs, &zone_inputs)?;
+        merge_stored_proofs(proofs, &zone_inputs)?;
     metrics
         .zone_witness_duration_seconds
         .record(started.elapsed().as_secs_f64());

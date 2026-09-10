@@ -21,7 +21,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use zone_rpc::{ZoneDebugApi, types::ZoneExecutionWitness};
 
-use crate::{ZoneSequencerProvider, resolve_portal_zone_anchor};
+use crate::ZoneSequencerProvider;
+use alloy_rpc_types_eth::BlockNumberOrTag;
+use tempo_zone_contracts::ZonePortal;
 
 const FORMAT_VERSION: u32 = 2;
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -33,11 +35,13 @@ pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
     shutdown: CancellationToken,
 ) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
     let directory = config.directory.clone();
+    let initially_pruned = config.initial_processed_through.unwrap_or(0);
     let store = Arc::new(
-        tokio::task::spawn_blocking(move || ProofStore::open(directory, 0))
+        tokio::task::spawn_blocking(move || ProofStore::open(directory, initially_pruned))
             .await
             .context("proof store opening task panicked")??,
     );
+    store.state.write().processed_through = config.initial_processed_through;
     let (reconciled_tx, reconciled_rx) = watch::channel(false);
     let (requests_tx, requests_rx) = mpsc::channel(16);
     let collector = ProofCollector {
@@ -83,6 +87,17 @@ impl ProofCollectorHandle {
             .context("proof collector stopped before persistence")?
     }
 
+    /// Activate a pruning constraint for one shadow-prover lifetime.
+    pub(crate) fn start_shadow_prover(&self) -> ShadowProverGuard {
+        let mut state = self.store.state.write();
+        state.shadow_generation += 1;
+        state.processed_through = Some(state.pruned_through);
+        ShadowProverGuard {
+            store: self.store.clone(),
+            generation: state.shadow_generation,
+        }
+    }
+
     /// Wait for a reconciled, complete inclusive range of retained proofs.
     pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
         ensure!(from <= to, "invalid proof range {from}..={to}");
@@ -101,6 +116,32 @@ impl ProofCollectorHandle {
                 .changed()
                 .await
                 .context("proof collector stopped before the requested range was available")?;
+        }
+    }
+}
+
+/// Keeps witnesses available until the shadow prover processes them or exits.
+#[derive(Debug)]
+pub(crate) struct ShadowProverGuard {
+    store: Arc<ProofStore>,
+    generation: u64,
+}
+
+impl ShadowProverGuard {
+    /// Advance after an ordered shadow job finishes or is explicitly abandoned.
+    pub(crate) fn mark_processed(&self, through: u64) {
+        let mut state = self.store.state.write();
+        if state.shadow_generation == self.generation {
+            state.processed_through = state.processed_through.max(Some(through));
+        }
+    }
+}
+
+impl Drop for ShadowProverGuard {
+    fn drop(&mut self) {
+        let mut state = self.store.state.write();
+        if state.shadow_generation == self.generation {
+            state.processed_through = None;
         }
     }
 }
@@ -152,21 +193,19 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
     }
 
     async fn reconcile_and_collect(&self) -> Result<()> {
-        if let Some(settlement) = &self.config.settlement {
-            // A syncing follower may not have the portal anchor locally yet. Retry before
-            // collecting, so startup never tries to reconstruct already-settled history.
-            let anchor = resolve_portal_zone_anchor(
-                &self.provider,
-                settlement.portal_address,
-                &settlement.l1_provider,
-            )
-            .await?;
-            let store = self.store.clone();
-            tokio::task::spawn_blocking(move || store.prune_through(anchor.block_number))
-                .await
-                .context("proof pruning task panicked")??;
-            self.reconciled.send_modify(|_| {});
-        }
+        let settlement = &self.config.settlement;
+        let intended_prune = u64::try_from(
+            ZonePortal::new(settlement.portal_address, &settlement.l1_provider)
+                .zoneHeight()
+                .block(BlockNumberOrTag::Finalized.into())
+                .call()
+                .await?,
+        )?;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.prune_through(intended_prune))
+            .await
+            .context("proof pruning task panicked")??;
+        self.reconciled.send_modify(|_| {});
         let head = self.provider.best_block_number()?;
         let store = self.store.clone();
         let provider = self.provider.clone();
@@ -247,21 +286,20 @@ pub struct ProofCollectorConfig {
     pub directory: PathBuf,
     /// In-process API used to replay an executed block and collect its Zone and Tempo witness.
     pub debug_api: Arc<dyn ZoneDebugApi>,
-    /// Settlement source for retaining only unsettled blocks. None retains historical
-    /// witnesses for RPC-follower shadow proving.
-    pub settlement: Option<ProofCollectorSettlement>,
+    /// Settlement source for the intended pruning frontier.
+    pub settlement: ProofCollectorSettlement,
+    /// Initial shadow-prover frontier. `None` disables the pruning constraint.
+    pub initial_processed_through: Option<u64>,
 }
 
 impl std::fmt::Debug for ProofCollectorConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProofCollectorConfig")
+            .field("initial_processed_through", &self.initial_processed_through)
             .field("directory", &self.directory)
             .field("debug_api", &"<in-process>")
-            .field(
-                "settlement_portal",
-                &self.settlement.as_ref().map(|s| s.portal_address),
-            )
+            .field("settlement_portal", &self.settlement.portal_address)
             .finish()
     }
 }
@@ -323,6 +361,8 @@ impl ProofStore {
             state: RwLock::new(ProofStoreState {
                 pruned_through,
                 proofs,
+                processed_through: None,
+                shadow_generation: 0,
             }),
         })
     }
@@ -433,6 +473,9 @@ impl ProofStore {
 
     fn prune_through(&self, through: u64) -> Result<()> {
         let mut state = self.state.write();
+        let through = state
+            .processed_through
+            .map_or(through, |processed| through.min(processed));
         if through <= state.pruned_through {
             return Ok(());
         }
@@ -469,6 +512,8 @@ impl ProofStore {
 
 #[derive(Debug)]
 struct ProofStoreState {
+    processed_through: Option<u64>,
+    shadow_generation: u64,
     pruned_through: u64,
     proofs: BTreeMap<u64, Arc<StoredBlockProof>>,
 }
@@ -537,6 +582,66 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn pruning_waits_for_shadow_progress_and_never_exceeds_settlement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+        store.state.write().processed_through = Some(1);
+        let (_reconciled_tx, reconciled) = watch::channel(true);
+        let (requests, _) = mpsc::channel(1);
+        let handle = ProofCollectorHandle {
+            store: store.clone(),
+            reconciled,
+            requests,
+        };
+        store.prune_through(4).unwrap();
+        assert_eq!(store.state.read().pruned_through, 1);
+        // Collection still starts at 2, including already-settled but unproved blocks.
+        store.insert(proof(2, B256::repeat_byte(2))).unwrap();
+        store.insert(proof(3, B256::repeat_byte(3))).unwrap();
+        let snapshot = store.snapshot(2, 3).unwrap();
+        let guard = handle.start_shadow_prover();
+        guard.mark_processed(3);
+        store.prune_through(2).unwrap();
+        assert_eq!(store.state.read().pruned_through, 2);
+        assert!(store.snapshot(3, 3).is_ok());
+        guard.mark_processed(1);
+        assert_eq!(store.state.read().processed_through, Some(3));
+        store.prune_through(4).unwrap();
+        assert_eq!(store.state.read().pruned_through, 3);
+        assert!(store.snapshot(3, 3).is_err());
+        assert_eq!(snapshot[0].witness.block_number, 2);
+    }
+
+    #[test]
+    fn stopped_prover_releases_pruning_without_affecting_its_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+        let (_reconciled_tx, reconciled) = watch::channel(true);
+        let (requests, _) = mpsc::channel(1);
+        let handle = ProofCollectorHandle {
+            store: store.clone(),
+            reconciled,
+            requests,
+        };
+        let old = handle.start_shadow_prover();
+        store.prune_through(4).unwrap();
+        assert_eq!(store.state.read().pruned_through, 0);
+        drop(old);
+        store.prune_through(2).unwrap();
+        let old = handle.start_shadow_prover();
+        old.mark_processed(100);
+        let new = handle.start_shadow_prover();
+        assert_eq!(store.state.read().processed_through, Some(2));
+        old.mark_processed(100);
+        drop(old);
+        store.prune_through(4).unwrap();
+        assert_eq!(store.state.read().pruned_through, 2);
+        new.mark_processed(3);
+        store.prune_through(4).unwrap();
+        assert_eq!(store.state.read().pruned_through, 3);
     }
 
     #[test]

@@ -801,7 +801,7 @@ where
         let portal_address = self.portal_address;
         let debug_l1_provider = l1_provider.clone();
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
-        let proof_directory = ctx.config.datadir().data_dir().join("proofs");
+        let data_dir = ctx.config.datadir().data_dir().to_path_buf();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -825,24 +825,34 @@ where
                 Ok(())
             })
             .await?;
-        let proof_collector_config = ProofCollectorConfig {
-            directory: proof_directory,
-            debug_api: Arc::new(NodeZoneDebugApi::new(
-                handle.eth_handlers().api.clone(),
-                l1_provider.clone(),
-            )),
-            settlement: self
-                .sequencer_config
-                .as_ref()
-                .map(|_| ProofCollectorSettlement {
-                    portal_address: self.portal_address,
-                    l1_provider: l1_provider.clone(),
-                }),
-        };
-        // Sequencer nodes collect while following as well as leading. RPC-only shadow
-        // provers retain historical witnesses instead of pruning at the settlement frontier.
+
         let proof_collector =
             if self.sequencer_config.is_some() || finalized_batch_submissions.is_some() {
+                // Batches settled by the startup Tempo checkpoint precede this node's
+                // shadow-proving scope, even if the live portal is further ahead.
+                let initial_processed_through = if effective_shadow_prover_config.is_some() {
+                    Some(u64::try_from(
+                        ZonePortal::new(self.portal_address, &l1_provider)
+                            .zoneHeight()
+                            .block(tempo_block_number.into())
+                            .call()
+                            .await?,
+                    )?)
+                } else {
+                    None
+                };
+                let proof_collector_config = ProofCollectorConfig {
+                    directory: data_dir.join("proofs"),
+                    debug_api: Arc::new(NodeZoneDebugApi::new(
+                        handle.eth_handlers().api.clone(),
+                        l1_provider.clone(),
+                    )),
+                    settlement: ProofCollectorSettlement {
+                        portal_address: self.portal_address,
+                        l1_provider: l1_provider.clone(),
+                    },
+                    initial_processed_through,
+                };
                 let (collector, collector_task) = spawn_proof_collector(
                     proof_collector_config,
                     provider.clone(),

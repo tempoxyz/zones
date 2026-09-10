@@ -491,7 +491,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         };
 
         if let Some(prover) = &self.shadow_prover {
-            prover.try_enqueue(from, to, batch_data.clone()).await;
+            prover.try_enqueue(from, to, batch_data.clone());
         }
         self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals, shutdown)
             .await
