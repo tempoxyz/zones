@@ -2789,6 +2789,8 @@ impl L1TestNode {
             .apply(|mut c| {
                 c.dev.block_time = Some(Duration::from_millis(500));
                 c.dev.finality_depth = std::num::NonZeroUsize::MIN;
+                // Witness collection must prove older L1 checkpoints during catch-up.
+                c.rpc.rpc_eth_proof_window = 100_000;
                 c
             });
 

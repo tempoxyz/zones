@@ -345,7 +345,7 @@ where
             &reads,
         )
         .await
-        .map_err(|error| operator_rpc_error(internal(error)))?;
+        .map_err(|error| operator_rpc_error(internal(format!("{error:#}"))))?;
         Ok(ZoneExecutionWitness {
             block_number,
             block_hash,
