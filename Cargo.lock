@@ -3719,6 +3719,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "exithatch"
+version = "0.3.1"
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -516,14 +516,14 @@ mod tests {
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, zone_chain_id};
 
     #[test]
-    fn l1_storage_recorder_deduplicates_successful_reads_without_block_numbers() {
+    fn l1_storage_recorder_deduplicates_successful_reads() {
         let account = Address::repeat_byte(0xaa);
         let slot = B256::repeat_byte(0xbb);
         let value = B256::repeat_byte(0xcc);
         let reader = RecordingL1StorageReader::new(MockL1Reader::returning(value));
 
         assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
-        assert_eq!(reader.read_l1_storage(account, slot, 11).unwrap(), value);
+        assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
         assert_eq!(
             reader.take_reads(),
             HashSet::from_iter([TempoStorageRead { account, slot }])

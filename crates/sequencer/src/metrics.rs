@@ -26,14 +26,11 @@ pub(crate) struct ProverMetrics {
     /// Time spent loading and decoding canonical Zone blocks.
     pub(crate) zone_inputs_duration_seconds: Histogram,
 
-    /// Time spent generating and combining Zone execution witnesses.
+    /// Time spent generating and combining Zone and Tempo execution witnesses.
     pub(crate) zone_witness_duration_seconds: Histogram,
 
     /// Time spent fetching and validating Tempo checkpoints and ancestry.
     pub(crate) tempo_headers_duration_seconds: Histogram,
-
-    /// Time spent fetching and combining Tempo state proofs.
-    pub(crate) tempo_witness_duration_seconds: Histogram,
 
     /// Time spent verifying a generated batch witness locally or remotely.
     pub(crate) spf_execution_duration_seconds: Histogram,
