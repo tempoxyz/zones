@@ -264,10 +264,6 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             witness.block_hash == block_hash,
             "collected witness does not match Zone block {number} ({block_hash})"
         );
-        ensure!(
-            witness.execution_witness.headers.len() <= 1,
-            "Zone block {number} reads an older BLOCKHASH"
-        );
         Ok(StoredBlockProof {
             format_version: FORMAT_VERSION,
             witness,
