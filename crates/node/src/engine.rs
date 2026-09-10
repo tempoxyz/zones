@@ -125,7 +125,7 @@ trait AvailableBlockDrain {
     /// Checks the leadership permit and bounds a checkpoint batch to the permitted prefix.
     ///
     /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
-    fn permit(&self, block: &mut Self::Block) -> Option<EngineExit>;
+    fn apply_permit(&self, block: &mut Self::Block) -> Option<EngineExit>;
 
     /// Completes and consumes one block.
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()>;
@@ -151,7 +151,7 @@ where
         let Some(mut block) = drain.next_available()? else {
             return Ok(None);
         };
-        if let Some(exit) = drain.permit(&mut block) {
+        if let Some(exit) = drain.apply_permit(&mut block) {
             return Ok(Some(exit));
         }
         drain.advance_one(block).await?;
@@ -478,7 +478,7 @@ impl AvailableBlockDrain for ZoneEngine {
         }))
     }
 
-    fn permit(&self, block: &mut Self::Block) -> Option<EngineExit> {
+    fn apply_permit(&self, block: &mut Self::Block) -> Option<EngineExit> {
         self.production_permit
             .as_ref()
             .and_then(|permit| block.apply_permit(permit))
@@ -896,7 +896,7 @@ mod tests {
             Ok(self.pending.front().copied())
         }
 
-        fn permit(&self, block: &mut Self::Block) -> Option<EngineExit> {
+        fn apply_permit(&self, block: &mut Self::Block) -> Option<EngineExit> {
             self.denied
                 .iter()
                 .find(|(denied, _)| *denied == *block)
