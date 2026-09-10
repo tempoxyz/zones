@@ -489,6 +489,7 @@ mod tests {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
     }
 
+    #[derive(Default)]
     struct PausedDrain {
         pending: VecDeque<u64>,
         advanced: Vec<u64>,
@@ -545,12 +546,9 @@ mod tests {
         let (release, release_first) = oneshot::channel();
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2, 3]),
-            advanced: Vec::new(),
             first_started: Some(first_started),
             release_first: Some(release_first),
-            paused: Arc::new(AtomicBool::new(false)),
-            pause_on_peek: false,
-            denied: Vec::new(),
+            ..Default::default()
         };
 
         let task = tokio::spawn(async move {
@@ -577,11 +575,6 @@ mod tests {
         let stop = CancellationToken::new();
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2, 3]),
-            advanced: Vec::new(),
-            first_started: None,
-            release_first: None,
-            paused: Arc::new(AtomicBool::new(false)),
-            pause_on_peek: false,
             denied: vec![(
                 3,
                 EngineExit::Demoted {
@@ -589,6 +582,7 @@ mod tests {
                     epoch: 7,
                 },
             )],
+            ..Default::default()
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -611,12 +605,8 @@ mod tests {
         let stop = CancellationToken::new();
         let mut drain = PausedDrain {
             pending: VecDeque::from([5]),
-            advanced: Vec::new(),
-            first_started: None,
-            release_first: None,
-            paused: Arc::new(AtomicBool::new(false)),
-            pause_on_peek: false,
             denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
+            ..Default::default()
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -632,12 +622,8 @@ mod tests {
         let stop = CancellationToken::new();
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2]),
-            advanced: Vec::new(),
-            first_started: None,
-            release_first: None,
             paused: Arc::new(AtomicBool::new(true)),
-            pause_on_peek: false,
-            denied: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(drain_all_available(&mut drain, &stop).await.unwrap(), None);
@@ -660,12 +646,10 @@ mod tests {
         let paused = Arc::new(AtomicBool::new(false));
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2, 3]),
-            advanced: Vec::new(),
             first_started: Some(first_started),
             release_first: Some(release_first),
             paused: paused.clone(),
-            pause_on_peek: false,
-            denied: Vec::new(),
+            ..Default::default()
         };
 
         let task = tokio::spawn(async move {
@@ -686,13 +670,9 @@ mod tests {
     async fn portal_pause_published_before_queue_peek_prevents_production() {
         let mut drain = PausedDrain {
             pending: VecDeque::from([42]),
-            advanced: Vec::new(),
-            first_started: None,
-            release_first: None,
-            paused: Arc::new(AtomicBool::new(false)),
             // Publish the pause as the subscriber makes its anchor visible to the queue peek.
             pause_on_peek: true,
-            denied: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(

@@ -2187,16 +2187,25 @@ mod tests {
         )));
     }
 
-    #[tokio::test]
-    async fn portal_pause_handles_deployment_after_finalized_checkpoint() {
+    /// A mocked L1 provider plus a fresh tracker and portal address for the pause tests.
+    fn pause_env() -> (Asserter, DynProvider<TempoNetwork>, L1BlockTracker, Address) {
         let asserter = Asserter::new();
-        push_finalized_header(&asserter, 10);
-        asserter.push_success(&Bytes::new());
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let tracker = L1BlockTracker::default();
-        let portal = Address::repeat_byte(0x11);
+        (
+            asserter,
+            provider,
+            L1BlockTracker::default(),
+            Address::repeat_byte(0x11),
+        )
+    }
+
+    #[tokio::test]
+    async fn portal_pause_handles_deployment_after_finalized_checkpoint() {
+        let (asserter, provider, tracker, portal) = pause_env();
+        push_finalized_header(&asserter, 10);
+        asserter.push_success(&Bytes::new());
 
         tokio::time::timeout(
             Duration::from_secs(1),
@@ -2218,13 +2227,8 @@ mod tests {
 
     #[tokio::test]
     async fn portal_pause_initialization_waits_for_finalized_state() {
-        let asserter = Asserter::new();
+        let (asserter, provider, tracker, portal) = pause_env();
         asserter.push_success(&None::<TempoHeaderResponse>);
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let tracker = L1BlockTracker::default();
-        let portal = Address::repeat_byte(0x11);
         let initialize = initialize_portal_pause(&provider, portal, &tracker);
         tokio::pin!(initialize);
 
@@ -2248,12 +2252,7 @@ mod tests {
 
     #[tokio::test]
     async fn portal_pause_rpc_errors_preserve_the_previous_state() {
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let tracker = L1BlockTracker::default();
-        let portal = Address::repeat_byte(0x11);
+        let (asserter, provider, tracker, portal) = pause_env();
         tracker
             .observe_portal_pause(
                 alloy_eips::NumHash::new(10, alloy_primitives::B256::with_last_byte(10)),
@@ -2284,12 +2283,7 @@ mod tests {
 
     #[tokio::test]
     async fn portal_pause_missing_code_does_not_advance_the_snapshot() {
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let tracker = L1BlockTracker::default();
-        let portal = Address::repeat_byte(0x11);
+        let (asserter, provider, tracker, portal) = pause_env();
         push_portal_pause_snapshot(&asserter, 10, true);
         refresh_portal_pause(&provider, portal, &tracker)
             .await
@@ -2313,14 +2307,9 @@ mod tests {
 
     #[tokio::test]
     async fn portal_pause_watcher_observes_automatic_expiry_without_an_event() {
-        let asserter = Asserter::new();
+        let (asserter, provider, tracker, portal) = pause_env();
         push_portal_pause_snapshot(&asserter, 10, true);
         push_portal_pause_snapshot(&asserter, 11, false);
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let tracker = L1BlockTracker::default();
-        let portal = Address::repeat_byte(0x11);
 
         refresh_portal_pause(&provider, portal, &tracker)
             .await

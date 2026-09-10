@@ -172,28 +172,6 @@ impl L1BlockTracker {
         Ok(())
     }
 
-    async fn wait_for_control_plane(&self, block: NumHash) -> eyre::Result<()> {
-        let mut changed = self.changed.subscribe();
-        loop {
-            if let Some(latest) = self.control_plane_latest() {
-                if latest.number == block.number {
-                    eyre::ensure!(
-                        latest.hash == block.hash,
-                        "queued L1 anchor conflicts with finalized control-plane block {}",
-                        block.number
-                    );
-                }
-                if latest.number >= block.number {
-                    return Ok(());
-                }
-            }
-            changed
-                .changed()
-                .await
-                .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
-        }
-    }
-
     /// Return whether finalized Portal state currently pauses block production.
     pub fn portal_paused(&self) -> bool {
         self.state
@@ -825,17 +803,14 @@ where
         block_number: u64,
     ) -> Result<(SealedHeader<TempoHeader>, L1ProcessedEvents), L1SubscriberError> {
         let start = std::time::Instant::now();
-        let fetch_failures = &self.subscriber_metrics.fetch_failures;
-        let header_resp = async {
-            let header = provider.get_header_by_number(block_number.into()).await?;
-            Ok::<_, L1SubscriberError>(
-                header.ok_or_eyre(format!("L1 header not found for block {block_number}"))?,
-            )
-        }
-        .await
-        .inspect_err(|_| {
-            fetch_failures.increment(1);
-        })?;
+        let header_resp = provider
+            .get_header_by_number(block_number.into())
+            .await
+            .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
+            .ok_or_else(|| {
+                self.subscriber_metrics.fetch_failures.increment(1);
+                eyre::eyre!("L1 header not found for block {block_number}")
+            })?;
         if header_resp.number() != block_number {
             return Err(L1SubscriberError::Fatal {
                 block_number,
@@ -871,14 +846,12 @@ where
         .await
         .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?;
         // A recognized log that cannot be decoded must fail before any state is published.
-        let events = self
-            .extract_events(header.num_hash(), &receipts)
+        self.extract_events(header.num_hash(), &receipts)
             .inspect_err(|_| self.subscriber_metrics.decode_fence_failures.increment(1))
             .map_err(L1SubscriberError::fatal_from_err(
                 block_number,
                 "portal event decoding",
-            ))?;
-        Ok(events)
+            ))
     }
 
     /// Apply finalized governance continuously, independent of execution backpressure.
@@ -896,13 +869,7 @@ where
         let backfill_start = std::time::Instant::now();
         while let Some((sealed, processed_events)) = fetched.try_next().await? {
             let block_number = sealed.number();
-            let L1ProcessedEvents {
-                portal_events: events,
-                invalidated,
-                portal_logs: _,
-                finalized_batches: _,
-                portal_pause,
-            } = &processed_events;
+            let events = &processed_events.portal_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let anchor = sealed.num_hash();
@@ -942,16 +909,16 @@ where
                         ))?;
                 }
             }
-            if let Some(paused) = portal_pause {
+            if let Some(paused) = processed_events.portal_pause {
                 self.block_tracker
-                    .observe_portal_pause(anchor, *paused)
+                    .observe_portal_pause(anchor, paused)
                     .map_err(L1SubscriberError::fatal_from_err(
                         block_number,
                         "portal pause observation",
                     ))?;
             }
             self.apply_enabled_token_events(events);
-            self.update_l1_state_anchor(block_number, invalidated);
+            self.update_l1_state_anchor(block_number, &processed_events.invalidated);
             self.record_portal_event_metrics(events);
             // Wake the queue reader only after all governance state is applied.
             {
@@ -1031,7 +998,7 @@ where
         to: u64,
     ) -> Result<(), L1SubscriberError> {
         let mut changed = self.block_tracker.changed.subscribe();
-        let mut replay = BTreeMap::new();
+        let mut replay = VecDeque::new();
         for number in from..=to {
             while self
                 .block_tracker
@@ -1053,7 +1020,7 @@ where
                 .get(&number)
                 .cloned();
             let (header, events) = if let Some(cached) = cached {
-                replay.remove(&number);
+                replay.pop_front();
                 cached
             } else {
                 if replay.is_empty() {
@@ -1064,7 +1031,7 @@ where
                     replay = self.replay_headers(provider, number, tip).await?;
                 }
                 let header = replay
-                    .remove(&number)
+                    .pop_front()
                     .ok_or_eyre("missing authenticated replay header")?;
                 let events = self.fetch_events(provider, &header).await?;
                 // Keep the in-flight replay block too: reconnects must retain observer progress.
@@ -1077,18 +1044,18 @@ where
             };
             let anchor = header.num_hash();
             let parent_hash = header.parent_hash();
-            self.block_tracker.wait_for_control_plane(anchor).await?;
             if let Some(sender) = &self.finalized_batch_submissions {
-                for submission in &events.finalized_batches {
-                    sender.send(submission.clone()).await.map_err(|_| {
-                        L1SubscriberError::Fatal {
+                for submission in events.finalized_batches {
+                    sender
+                        .send(submission)
+                        .await
+                        .map_err(|_| L1SubscriberError::Fatal {
                             block_number: number,
                             stage: "finalized batch observer delivery",
                             source: eyre::eyre!(
                                 "finalized batch submission observer is unavailable"
                             ),
-                        }
-                    })?;
+                        })?;
                     // No await between delivery and removal: cancellation can only leave the
                     // undelivered suffix for the next connection.
                     self.block_tracker
@@ -1139,7 +1106,7 @@ where
         provider: &impl Provider<TempoNetwork>,
         from: u64,
         tip: NumHash,
-    ) -> Result<BTreeMap<u64, SealedHeader<TempoHeader>>, L1SubscriberError> {
+    ) -> Result<VecDeque<SealedHeader<TempoHeader>>, L1SubscriberError> {
         if from > tip.number {
             return Err(eyre::eyre!("replay start is above its governance anchor").into());
         }
@@ -1147,7 +1114,7 @@ where
             return Err(eyre::eyre!("L1 replay gap {from}..={} exceeds the {MAX_L1_REPLAY_BLOCKS}-block recovery limit; operator recovery required", tip.number).into());
         }
         let mut expected_hash = tip.hash;
-        let mut headers = BTreeMap::new();
+        let mut headers = VecDeque::new();
         for number in (from..=tip.number).rev() {
             let response = provider
                 .get_header_by_hash(expected_hash)
@@ -1164,7 +1131,7 @@ where
                 });
             }
             expected_hash = header.parent_hash();
-            headers.insert(number, header);
+            headers.push_front(header);
         }
         Ok(headers)
     }
