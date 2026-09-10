@@ -26,7 +26,8 @@ use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_provider::{BlockReader, CanonStateSubscriptions, HeaderProvider};
+use reth_primitives_traits::SealedOrRecoveredBlock;
+use reth_provider::{BlockReader, BlockSource, CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -261,14 +262,12 @@ impl<E> NodeZoneDebugApi<E> {
     }
 }
 
-impl<E> NodeZoneDebugApi<E>
+#[jsonrpsee::core::async_trait]
+impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
 where
     E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
 {
-    async fn execution_witness_at(
-        &self,
-        block_id: alloy_rpc_types_eth::BlockId,
-    ) -> RpcResult<ZoneExecutionWitness> {
+    async fn zone_execution_witness(&self, block_id: BlockId) -> RpcResult<ZoneExecutionWitness> {
         let _permit = self
             .eth_api
             .tracing_task_guard()
@@ -276,27 +275,39 @@ where
             .acquire_owned()
             .await;
 
-        let pending = if let alloy_rpc_types_eth::BlockId::Hash(hash) = block_id {
-            self.eth_api
-                .provider()
-                .pending_block()
-                .map_err(|error| operator_rpc_error(internal(error)))?
-                .filter(|block| block.hash() == hash.block_hash)
-                .map(Arc::new)
-        } else {
-            None
-        };
-        let block = if let Some(block) = pending {
-            block
-        } else {
-            self.eth_api
-                .recovered_block(block_id)
-                .await
-                .map_err(|error| operator_rpc_error(internal(error)))?
-                .ok_or_else(|| {
-                    operator_rpc_error(internal(format!("block {block_id} not found")))
-                })?
-        };
+        let block = match block_id {
+            BlockId::Hash(hash) => {
+                self.eth_api
+                    .spawn_blocking_io(move |eth_api| {
+                        let source = if hash.require_canonical == Some(true) {
+                            BlockSource::Canonical
+                        } else {
+                            BlockSource::Any
+                        };
+                        let block = eth_api
+                            .provider()
+                            .find_sealed_or_recovered_block(hash.block_hash, source)
+                            .map_err(EthApiError::from)?;
+                        block
+                            .map(|block| match block {
+                                SealedOrRecoveredBlock::Recovered(block) => Ok(block),
+                                SealedOrRecoveredBlock::Sealed(block) => {
+                                    Arc::unwrap_or_clone(block)
+                                        .try_recover()
+                                        .map(Arc::new)
+                                        .map_err(|_| {
+                                            EthApiError::InvalidTransactionSignature.into()
+                                        })
+                                }
+                            })
+                            .transpose()
+                    })
+                    .await
+            }
+            BlockId::Number(_) => self.eth_api.recovered_block(block_id).await,
+        }
+        .map_err(|error| operator_rpc_error(internal(error)))?
+        .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
         let block_number = block.header().number();
         let block_hash = block.hash();
         let parent_hash = block.parent_hash();
@@ -420,23 +431,6 @@ async fn collect_tempo_witness(
         }
     }
     Ok((initial_header, nodes.into_values().collect()))
-}
-
-#[jsonrpsee::core::async_trait]
-impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
-where
-    E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
-{
-    async fn zone_execution_witness(
-        &self,
-        block_id: BlockNumberOrTag,
-    ) -> RpcResult<ZoneExecutionWitness> {
-        self.execution_witness_at(block_id.into()).await
-    }
-
-    async fn zone_execution_witness_by_hash(&self, hash: B256) -> RpcResult<ZoneExecutionWitness> {
-        self.execution_witness_at(hash.into()).await
-    }
 }
 
 /// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.

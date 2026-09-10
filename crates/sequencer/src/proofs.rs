@@ -524,7 +524,7 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         let witness = self
             .config
             .debug_api
-            .zone_execution_witness_by_hash(block_hash)
+            .zone_execution_witness(block_hash.into())
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))
             .wrap_err_with(|| format!("collect witness for Zone block {number}"))?;
