@@ -8,6 +8,7 @@ import {
     IZoneFactory,
     IZonePortal,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    TokenEnablementTransition,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
@@ -38,6 +39,8 @@ import { IValidatorConfig } from "tempo-std/interfaces/IValidatorConfig.sol";
 contract BaseTest is Test {
 
     mapping(address portal => uint256 height) private _submittedZoneHeights;
+
+    bytes32 private constant _PORTAL_TOKEN_ENABLEMENT_CURSOR_SLOT = bytes32(uint256(28));
 
     // Registry precompiles
     address internal constant _ACCOUNT_KEYCHAIN = StdPrecompiles.ACCOUNT_KEYCHAIN_ADDRESS;
@@ -292,6 +295,21 @@ contract BaseTest is Test {
         withdrawals[0] = withdrawal;
     }
 
+    /// @dev Read the packed cursor through a cheatcode so this helper does not consume a pending
+    ///      `vm.prank` or `vm.expectRevert` before the portal call they are intended to guard.
+    function _currentTokenEnablementTransition(IZonePortal portal)
+        internal
+        view
+        returns (TokenEnablementTransition memory)
+    {
+        uint64 processedTokenCount =
+            uint64(uint256(vm.load(address(portal), _PORTAL_TOKEN_ENABLEMENT_CURSOR_SLOT)));
+        return TokenEnablementTransition({
+            prevProcessedTokenCount: processedTokenCount,
+            nextProcessedTokenCount: processedTokenCount
+        });
+    }
+
     /// @notice Submit through the TIP-1091 entrypoint while dedicated certificate tests exercise
     ///         the real signature precompile behavior independently.
     function _submitBatch(
@@ -319,6 +337,7 @@ contract BaseTest is Test {
             recentTempoBlockNumber,
             blockTransition,
             depositQueueTransition,
+            _currentTokenEnablementTransition(portal),
             withdrawalQueueHash,
             verifierConfig,
             proof,

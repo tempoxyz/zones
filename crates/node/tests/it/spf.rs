@@ -28,8 +28,8 @@ use tempo_primitives::TempoHeader;
 use zone_chainspec::ZoneChainSpec;
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
-    BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock, ZoneStateWitness,
-    prove_zone_batch,
+    BatchWitness, PublicInputs, SpfConfig, TempoImport, TempoStateWitness, ZoneBlock,
+    ZoneStateWitness, prove_zone_batch,
 };
 
 use crate::utils::{
@@ -126,10 +126,12 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 timestamp: first_built_block.header.timestamp(),
                 timestamp_millis_part: first_built_block.header.timestamp_millis_part,
                 beneficiary: first_built_block.header.beneficiary(),
-                tempo_header_rlp: Bytes::from(alloy_rlp::encode(&first_tempo_block.header)),
-                deposits: vec![],
-                decryptions: vec![],
-                enabled_tokens: vec![],
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from(alloy_rlp::encode(&first_tempo_block.header)),
+                    deposits: vec![],
+                    decryptions: vec![],
+                    enabled_tokens: vec![],
+                },
                 finalize_withdrawal_batch_count: None,
                 finalize_withdrawal_batch_encrypted_senders: vec![],
                 transactions: vec![first_raw_transaction],
@@ -140,10 +142,12 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 timestamp: second_built_block.header.timestamp(),
                 timestamp_millis_part: second_built_block.header.timestamp_millis_part,
                 beneficiary: second_built_block.header.beneficiary(),
-                tempo_header_rlp: Bytes::from(alloy_rlp::encode(&second_tempo_block.header)),
-                deposits: vec![],
-                decryptions: vec![],
-                enabled_tokens: vec![],
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from(alloy_rlp::encode(&second_tempo_block.header)),
+                    deposits: vec![],
+                    decryptions: vec![],
+                    enabled_tokens: vec![],
+                },
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: vec![],
                 transactions: vec![second_raw_transaction],
@@ -290,10 +294,12 @@ impl BuiltTransactionBlock {
                 timestamp: self.zone_timestamp,
                 timestamp_millis_part: self.zone_timestamp_millis_part,
                 beneficiary: self.zone_beneficiary,
-                tempo_header_rlp: Bytes::from(alloy_rlp::encode(&self.tempo_header)),
-                deposits: vec![],
-                decryptions: vec![],
-                enabled_tokens: vec![],
+                tempo_import: TempoImport::Full {
+                    header_rlp: Bytes::from(alloy_rlp::encode(&self.tempo_header)),
+                    deposits: vec![],
+                    decryptions: vec![],
+                    enabled_tokens: vec![],
+                },
                 finalize_withdrawal_batch_count: Some(U256::ZERO),
                 finalize_withdrawal_batch_encrypted_senders: vec![],
                 transactions: vec![self.raw_user_transaction.clone()],

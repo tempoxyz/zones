@@ -6,6 +6,7 @@ use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::UnknownFunctionSelector;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     receive_policy_guard::ReceivePolicyGuard,
@@ -20,7 +21,8 @@ use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
-    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
+    compressed_x_and_parity, encrypt_plaintext, test_context, test_context_with_hardfork, test_env,
+    test_storage_provider,
 };
 
 const GAS: u64 = 30_000_000;
@@ -46,12 +48,15 @@ struct Harness {
 
 impl Harness {
     fn new() -> eyre::Result<Self> {
-        Self::with_l1(MockL1Reader::default())
+        Self::new_with_hardfork(TempoHardfork::T13)
     }
 
-    fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
-        let mut ctx = test_context();
-        ctx.cfg.spec = TempoHardfork::T9;
+    fn new_with_hardfork(hardfork: TempoHardfork) -> eyre::Result<Self> {
+        let ctx = test_context_with_hardfork(hardfork);
+        Self::with_l1(MockL1Reader::default(), ctx)
+    }
+
+    fn with_l1(l1: MockL1Reader, mut ctx: TestContext) -> eyre::Result<Self> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
         let child_header = TempoHeader {
@@ -116,12 +121,17 @@ impl Harness {
             .unwrap();
     }
 
-    fn set_token_enablement_hash(&self, hash: B256) {
+    fn set_token_enablements(&self, enabled_tokens: &[EnabledToken]) {
+        let hash = enabled_tokens
+            .iter()
+            .fold(B256::ZERO, |hash, enabled| enabled.hash_with_previous(hash));
+        let tokens = enabled_tokens.iter().map(|enabled| enabled.token).collect();
         self.l1
             .with_storage(1, || {
-                ZonePortalStorage::new(PORTAL)
-                    .token_enablement_hash
-                    .write(hash)
+                let mut portal = ZonePortalStorage::new(PORTAL);
+                portal.token_enablement_hash.write(hash)?;
+                portal.enabled_tokens.write(tokens)?;
+                Ok(())
             })
             .unwrap();
     }
@@ -256,10 +266,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
     let enabled_tokens = (1..=token_enablements)
         .map(|index| maximum_metadata_token(index as u16))
         .collect::<Vec<_>>();
-    let token_enablement_hash = enabled_tokens
-        .iter()
-        .fold(B256::ZERO, |hash, enabled| enabled.hash_with_previous(hash));
-    harness.set_token_enablement_hash(token_enablement_hash);
+    harness.set_token_enablements(&enabled_tokens);
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -410,6 +417,64 @@ fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<(
 }
 
 #[test]
+fn advance_tempo_headers_activates_at_t13() -> eyre::Result<()> {
+    for hardfork in [TempoHardfork::T12, TempoHardfork::T13] {
+        let mut harness = Harness::new_with_hardfork(hardfork)?;
+        let calldata = IZoneInbox::advanceTempoHeadersCall {
+            headers: vec![encode_header(&harness.child_header())],
+        }
+        .abi_encode();
+        let output = harness.call(Address::ZERO, calldata)?;
+        if hardfork == TempoHardfork::T12 {
+            assert!(output.is_revert());
+            let error = UnknownFunctionSelector::abi_decode(&output.bytes)?;
+            assert_eq!(
+                error.selector.as_slice(),
+                &IZoneInbox::advanceTempoHeadersCall::SELECTOR
+            );
+        } else {
+            assert!(output.is_success());
+        }
+        assert!(harness.l1.storage_requests().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn processed_enabled_token_count_activates_at_t13() -> eyre::Result<()> {
+    let mut harness = Harness::new_with_hardfork(TempoHardfork::T12)?;
+    let calldata = IZoneInbox::processedEnabledTokenCountCall {}.abi_encode();
+
+    let pre_t13 = harness.call(ALICE, &calldata)?;
+    assert!(pre_t13.is_revert());
+    let error = UnknownFunctionSelector::abi_decode(&pre_t13.bytes)?;
+    assert_eq!(
+        error.selector.as_slice(),
+        &IZoneInbox::processedEnabledTokenCountCall::SELECTOR
+    );
+
+    let mut harness = Harness::new()?;
+    let t13_env = test_env(&harness.ctx);
+    let t13_precompile = ZoneInbox::create(harness.l1_state.clone(), &t13_env);
+    let post_t13 = call_precompile(
+        &mut harness.ctx,
+        &t13_precompile,
+        ALICE,
+        &calldata,
+        GAS,
+        true,
+        ZONE_INBOX_ADDRESS,
+        ZONE_INBOX_ADDRESS,
+    )?;
+    assert!(post_t13.is_success());
+    assert_eq!(
+        IZoneInbox::processedEnabledTokenCountCall::abi_decode_returns(&post_t13.bytes)?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let calldata = harness.advance_call(Vec::new(), Vec::new()).abi_encode();
@@ -466,7 +531,7 @@ fn advance_rejects_a_preselected_anchor_before_child_selection() -> eyre::Result
 
 #[test]
 fn child_anchor_storage_failure_is_fatal_and_rolls_back_checkpoint() -> eyre::Result<()> {
-    let mut harness = Harness::with_l1(MockL1Reader::failing_storage())?;
+    let mut harness = Harness::with_l1(MockL1Reader::failing_storage(), test_context())?;
     let result = harness.call_atomic(
         Address::ZERO,
         harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
@@ -557,7 +622,7 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         symbol: "EXD".into(),
         currency: "USD".into(),
     };
-    harness.set_token_enablement_hash(enabled.hash_with_previous(B256::ZERO));
+    harness.set_token_enablements(std::slice::from_ref(&enabled));
 
     harness.call(
         Address::ZERO,
@@ -594,7 +659,7 @@ fn omitted_token_enablement_reverts() -> eyre::Result<()> {
         currency: "USD".into(),
     };
 
-    harness.set_token_enablement_hash(enabled.hash_with_previous(B256::ZERO));
+    harness.set_token_enablements(std::slice::from_ref(&enabled));
     harness.set_queue_hash(B256::ZERO);
 
     let output = harness.call(

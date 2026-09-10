@@ -10,7 +10,9 @@ use alloy_transport::{RpcError, TransportError, TransportErrorKind};
 use eyre::{OptionExt as _, Result, WrapErr as _, ensure};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoTxEnvelope;
-use tempo_zone_contracts::ZonePortal;
+use tempo_zone_contracts::{
+    BatchSubmitted, TokenEnablementTransition, legacySubmitBatchCall, submitBatchCall,
+};
 use tokio::sync::mpsc::Receiver;
 use tracing::{error, info, warn};
 use zone_l1::FinalizedBatchSubmission;
@@ -125,7 +127,7 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
     async fn fetch_submit_batch_calls(
         &self,
         submission: &FinalizedBatchSubmission,
-    ) -> Result<Vec<ZonePortal::submitBatchCall>> {
+    ) -> Result<Vec<submitBatchCall>> {
         let block = self
             .l1_provider
             .get_block_by_hash(submission.block.hash)
@@ -174,7 +176,27 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                 if kind != TxKind::Call(self.portal_address) {
                     return None;
                 }
-                ZonePortal::submitBatchCall::abi_decode(input).ok()
+                if submission.is_legacy {
+                    legacySubmitBatchCall::abi_decode(input)
+                        .ok()
+                        .map(|call| submitBatchCall {
+                            tempoBlockNumber: call.tempoBlockNumber,
+                            recentTempoBlockNumber: call.recentTempoBlockNumber,
+                            blockTransition: call.blockTransition,
+                            depositQueueTransition: call.depositQueueTransition,
+                            tokenEnablementTransition: TokenEnablementTransition {
+                                prevProcessedTokenCount: 0,
+                                nextProcessedTokenCount: 0,
+                            },
+                            withdrawalQueueHash: call.withdrawalQueueHash,
+                            verifierConfig: call.verifierConfig,
+                            proof: call.proof,
+                            nextZoneHeight: call.nextZoneHeight,
+                            signatures: call.signatures,
+                        })
+                } else {
+                    submitBatchCall::abi_decode(input).ok()
+                }
             })
             .collect::<Vec<_>>();
 
@@ -190,8 +212,8 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
 
     async fn submission_target(
         &self,
-        call: &ZonePortal::submitBatchCall,
-        event: &ZonePortal::BatchSubmitted,
+        call: &submitBatchCall,
+        event: &BatchSubmitted,
         submission_block_number: u64,
     ) -> Result<(u64, BatchData, ShadowProofAnchor)> {
         ensure!(
@@ -226,6 +248,8 @@ impl<P: ZoneSequencerProvider> RpcFollowerShadowProver<P> {
                 next_processed_deposit_hash: call.depositQueueTransition.nextProcessedHash,
                 prev_deposit_number: call.depositQueueTransition.prevDepositNumber,
                 next_deposit_number: call.depositQueueTransition.nextDepositNumber,
+                prev_processed_token_count: call.tokenEnablementTransition.prevProcessedTokenCount,
+                next_processed_token_count: call.tokenEnablementTransition.nextProcessedTokenCount,
                 withdrawal_queue_hash: call.withdrawalQueueHash,
                 withdrawal_batch_index: event.withdrawalBatchIndex,
             },
@@ -327,14 +351,13 @@ fn verify_transactions_root(
     Ok(())
 }
 
-fn call_matches_event(
-    call: &ZonePortal::submitBatchCall,
-    event: &ZonePortal::BatchSubmitted,
-) -> bool {
+fn call_matches_event(call: &submitBatchCall, event: &BatchSubmitted) -> bool {
     event.nextBlockHash == call.blockTransition.nextBlockHash
         && event.nextProcessedDepositQueueHash == call.depositQueueTransition.nextProcessedHash
         && event.lastProcessedDepositNumber == call.depositQueueTransition.nextDepositNumber
         && event.withdrawalQueueHash == call.withdrawalQueueHash
+        && event.lastProcessedEnabledTokenCount
+            == call.tokenEnablementTransition.nextProcessedTokenCount
 }
 
 fn submitted_anchor_number(tempo_block_number: u64, recent_tempo_block_number: u64) -> Result<u64> {
@@ -351,6 +374,48 @@ fn submitted_anchor_number(tempo_block_number: u64, recent_tempo_block_number: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submission_match_binds_t13_token_cursor() {
+        use alloy_primitives::{B256, U256};
+        use tempo_zone_contracts::{BlockTransition, DepositQueueTransition};
+
+        let call = submitBatchCall {
+            tempoBlockNumber: 10,
+            recentTempoBlockNumber: 0,
+            blockTransition: BlockTransition {
+                prevBlockHash: B256::ZERO,
+                nextBlockHash: B256::repeat_byte(1),
+            },
+            depositQueueTransition: DepositQueueTransition {
+                prevProcessedHash: B256::ZERO,
+                nextProcessedHash: B256::repeat_byte(2),
+                prevDepositNumber: 0,
+                nextDepositNumber: 3,
+            },
+            tokenEnablementTransition: TokenEnablementTransition {
+                prevProcessedTokenCount: 2,
+                nextProcessedTokenCount: 4,
+            },
+            withdrawalQueueHash: B256::repeat_byte(3),
+            verifierConfig: Default::default(),
+            proof: Default::default(),
+            nextZoneHeight: U256::from(1),
+            signatures: Vec::new(),
+        };
+        let mut event = BatchSubmitted {
+            withdrawalBatchIndex: 1,
+            withdrawalQueueIndex: U256::ZERO,
+            nextProcessedDepositQueueHash: call.depositQueueTransition.nextProcessedHash,
+            nextBlockHash: call.blockTransition.nextBlockHash,
+            withdrawalQueueHash: call.withdrawalQueueHash,
+            lastProcessedDepositNumber: call.depositQueueTransition.nextDepositNumber,
+            lastProcessedEnabledTokenCount: 4,
+        };
+        assert!(call_matches_event(&call, &event));
+        event.lastProcessedEnabledTokenCount = 3;
+        assert!(!call_matches_event(&call, &event));
+    }
 
     #[test]
     fn direct_submission_anchors_to_checkpoint() {

@@ -13,6 +13,18 @@ pub const NO_QUEUE_INDEX: U256 = U256::MAX;
 /// keeps the outer `processWithdrawals` transaction well below a 30M gas block.
 pub const MAX_WITHDRAWAL_GAS_LIMIT: u64 = 10_000_000;
 
+/// Maximum number of Tempo headers authenticated by one checkpoint-only Zone block.
+pub const MAX_TEMPO_HEADERS_PER_ZONE_BLOCK: usize = 1024;
+
+/// Maximum deposit entries that may remain outstanding on a ZonePortal.
+pub const MAX_UNPROCESSED_DEPOSITS: usize = 230;
+
+/// Capacity reserved for one maximum-size withdrawal batch to bounce back.
+pub const WITHDRAWAL_BOUNCEBACK_RESERVE: usize = 20;
+
+/// Maximum token enablements that may remain outstanding on a ZonePortal.
+pub const MAX_UNPROCESSED_TOKEN_ENABLEMENTS: usize = 8;
+
 /// Maximum RLP-encoded block size.
 ///
 /// This follows EIP-7934's `MAX_BLOCK_SIZE - SAFETY_MARGIN` and matches

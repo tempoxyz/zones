@@ -12,12 +12,46 @@ use reth_node_api::{
     InvalidPayloadAttributesError, NewPayloadError, PayloadTypes, PayloadValidator,
 };
 use reth_payload_primitives::PayloadAttributes;
-use reth_primitives_traits::{AlloyBlockHeader, SealedBlock};
+use reth_primitives_traits::{AlloyBlockHeader, SealedBlock, SealedHeader};
 use serde::{Deserialize, Serialize};
 use tempo_node::engine::TempoEngineValidator;
 use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
 use tempo_primitives::{Block, TempoHeader};
 use zone_l1::PreparedL1Block;
+
+/// Explicit opening Tempo system-call variant for a Zone payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TempoImport {
+    Full(Box<PreparedL1Block>),
+    CheckpointOnly(Vec<SealedHeader<TempoHeader>>),
+}
+
+impl TempoImport {
+    pub(crate) fn is_checkpoint_only(&self) -> bool {
+        matches!(self, Self::CheckpointOnly(_))
+    }
+
+    pub(crate) fn follows_checkpoint_blocks(&self) -> bool {
+        match self {
+            Self::Full(prepared) => prepared.follows_checkpoint_blocks,
+            Self::CheckpointOnly(_) => false,
+        }
+    }
+
+    pub(crate) fn total_deposits(&self) -> usize {
+        match self {
+            Self::Full(prepared) => prepared.queued_deposits.len(),
+            Self::CheckpointOnly(_) => 0,
+        }
+    }
+
+    pub(crate) fn enabled_tokens(&self) -> usize {
+        match self {
+            Self::Full(prepared) => prepared.enabled_tokens.len(),
+            Self::CheckpointOnly(_) => 0,
+        }
+    }
+}
 
 /// Zone RPC payload attributes — the type that flows through FCU.
 ///
@@ -38,7 +72,7 @@ pub struct ZonePayloadAttributes {
     /// processes exactly one L1 block via `advanceTempo`. Decryption and ABI
     /// encoding have already been performed by the engine; TIP-403 policy is
     /// enforced during `advanceTempo` when the deposits mint TIP-20 tokens.
-    pub l1_block: PreparedL1Block,
+    pub tempo_import: TempoImport,
 }
 
 impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
@@ -65,8 +99,8 @@ impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
 
 impl ZonePayloadAttributes {
     /// Returns a reference to the prepared L1 block data.
-    pub fn l1_block(&self) -> &PreparedL1Block {
-        &self.l1_block
+    pub fn tempo_import(&self) -> &TempoImport {
+        &self.tempo_import
     }
 
     /// Returns the extra data for the block header (always empty for zones).

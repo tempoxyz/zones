@@ -81,7 +81,7 @@ pub mod zone_fee_manager;
 pub mod zone_state;
 pub mod ztip20;
 
-pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};
+pub use inbox::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, ZoneInbox};
 pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;

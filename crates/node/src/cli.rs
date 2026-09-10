@@ -280,6 +280,10 @@ async fn configure_sequencing(
         !args.enable_prover || should_sequence_blocks || rpc_only,
         "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
     );
+    eyre::ensure!(
+        !args.enable_prover || !should_sequence_blocks || args.prover_address.is_some(),
+        "settlement proving requires --sequencer.prover-address for Nitro attestation"
+    );
 
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
@@ -579,12 +583,12 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Validate finalized batch candidates with the SPF without changing settlement. On an
-    /// rpc_only follower, candidates are recovered from finalized L1 submissions.
+    /// Require Nitro-attested SPF validation for settlement, or run observational SPF validation
+    /// on an rpc_only follower.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
-    /// Send witnesses to this remote prover instead of executing the SPF locally.
+    /// Send witnesses to a remote Nitro prover capable of producing settlement attestations.
     #[arg(
         long = "sequencer.prover-address",
         env = "SEQUENCER_PROVER_ADDRESS",
