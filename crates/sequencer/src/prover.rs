@@ -824,7 +824,6 @@ async fn zone_witnesses(
                 .wrap_err_with(|| {
                     format!("debug_zoneExecutionWitness for Zone block {number}")
                 })?;
-            ensure!(witness.block_number == number, "witness returned for wrong Zone block");
             if witness.execution_witness.headers.len() > 1 {
                 bail!(
                     "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"

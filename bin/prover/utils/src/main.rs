@@ -953,10 +953,6 @@ async fn zone_witnesses(
                 )
                 .await
                 .wrap_err_with(|| format!("debug_zoneExecutionWitness for Zone block {number}"))?;
-            eyre::ensure!(
-                witness.block_number == number,
-                "witness returned for wrong Zone block"
-            );
             debug!(
                 zone_block = number,
                 state_nodes = witness.execution_witness.state.len(),
