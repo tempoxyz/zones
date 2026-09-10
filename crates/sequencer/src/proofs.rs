@@ -9,27 +9,19 @@ use std::{
     time::Duration,
 };
 
-use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::B256;
-use alloy_provider::DynProvider;
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::StreamExt as _;
 use parking_lot::RwLock;
-use reth_provider::TransactionVariant;
 use serde::{Deserialize, Serialize};
-use tempo_alloy::TempoNetwork;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use zone_rpc::ZoneDebugApi;
-use zone_spf::{TempoStateWitness, ZoneStateWitness};
+use zone_rpc::{ZoneDebugApi, types::ZoneExecutionWitness};
 
-use crate::{
-    ZoneSequencerProvider,
-    prover::{build_zone_inputs_for_block, collect_l1_reads, tempo_header, tempo_state_witness},
-};
+use crate::ZoneSequencerProvider;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -38,7 +30,7 @@ const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub struct ProofCollectorConfig {
     /// Directory containing immutable per-block JSON proof files.
     pub directory: PathBuf,
-    /// In-process API used to replay an executed block and collect its Zone reads.
+    /// In-process API used to replay an executed block and collect its Zone and Tempo witness.
     pub debug_api: Arc<dyn ZoneDebugApi>,
 }
 
@@ -57,11 +49,7 @@ impl std::fmt::Debug for ProofCollectorConfig {
 #[serde(rename_all = "camelCase")]
 pub struct StoredBlockProof {
     pub format_version: u32,
-    pub block_number: u64,
-    pub block_hash: B256,
-    pub parent_hash: B256,
-    pub zone_state_witness: ZoneStateWitness,
-    pub tempo_state_witness: TempoStateWitness,
+    pub witness: ZoneExecutionWitness,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,12 +112,15 @@ impl ProofStore {
                 "stored proof filename does not match contents: {}",
                 path.display()
             );
-            if proof.block_number <= pruned_through {
+            if proof.witness.block_number <= pruned_through {
                 fs::remove_file(&path)
                     .wrap_err_with(|| format!("remove settled proof {}", path.display()))?;
                 continue;
             }
-            if proofs.insert(proof.block_number, Arc::new(proof)).is_some() {
+            if proofs
+                .insert(proof.witness.block_number, Arc::new(proof))
+                .is_some()
+            {
                 bail!("duplicate stored proof height in {}", directory.display());
             }
         }
@@ -148,17 +139,17 @@ impl ProofStore {
         proof.validate()?;
         let mut state = self.state.write();
         {
-            if proof.block_number <= state.pruned_through {
+            if proof.witness.block_number <= state.pruned_through {
                 bail!(
                     "cannot store proof for settled Zone block {}",
-                    proof.block_number
+                    proof.witness.block_number
                 );
             }
-            if let Some(existing) = state.proofs.get(&proof.block_number) {
+            if let Some(existing) = state.proofs.get(&proof.witness.block_number) {
                 ensure!(
-                    existing.block_hash == proof.block_hash,
+                    existing.witness.block_hash == proof.witness.block_hash,
                     "conflicting proof already stored at Zone block {}",
-                    proof.block_number
+                    proof.witness.block_number
                 );
                 return Ok(existing.clone());
             }
@@ -181,7 +172,9 @@ impl ProofStore {
         sync_directory(&self.directory)?;
 
         let proof = Arc::new(proof);
-        state.proofs.insert(proof.block_number, proof.clone());
+        state
+            .proofs
+            .insert(proof.witness.block_number, proof.clone());
         Ok(proof)
     }
 
@@ -190,7 +183,7 @@ impl ProofStore {
             .read()
             .proofs
             .get(&number)
-            .is_some_and(|proof| proof.block_hash == hash)
+            .is_some_and(|proof| proof.witness.block_hash == hash)
     }
 
     fn snapshot(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
@@ -230,9 +223,9 @@ impl ProofStore {
         let stored = self.state.read().proofs.clone();
         for (number, proof) in stored {
             let canonical = block_hash(number)?;
-            let staged_next =
-                head.checked_add(1) == Some(number) && block_hash(head)? == Some(proof.parent_hash);
-            if !staged_next && (number > head || canonical != Some(proof.block_hash)) {
+            let staged_next = head.checked_add(1) == Some(number)
+                && block_hash(head)? == Some(proof.witness.parent_hash);
+            if !staged_next && (number > head || canonical != Some(proof.witness.block_hash)) {
                 self.invalidate_from(number)?;
                 break;
             }
@@ -283,12 +276,19 @@ impl StoredBlockProof {
             "unsupported proof format version {}",
             self.format_version
         );
-        ensure!(self.block_number > 0, "cannot store a genesis block proof");
+        ensure!(
+            self.witness.block_number > 0,
+            "cannot store a genesis block proof"
+        );
         Ok(())
     }
 
     fn file_name(&self) -> std::ffi::OsString {
-        format!("{}-{:x}.json", self.block_number, self.block_hash).into()
+        format!(
+            "{}-{:x}.json",
+            self.witness.block_number, self.witness.block_hash
+        )
+        .into()
     }
 }
 
@@ -375,7 +375,6 @@ impl ProofCollectorHandle {
 struct ProofCollector<P> {
     config: ProofCollectorConfig,
     provider: P,
-    l1_provider: DynProvider<TempoNetwork>,
     store: Arc<ProofStore>,
     status: watch::Sender<CollectorStatus>,
     requests: mpsc::Receiver<CollectRequest>,
@@ -385,7 +384,6 @@ struct ProofCollector<P> {
 pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
     config: ProofCollectorConfig,
     provider: P,
-    l1_provider: DynProvider<TempoNetwork>,
     pruned_through: u64,
     shutdown: CancellationToken,
 ) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
@@ -400,7 +398,6 @@ pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
     let collector = ProofCollector {
         config,
         provider,
-        l1_provider,
         store: store.clone(),
         status: status_tx,
         requests: requests_rx,
@@ -524,58 +521,24 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
     }
 
     async fn collect_block(&self, number: u64, block_hash: B256) -> Result<StoredBlockProof> {
-        let block = self
-            .provider
-            .recovered_block(block_hash.into(), TransactionVariant::WithHash)?
-            .or(self
-                .provider
-                .pending_block()?
-                .filter(|block| block.hash() == block_hash))
-            .ok_or_eyre(format!("executed Zone block {block_hash} not found"))?;
-        ensure!(
-            block.number() == number && block.hash() == block_hash,
-            "Zone block {number} changed"
-        );
-        let parent_hash = block.parent_hash();
-        let inputs = build_zone_inputs_for_block(&self.provider, &block)?;
         let witness = self
             .config
             .debug_api
             .zone_execution_witness_by_hash(block_hash)
             .await
             .map_err(|error| eyre::eyre!(error.to_string()))
-            .wrap_err_with(|| format!("collect Zone witness for block {number}"))?;
+            .wrap_err_with(|| format!("collect witness for Zone block {number}"))?;
+        ensure!(
+            witness.block_hash == block_hash,
+            "collected witness does not match Zone block {number} ({block_hash})"
+        );
         ensure!(
             witness.execution_witness.headers.len() <= 1,
             "Zone block {number} reads an older BLOCKHASH"
         );
-        let zone_state_witness = ZoneStateWitness {
-            node_pool: witness.execution_witness.state,
-            bytecodes: witness.execution_witness.codes,
-        };
-        let tempo_reads = witness
-            .tempo_reads
-            .into_iter()
-            .map(|read| (number, read))
-            .collect();
-        let initial_tempo_header = tempo_header(&self.l1_provider, inputs.initial_tempo_number)
-            .await
-            .context("fetch initial Tempo checkpoint for stored proof")?;
-        ensure!(
-            initial_tempo_header.hash_slow() == inputs.initial_tempo_hash,
-            "Tempo checkpoint changed while collecting Zone block {number}"
-        );
-        let reads = collect_l1_reads(tempo_reads, &inputs.checkpoint_by_zone_block)?;
-        let tempo_state_witness =
-            tempo_state_witness(&self.l1_provider, &initial_tempo_header, reads).await?;
-
         Ok(StoredBlockProof {
             format_version: FORMAT_VERSION,
-            block_number: number,
-            block_hash,
-            parent_hash,
-            zone_state_witness,
-            tempo_state_witness,
+            witness,
         })
     }
 }
@@ -587,18 +550,18 @@ mod tests {
     use super::*;
 
     fn proof(number: u64, hash: B256) -> StoredBlockProof {
+        let mut execution_witness = ZoneExecutionWitness::default().execution_witness;
+        execution_witness.state = vec![Bytes::from_static(b"zone")];
+        execution_witness.codes = vec![Bytes::from_static(b"code")];
+        execution_witness.headers = vec![Bytes::from_static(b"ancestor")];
         StoredBlockProof {
             format_version: FORMAT_VERSION,
-            block_number: number,
-            block_hash: hash,
-            parent_hash: B256::ZERO,
-            zone_state_witness: ZoneStateWitness {
-                node_pool: vec![Bytes::from_static(b"zone")],
-                bytecodes: vec![Bytes::from_static(b"code")],
-            },
-            tempo_state_witness: TempoStateWitness {
-                initial_tempo_header_rlp: Bytes::from_static(b"header"),
-                node_pool: vec![Bytes::from_static(b"tempo")],
+            witness: ZoneExecutionWitness {
+                block_number: number,
+                block_hash: hash,
+                execution_witness,
+                tempo_state: vec![Bytes::from_static(b"tempo")],
+                ..Default::default()
             },
         }
     }
@@ -609,12 +572,17 @@ mod tests {
         let hash = b256!("0101010101010101010101010101010101010101010101010101010101010101");
         let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
         store.insert(proof(1, hash)).unwrap();
-        assert_eq!(store.snapshot(1, 1).unwrap()[0].block_hash, hash);
+        assert_eq!(store.snapshot(1, 1).unwrap()[0].witness.block_hash, hash);
         let json = fs::read_to_string(directory.path().join(proof(1, hash).file_name())).unwrap();
-        assert!(json.starts_with("{\"formatVersion\":1,"));
+        let stored_json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(stored_json["formatVersion"], FORMAT_VERSION);
+        assert_eq!(
+            stored_json["witness"],
+            serde_json::to_value(proof(1, hash).witness).unwrap()
+        );
 
         let reopened = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
-        assert_eq!(reopened.snapshot(1, 1).unwrap()[0].block_hash, hash);
+        assert_eq!(*reopened.snapshot(1, 1).unwrap()[0], proof(1, hash));
         reopened.prune_through(1).unwrap();
         assert!(reopened.snapshot(1, 1).is_err());
         assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
@@ -658,7 +626,7 @@ mod tests {
         let staged_hash = B256::repeat_byte(2);
         let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
         let mut staged = proof(2, staged_hash);
-        staged.parent_hash = parent_hash;
+        staged.witness.parent_hash = parent_hash;
         store.insert(staged).unwrap();
         drop(store);
 
@@ -683,7 +651,7 @@ mod tests {
         let store = ProofStore::open(directory.path().to_path_buf(), 0).unwrap();
         let parent_hash = B256::repeat_byte(1);
         let mut staged = proof(2, B256::repeat_byte(2));
-        staged.parent_hash = parent_hash;
+        staged.witness.parent_hash = parent_hash;
         store.insert(staged).unwrap();
         store.insert(proof(3, B256::repeat_byte(3))).unwrap();
         store

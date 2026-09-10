@@ -19,10 +19,10 @@ async fn canonical_leader_block_has_durable_proof() -> eyre::Result<()> {
         .proof_directory()
         .join(format!("{}-{:x}.json", tip.number(), tip.hash()));
     let proof: StoredBlockProof = serde_json::from_slice(&std::fs::read(&path)?)?;
-    assert_eq!(proof.block_hash, tip.hash());
-    assert_eq!(proof.parent_hash, tip.parent_hash());
-    assert_eq!(proof.block_number, tip.number());
-    assert!(leader.provider().get_block_number().await? >= proof.block_number);
+    assert_eq!(proof.witness.block_hash, tip.hash());
+    assert_eq!(proof.witness.parent_hash, tip.parent_hash());
+    assert_eq!(proof.witness.block_number, tip.number());
+    assert!(leader.provider().get_block_number().await? >= proof.witness.block_number);
 
     // Turn the spool path into a regular file to force the next atomic write to fail,
     // retaining the previously collected proofs in a sibling directory.

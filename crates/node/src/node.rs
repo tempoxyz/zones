@@ -832,7 +832,10 @@ where
             .await?;
         let proof_collector_config = ProofCollectorConfig {
             directory: proof_directory,
-            debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+            debug_api: Arc::new(NodeZoneDebugApi::new(
+                handle.eth_handlers().api.clone(),
+                l1_provider.clone(),
+            )),
         };
         let prover_config =
             effective_shadow_prover_config
@@ -857,7 +860,6 @@ where
             let (collector, collector_task) = spawn_proof_collector(
                 proof_collector_config.clone(),
                 provider.clone(),
-                l1_provider.clone(),
                 0,
                 tokio_util::sync::CancellationToken::new(),
             )
@@ -978,7 +980,6 @@ where
             let (collector, collector_task) = spawn_proof_collector(
                 proof_collector_config,
                 provider.clone(),
-                l1_provider.clone(),
                 anchor.block_number,
                 tokio_util::sync::CancellationToken::new(),
             )

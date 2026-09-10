@@ -991,7 +991,6 @@ where
             let (collector, collector_task) = spawn_proof_collector(
                 sequencer.proof_collector_config.clone(),
                 context.provider.clone(),
-                context.attestation.l1_provider.clone(),
                 portal_confirmed_height,
                 collector_stop.clone(),
             )
