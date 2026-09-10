@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -8,9 +8,9 @@ use std::{
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
 use alloy_eips::{BlockId, eip2718::Encodable2718 as _};
 use alloy_network::primitives::BlockTransactions;
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{Block, BlockNumberOrTag, EIP1186AccountProofResponse, Transaction};
+use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
@@ -19,22 +19,19 @@ use futures::{StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 use tempo_zone_contracts::{
-    IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
-    ZONE_OUTBOX_ADDRESS, ZonePortal,
+    IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal,
 };
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
-use zone_precompiles::{outbox, tempo_state};
+use zone_precompiles::outbox;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
 };
-use zone_rpc::{
-    ZoneProvider, ZoneProviderConfig,
-    types::{TempoStorageRead, ZoneExecutionWitness},
-};
+use zone_rpc::{ZoneProvider, ZoneProviderConfig, types::ZoneExecutionWitness};
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
@@ -46,7 +43,6 @@ const RPC_CONCURRENCY: usize = 8;
 const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
-type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -298,25 +294,12 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     );
     timings.record("batch extraction", started, ());
 
-    let started = start_phase("initial checkpoint");
-    let initial_tempo_header =
-        initial_tempo_header(&tempo_provider, &zone_provider, parent_number).await?;
-    timings.record("initial checkpoint", started, ());
-
-    let started = start_phase("Zone state witness");
-    let (zone_state_witness, tempo_reads) =
+    let started = start_phase("Zone and Tempo state witnesses");
+    let (zone_state_witness, initial_tempo_state_witness) =
         zone_witnesses(&zone_provider, from_block, to_block).await?;
-    timings.record("Zone state witness", started, ());
-
-    let started = start_phase("Tempo state witness");
-    let checkpoint_by_zone_block = extracted
-        .iter()
-        .map(|block| (block.input.number, block.checkpoint_number))
-        .collect();
-    let reads = collect_l1_reads(tempo_reads, &checkpoint_by_zone_block)?;
-    let initial_tempo_state_witness =
-        tempo_state_witness(&tempo_provider, &initial_tempo_header, reads).await?;
-    timings.record("Tempo state witness", started, ());
+    let initial_tempo_header =
+        decode_tempo_header(&initial_tempo_state_witness.initial_tempo_header_rlp)?;
+    timings.record("Zone and Tempo state witnesses", started, ());
 
     let final_tempo_header = extracted
         .iter()
@@ -925,36 +908,6 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
     })
 }
 
-async fn initial_tempo_header(
-    tempo: &DynProvider<TempoNetwork>,
-    zone: &DynProvider<TempoNetwork>,
-    parent_number: u64,
-) -> Result<TempoHeader> {
-    let block_id = BlockId::number(parent_number);
-    let (hash_word, number_word) = tokio::try_join!(
-        zone.get_storage_at(
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH)
-        )
-        .block_id(block_id),
-        zone.get_storage_at(
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER)
-        )
-        .block_id(block_id),
-    )?;
-    let expected_hash = B256::from(hash_word.to_be_bytes::<32>());
-    let checkpoint_number = number_word.to::<u64>();
-    let header = tempo_header(tempo, checkpoint_number).await?;
-    if header.hash_slow() != expected_hash {
-        bail!(
-            "parent Zone state commits Tempo block {checkpoint_number} hash {expected_hash}, but RPC returned {}",
-            header.hash_slow()
-        );
-    }
-    Ok(header)
-}
-
 async fn withdrawal_batch_index_at(
     zone: &DynProvider<TempoNetwork>,
     block_number: u64,
@@ -987,7 +940,7 @@ async fn zone_witnesses(
     zone: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
-) -> Result<(ZoneStateWitness, Vec<(u64, TempoStorageRead)>)> {
+) -> Result<(ZoneStateWitness, TempoStateWitness)> {
     let results = stream::iter(from..=to)
         .map(|number| async move {
             let started = Instant::now();
@@ -1000,6 +953,10 @@ async fn zone_witnesses(
                 )
                 .await
                 .wrap_err_with(|| format!("debug_zoneExecutionWitness for Zone block {number}"))?;
+            eyre::ensure!(
+                witness.block_number == number,
+                "witness returned for wrong Zone block"
+            );
             debug!(
                 zone_block = number,
                 state_nodes = witness.execution_witness.state.len(),
@@ -1017,15 +974,23 @@ async fn zone_witnesses(
 
     let mut state = BTreeMap::new();
     let mut codes = BTreeMap::new();
-    let mut tempo_reads = Vec::new();
+    let mut tempo_nodes = BTreeMap::new();
+    let mut initial_tempo_header_rlp = None;
     for (number, witness) in results {
+        if number == from {
+            initial_tempo_header_rlp = Some(Bytes::from(alloy_rlp::encode(
+                &witness.initial_tempo_header,
+            )));
+        }
         for node in witness.execution_witness.state {
             state.entry(keccak256(&node)).or_insert(node);
         }
         for code in witness.execution_witness.codes {
             codes.entry(keccak256(&code)).or_insert(code);
         }
-        tempo_reads.extend(witness.tempo_reads.into_iter().map(|read| (number, read)));
+        for node in witness.tempo_state {
+            tempo_nodes.entry(keccak256(&node)).or_insert(node);
+        }
     }
 
     Ok((
@@ -1033,100 +998,11 @@ async fn zone_witnesses(
             node_pool: state.into_values().collect(),
             bytecodes: codes.into_values().collect(),
         },
-        tempo_reads,
+        TempoStateWitness {
+            initial_tempo_header_rlp: initial_tempo_header_rlp.ok_or_eyre("empty witness range")?,
+            node_pool: tempo_nodes.into_values().collect(),
+        },
     ))
-}
-
-fn collect_l1_reads(
-    tempo_reads: Vec<(u64, TempoStorageRead)>,
-    checkpoints: &BTreeMap<u64, u64>,
-) -> Result<L1Reads> {
-    let mut reads = L1Reads::new();
-    for (zone_block, read) in tempo_reads {
-        let checkpoint = checkpoints
-            .get(&zone_block)
-            .copied()
-            .ok_or_else(|| eyre!("missing Tempo checkpoint for Zone block {zone_block}"))?;
-        reads
-            .entry(checkpoint)
-            .or_default()
-            .entry(read.account)
-            .or_default()
-            .insert(read.slot);
-    }
-    Ok(reads)
-}
-
-async fn tempo_state_witness(
-    tempo: &DynProvider<TempoNetwork>,
-    initial_header: &TempoHeader,
-    reads: L1Reads,
-) -> Result<TempoStateWitness> {
-    let requests = reads
-        .into_iter()
-        .map(|(block, accounts)| {
-            let targets = accounts
-                .into_iter()
-                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
-                .collect::<Vec<_>>();
-            (block, targets)
-        })
-        .collect::<Vec<_>>();
-    let proofs = stream::iter(requests)
-        .map(|(block, targets)| async move {
-            let started = Instant::now();
-            debug!(
-                tempo_block = block,
-                accounts = targets.len(),
-                storage_slots = targets.iter().map(|(_, slots)| slots.len()).sum::<usize>(),
-                "requesting Tempo state multiproof"
-            );
-            let proof = tempo
-                .client()
-                .request::<_, Vec<EIP1186AccountProofResponse>>(
-                    "eth_getMultiProof",
-                    (targets, BlockId::number(block)),
-                )
-                .await
-                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))?;
-            debug!(
-                tempo_block = block,
-                accounts = proof.len(),
-                account_proof_nodes = proof
-                    .iter()
-                    .map(|proof| proof.account_proof.len())
-                    .sum::<usize>(),
-                storage_proofs = proof
-                    .iter()
-                    .map(|proof| proof.storage_proof.len())
-                    .sum::<usize>(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "received Tempo state multiproof"
-            );
-            Ok::<_, eyre::Report>(proof)
-        })
-        .buffer_unordered(RPC_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-
-    let mut nodes = BTreeMap::new();
-    for block_proofs in proofs {
-        for proof in block_proofs {
-            for node in proof.account_proof {
-                nodes.entry(keccak256(&node)).or_insert(node);
-            }
-            for storage in proof.storage_proof {
-                for node in storage.proof {
-                    nodes.entry(keccak256(&node)).or_insert(node);
-                }
-            }
-        }
-    }
-
-    Ok(TempoStateWitness {
-        initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(initial_header)),
-        node_pool: nodes.into_values().collect(),
-    })
 }
 
 async fn tempo_anchor(
@@ -1271,19 +1147,6 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
-
-    #[test]
-    fn groups_tempo_storage_reads_by_checkpoint() {
-        let account = address!("00000000000000000000000000000000000000aa");
-        let slot = B256::repeat_byte(0x11);
-        let checkpoints = BTreeMap::from([(4_u64, 99_u64)]);
-
-        let reads =
-            collect_l1_reads(vec![(4, TempoStorageRead { account, slot })], &checkpoints).unwrap();
-
-        assert!(reads[&99][&account].contains(&slot));
-    }
 
     #[test]
     fn derives_an_exact_counted_zone_range() {

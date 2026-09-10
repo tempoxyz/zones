@@ -6,24 +6,24 @@
 pub use zone_rpc::*;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, Weak},
     time::Duration,
 };
 
-use alloy_consensus::{BlockHeader, transaction::TxHashRef};
+use alloy_consensus::{BlockHeader, Sealable as _, transaction::TxHashRef};
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::{
-    Block, BlockId, BlockNumberOrTag, BlockTransactions, FeeHistory, Filter, FilterChanges,
-    FilterId, TransactionRequest,
+    Block, BlockId, BlockNumberOrTag, BlockTransactions, EIP1186AccountProofResponse, FeeHistory,
+    Filter, FilterChanges, FilterId, TransactionRequest,
     state::{EvmOverrides, StateOverride},
 };
 use alloy_sol_types::SolCall;
-use eyre::WrapErr;
-use futures::StreamExt;
+use eyre::{OptionExt as _, WrapErr};
+use futures::{StreamExt, TryStreamExt as _, stream};
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
@@ -48,7 +48,7 @@ use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
-use tempo_primitives::{TempoPrimitives, TempoTxEnvelope};
+use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope};
 use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
@@ -249,11 +249,15 @@ impl Web3ApiServer for OperatorWeb3Api {
 #[derive(Clone)]
 pub(crate) struct NodeZoneDebugApi<E> {
     eth_api: E,
+    l1_provider: DynProvider<TempoNetwork>,
 }
 
 impl<E> NodeZoneDebugApi<E> {
-    pub(crate) const fn new(eth_api: E) -> Self {
-        Self { eth_api }
+    pub(crate) const fn new(eth_api: E, l1_provider: DynProvider<TempoNetwork>) -> Self {
+        Self {
+            eth_api,
+            l1_provider,
+        }
     }
 }
 
@@ -280,9 +284,13 @@ where
             .map_err(|error| operator_rpc_error(internal(error)))?
             .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
         let block_number = block.header().number();
+        let block_hash = block.hash();
+        let parent_hash = block.parent_hash();
 
-        self.eth_api
+        let (execution_witness, reads, initial_tempo) = self
+            .eth_api
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                let initial_tempo = db.database.0.tempo_num_hash().map_err(EthApiError::from)?;
                 let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
                 let block_executor = evm_config.executor(&mut db);
                 let mode = ExecutionWitnessMode::default();
@@ -308,21 +316,93 @@ where
                 let witness = witness
                     .expect("state closure is called after successful execution")
                     .map_err(EthApiError::from)?;
-                Ok(ZoneExecutionWitness {
-                    execution_witness: witness,
-                    tempo_reads: recorder
-                        .take_reads()
-                        .into_iter()
-                        .map(|read| RpcTempoStorageRead {
-                            account: read.account,
-                            slot: read.slot,
-                        })
-                        .collect(),
-                })
+                Ok((witness, recorder.take_reads(), initial_tempo))
             })
             .await
-            .map_err(|error| operator_rpc_error(internal(error)))
+            .map_err(|error| operator_rpc_error(internal(error)))?;
+
+        let (initial_tempo_header, tempo_state) =
+            collect_tempo_witness(&self.l1_provider, initial_tempo, &reads)
+                .await
+                .map_err(|error| operator_rpc_error(internal(error)))?;
+        let tempo_reads = reads
+            .iter()
+            .map(|read| (read.account, read.slot))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|(account, slot)| RpcTempoStorageRead { account, slot })
+            .collect();
+        Ok(ZoneExecutionWitness {
+            block_number,
+            block_hash,
+            parent_hash,
+            execution_witness,
+            initial_tempo_header,
+            tempo_state,
+            tempo_reads,
+        })
     }
+}
+
+/// Fetch proofs at the checkpoints actually used by replay, including reads before advanceTempo.
+async fn collect_tempo_witness(
+    provider: &DynProvider<TempoNetwork>,
+    initial_tempo: alloy_eips::NumHash,
+    reads: &HashSet<zone_evm::TempoStorageRead>,
+) -> eyre::Result<(TempoHeader, Vec<Bytes>)> {
+    let initial_header = provider
+        .get_block_by_number(initial_tempo.number.into())
+        .await?
+        .ok_or_eyre("initial Tempo checkpoint not found")?
+        .header
+        .as_ref()
+        .clone();
+    eyre::ensure!(
+        initial_header.hash_slow() == initial_tempo.hash,
+        "initial Tempo checkpoint hash mismatch at block {}",
+        initial_tempo.number
+    );
+
+    let mut targets = BTreeMap::<u64, BTreeMap<Address, BTreeSet<B256>>>::new();
+    for read in reads {
+        targets
+            .entry(read.block_number)
+            .or_default()
+            .entry(read.account)
+            .or_default()
+            .insert(read.slot);
+    }
+    let proofs = stream::iter(targets)
+        .map(|(number, accounts)| async move {
+            let targets = accounts
+                .into_iter()
+                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            provider
+                .client()
+                .request::<_, Vec<EIP1186AccountProofResponse>>(
+                    "eth_getMultiProof",
+                    (targets, BlockId::number(number)),
+                )
+                .await
+                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {number}"))
+        })
+        .buffer_unordered(8)
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    let mut nodes = BTreeMap::new();
+    for proof in proofs.into_iter().flatten() {
+        for node in proof.account_proof.into_iter().chain(
+            proof
+                .storage_proof
+                .into_iter()
+                .flat_map(|proof| proof.proof),
+        ) {
+            nodes.entry(keccak256(&node)).or_insert(node);
+        }
+    }
+    Ok((initial_header, nodes.into_values().collect()))
 }
 
 /// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.
@@ -1527,20 +1607,134 @@ mod tests {
         );
     }
 
-    #[test]
-    fn zone_execution_witness_serializes_tempo_reads() {
+    #[tokio::test]
+    async fn tempo_witness_collects_each_checkpoint_and_propagates_errors() -> eyre::Result<()> {
+        use alloy_provider::ProviderBuilder;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let header = TempoHeader::default();
+        let initial = alloy_eips::NumHash {
+            number: 0,
+            hash: header.hash_slow(),
+        };
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let fail = Arc::new(AtomicBool::new(false));
+        let mut module = RpcModule::new((requests.clone(), fail.clone()));
+        let mut block = serde_json::to_value(TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header::new(header.clone()),
+            timestamp_millis: 0,
+        })?;
+        block["transactions"] = serde_json::json!([]);
+        block["uncles"] = serde_json::json!([]);
+        module.register_method("eth_getBlockByNumber", move |_, _, _| block.clone())?;
+        module.register_method("eth_getMultiProof", |params, ctx, _| {
+            let params: serde_json::Value = params.parse()?;
+            ctx.0.lock().unwrap().push(params.clone());
+            if ctx.1.load(Ordering::Relaxed) {
+                return Err(ErrorObjectOwned::owned(
+                    -32000,
+                    "proof unavailable",
+                    None::<()>,
+                ));
+            }
+            let proofs = params[0].as_array().unwrap().iter().map(|target| {
+                serde_json::json!({
+                    "address": target[0], "balance": "0x0", "nonce": "0x0",
+                    "codeHash": B256::ZERO, "storageHash": B256::ZERO,
+                    "accountProof": ["0x01"],
+                    "storageProof": target[1].as_array().unwrap().iter().map(|slot| {
+                        serde_json::json!({"key": slot, "value": "0x0", "proof": ["0x01", "0x02"]})
+                    }).collect::<Vec<_>>()
+                })
+            }).collect::<Vec<_>>();
+            Ok::<_, ErrorObjectOwned>(proofs)
+        })?;
+        let server = jsonrpsee::server::ServerBuilder::default()
+            .build("127.0.0.1:0")
+            .await?;
+        let address = server.local_addr()?;
+        let handle = server.start(module);
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http(format!("http://{address}").parse()?)
+            .erased();
         let account = Address::repeat_byte(0xaa);
         let slot = B256::repeat_byte(0xbb);
-        let value = serde_json::to_value(ZoneExecutionWitness {
+        let reads = HashSet::from([
+            zone_evm::TempoStorageRead {
+                account,
+                slot,
+                block_number: 10,
+            },
+            zone_evm::TempoStorageRead {
+                account,
+                slot,
+                block_number: 11,
+            },
+        ]);
+        let (actual_header, nodes) = collect_tempo_witness(&provider, initial, &reads).await?;
+        assert_eq!(actual_header, header);
+        assert_eq!(
+            nodes.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([Bytes::from(vec![1]), Bytes::from(vec![2])])
+        );
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request[1].clone())
+                    .collect::<HashSet<_>>(),
+                HashSet::from([serde_json::json!("0xa"), serde_json::json!("0xb")])
+            );
+            for request in requests.iter() {
+                assert_eq!(request[0], serde_json::json!([[account, [slot]]]));
+            }
+        }
+        fail.store(true, Ordering::Relaxed);
+        let error = collect_tempo_witness(&provider, initial, &reads)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("proof unavailable"));
+        let error = collect_tempo_witness(
+            &provider,
+            alloy_eips::NumHash {
+                hash: B256::ZERO,
+                ..initial
+            },
+            &HashSet::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("checkpoint hash mismatch"));
+        handle.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn zone_execution_witness_roundtrips_zone_and_tempo_material() {
+        let account = Address::repeat_byte(0xaa);
+        let slot = B256::repeat_byte(0xbb);
+        let witness = ZoneExecutionWitness {
+            block_number: 7,
+            block_hash: B256::repeat_byte(0xcc),
+            parent_hash: B256::repeat_byte(0xdd),
             execution_witness: Default::default(),
+            initial_tempo_header: TempoHeader::default(),
+            tempo_state: vec![Bytes::from(vec![1, 2])],
             tempo_reads: vec![RpcTempoStorageRead { account, slot }],
-        })
-        .unwrap();
+        };
+        let value = serde_json::to_value(&witness).unwrap();
 
         assert!(value.get("state").is_some());
         assert_eq!(
             value["tempo_reads"],
             serde_json::json!([{ "account": account, "slot": slot }])
+        );
+        assert_eq!(value["tempo_state"], serde_json::json!(["0x0102"]));
+        assert_eq!(
+            serde_json::from_value::<ZoneExecutionWitness>(value).unwrap(),
+            witness
         );
     }
 
