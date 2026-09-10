@@ -23,9 +23,10 @@ on:
 
 jobs:
   build:
-    uses: tempoxyz/gh-actions/.github/workflows/reproducible-build.yml@98b1081dcf34361b576aca2ab3041772708582ef
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-build.yml@5338a3746a2ac2ddd88cbede733c79f907aca3a0
     permissions:
       contents: read
+      id-token: write
     with:
       binary-name: tempo-zone
       ref: ${{ inputs.ref }}
