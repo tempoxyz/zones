@@ -289,18 +289,10 @@ where
                             .find_sealed_or_recovered_block(hash.block_hash, source)
                             .map_err(EthApiError::from)?;
                         block
-                            .map(|block| match block {
-                                SealedOrRecoveredBlock::Recovered(block) => Ok(block),
-                                SealedOrRecoveredBlock::Sealed(block) => {
-                                    Arc::unwrap_or_clone(block)
-                                        .try_recover()
-                                        .map(Arc::new)
-                                        .map_err(|_| {
-                                            EthApiError::InvalidTransactionSignature.into()
-                                        })
-                                }
-                            })
+                            .map(SealedOrRecoveredBlock::into_recovered_block)
                             .transpose()
+                            .map(|block| block.map(Arc::new))
+                            .map_err(|_| EthApiError::InvalidTransactionSignature.into())
                     })
                     .await
             }
