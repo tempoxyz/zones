@@ -30,7 +30,7 @@ use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, ConsensusEngineHandle, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
+    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
     PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_builder::{
@@ -44,7 +44,6 @@ use reth_node_builder::{
         PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_payload_builder::PayloadBuilderHandle;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_api::Web3ApiServer as _;
@@ -983,21 +982,25 @@ where
             );
         } else if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
+            let last_header = provider
+                .sealed_header(provider.best_block_number()?)?
+                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
             let collector = proof_collector.expect("sequencer has a proof collector");
-            Self::spawn_zone_engine(
-                &provider,
+            let engine = ZoneEngine::new(
+                provider.chain_spec(),
                 engine_handle,
                 payload_builder,
-                &task_executor,
-                sequencer_addr,
                 self.deposit_queue.clone(),
                 self.l1_block_tracker.clone(),
+                last_header,
+                sequencer_addr,
                 self.encryption_keys
                     .clone()
                     .expect("sequencer mode configures deposit decryption keys"),
                 self.portal_address,
-                collector.clone(),
-            )?;
+            )
+            .with_proof_collector(collector.clone());
+            task_executor.spawn_critical_task("zone-engine", engine.run());
 
             Self::launch_sequencer_tasks(
                 config,
@@ -1556,38 +1559,6 @@ where
             );
         }
 
-        Ok(())
-    }
-
-    /// Start the single-sequencer engine with the node-owned proof collector.
-    fn spawn_zone_engine(
-        provider: &N::Provider,
-        engine_handle: ConsensusEngineHandle<ZonePayloadTypes>,
-        payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
-        task_executor: &TaskExecutor,
-        fee_recipient: Address,
-        deposit_queue: DepositQueue,
-        l1_block_tracker: L1BlockTracker,
-        encryption_keys: EncryptionKeyRing,
-        portal_address: Address,
-        proof_collector: ProofCollectorHandle,
-    ) -> eyre::Result<()> {
-        let last_header = provider
-            .sealed_header(provider.best_block_number()?)?
-            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-        let engine = ZoneEngine::new(
-            provider.chain_spec(),
-            engine_handle,
-            payload_builder,
-            deposit_queue,
-            l1_block_tracker,
-            last_header,
-            fee_recipient,
-            encryption_keys,
-            portal_address,
-        )
-        .with_proof_collector(proof_collector);
-        task_executor.spawn_critical_task("zone-engine", engine.run());
         Ok(())
     }
 
