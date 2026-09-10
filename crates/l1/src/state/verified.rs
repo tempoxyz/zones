@@ -278,16 +278,16 @@ struct AuthenticatedBlockRoots {
 #[derive(Clone, Debug)]
 pub struct PayloadL1StateProvider {
     rpc_client: L1RpcClient,
-    verified: Option<VerifiedL1StateCache>,
+    verified: VerifiedL1StateCache,
     anchors: Arc<BTreeMap<u64, TrustedL1Anchor>>,
     unverified_reads: Arc<Mutex<UnverifiedL1Reads>>,
 }
 
 impl PayloadL1StateProvider {
-    /// Creates a reader for one payload attempt with an explicitly shared RPC client.
+    /// Creates a verified reader for one payload attempt.
     pub fn new(
         rpc_client: L1RpcClient,
-        verified: Option<VerifiedL1StateCache>,
+        verified: VerifiedL1StateCache,
         anchors: impl IntoIterator<Item = SealedHeader<TempoHeader>>,
     ) -> Result<Self> {
         let mut by_number = BTreeMap::new();
@@ -315,9 +315,6 @@ impl PayloadL1StateProvider {
 
     /// Authenticates all provisional reads, atomically promotes them, and returns their count.
     pub fn verify_and_commit(&self) -> Result<usize, L1ReadValidationError> {
-        let Some(verified) = self.verified.as_ref() else {
-            return Ok(0);
-        };
         let unverified_reads = std::mem::take(&mut *self.unverified_reads.lock());
         if unverified_reads.is_empty() {
             return Ok(0);
@@ -325,18 +322,23 @@ impl PayloadL1StateProvider {
         let started = std::time::Instant::now();
         let result = self.rpc_client.block_on(verify_payload_reads(
             &self.rpc_client,
-            verified,
+            &self.verified,
             &self.anchors,
             unverified_reads,
         ));
-        verified
+        self.verified
             .0
             .metrics
             .proof_duration_seconds
             .record(started.elapsed().as_secs_f64());
         match &result {
-            Ok(proved) => verified.0.metrics.proved_slots.increment(*proved as u64),
-            Err(_) => verified.0.metrics.proof_failures.increment(1),
+            Ok(proved) => self
+                .verified
+                .0
+                .metrics
+                .proved_slots
+                .increment(*proved as u64),
+            Err(_) => self.verified.0.metrics.proof_failures.increment(1),
         }
         result
     }
@@ -357,8 +359,7 @@ impl PayloadL1StateProvider {
             eyre::eyre!("no trusted Tempo header for L1 read at block {block_number}")
         })?;
         let block = anchor.block;
-        let verified = self.verified.as_ref().expect("checked by caller");
-        if let Some(value) = verified.get(block, storage) {
+        if let Some(value) = self.verified.get(block, storage) {
             return Ok(value);
         }
 
@@ -385,19 +386,13 @@ impl L1StorageReader for PayloadL1StateProvider {
         slot: B256,
         block_number: u64,
     ) -> std::result::Result<B256, L1StateError> {
-        let result = if self.verified.is_some() {
-            self.read_verified(account, slot, block_number)
-        } else {
-            let at = BlockId::number(block_number);
-            self.rpc_client
-                .block_on(self.rpc_client.fetch_storage(account, slot, at))
-        };
-        result.map_err(|error| L1StateError::StorageUnavailable {
-            account,
-            slot,
-            block_number,
-            reason: error.to_string(),
-        })
+        self.read_verified(account, slot, block_number)
+            .map_err(|error| L1StateError::StorageUnavailable {
+                account,
+                slot,
+                block_number,
+                reason: error.to_string(),
+            })
     }
 }
 
@@ -579,6 +574,7 @@ pub enum L1ReadValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::L1StateCache;
     use alloy_consensus::{
         Header,
         constants::{EMPTY_ROOT_HASH, KECCAK_EMPTY},
@@ -637,8 +633,6 @@ mod tests {
 
     #[test]
     fn authenticated_root_changes_drive_ordinary_cache_invalidation() {
-        use crate::state::L1StateCache;
-
         let verified = VerifiedL1StateCache::with_limits(10, 10);
         let ordinary = L1StateCache::new();
         let account = Address::repeat_byte(0x11);
@@ -750,12 +744,9 @@ mod tests {
             .erased();
         let rpc_client = L1RpcClient::from_provider(provider, tokio::runtime::Handle::current());
         let verified = VerifiedL1StateCache::new();
-        let reader = PayloadL1StateProvider::new(
-            rpc_client.clone(),
-            Some(verified.clone()),
-            [header.clone()],
-        )
-        .unwrap();
+        let reader =
+            PayloadL1StateProvider::new(rpc_client.clone(), verified.clone(), [header.clone()])
+                .unwrap();
 
         let execution_reader = reader.clone();
         assert_eq!(
@@ -779,8 +770,7 @@ mod tests {
             1
         );
 
-        let cache_reader =
-            PayloadL1StateProvider::new(rpc_client, Some(verified), [header]).unwrap();
+        let cache_reader = PayloadL1StateProvider::new(rpc_client, verified, [header]).unwrap();
         assert_eq!(
             tokio::task::spawn_blocking(move || { cache_reader.read_l1_storage(account, slot, 7) })
                 .await
@@ -788,33 +778,6 @@ mod tests {
                 .unwrap(),
             B256::ZERO
         );
-        assert!(asserter.read_q().is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn disabled_verification_uses_one_transport_read_without_proof_bookkeeping() {
-        let account = Address::repeat_byte(0x11);
-        let slot = B256::with_last_byte(1);
-        let expected = U256::from(42);
-        let asserter = Asserter::new();
-        asserter.push_success(&expected);
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter.clone())
-            .erased();
-        let rpc_client = L1RpcClient::from_provider(provider, tokio::runtime::Handle::current());
-        let reader = PayloadL1StateProvider::new(rpc_client, None, []).unwrap();
-
-        let execution_reader = reader.clone();
-        assert_eq!(
-            tokio::task::spawn_blocking(move || {
-                execution_reader.read_l1_storage(account, slot, 7)
-            })
-            .await
-            .unwrap()
-            .unwrap(),
-            B256::from(expected.to_be_bytes::<32>())
-        );
-        assert_eq!(reader.verify_and_commit().unwrap(), 0);
         assert!(asserter.read_q().is_empty());
     }
 
@@ -838,8 +801,7 @@ mod tests {
             .erased();
         let rpc_client = L1RpcClient::from_provider(provider, tokio::runtime::Handle::current());
         let verified = VerifiedL1StateCache::new();
-        let reader =
-            PayloadL1StateProvider::new(rpc_client, Some(verified.clone()), [header]).unwrap();
+        let reader = PayloadL1StateProvider::new(rpc_client, verified.clone(), [header]).unwrap();
 
         let execution_reader = reader.clone();
         assert_eq!(

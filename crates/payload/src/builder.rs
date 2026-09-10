@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::Evm;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
@@ -26,7 +26,7 @@ use reth_node_api::{FullNodeTypes, NodeTypes};
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
-use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
+use reth_primitives_traits::{AlloyBlockHeader as _, Recovered, SealedHeader};
 use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
@@ -48,9 +48,9 @@ use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     PreparedL1Block, TempoStateExt,
-    state::{PayloadL1StateProvider, VerifiedL1StateCache},
+    state::{L1ReadValidationError, L1StateProvider, PayloadL1StateProvider, VerifiedL1StateCache},
 };
-use zone_precompiles::L1StateError;
+use zone_precompiles::{L1StateError, L1StorageReader};
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
 use crate::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
@@ -71,6 +71,58 @@ const BLOCK_SIZE_SAFETY_MARGIN: usize = 1024 * 1024;
 
 /// Diagnostic retained when upstream Tempo precompile storage stringifies an [`L1StateError`].
 const L1_STORAGE_UNAVAILABLE_ERROR_PREFIX: &str = "Tempo L1 storage unavailable";
+
+/// Payload L1 reader with a test-only unverified variant.
+#[derive(Clone, Debug)]
+enum PayloadL1Reader {
+    /// Deferred-verification reader used by production payload construction.
+    Verified(PayloadL1StateProvider),
+    /// Unverified cache-backed reader for synthetic tests and mocks only.
+    #[cfg(any(test, feature = "test-utils"))]
+    Unverified(L1StateProvider),
+}
+
+impl PayloadL1Reader {
+    fn new(
+        provider: &L1StateProvider,
+        verified: Option<VerifiedL1StateCache>,
+        anchors: impl IntoIterator<Item = SealedHeader<TempoHeader>>,
+    ) -> eyre::Result<Self> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if verified.is_none() {
+            return Ok(Self::Unverified(provider.clone()));
+        }
+
+        let verified = verified.ok_or_else(|| eyre::eyre!("L1 state reads must be verified"))?;
+        let rpc_client = provider.rpc_client().clone();
+        Ok(Self::Verified(PayloadL1StateProvider::new(
+            rpc_client, verified, anchors,
+        )?))
+    }
+
+    fn verify_and_commit(&self) -> Result<usize, L1ReadValidationError> {
+        match self {
+            Self::Verified(reader) => reader.verify_and_commit(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Unverified(_) => Ok(0),
+        }
+    }
+}
+
+impl L1StorageReader for PayloadL1Reader {
+    fn read_l1_storage(
+        &self,
+        account: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256, L1StateError> {
+        match self {
+            Self::Verified(reader) => reader.read_l1_storage(account, slot, block_number),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Unverified(reader) => reader.read_l1_storage(account, slot, block_number),
+        }
+    }
+}
 
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
@@ -192,8 +244,8 @@ where
             TempoImport::CheckpointOnly(headers) => headers.as_slice(),
         };
         validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
-        let payload_l1 = PayloadL1StateProvider::new(
-            self.evm_config.l1_reader().rpc_client().clone(),
+        let payload_l1 = PayloadL1Reader::new(
+            self.evm_config.l1_reader(),
             self.verified_l1_state_cache.clone(),
             imported_headers.iter().cloned(),
         )

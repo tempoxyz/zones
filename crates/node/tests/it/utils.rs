@@ -69,7 +69,8 @@ use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache, encryption_key_address, state::EnabledTokenRegistry,
+    L1PortalEvents, L1StateCache, MAX_L1_LOOKAHEAD_BLOCKS, encryption_key_address,
+    state::EnabledTokenRegistry,
 };
 use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
@@ -2771,6 +2772,7 @@ impl L1TestNode {
             .apply(|mut c| {
                 c.dev.block_time = Some(Duration::from_millis(500));
                 c.dev.finality_depth = std::num::NonZeroUsize::MIN;
+                c.rpc.rpc_eth_proof_window = MAX_L1_LOOKAHEAD_BLOCKS;
                 c
             });
 

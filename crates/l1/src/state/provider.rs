@@ -178,7 +178,7 @@ impl L1RpcClient {
             .client()
             .request("eth_getMultiProof", (targets, block))
             .await
-            .map_err(Into::into)
+            .map_err(|error| eyre::eyre!("eth_getMultiProof failed at {block}: {error}"))
     }
 }
 
