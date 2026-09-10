@@ -550,8 +550,8 @@ enum Readiness {
 /// Forced-recovery promotion requires the operator-selected block to remain in the local canonical
 /// chain. The node may have advanced beyond that checkpoint before restarting, so requiring it to
 /// remain the head would make every in-progress recovery restart fatal. Normal transitions need no
-/// additional evidence: the next-anchor rule and one-to-one zone/L1 block mapping ensure all
-/// earlier leaders' blocks are already local.
+/// additional evidence: the next-anchor rule and production permits that stop checkpoint batches
+/// at leadership boundaries ensure all earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
