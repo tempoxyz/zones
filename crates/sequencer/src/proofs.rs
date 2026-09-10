@@ -9,17 +9,19 @@ use std::{
     time::Duration,
 };
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
+use alloy_provider::DynProvider;
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::StreamExt as _;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use tempo_alloy::TempoNetwork;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use zone_rpc::{ZoneDebugApi, types::ZoneExecutionWitness};
 
-use crate::ZoneSequencerProvider;
+use crate::{ZoneSequencerProvider, resolve_portal_zone_anchor};
 
 const FORMAT_VERSION: u32 = 2;
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
@@ -32,6 +34,16 @@ pub struct ProofCollectorConfig {
     pub directory: PathBuf,
     /// In-process API used to replay an executed block and collect its Zone and Tempo witness.
     pub debug_api: Arc<dyn ZoneDebugApi>,
+    /// Settlement source for retaining only unsettled blocks. None retains historical
+    /// witnesses for RPC-follower shadow proving.
+    pub settlement: Option<ProofCollectorSettlement>,
+}
+
+/// L1 portal used to advance the retained witness frontier independently of leadership.
+#[derive(Clone)]
+pub struct ProofCollectorSettlement {
+    pub portal_address: Address,
+    pub l1_provider: DynProvider<TempoNetwork>,
 }
 
 impl std::fmt::Debug for ProofCollectorConfig {
@@ -40,6 +52,10 @@ impl std::fmt::Debug for ProofCollectorConfig {
             .debug_struct("ProofCollectorConfig")
             .field("directory", &self.directory)
             .field("debug_api", &"<in-process>")
+            .field(
+                "settlement_portal",
+                &self.settlement.as_ref().map(|s| s.portal_address),
+            )
             .finish()
     }
 }
@@ -349,6 +365,10 @@ impl ProofCollectorHandle {
         ensure!(from <= to, "invalid proof range {from}..={to}");
         let mut status = self.status.clone();
         loop {
+            ensure!(
+                from > self.store.state.read().pruned_through,
+                "requested proof range {from}..={to} has already been settled and pruned"
+            );
             if matches!(*status.borrow(), CollectorStatus::Ready)
                 && let Ok(proofs) = self.store.snapshot(from, to)
             {
@@ -362,13 +382,6 @@ impl ProofCollectorHandle {
                 .await
                 .context("proof collector stopped before the requested range was available")?;
         }
-    }
-
-    pub(crate) async fn prune_through(&self, through: u64) -> Result<()> {
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.prune_through(through))
-            .await
-            .context("proof pruning task panicked")?
     }
 }
 
@@ -384,12 +397,11 @@ struct ProofCollector<P> {
 pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
     config: ProofCollectorConfig,
     provider: P,
-    pruned_through: u64,
     shutdown: CancellationToken,
 ) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
     let directory = config.directory.clone();
     let store = Arc::new(
-        tokio::task::spawn_blocking(move || ProofStore::open(directory, pruned_through))
+        tokio::task::spawn_blocking(move || ProofStore::open(directory, 0))
             .await
             .context("proof store opening task panicked")??,
     );
@@ -468,6 +480,20 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
     }
 
     async fn reconcile_and_collect(&self) -> Result<()> {
+        if let Some(settlement) = &self.config.settlement {
+            // A syncing follower may not have the portal anchor locally yet. Retry before
+            // collecting, so startup never tries to reconstruct already-settled history.
+            let anchor = resolve_portal_zone_anchor(
+                &self.provider,
+                settlement.portal_address,
+                &settlement.l1_provider,
+            )
+            .await?;
+            let store = self.store.clone();
+            tokio::task::spawn_blocking(move || store.prune_through(anchor.block_number))
+                .await
+                .context("proof pruning task panicked")??;
+        }
         let head = self.provider.best_block_number()?;
         let store = self.store.clone();
         let provider = self.provider.clone();
@@ -687,6 +713,30 @@ mod tests {
         store.invalidate_from(1).unwrap();
         assert!(store.state.read().proofs.is_empty());
         assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn settled_range_returns_an_error_instead_of_waiting_for_pruned_proofs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+        store.insert(proof(1, B256::repeat_byte(1))).unwrap();
+        store.prune_through(1).unwrap();
+        let (_status_tx, status) = watch::channel(CollectorStatus::Ready);
+        let (requests, _receiver) = mpsc::channel(1);
+        let handle = ProofCollectorHandle {
+            store,
+            status,
+            requests,
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), handle.wait_for_range(1, 1))
+            .await
+            .expect("a pruned range must not wait for witnesses that will never be collected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("settled and pruned")
+        );
     }
 
     #[tokio::test]

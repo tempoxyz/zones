@@ -24,6 +24,20 @@ async fn canonical_leader_block_has_durable_proof() -> eyre::Result<()> {
     assert_eq!(proof.witness.block_number, tip.number());
     assert!(leader.provider().get_block_number().await? >= proof.witness.block_number);
 
+    // A sequencer retains witnesses while following, before any promotion to leader.
+    let follower_path =
+        cluster.nodes[1]
+            .proof_directory()
+            .join(format!("{}-{:x}.json", tip.number(), tip.hash()));
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !follower_path.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await?;
+    let follower_proof: StoredBlockProof = serde_json::from_slice(&std::fs::read(&follower_path)?)?;
+    assert_eq!(follower_proof.witness.block_hash, tip.hash());
+
     // Turn the spool path into a regular file to force the next atomic write to fail,
     // retaining the previously collected proofs in a sibling directory.
     let directory = leader.proof_directory();

@@ -39,7 +39,7 @@ use zone_p2p::{
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
     ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_proof_collector, spawn_zone_sequencer,
+    resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -112,11 +112,12 @@ pub struct RoleStatus {
 /// Shared handle to the live [`RoleStatus`].
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
-/// Leader-only background task dependencies (batch submission, withdrawal processing).
+/// Dependencies used by leader tasks; the proof collector itself is node-owned.
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
-    pub proof_collector_config: zone_sequencer::ProofCollectorConfig,
+    /// Node-owned collector shared across all role generations.
+    pub proof_collector: zone_sequencer::ProofCollectorHandle,
     pub prover_config: Option<ShadowProverConfig>,
 }
 
@@ -986,20 +987,7 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
-            // Keep collection alive until the engine finishes its in-flight block on demotion.
-            let collector_stop = CancellationToken::new();
-            let (collector, collector_task) = spawn_proof_collector(
-                sequencer.proof_collector_config.clone(),
-                context.provider.clone(),
-                portal_confirmed_height,
-                collector_stop.clone(),
-            )
-            .await?;
-            let collector_task = AbortOnDropHandle::new(collector_task);
-            tasks.spawn(async move {
-                let _ = collector_task.await;
-                TaskEnd::Ended("proof-collector")
-            });
+            let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
             let enforce_proof_persistence = true;
             #[cfg(feature = "test-utils")]
@@ -1011,10 +999,8 @@ where
                 engine
             };
             let engine_token = token.clone();
-            let collector_guard = collector_stop.drop_guard();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
             tasks.spawn(async move {
-                let _collector_guard = collector_guard;
                 let exit = engine.run_until(engine_token).await;
                 // Signalled before the task resolves so `stop` learns the canonical head is
                 // pinned without having to drain the JoinSet first.

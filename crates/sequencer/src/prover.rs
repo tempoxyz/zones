@@ -87,29 +87,6 @@ pub struct ShadowProver {
     proofs: ProofCollectorHandle,
 }
 
-/// Proof collection plus optional observational SPF validation for the monitor.
-#[derive(Debug, Clone)]
-pub(crate) struct ProofServices {
-    collector: ProofCollectorHandle,
-    shadow: Option<ShadowProver>,
-}
-
-impl ProofServices {
-    pub(crate) const fn new(collector: ProofCollectorHandle, shadow: Option<ShadowProver>) -> Self {
-        Self { collector, shadow }
-    }
-
-    pub(crate) async fn try_enqueue(&self, from: u64, to: u64, batch: BatchData) {
-        if let Some(shadow) = &self.shadow {
-            shadow.try_enqueue(from, to, batch).await;
-        }
-    }
-
-    pub(crate) async fn prune_through(&self, through: u64) -> Result<()> {
-        self.collector.prune_through(through).await
-    }
-}
-
 /// Exact Tempo anchor committed by a finalized batch submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShadowProofAnchor {

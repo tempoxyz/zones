@@ -38,7 +38,8 @@ pub use encryption_key::{
 };
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use proofs::{
-    ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, spawn_proof_collector,
+    ProofCollectorConfig, ProofCollectorHandle, ProofCollectorSettlement, StoredBlockProof,
+    spawn_proof_collector,
 };
 pub use prover::{
     SHADOW_PROVER_QUEUE_CAPACITY, ShadowProofAnchor, ShadowProver, ShadowProverConfig,
@@ -164,25 +165,16 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
-    let proof_services = if let Some(collector) = proof_collector {
-        let shadow = prover_config.map(|prover_config| {
-            prover::spawn_shadow_prover(
-                prover_config,
-                collector.clone(),
-                config.portal_address,
-                config.batch_anchor_config,
-                zone_provider.clone(),
-                l1_provider.clone(),
-            )
-        });
-        Some(prover::ProofServices::new(collector, shadow))
-    } else {
-        assert!(
-            prover_config.is_none(),
-            "shadow prover requires a proof collector"
-        );
-        None
-    };
+    let shadow_prover = prover_config.map(|prover_config| {
+        prover::spawn_shadow_prover(
+            prover_config,
+            proof_collector.expect("shadow prover requires a proof collector"),
+            config.portal_address,
+            config.batch_anchor_config,
+            zone_provider.clone(),
+            l1_provider.clone(),
+        )
+    });
     let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
@@ -223,7 +215,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         l1_provider,
         signer,
         monitor_shared_state,
-        proof_services,
+        shadow_prover,
         shutdown,
     );
 

@@ -100,8 +100,9 @@ use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
-    ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
-    spawn_proof_collector, spawn_shadow_prover, spawn_zone_sequencer,
+    ProofCollectorSettlement, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
+    attestation::AttestationDomain, spawn_proof_collector, spawn_shadow_prover,
+    spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -830,7 +831,31 @@ where
                 handle.eth_handlers().api.clone(),
                 l1_provider.clone(),
             )),
+            settlement: self
+                .sequencer_config
+                .as_ref()
+                .map(|_| ProofCollectorSettlement {
+                    portal_address: self.portal_address,
+                    l1_provider: l1_provider.clone(),
+                }),
         };
+        // Sequencer nodes collect while following as well as leading. RPC-only shadow
+        // provers retain historical witnesses instead of pruning at the settlement frontier.
+        let proof_collector =
+            if self.sequencer_config.is_some() || finalized_batch_submissions.is_some() {
+                let (collector, collector_task) = spawn_proof_collector(
+                    proof_collector_config,
+                    provider.clone(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await?;
+                task_executor.spawn_critical_task("zone-proof-collector", async move {
+                    let _ = collector_task.await;
+                });
+                Some(collector)
+            } else {
+                None
+            };
         let prover_config =
             effective_shadow_prover_config
                 .as_ref()
@@ -849,21 +874,11 @@ where
             prover_config.clone(),
             finalized_batch_submissions,
         ) {
-            // Finalized submissions can be replayed from before the current portal checkpoint.
-            // Keep those witnesses available to the RPC follower's shadow prover.
-            let (collector, collector_task) = spawn_proof_collector(
-                proof_collector_config.clone(),
-                provider.clone(),
-                0,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await?;
-            task_executor.spawn_critical_task("rpc-follower-proof-collector", async move {
-                let _ = collector_task.await;
-            });
             let prover = spawn_shadow_prover(
                 runtime_config,
-                collector,
+                proof_collector
+                    .clone()
+                    .expect("RPC shadow prover has a proof collector"),
                 self.portal_address,
                 config.batch_anchor_config,
                 provider.clone(),
@@ -923,7 +938,9 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
-                    proof_collector_config.clone(),
+                    proof_collector
+                        .clone()
+                        .expect("sequencer has a proof collector"),
                     prover_config.clone(),
                 )?),
                 None => None,
@@ -968,22 +985,7 @@ where
             let last_header = provider
                 .sealed_header(provider.best_block_number()?)?
                 .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-            let anchor = zone_sequencer::resolve_portal_zone_anchor(
-                &provider,
-                self.portal_address,
-                &l1_provider,
-            )
-            .await?;
-            let (collector, collector_task) = spawn_proof_collector(
-                proof_collector_config,
-                provider.clone(),
-                anchor.block_number,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await?;
-            task_executor.spawn_critical_task("zone-proof-collector", async move {
-                let _ = collector_task.await;
-            });
+            let collector = proof_collector.expect("sequencer has a proof collector");
             let engine = ZoneEngine::new(
                 provider.chain_spec(),
                 engine_handle,
@@ -1426,7 +1428,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
-        proof_collector_config: ProofCollectorConfig,
+        proof_collector: ProofCollectorHandle,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
@@ -1444,7 +1446,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
-            proof_collector_config,
+            proof_collector,
             prover_config,
         })
     }
@@ -1611,7 +1613,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
-        proof_collector_config: Option<ProofCollectorHandle>,
+        proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
@@ -1635,7 +1637,7 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
-            proof_collector_config,
+            proof_collector,
             prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
