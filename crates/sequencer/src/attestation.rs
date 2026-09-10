@@ -319,6 +319,18 @@ impl AttestationStore {
         })
     }
 
+    /// Most recent proposed anchor at this height, including proposals awaiting quorum.
+    pub fn latest_settlement_anchor(&self, height: u64) -> Option<u64> {
+        self.settlements
+            .read()
+            .expect("attestation store lock poisoned")
+            .get(&height)?
+            .values()
+            .filter_map(|signatures| signatures.values().next())
+            .map(|signed| signed.attestation.anchorBlockNumber)
+            .max()
+    }
+
     /// Remove one unusable certificate without discarding other anchor candidates.
     pub fn remove_settlement(&self, height: u64, digest: B256) {
         let mut settlements = self

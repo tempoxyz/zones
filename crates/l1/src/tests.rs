@@ -2495,3 +2495,85 @@ fn pause_snapshot_agrees_with_the_last_event_in_a_block() {
         }
     }
 }
+
+#[tokio::test]
+async fn observer_delivery_resumes_after_reconnect_without_duplicates() {
+    for historical_replay in [false, true] {
+        let number = MAX_L1_LOOKAHEAD_BLOCKS + 1;
+        let checkpoint = seal(make_test_header(number - 1)).num_hash();
+        let mut subscriber = test_subscriber_with_checkpoint(checkpoint);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        subscriber.finalized_batch_submissions = Some(sender);
+        if historical_replay {
+            // Governance is outside the consumer's cache window when it observes this block.
+            subscriber.block_tracker.initialize_consumed_through(0);
+        }
+        let logs = (0..6)
+            .map(|index| Log {
+                inner: alloy_primitives::Log {
+                    address: subscriber.config.portal_address,
+                    data: abi::ZonePortal::BatchSubmitted {
+                        withdrawalBatchIndex: index,
+                        withdrawalQueueIndex: U256::ZERO,
+                        nextProcessedDepositQueueHash: B256::ZERO,
+                        nextBlockHash: B256::with_last_byte(index as u8),
+                        withdrawalQueueHash: B256::ZERO,
+                        lastProcessedDepositNumber: 0,
+                    }
+                    .encode_log_data(),
+                },
+                ..Default::default()
+            })
+            .collect();
+        let receipts = vec![make_receipt_with_logs(number, B256::ZERO, logs)];
+        let mut header = make_chained_header(number, checkpoint.hash);
+        header.inner.receipts_root = calculate_test_receipts_root(&receipts);
+        header.inner.logs_bloom = *receipts[0].inner.inner.bloom_ref();
+        let anchor = seal(header.clone()).num_hash();
+        let rpc = Asserter::new();
+        rpc.push_success(&Some(header_response(header.clone())));
+        rpc.push_success(&Some(header_response(header.clone())));
+        rpc.push_success(&Some(receipts.clone()));
+        if historical_replay {
+            rpc.push_success(&Some(header_response(header)));
+            rpc.push_success(&Some(receipts));
+        }
+        let provider =
+            ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(rpc.clone());
+        subscriber
+            .sync_finalized_once(&provider, number)
+            .await
+            .unwrap();
+        subscriber
+            .block_tracker
+            .initialize_consumed_through(checkpoint.number);
+
+        for index in 0..5 {
+            // Dropping the blocked future models try_join! cancelling it on a reconnect.
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(20),
+                    subscriber.backfill_anchors(&provider, number, number),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(receiver.try_recv().unwrap().log_index, index);
+            assert!(receiver.try_recv().is_err());
+            assert!(subscriber.block_tracker.latest().is_none());
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            subscriber.backfill_anchors(&provider, number, number),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(receiver.try_recv().unwrap().log_index, 5);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(subscriber.block_tracker.latest(), Some(anchor));
+        assert_eq!(subscriber.deposit_queue.last_enqueued(), Some(anchor));
+        // Reconnects reuse the in-flight block, including a block fetched during replay.
+        assert!(rpc.read_q().is_empty());
+    }
+}

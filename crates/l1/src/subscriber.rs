@@ -4,7 +4,7 @@ use crate::{
     state::EnabledTokenRegistry,
 };
 use eyre::{OptionExt as _, WrapErr as _};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
@@ -506,7 +506,7 @@ pub(crate) struct L1ProcessedEvents {
     pub(crate) portal_events: L1PortalEvents,
     pub(crate) invalidated: HashSet<Address>,
     pub(crate) portal_logs: Option<Vec<alloy_primitives::Log>>,
-    pub(crate) finalized_batches: Vec<FinalizedBatchSubmission>,
+    pub(crate) finalized_batches: VecDeque<FinalizedBatchSubmission>,
     pub(crate) portal_pause: Option<bool>,
 }
 
@@ -1067,6 +1067,12 @@ where
                     .remove(&number)
                     .ok_or_eyre("missing authenticated replay header")?;
                 let events = self.fetch_events(provider, &header).await?;
+                // Keep the in-flight replay block too: reconnects must retain observer progress.
+                self.block_tracker
+                    .state
+                    .write()
+                    .pending
+                    .insert(number, (header.clone(), events.clone()));
                 (header, events)
             };
             let anchor = header.num_hash();
@@ -1083,6 +1089,17 @@ where
                             ),
                         }
                     })?;
+                    // No await between delivery and removal: cancellation can only leave the
+                    // undelivered suffix for the next connection.
+                    self.block_tracker
+                        .state
+                        .write()
+                        .pending
+                        .get_mut(&number)
+                        .expect("in-flight block retained")
+                        .1
+                        .finalized_batches
+                        .pop_front();
                 }
             }
             let appended = self
@@ -1115,6 +1132,8 @@ where
 
     /// Authenticate discarded history backwards from the exact governance tip before enqueueing.
     /// This path is used only after execution has fallen outside the retained window.
+    /// Each parent hash depends on the preceding response, so this bounded walk is serial and
+    /// must finish before execution advances. Large gaps can take substantial time to authenticate.
     pub(crate) async fn replay_headers(
         &self,
         provider: &impl Provider<TempoNetwork>,
@@ -1251,7 +1270,7 @@ where
             portal_events,
             invalidated,
             portal_logs,
-            finalized_batches,
+            finalized_batches: finalized_batches.into(),
             portal_pause,
         })
     }
