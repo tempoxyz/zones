@@ -57,7 +57,8 @@ use tempo_primitives::{
 use tempo_revm::TempoTxEnv;
 use tempo_zone_contracts as _;
 use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
-use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
+use zone_l1::state::{L1RpcClient, L1StateCache, L1StateProvider, L1StateProviderConfig};
+pub use zone_primitives::StorageReadKey;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -264,6 +265,20 @@ where
         self.inner.chain_spec()
     }
 
+    /// Returns the configured L1 reader.
+    pub fn l1_reader(&self) -> &L1 {
+        &self.zone_factory.l1_reader
+    }
+
+    /// Clones this configuration with another L1 reader implementation.
+    pub fn with_l1_reader<R: L1StorageReader>(&self, reader: R) -> ZoneEvmConfig<R> {
+        ZoneEvmConfig::new(
+            self.chain_spec.clone(),
+            reader,
+            self.zone_factory.portal_address,
+        )
+    }
+
     /// Clones this configuration with a Tempo L1 storage-read recorder.
     pub fn with_l1_storage_recorder(
         &self,
@@ -272,11 +287,7 @@ where
         RecordingL1StorageReader<L1>,
     ) {
         let reader = RecordingL1StorageReader::new(self.zone_factory.l1_reader.clone());
-        let config = ZoneEvmConfig::new(
-            self.chain_spec.clone(),
-            reader.clone(),
-            self.zone_factory.portal_address,
-        );
+        let config = self.with_l1_reader(reader.clone());
         (config, reader)
     }
 }
@@ -297,7 +308,8 @@ impl ZoneEvmConfig {
             max_sync_attempts: Some(NonZeroU32::MIN),
             ..Default::default()
         };
-        let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+        let rpc_client = L1RpcClient::from_provider(provider, runtime_handle);
+        let l1_provider = L1StateProvider::with_client(config, cache, rpc_client);
         Self::new(chain_spec, l1_provider, Address::ZERO)
     }
 }
@@ -449,7 +461,7 @@ where
 #[derive(Clone, Debug)]
 pub struct RecordingL1StorageReader<L1> {
     inner: L1,
-    reads: Arc<Mutex<HashSet<TempoStorageRead>>>,
+    reads: Arc<Mutex<HashSet<StorageReadKey>>>,
 }
 
 impl<L1> RecordingL1StorageReader<L1> {
@@ -461,7 +473,7 @@ impl<L1> RecordingL1StorageReader<L1> {
     }
 
     /// Takes and returns the deduplicated storage reads recorded so far.
-    pub fn take_reads(&self) -> HashSet<TempoStorageRead> {
+    pub fn take_reads(&self) -> HashSet<StorageReadKey> {
         std::mem::take(&mut self.reads.lock().expect("L1 read recorder lock poisoned"))
     }
 }
@@ -477,18 +489,9 @@ impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
         self.reads
             .lock()
             .expect("L1 read recorder lock poisoned")
-            .insert(TempoStorageRead { account, slot });
+            .insert(StorageReadKey { account, slot });
         Ok(value)
     }
-}
-
-/// A Tempo L1 storage slot accessed while replaying a Zone block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TempoStorageRead {
-    /// Tempo account whose storage was accessed.
-    pub account: Address,
-    /// Storage slot that was accessed.
-    pub slot: B256,
 }
 
 #[cfg(test)]
@@ -526,7 +529,7 @@ mod tests {
         assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
         assert_eq!(
             reader.take_reads(),
-            HashSet::from_iter([TempoStorageRead { account, slot }])
+            HashSet::from_iter([StorageReadKey { account, slot }])
         );
 
         let failing = RecordingL1StorageReader::new(MockL1Reader::failing_storage());

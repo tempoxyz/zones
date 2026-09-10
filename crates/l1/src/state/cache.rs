@@ -9,13 +9,13 @@
 //!
 //! Each `(contract_address, slot_key)` pair maps to a [`BTreeMap<u64, B256>`] of
 //! `block_number → value`. Slot histories are bounded by both a weighted LRU and a per-slot limit.
-//! A lookup for block N may inherit the most recent earlier value only when verified receipt
-//! coverage and mutation barriers prove that it remained current.
+//! A lookup for block N may inherit the most recent earlier value only when authenticated
+//! storage-root coverage and mutation barriers prove that it remained current.
 //!
 //! ## Write path
 //!
-//! - The [`L1Subscriber`](crate::l1::L1Subscriber) records mutation barriers from finalized L1
-//!   receipts.
+//! - The [`L1Subscriber`](crate::l1::L1Subscriber) records mutation barriers from authenticated
+//!   storage-root changes for the Zone Portal and TIP-403 Registry.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
 
@@ -63,8 +63,8 @@ impl L1StateCache {
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
 /// Inherited values are valid only when the subscriber has processed every intervening L1 block
-/// and no log from the owning contract indicates a possible mutation. The coverage range starts
-/// at the current floor and ends at the latest finalized block whose receipts were processed.
+/// and no authenticated storage-root change indicates a mutation. The coverage range starts at the
+/// current floor and ends at the latest finalized block whose account proofs were processed.
 #[derive(Debug)]
 pub struct L1StateCacheInner {
     /// Bounded per-slot value histories, promoted as a unit on access.
@@ -75,7 +75,7 @@ pub struct L1StateCacheInner {
     invalidation_count: usize,
     /// Maximum number of mutation barriers retained before resetting.
     max_invalidations: usize,
-    /// Contiguous receipt coverage: earliest usable value height through latest processed block.
+    /// Contiguous proof coverage: earliest usable value height through latest processed block.
     coverage: RangeInclusive<u64>,
 }
 
@@ -101,7 +101,7 @@ impl L1StateCacheInner {
         }
     }
 
-    /// Returns whether receipt processing has established contiguous coverage at `block_number`.
+    /// Returns whether subscriber processing has established contiguous coverage at `block_number`.
     pub fn has_coverage_at(&self, block_number: u64) -> bool {
         self.coverage.contains(&block_number)
     }
@@ -109,7 +109,7 @@ impl L1StateCacheInner {
     /// Returns the cached value for a storage slot at the given block number.
     ///
     /// An exact-height value is always valid. A value inherited from an earlier height is returned
-    /// only when the subscriber has processed receipts through `block_number` and no mutation
+    /// only when the subscriber has authenticated roots through `block_number` and no mutation
     /// barrier exists after the value was populated.
     pub fn get(&mut self, address: Address, slot: B256, block_number: u64) -> Option<B256> {
         let (&cached_block, &value) = self
@@ -164,7 +164,7 @@ impl L1StateCacheInner {
         debug_assert!(inserted, "trimmed slot history must fit cache capacity");
     }
 
-    /// Clears cached state and establishes a new contiguous receipt-coverage baseline.
+    /// Clears cached state and establishes a new contiguous proof-coverage baseline.
     fn reset(&mut self, floor: u64) {
         self.slots.clear();
         self.invalidations.clear();
@@ -172,7 +172,7 @@ impl L1StateCacheInner {
         self.coverage = floor..=floor;
     }
 
-    /// Records mutation barriers and publishes receipt coverage for one finalized block.
+    /// Records authenticated root-change barriers and publishes proof coverage for one block.
     ///
     /// Coverage only advances one block at a time. A duplicate, skipped, or out-of-order block
     /// invalidates the cache's continuity assumptions, so cached state is cleared and `anchor`

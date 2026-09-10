@@ -347,7 +347,7 @@ async fn collect_tempo_witness(
     provider: &DynProvider<TempoNetwork>,
     initial_tempo: alloy_eips::NumHash,
     first_tx_input: Option<&[u8]>,
-    reads: &HashSet<zone_evm::TempoStorageRead>,
+    reads: &HashSet<zone_evm::StorageReadKey>,
 ) -> eyre::Result<(TempoHeader, Vec<Bytes>)> {
     let initial_header = provider
         .get_block_by_number(initial_tempo.number.into())
@@ -1657,7 +1657,7 @@ mod tests {
             .erased();
         let account = Address::repeat_byte(0xaa);
         let slot = B256::repeat_byte(0xbb);
-        let reads = HashSet::from([zone_evm::TempoStorageRead { account, slot }]);
+        let reads = HashSet::from([zone_evm::StorageReadKey { account, slot }]);
         let mut checkpoint = TempoHeader::default();
         checkpoint.inner.number = 10;
         let first_tx_input = IZoneInbox::advanceTempoCall {

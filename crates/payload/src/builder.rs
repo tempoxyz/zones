@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::Evm;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
@@ -26,7 +26,7 @@ use reth_node_api::{FullNodeTypes, NodeTypes};
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
-use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
+use reth_primitives_traits::{AlloyBlockHeader as _, Recovered, SealedHeader};
 use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
@@ -43,11 +43,14 @@ use tempo_primitives::{
 use tempo_transaction_pool::{
     StateAwareBestTransactions, TempoTransactionPool, transaction::TempoPooledTransaction,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
-use zone_l1::{PreparedL1Block, TempoStateExt};
-use zone_precompiles::L1StateError;
+use zone_l1::{
+    PreparedL1Block, TempoStateExt,
+    state::{L1ReadValidationError, L1StateProvider, PayloadL1StateProvider, VerifiedL1StateCache},
+};
+use zone_precompiles::{L1StateError, L1StorageReader};
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
 use crate::{TempoImport, ZonePayloadAttributes, ZonePayloadTypes};
@@ -69,12 +72,65 @@ const BLOCK_SIZE_SAFETY_MARGIN: usize = 1024 * 1024;
 /// Diagnostic retained when upstream Tempo precompile storage stringifies an [`L1StateError`].
 const L1_STORAGE_UNAVAILABLE_ERROR_PREFIX: &str = "Tempo L1 storage unavailable";
 
+/// Payload L1 reader with a test-only unverified variant.
+#[derive(Clone, Debug)]
+enum PayloadL1Reader {
+    /// Deferred-verification reader used by production payload construction.
+    Verified(PayloadL1StateProvider),
+    /// Unverified cache-backed reader for synthetic tests and mocks only.
+    #[cfg(any(test, feature = "test-utils"))]
+    Unverified(L1StateProvider),
+}
+
+impl PayloadL1Reader {
+    fn new(
+        provider: &L1StateProvider,
+        verified: Option<VerifiedL1StateCache>,
+        anchors: impl IntoIterator<Item = SealedHeader<TempoHeader>>,
+    ) -> eyre::Result<Self> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if verified.is_none() {
+            return Ok(Self::Unverified(provider.clone()));
+        }
+
+        let verified = verified.ok_or_else(|| eyre::eyre!("L1 state reads must be verified"))?;
+        let rpc_client = provider.rpc_client().clone();
+        Ok(Self::Verified(PayloadL1StateProvider::new(
+            rpc_client, verified, anchors,
+        )?))
+    }
+
+    fn verify_and_commit(&self) -> Result<usize, L1ReadValidationError> {
+        match self {
+            Self::Verified(reader) => reader.verify_and_commit(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Unverified(_) => Ok(0),
+        }
+    }
+}
+
+impl L1StorageReader for PayloadL1Reader {
+    fn read_l1_storage(
+        &self,
+        account: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256, L1StateError> {
+        match self {
+            Self::Verified(reader) => reader.read_l1_storage(account, slot, block_number),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::Unverified(reader) => reader.read_l1_storage(account, slot, block_number),
+        }
+    }
+}
+
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
     withdrawal_batch_interval_blocks: u64,
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
+    verified_l1_state_cache: Option<VerifiedL1StateCache>,
 }
 
 impl ZonePayloadFactory {
@@ -83,6 +139,7 @@ impl ZonePayloadFactory {
         Self {
             withdrawal_batch_interval_blocks: withdrawal_batch_interval_blocks.max(1),
             withdrawal_reveal_encryptor: None,
+            verified_l1_state_cache: None,
         }
     }
 
@@ -91,6 +148,12 @@ impl ZonePayloadFactory {
         encryptor: Arc<dyn WithdrawalRevealEncryptor>,
     ) -> Self {
         self.withdrawal_reveal_encryptor = Some(encryptor);
+        self
+    }
+
+    /// Enables storage-root-keyed cache reuse and deferred proof verification for payloads.
+    pub fn with_verified_l1_state_cache(mut self, state: VerifiedL1StateCache) -> Self {
+        self.verified_l1_state_cache = Some(state);
         self
     }
 }
@@ -124,6 +187,7 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
+            verified_l1_state_cache: self.verified_l1_state_cache.clone(),
             withdrawal_batch_interval_blocks: self.withdrawal_batch_interval_blocks,
             withdrawal_reveal_encryptor: self.withdrawal_reveal_encryptor.clone(),
         })
@@ -139,6 +203,8 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: ZoneEvmConfig,
+    /// Shared authenticated roots and proved slot values used by payload execution.
+    verified_l1_state_cache: Option<VerifiedL1StateCache>,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data for batch finalization.
@@ -178,6 +244,13 @@ where
             TempoImport::CheckpointOnly(headers) => headers.as_slice(),
         };
         validate_l1_continuity(state_provider.as_ref(), imported_headers)?;
+        let payload_l1 = PayloadL1Reader::new(
+            self.evm_config.l1_reader(),
+            self.verified_l1_state_cache.clone(),
+            imported_headers.iter().cloned(),
+        )
+        .map_err(|error| PayloadBuilderError::other(std::io::Error::other(error.to_string())))?;
+        let payload_evm_config = self.evm_config.with_l1_reader(payload_l1.clone());
         let final_imported = imported_headers.last().expect("validated nonempty import");
         let checkpoint_only = matches!(tempo_import, TempoImport::CheckpointOnly(_));
         let follows_checkpoint_blocks = tempo_import.follows_checkpoint_blocks();
@@ -234,8 +307,7 @@ where
             consensus_context: None,
             subblock_fee_recipients: Default::default(),
         };
-        let mut builder = self
-            .evm_config
+        let mut builder = payload_evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
             .map_err(PayloadBuilderError::other)?;
         let base_fee = builder.evm().block().basefee;
@@ -314,6 +386,18 @@ where
             block,
             block_access_list: _,
         } = builder.finish(&*state_provider, None)?;
+
+        if cancel.is_cancelled() {
+            return Ok(BuildOutcome::Cancelled);
+        }
+        let proved_slots = payload_l1
+            .verify_and_commit()
+            .map_err(PayloadBuilderError::other)?;
+        debug!(
+            target: "zone::payload",
+            proved_slots,
+            "Authenticated payload L1 storage misses"
+        );
 
         let requests = chain_spec
             .is_prague_active_at_timestamp(attributes.timestamp())
