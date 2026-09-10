@@ -835,7 +835,7 @@ async fn zone_witnesses(
                 state_nodes = witness.execution_witness.state.len(),
                 bytecodes = witness.execution_witness.codes.len(),
                 ancestor_headers = witness.execution_witness.headers.len(),
-                tempo_storage_reads = witness.tempo_reads.len(),
+                tempo_state_nodes = witness.tempo_state.len(),
                 elapsed_ms = started.elapsed().as_millis(),
                 "Received Zone execution witness"
             );

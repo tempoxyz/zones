@@ -35,18 +35,6 @@ pub struct ZoneExecutionWitness {
     pub initial_tempo_header: TempoHeader,
     /// Deduplicated RLP-encoded account and storage proof nodes for all Tempo reads.
     pub tempo_state: Vec<Bytes>,
-    /// Deduplicated Tempo L1 storage slots accessed during replay.
-    #[serde(default)]
-    pub tempo_reads: Vec<TempoStorageRead>,
-}
-
-/// A Tempo L1 storage slot accessed during Zone block replay.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TempoStorageRead {
-    /// Tempo account whose storage was accessed.
-    pub account: Address,
-    /// Storage slot that was accessed.
-    pub slot: B256,
 }
 
 /// A JSON-RPC 2.0 request.

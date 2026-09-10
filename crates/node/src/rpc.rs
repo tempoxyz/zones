@@ -65,8 +65,8 @@ use zone_rpc::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoundDecryptionKey, BoxEyreFut, BoxFut,
         DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalSequencerInfo, PeerTipInfo,
         SequencerInfoResponse, SequencerPeerInfo, SequencerProgress, SequencerReadiness,
-        SetLeaderResponse, TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness,
-        ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
+        SetLeaderResponse, ZoneExecutionWitness, ZoneInfoResponse, internal, raw_null, raw_zero,
+        to_raw,
     },
 };
 
@@ -325,13 +325,6 @@ where
             collect_tempo_witness(&self.l1_provider, initial_tempo, &reads)
                 .await
                 .map_err(|error| operator_rpc_error(internal(error)))?;
-        let tempo_reads = reads
-            .iter()
-            .map(|read| (read.account, read.slot))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|(account, slot)| RpcTempoStorageRead { account, slot })
-            .collect();
         Ok(ZoneExecutionWitness {
             block_number,
             block_hash,
@@ -339,7 +332,6 @@ where
             execution_witness,
             initial_tempo_header,
             tempo_state,
-            tempo_reads,
         })
     }
 }
@@ -1713,8 +1705,6 @@ mod tests {
 
     #[test]
     fn zone_execution_witness_roundtrips_zone_and_tempo_material() {
-        let account = Address::repeat_byte(0xaa);
-        let slot = B256::repeat_byte(0xbb);
         let witness = ZoneExecutionWitness {
             block_number: 7,
             block_hash: B256::repeat_byte(0xcc),
@@ -1722,15 +1712,10 @@ mod tests {
             execution_witness: Default::default(),
             initial_tempo_header: TempoHeader::default(),
             tempo_state: vec![Bytes::from(vec![1, 2])],
-            tempo_reads: vec![RpcTempoStorageRead { account, slot }],
         };
         let value = serde_json::to_value(&witness).unwrap();
 
         assert!(value.get("state").is_some());
-        assert_eq!(
-            value["tempo_reads"],
-            serde_json::json!([{ "account": account, "slot": slot }])
-        );
         assert_eq!(value["tempo_state"], serde_json::json!(["0x0102"]));
         assert_eq!(
             serde_json::from_value::<ZoneExecutionWitness>(value).unwrap(),
