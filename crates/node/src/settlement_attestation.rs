@@ -652,10 +652,7 @@ where
     let (_, signatures) = context
         .store
         .insert_settlement(context.domain, signer, signed);
-    eyre::ensure!(
-        signatures > 0,
-        "settlement proposal was already submitted or exceeds the pending proposal limit"
-    );
+    eyre::ensure!(signatures > 0, "settlement proposal is no longer retained");
     commands
         .send(P2pCommand::BroadcastSettlementProposal(
             attestation.encode(),

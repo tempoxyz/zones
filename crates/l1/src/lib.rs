@@ -18,7 +18,7 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockNumberOrTag, NumHash};
-use alloy_network::{ReceiptResponse as _, primitives::HeaderResponse as _};
+use alloy_network::ReceiptResponse as _;
 use alloy_primitives::{Address, B256, Bloom, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
@@ -98,7 +98,7 @@ pub use state::L1StateCache;
 pub use subscriber::{
     AuthenticatedPortalLogs, FinalizedBatchSubmission, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, L1SubscriberError, LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS,
-    extract_finalized_batch_submissions, verify_receipts_against_header,
+    MAX_L1_REPLAY_BLOCKS, extract_finalized_batch_submissions, verify_receipts_against_header,
 };
 
 #[cfg(test)]

@@ -146,6 +146,7 @@ async fn refresh_portal_pause(
 }
 
 /// Wait for a known finalized pause state before allowing node startup to continue.
+/// There is deliberately no retry limit: an RPC outage must not start an unguarded producer.
 async fn initialize_portal_pause(
     l1_provider: &DynProvider<TempoNetwork>,
     portal_address: Address,
@@ -802,15 +803,6 @@ where
                         &schedule,
                     ),
                 )?;
-                validate_stale_leadership_startup(
-                    &l1_provider,
-                    self.portal_address,
-                    snapshot_anchor,
-                    historical_replay_through,
-                    schedule.latest_observed_epoch().unwrap_or(1),
-                    p2p.manifest().forced_recovery().is_some(),
-                )
-                .await?;
                 // Seed the applied anchor from the persisted checkpoint so it targets the leader
                 // of the next anchor from the very start (and not after the first post-restart block)
                 schedule.record_applied_anchor(snapshot_anchor);
@@ -1215,47 +1207,6 @@ where
         recovery_start_tempo_block,
         resumed = snapshot_anchor >= recovery_start_tempo_block,
         "Installed manifest forced recovery"
-    );
-    Ok(())
-}
-
-/// A restart beyond the retained execution window must not silently rely on a replaced leader.
-/// A coordinated manifest recovery explicitly authorizes the missing historical anchors.
-async fn validate_stale_leadership_startup(
-    provider: &DynProvider<TempoNetwork>,
-    portal_address: Address,
-    local_anchor: u64,
-    finalized_number: u64,
-    local_epoch: u64,
-    forced_recovery: bool,
-) -> eyre::Result<()> {
-    if portal_address.is_zero()
-        || finalized_number.saturating_sub(local_anchor) <= zone_l1::MAX_L1_LOOKAHEAD_BLOCKS
-    {
-        return Ok(());
-    }
-    let header = provider
-        .get_header_by_number(finalized_number.into())
-        .await?
-        .ok_or_else(|| eyre::eyre!("missing finalized leadership snapshot {finalized_number}"))?;
-    eyre::ensure!(
-        header.number() == finalized_number,
-        "wrong finalized leadership snapshot height"
-    );
-    let block = alloy_rpc_types_eth::BlockId::hash_canonical(header.hash);
-    if provider
-        .get_code_at(portal_address)
-        .block_id(block)
-        .await?
-        .is_empty()
-    {
-        return Ok(());
-    }
-    let portal = ZonePortal::new(portal_address, provider);
-    let epoch = portal.leaderEpoch().block(block).call().await?;
-    eyre::ensure!(
-        epoch == local_epoch || forced_recovery,
-        "local Tempo anchor {local_anchor} is stale: local leadership epoch {local_epoch}, finalized epoch {epoch} at {finalized_number}; configure coordinated manifest forced recovery before restarting"
     );
     Ok(())
 }
@@ -2234,41 +2185,6 @@ mod tests {
         asserter.push_success(&Bytes::from(ZonePortal::pausedCall::abi_encode_returns(
             &paused,
         )));
-    }
-
-    #[tokio::test]
-    async fn stale_startup_requires_explicit_recovery_after_leader_rotation() {
-        for (current_epoch, recovery, allowed) in
-            [(1u64, false, true), (2, false, false), (2, true, true)]
-        {
-            let asserter = Asserter::new();
-            push_finalized_header(&asserter, 10_000);
-            asserter.push_success(&Bytes::from_static(&[0x00]));
-            asserter.push_success(&Bytes::from(
-                ZonePortal::leaderEpochCall::abi_encode_returns(&current_epoch),
-            ));
-            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect_mocked_client(asserter.clone())
-                .erased();
-            let result = validate_stale_leadership_startup(
-                &provider,
-                Address::repeat_byte(1),
-                10,
-                10_000,
-                1,
-                recovery,
-            )
-            .await;
-            assert_eq!(result.is_ok(), allowed);
-            if let Err(error) = result {
-                assert!(
-                    error
-                        .to_string()
-                        .contains("configure coordinated manifest forced recovery")
-                );
-            }
-            assert!(asserter.read_q().is_empty());
-        }
     }
 
     #[tokio::test]

@@ -90,15 +90,16 @@ const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
 /// map overhead while covering more than the current Zone E recovery gap.
-const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
+const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = zone_l1::MAX_L1_REPLAY_BLOCKS as u32;
 
 /// Refuse recovery ranges that cannot fit in the bounded ancestry cache.
 /// Oversized gaps require operator recovery rather than an unbounded allocation.
 pub(crate) fn validate_ancestry_range(from: u64, to: u64) -> Result<()> {
     eyre::ensure!(
-        to.saturating_sub(from) < u64::from(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY),
+        to.checked_sub(from)
+            .is_some_and(|span| span < zone_l1::MAX_L1_REPLAY_BLOCKS),
         "L1 ancestry range {from}..={to} exceeds the recovery limit of {} headers; operator recovery is required; automatic ancestry replay across this gap is unsupported",
-        DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY
+        zone_l1::MAX_L1_REPLAY_BLOCKS
     );
     Ok(())
 }

@@ -162,10 +162,16 @@ impl AttestationStore {
                 .write()
                 .expect("attestation store lock poisoned");
 
-            if height <= *self.submitted_height.borrow()
-                || (!all.contains_key(&height) && all.len() >= MAX_SETTLEMENT_HEIGHTS)
-            {
+            if height <= *self.submitted_height.borrow() {
                 return (false, 0);
+            }
+            if !all.contains_key(&height) && all.len() >= MAX_SETTLEMENT_HEIGHTS {
+                // Only locally validated leader proposals enter this store. A newer eligible
+                // boundary must not be rejected because obsolete lower heights filled it.
+                if height < *all.first_key_value().expect("full store").0 {
+                    return (false, 0);
+                }
+                all.pop_first();
             }
             let by_digest = all.entry(height).or_default();
             if !by_digest.contains_key(&digest)
@@ -492,8 +498,25 @@ mod tests {
         );
         assert!(store.settlement_at(10, 2).is_some());
         for height in 11..300 {
-            store.insert_settlement(domain(), leader.address(), sign(height, 200, &leader));
+            assert_eq!(
+                store.insert_settlement(domain(), leader.address(), sign(height, 200, &leader)),
+                (true, 1),
+                "a full store must admit the next eligible settlement height",
+            );
         }
+        assert!(store.settlement_at(299, 1).is_some());
+        assert!(store.settlement_at(10, 1).is_none());
+        // Late responses cannot resurrect an evicted proposal.
+        assert!(
+            store
+                .insert_follower_settlement(
+                    domain(),
+                    leader.address(),
+                    follower.address(),
+                    sign(10, 199, &follower)
+                )
+                .is_err()
+        );
         assert_eq!(
             store.settlements.read().unwrap().len(),
             MAX_SETTLEMENT_HEIGHTS
