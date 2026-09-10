@@ -53,8 +53,8 @@ pub(crate) struct VerifiedL1StateCacheMetrics {
     /// Payload reads that required an exact-anchor `eth_getStorageAt` call.
     pub slot_cache_misses: Counter,
 
-    /// Account roots authenticated from finalized-header proofs.
-    pub authenticated_account_roots: Counter,
+    /// Verified account roots, authenticated from finalized-header proofs.
+    pub verified_account_roots: Counter,
 
     /// Payload miss values authenticated and committed to the verified slot cache.
     pub proved_slots: Counter,

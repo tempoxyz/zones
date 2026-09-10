@@ -73,15 +73,13 @@ impl Default for L1StateProviderConfig {
 /// asynchronous L1 RPC layer. It holds:
 ///
 /// - A [`DynProvider<TempoNetwork>`] (alloy HTTP provider) created once and reused across calls.
-/// - A [`tokio::runtime::Handle`] used by the synchronous [`get_storage`](Self::get_storage)
-///   method to dispatch async work from a blocking context.
+/// - A [`tokio::runtime::Handle`] used by [`block_on`](Self::block_on) to dispatch async work
+///   from a blocking context.
 ///
 /// # Sync dispatch safety
 ///
-/// Blocking operations must always call `runtime_handle.block_on(...)` to execute their async
-/// RPC work. This is safe **only** when the caller is running on a blocking / OS thread that is
-/// *not* part of the tokio async runtime (e.g. the EVM execution thread spawned via
-/// `spawn_blocking`). Calling it from within an async task on the same runtime will panic.
+/// [`block_on`](Self::block_on) uses `tokio::task::block_in_place`, so it may run outside Tokio or
+/// on a multi-thread runtime, but it panics on a current-thread runtime.
 #[derive(Clone, Debug)]
 pub struct L1RpcClient {
     /// Alloy provider pointed at **Tempo L1** and shared by all clones of this client.
@@ -92,17 +90,12 @@ pub struct L1RpcClient {
 }
 
 impl L1RpcClient {
-    /// Returns the chain ID reported by the configured L1 provider.
-    pub async fn get_chain_id(&self) -> Result<u64> {
-        Ok(self.provider.get_chain_id().await?)
-    }
-
     /// Connect to the configured L1 RPC endpoint.
     ///
     /// The provider is created eagerly from [`L1StateProviderConfig::l1_rpc_url`] and reused
     /// for the lifetime of this instance. The transport (HTTP or WebSocket) is auto-detected
-    /// from the URL scheme. `runtime_handle` is stored for later use by the synchronous
-    /// [`get_storage`](Self::get_storage) method.
+    /// from the URL scheme. `runtime_handle` is stored for later use by
+    /// [`block_on`](Self::block_on).
     pub async fn connect(
         config: &L1StateProviderConfig,
         runtime_handle: tokio::runtime::Handle,
@@ -139,49 +132,31 @@ impl L1RpcClient {
     ///
     /// # Panics
     ///
-    /// Panics if called from within an async context on the same Tokio runtime (see struct-level
-    /// docs).
-    pub fn run_blocking<F: Future>(&self, future: F) -> F::Output {
+    /// Panics if called from a current-thread Tokio runtime.
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         tokio::task::block_in_place(|| self.runtime_handle.block_on(future))
-    }
-
-    /// Read a storage slot synchronously at a specific L1 block.
-    ///
-    /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
-    /// One call performs one logical RPC operation. The transport-level [`RetryBackoffLayer`]
-    /// handles bounded retries with exponential backoff. See [`run_blocking`](Self::run_blocking)
-    /// for panic conditions.
-    ///
-    /// The exact [`BlockId`] is forwarded unchanged, so callers may anchor the read by number or
-    /// hash.
-    pub fn get_storage(&self, account: Address, slot: B256, block: BlockId) -> Result<B256> {
-        self.run_blocking(self.get_storage_async(account, slot, block))
     }
 
     /// Read a storage slot asynchronously at a specific L1 block.
     ///
-    /// Same RPC semantics as [`get_storage`](Self::get_storage), but natively async. The
-    /// transport-level [`RetryBackoffLayer`] handles bounded retries with exponential backoff.
-    async fn get_storage_async(
-        &self,
-        account: Address,
-        slot: B256,
-        block: BlockId,
-    ) -> Result<B256> {
+    /// One call performs one logical RPC operation. The transport-level [`RetryBackoffLayer`]
+    /// handles bounded retries with exponential backoff. The exact [`BlockId`] is forwarded
+    /// unchanged, so callers may anchor the read by number or hash.
+    pub async fn fetch_storage(&self, account: Address, slot: B256, at: BlockId) -> Result<B256> {
         let key = U256::from_be_bytes(slot.0);
         let value = self
             .provider
             .get_storage_at(account, key)
-            .block_id(block)
+            .block_id(at)
             .await
             .map_err(|error| {
-                warn!(%account, %slot, %block, %error, "eth_getStorageAt RPC call failed");
+                warn!(%account, %slot, block = %at, %error, "eth_getStorageAt RPC call failed");
                 eyre::eyre!(
-                    "eth_getStorageAt failed for account={account} slot={slot} block={block}: {error}"
+                    "eth_getStorageAt failed for account={account} slot={slot} block={at}: {error}"
                 )
             })?;
         let value = B256::from(value.to_be_bytes());
-        debug!(%account, %slot, %block, %value, "fetched L1 storage slot from RPC");
+        debug!(%account, %slot, block = %at, %value, "fetched L1 storage slot from RPC");
         Ok(value)
     }
 
@@ -231,7 +206,7 @@ impl L1StateProvider {
     pub async fn chain_id(&self) -> Result<u64> {
         match self.chain_id {
             Some(chain_id) => Ok(chain_id),
-            None => Ok(self.rpc_client.get_chain_id().await?),
+            None => Ok(self.rpc_client.provider.get_chain_id().await?),
         }
     }
 
@@ -247,7 +222,7 @@ impl L1StateProvider {
         Ok(Self::with_client(config, cache, rpc_client))
     }
 
-    /// Create an provider with an explicitly shared RPC client.
+    /// Create a provider with an explicitly shared RPC client.
     pub fn with_client(
         config: L1StateProviderConfig,
         cache: L1StateCache,
@@ -276,9 +251,10 @@ impl L1StateProvider {
         loop {
             attempt += 1;
             let start = std::time::Instant::now();
+            let at = BlockId::number(block_number);
             let result = self
                 .rpc_client
-                .get_storage(address, slot, BlockId::number(block_number));
+                .block_on(self.rpc_client.fetch_storage(address, slot, at));
             let elapsed = start.elapsed();
 
             match result {
@@ -325,8 +301,8 @@ impl L1StateProvider {
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
-        let id = BlockId::number(block_number);
-        let value = self.rpc_client.get_storage_async(address, slot, id).await?;
+        let at = BlockId::number(block_number);
+        let value = self.rpc_client.fetch_storage(address, slot, at).await?;
         self.cache.lock().set(address, slot, block_number, value);
         Ok(value)
     }

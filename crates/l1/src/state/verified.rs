@@ -76,7 +76,7 @@ impl VerifiedL1StateCache {
     ///
     /// Returns accounts whose root differs from the immediately preceding authenticated block, or
     /// whose parent root is unavailable.
-    pub(crate) fn record_authenticated_roots(
+    pub(crate) fn record_verified_roots(
         &self,
         block: NumHash,
         roots: impl IntoIterator<Item = (Address, B256)>,
@@ -100,7 +100,7 @@ impl VerifiedL1StateCache {
         };
         self.0
             .metrics
-            .authenticated_account_roots
+            .verified_account_roots
             .increment(roots.len() as u64);
         Ok(changed)
     }
@@ -323,7 +323,7 @@ impl PayloadL1StateProvider {
             return Ok(0);
         }
         let started = std::time::Instant::now();
-        let result = self.rpc_client.run_blocking(verify_payload_reads(
+        let result = self.rpc_client.block_on(verify_payload_reads(
             &self.rpc_client,
             verified,
             &self.anchors,
@@ -362,9 +362,10 @@ impl PayloadL1StateProvider {
             return Ok(value);
         }
 
+        let at = BlockId::hash(block.hash);
         let value = self
             .rpc_client
-            .get_storage(account, slot, BlockId::hash(block.hash))?;
+            .block_on(self.rpc_client.fetch_storage(account, slot, at))?;
         let mut unverified_reads = self.unverified_reads.lock();
         let reads = unverified_reads.entry(block_number).or_default();
         if let Some(observed) = reads.insert(storage, value) {
@@ -387,8 +388,9 @@ impl L1StorageReader for PayloadL1StateProvider {
         let result = if self.verified.is_some() {
             self.read_verified(account, slot, block_number)
         } else {
+            let at = BlockId::number(block_number);
             self.rpc_client
-                .get_storage(account, slot, BlockId::number(block_number))
+                .block_on(self.rpc_client.fetch_storage(account, slot, at))
         };
         result.map_err(|error| L1StateError::StorageUnavailable {
             account,
@@ -401,7 +403,7 @@ impl L1StorageReader for PayloadL1StateProvider {
 
 /// One account and its requested slot values authenticated by an EIP-1186 proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AuthenticatedAccountState {
+pub(crate) struct VerifiedAccountState {
     /// Authenticated storage-trie root, normalized for an absent account.
     pub(crate) storage_root: B256,
     /// Authenticated values for every requested raw slot.
@@ -415,11 +417,11 @@ struct TrustedL1Anchor {
 }
 
 /// Authenticates an `eth_getMultiProof` response against one global state root.
-pub(crate) fn authenticate_multi_proof(
+pub(crate) fn verify_multi_proof(
     state_root: B256,
     targets: &L1ProofTargets,
     responses: Vec<EIP1186AccountProofResponse>,
-) -> Result<BTreeMap<Address, AuthenticatedAccountState>> {
+) -> Result<BTreeMap<Address, VerifiedAccountState>> {
     let mut authenticated = BTreeMap::new();
 
     for response in responses {
@@ -457,7 +459,7 @@ pub(crate) fn authenticate_multi_proof(
         );
         authenticated.insert(
             address,
-            AuthenticatedAccountState {
+            VerifiedAccountState {
                 storage_root: proof.storage_root,
                 slots,
             },
@@ -472,8 +474,10 @@ pub(crate) fn authenticate_multi_proof(
     Ok(authenticated)
 }
 
-/// Builds empty-slot proof targets for account-root authentication.
-pub(crate) fn account_root_targets(accounts: impl IntoIterator<Item = Address>) -> L1ProofTargets {
+/// Builds account-only multiproof targets for authenticating storage roots.
+///
+/// Each account maps to an empty storage-slot set, so no individual slot proofs are requested.
+pub(crate) fn root_proof_targets(accounts: impl IntoIterator<Item = Address>) -> L1ProofTargets {
     accounts
         .into_iter()
         .map(|account| (account, BTreeSet::new()))
@@ -513,7 +517,7 @@ async fn verify_payload_reads(
                     block_number: block.number,
                     source,
                 })?;
-            let authenticated = authenticate_multi_proof(anchor.state_root, &targets, responses)
+            let authenticated = verify_multi_proof(anchor.state_root, &targets, responses)
                 .map_err(|error| {
                     L1ReadValidationError::Integrity(format!(
                         "proof verification failed at Tempo block {}: {error}",
@@ -621,9 +625,9 @@ mod tests {
         state
             .commit_payload([(block_a, account, root_a)], [((storage, root_a), value)])
             .unwrap();
-        let changed_b = state.record_authenticated_roots(block_b, [(account, root_a)]);
+        let changed_b = state.record_verified_roots(block_b, [(account, root_a)]);
         assert!(changed_b.unwrap().is_empty());
-        let changed_c = state.record_authenticated_roots(block_c, [(account, root_b)]);
+        let changed_c = state.record_verified_roots(block_c, [(account, root_b)]);
         assert_eq!(changed_c.unwrap(), BTreeSet::from([account]));
 
         assert_eq!(state.get(block_a, storage), Some(value));
@@ -644,7 +648,7 @@ mod tests {
         let value = B256::with_last_byte(0x42);
 
         let changed = verified
-            .record_authenticated_roots(
+            .record_verified_roots(
                 NumHash::new(1, B256::with_last_byte(1)),
                 [(account, root_a)],
             )
@@ -653,7 +657,7 @@ mod tests {
         ordinary.lock().set(account, slot, 1, value);
 
         let changed = verified
-            .record_authenticated_roots(
+            .record_verified_roots(
                 NumHash::new(2, B256::with_last_byte(2)),
                 [(account, root_a)],
             )
@@ -662,7 +666,7 @@ mod tests {
         assert_eq!(ordinary.lock().get(account, slot, 2), Some(value));
 
         let changed = verified
-            .record_authenticated_roots(
+            .record_verified_roots(
                 NumHash::new(3, B256::with_last_byte(3)),
                 [(account, root_b)],
             )
@@ -714,14 +718,14 @@ mod tests {
         let account = Address::repeat_byte(0x11);
         let slots = BTreeSet::from([B256::with_last_byte(1), B256::with_last_byte(2)]);
         let targets = BTreeMap::from([(account, slots.clone())]);
-        let authenticated = authenticate_multi_proof(
+        let verified = verify_multi_proof(
             EMPTY_ROOT_HASH,
             &targets,
             vec![empty_account_response(account, slots)],
         )
         .unwrap();
 
-        let account_state = &authenticated[&account];
+        let account_state = &verified[&account];
         assert_eq!(account_state.storage_root, EMPTY_ROOT_HASH);
         assert!(account_state.slots.values().all(|value| value.is_zero()));
     }
@@ -863,9 +867,9 @@ mod tests {
         let slot = B256::with_last_byte(1);
         let targets = BTreeMap::from([(account, BTreeSet::from([slot]))]);
 
-        assert!(authenticate_multi_proof(EMPTY_ROOT_HASH, &targets, vec![]).is_err());
+        assert!(verify_multi_proof(EMPTY_ROOT_HASH, &targets, vec![]).is_err());
         assert!(
-            authenticate_multi_proof(
+            verify_multi_proof(
                 EMPTY_ROOT_HASH,
                 &targets,
                 vec![
@@ -876,7 +880,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            authenticate_multi_proof(
+            verify_multi_proof(
                 EMPTY_ROOT_HASH,
                 &targets,
                 vec![empty_account_response(account, [B256::with_last_byte(2)])],

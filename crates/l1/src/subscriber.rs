@@ -6,7 +6,7 @@ use crate::{
     metrics::L1SubscriberMetrics,
     state::{
         EnabledTokenRegistry, L1RpcClient, L1StateCache, VerifiedL1StateCache,
-        verified::{account_root_targets, authenticate_multi_proof},
+        verified::{VerifiedAccountState, root_proof_targets, verify_multi_proof},
     },
 };
 use eyre::{OptionExt as _, WrapErr as _};
@@ -811,7 +811,7 @@ where
         let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
 
-        while let Some((sealed, processed_events, account_roots)) = blocks.try_next().await? {
+        while let Some((sealed, processed_events, verified_accounts)) = blocks.try_next().await? {
             let block_number = sealed.number();
             let (events, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
@@ -821,10 +821,15 @@ where
             let root_changes = if let Some(verified) = &self.verified_l1_state_cache {
                 Some(
                     verified
-                        .record_authenticated_roots(anchor, account_roots)
+                        .record_verified_roots(
+                            anchor,
+                            verified_accounts
+                                .into_iter()
+                                .map(|(account, state)| (account, state.storage_root)),
+                        )
                         .map_err(L1SubscriberError::fatal_from_err(
                             block_number,
-                            "authenticated storage-root publication",
+                            "verified storage-root publication",
                         ))?,
                 )
             } else {
@@ -943,7 +948,7 @@ where
             (
                 SealedHeader<TempoHeader>,
                 L1ProcessedEvents,
-                BTreeMap<Address, B256>,
+                BTreeMap<Address, VerifiedAccountState>,
             ),
             L1SubscriberError,
         >,
@@ -991,27 +996,22 @@ where
                         header_resp.receipts_root(),
                         header_resp.logs_bloom(),
                     );
-                    let account_roots = async {
+                    let verified_roots = async {
                         let Some(rpc_client) = rpc_client else {
                             return Ok::<_, L1SubscriberError>(BTreeMap::new());
                         };
-                        let targets =
-                            account_root_targets([portal_address, TIP403_REGISTRY_ADDRESS]);
+                        let targets = root_proof_targets([portal_address, TIP403_REGISTRY_ADDRESS]);
                         let responses = rpc_client
                             .get_multi_proof(BlockId::hash(block_hash), &targets)
                             .await?;
-                        let authenticated =
-                            authenticate_multi_proof(header_resp.state_root(), &targets, responses)
-                                .map_err(L1SubscriberError::fatal_from_err(
-                                    block_number,
-                                    "account storage-root verification",
-                                ))?;
-                        Ok(authenticated
-                            .into_iter()
-                            .map(|(account, state)| (account, state.storage_root))
-                            .collect())
+                        verify_multi_proof(header_resp.state_root(), &targets, responses).map_err(
+                            L1SubscriberError::fatal_from_err(
+                                block_number,
+                                "account storage-root verification",
+                            ),
+                        )
                     };
-                    let (receipts, account_roots) = tokio::try_join!(receipts, account_roots)
+                    let (receipts, verified_roots) = tokio::try_join!(receipts, verified_roots)
                         .inspect_err(|_| fetch_failures.increment(1))?;
                     // Abort before enqueueing work or advancing caches if a portal log fails to decode.
                     let processed_events = self
@@ -1032,7 +1032,7 @@ where
                         "Fetched, validated, and decoded L1 block data"
                     );
                     let sealed = SealedHeader::seal_slow(header_resp.inner.inner);
-                    Ok::<_, L1SubscriberError>((sealed, processed_events, account_roots))
+                    Ok::<_, L1SubscriberError>((sealed, processed_events, verified_roots))
                 }
             })
             .buffered(concurrency)
