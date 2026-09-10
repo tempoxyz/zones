@@ -286,7 +286,7 @@ where
         let block_number = block.header().number();
         let block_hash = block.hash();
         let parent_hash = block.parent_hash();
-        let opening_tx_input = block
+        let first_tx_input = block
             .body()
             .transactions
             .first()
@@ -329,7 +329,7 @@ where
         let (initial_tempo_header, tempo_state) = collect_tempo_witness(
             &self.l1_provider,
             initial_tempo,
-            opening_tx_input.as_ref().map(|input| input.as_ref()),
+            first_tx_input.as_ref().map(|input| input.as_ref()),
             &reads,
         )
         .await
@@ -349,7 +349,7 @@ where
 async fn collect_tempo_witness(
     provider: &DynProvider<TempoNetwork>,
     initial_tempo: alloy_eips::NumHash,
-    opening_tx_input: Option<&[u8]>,
+    first_tx_input: Option<&[u8]>,
     reads: &HashSet<zone_evm::TempoStorageRead>,
 ) -> eyre::Result<(TempoHeader, Vec<Bytes>)> {
     let initial_header = provider
@@ -370,7 +370,7 @@ async fn collect_tempo_witness(
     }
 
     let advance = IZoneInbox::advanceTempoCall::abi_decode(
-        opening_tx_input.ok_or_eyre("Zone block has no advanceTempo transaction")?,
+        first_tx_input.ok_or_eyre("Zone block has no advanceTempo transaction")?,
     )
     .wrap_err("decode opening advanceTempo transaction")?;
     let tempo_header = alloy_rlp::decode_exact::<TempoHeader>(&advance.header)
@@ -1665,7 +1665,7 @@ mod tests {
         let reads = HashSet::from([zone_evm::TempoStorageRead { account, slot }]);
         let mut checkpoint = TempoHeader::default();
         checkpoint.inner.number = 10;
-        let opening_tx_input = IZoneInbox::advanceTempoCall {
+        let first_tx_input = IZoneInbox::advanceTempoCall {
             header: alloy_rlp::encode(&checkpoint).into(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
@@ -1673,7 +1673,7 @@ mod tests {
         }
         .abi_encode();
         let (actual_header, nodes) =
-            collect_tempo_witness(&provider, initial, Some(&opening_tx_input), &reads).await?;
+            collect_tempo_witness(&provider, initial, Some(&first_tx_input), &reads).await?;
         assert_eq!(actual_header, header);
         assert_eq!(
             nodes.into_iter().collect::<BTreeSet<_>>(),
@@ -1689,7 +1689,7 @@ mod tests {
         let (_, nodes) = collect_tempo_witness(&provider, initial, None, &HashSet::new()).await?;
         assert!(nodes.is_empty());
         assert_eq!(requests.lock().unwrap().len(), 1);
-        let error = collect_tempo_witness(&provider, initial, Some(&opening_tx_input), &reads)
+        let error = collect_tempo_witness(&provider, initial, Some(&first_tx_input), &reads)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("proof unavailable"));
