@@ -26,8 +26,7 @@ use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_primitives_traits::SealedOrRecoveredBlock;
-use reth_provider::{BlockReader, BlockSource, CanonStateSubscriptions, HeaderProvider};
+use reth_provider::{BlockReader, CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -275,30 +274,26 @@ where
             .acquire_owned()
             .await;
 
-        let block = match block_id {
-            BlockId::Hash(hash) => {
-                self.eth_api
-                    .spawn_blocking_io(move |eth_api| {
-                        let source = if hash.require_canonical == Some(true) {
-                            BlockSource::Canonical
-                        } else {
-                            BlockSource::Any
-                        };
-                        let block = eth_api
-                            .provider()
-                            .find_sealed_or_recovered_block(hash.block_hash, source)
-                            .map_err(EthApiError::from)?;
-                        block
-                            .map(SealedOrRecoveredBlock::into_recovered_block)
-                            .transpose()
-                            .map(|block| block.map(Arc::new))
-                            .map_err(|_| EthApiError::InvalidTransactionSignature.into())
-                    })
-                    .await
-            }
-            BlockId::Number(_) => self.eth_api.recovered_block(block_id).await,
+        let pending = if let BlockId::Hash(hash) = block_id
+            && hash.require_canonical != Some(true)
+        {
+            self.eth_api
+                .provider()
+                .pending_block()
+                .map_err(|error| operator_rpc_error(internal(error)))?
+                .filter(|block| block.hash() == hash.block_hash)
+                .map(Arc::new)
+        } else {
+            None
+        };
+        let block = match pending {
+            Some(block) => Some(block),
+            None => self
+                .eth_api
+                .recovered_block(block_id)
+                .await
+                .map_err(|error| operator_rpc_error(internal(error)))?,
         }
-        .map_err(|error| operator_rpc_error(internal(error)))?
         .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
         let block_number = block.header().number();
         let block_hash = block.hash();
