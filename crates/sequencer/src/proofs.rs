@@ -27,6 +27,254 @@ const FORMAT_VERSION: u32 = 2;
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Reload the durable spool on a blocking task, then start collection until shutdown.
+pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
+    config: ProofCollectorConfig,
+    provider: P,
+    shutdown: CancellationToken,
+) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
+    let directory = config.directory.clone();
+    let store = Arc::new(
+        tokio::task::spawn_blocking(move || ProofStore::open(directory, 0))
+            .await
+            .context("proof store opening task panicked")??,
+    );
+    let (status_tx, status_rx) = watch::channel(CollectorStatus::default());
+    let (requests_tx, requests_rx) = mpsc::channel(16);
+    let collector = ProofCollector {
+        config,
+        provider,
+        store: store.clone(),
+        status: status_tx,
+        requests: requests_rx,
+    };
+    let handle = ProofCollectorHandle {
+        store,
+        status: status_rx,
+        requests: requests_tx,
+    };
+    let task = tokio::spawn(collector.run(shutdown));
+    Ok((handle, task))
+}
+
+/// Read/prune handle shared with the shadow prover and settlement monitor.
+#[derive(Clone, Debug)]
+pub struct ProofCollectorHandle {
+    store: Arc<ProofStore>,
+    status: watch::Receiver<CollectorStatus>,
+    requests: mpsc::Sender<CollectRequest>,
+}
+
+impl ProofCollectorHandle {
+    /// Collect one executed block before it becomes canonical.
+    ///
+    /// Success means the proof file and its directory have both been synced. Dropping this
+    /// future does not cancel an already queued request or authorize canonicalization.
+    pub async fn collect_and_persist(&self, number: u64, hash: B256) -> Result<()> {
+        let (response, result) = oneshot::channel();
+        let result = async {
+            self.requests
+                .send(CollectRequest {
+                    number,
+                    hash,
+                    response,
+                })
+                .await
+                .context("proof collector stopped")?;
+            result.await.context("proof collector dropped request")?
+        };
+        let mut status = self.status.clone();
+        tokio::pin!(result);
+        loop {
+            if let CollectorStatus::Failed(failure) = &*status.borrow() {
+                return Err(CollectionUnavailable(failure.clone()).into());
+            }
+            tokio::select! {
+                result = &mut result => return result,
+                changed = status.changed() => { changed.context("proof collector stopped")?; }
+            }
+        }
+    }
+
+    /// Wait for a reconciled, complete inclusive range of retained proofs.
+    pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
+        ensure!(from <= to, "invalid proof range {from}..={to}");
+        let mut status = self.status.clone();
+        loop {
+            ensure!(
+                from > self.store.state.read().pruned_through,
+                "requested proof range {from}..={to} has already been settled and pruned"
+            );
+            if matches!(*status.borrow(), CollectorStatus::Ready)
+                && let Ok(proofs) = self.store.snapshot(from, to)
+            {
+                return Ok(proofs);
+            }
+            if let CollectorStatus::Failed(failure) = &*status.borrow() {
+                return Err(CollectionUnavailable(failure.clone()).into());
+            }
+            status
+                .changed()
+                .await
+                .context("proof collector stopped before the requested range was available")?;
+        }
+    }
+}
+
+struct ProofCollector<P> {
+    config: ProofCollectorConfig,
+    provider: P,
+    store: Arc<ProofStore>,
+    status: watch::Sender<CollectorStatus>,
+    requests: mpsc::Receiver<CollectRequest>,
+}
+
+impl<P: ZoneSequencerProvider> ProofCollector<P> {
+    async fn run(mut self, shutdown: CancellationToken) {
+        info!(
+            target: "zone::sequencer::proofs",
+            directory = %self.config.directory.display(),
+            "Proof collector started"
+        );
+        let mut canonical = self.provider.canonical_state_stream();
+        let mut fallback = tokio::time::interval(FALLBACK_POLL_INTERVAL);
+
+        loop {
+            match self.reconcile_and_collect().await {
+                Ok(()) => {
+                    self.status.send_replace(CollectorStatus::Ready);
+                }
+                Err(error) => {
+                    error!(target: "zone::sequencer::proofs", %error, "Proof collection failed");
+                    self.status
+                        .send_replace(CollectorStatus::Failed(Arc::new(error)));
+                    if shutdown
+                        .run_until_cancelled(tokio::time::sleep(RETRY_INTERVAL))
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            }
+
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                request = self.requests.recv() => {
+                    let Some(request) = request else {
+                        warn!(target: "zone::sequencer::proofs", "Proof collection request channel closed");
+                        return;
+                    };
+                    let result = self.collect_and_persist(request.number, request.hash).await;
+                    let _ = request.response.send(result);
+                }
+                _ = fallback.tick() => {}
+                notification = canonical.next() => {
+                    let Some(notification) = notification else {
+                        warn!(target: "zone::sequencer::proofs", "Canonical state stream closed");
+                        return;
+                    };
+                    if notification.reverted().is_some() {
+                        self.status.send_replace(CollectorStatus::Reconciling);
+                        info!(target: "zone::sequencer::proofs", "Reconciling proof spool after canonical reorg");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn reconcile_and_collect(&self) -> Result<()> {
+        if let Some(settlement) = &self.config.settlement {
+            // A syncing follower may not have the portal anchor locally yet. Retry before
+            // collecting, so startup never tries to reconstruct already-settled history.
+            let anchor = resolve_portal_zone_anchor(
+                &self.provider,
+                settlement.portal_address,
+                &settlement.l1_provider,
+            )
+            .await?;
+            let store = self.store.clone();
+            tokio::task::spawn_blocking(move || store.prune_through(anchor.block_number))
+                .await
+                .context("proof pruning task panicked")??;
+        }
+        let head = self.provider.best_block_number()?;
+        let store = self.store.clone();
+        let provider = self.provider.clone();
+        tokio::task::spawn_blocking(move || {
+            store.reconcile(head, |number| Ok(provider.block_hash(number)?))
+        })
+        .await
+        .context("proof reconciliation task panicked")??;
+
+        let start = self.store.state.read().pruned_through.saturating_add(1);
+        for number in start..=head {
+            let block_hash = self
+                .provider
+                .block_hash(number)?
+                .ok_or_eyre(format!("canonical Zone block {number} has no hash"))?;
+            if self.store.contains(number, block_hash) {
+                continue;
+            }
+            self.collect_and_persist(number, block_hash).await?;
+        }
+        Ok(())
+    }
+
+    async fn collect_and_persist(&self, number: u64, block_hash: B256) -> Result<()> {
+        if self.store.contains(number, block_hash) {
+            return Ok(());
+        }
+        if self.store.state.read().proofs.contains_key(&number) {
+            self.invalidate_from(number).await?;
+        }
+        let proof = self.collect_block(number, block_hash).await?;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.insert(proof))
+            .await
+            .context("proof persistence task panicked")??;
+        self.status.send_modify(|_| {});
+        info!(
+            target: "zone::sequencer::proofs",
+            zone_block = number,
+            %block_hash,
+            "Collected and persisted block proofs"
+        );
+        Ok(())
+    }
+
+    async fn invalidate_from(&self, number: u64) -> Result<()> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.invalidate_from(number))
+            .await
+            .context("proof invalidation task panicked")?
+    }
+
+    async fn collect_block(&self, number: u64, block_hash: B256) -> Result<StoredBlockProof> {
+        let witness = self
+            .config
+            .debug_api
+            .zone_execution_witness(block_hash.into())
+            .await
+            .map_err(|error| eyre::eyre!(error.to_string()))
+            .wrap_err_with(|| format!("collect witness for Zone block {number}"))?;
+        ensure!(
+            witness.block_hash == block_hash,
+            "collected witness does not match Zone block {number} ({block_hash})"
+        );
+        ensure!(
+            witness.execution_witness.headers.len() <= 1,
+            "Zone block {number} reads an older BLOCKHASH"
+        );
+        Ok(StoredBlockProof {
+            format_version: FORMAT_VERSION,
+            witness,
+        })
+    }
+}
+
 /// Configuration for the proactive proof collector.
 #[derive(Clone)]
 pub struct ProofCollectorConfig {
@@ -37,13 +285,6 @@ pub struct ProofCollectorConfig {
     /// Settlement source for retaining only unsettled blocks. None retains historical
     /// witnesses for RPC-follower shadow proving.
     pub settlement: Option<ProofCollectorSettlement>,
-}
-
-/// L1 portal used to advance the retained witness frontier independently of leadership.
-#[derive(Clone)]
-pub struct ProofCollectorSettlement {
-    pub portal_address: Address,
-    pub l1_provider: DynProvider<TempoNetwork>,
 }
 
 impl std::fmt::Debug for ProofCollectorConfig {
@@ -60,41 +301,11 @@ impl std::fmt::Debug for ProofCollectorConfig {
     }
 }
 
-/// Immutable proof material collected for one executed Zone block, possibly not yet canonical.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StoredBlockProof {
-    pub format_version: u32,
-    pub witness: ZoneExecutionWitness,
-}
-
-#[derive(Clone, Debug, Default)]
-enum CollectorStatus {
-    #[default]
-    Reconciling,
-    Ready,
-    Failed(Arc<eyre::Report>),
-}
-
-#[derive(Debug)]
-struct CollectionUnavailable(Arc<eyre::Report>);
-
-impl std::fmt::Display for CollectionUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("proof collection is unavailable")
-    }
-}
-
-impl std::error::Error for CollectionUnavailable {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref().as_ref())
-    }
-}
-
-#[derive(Debug)]
-struct ProofStoreState {
-    pruned_through: u64,
-    proofs: BTreeMap<u64, Arc<StoredBlockProof>>,
+/// L1 portal used to advance the retained witness frontier independently of leadership.
+#[derive(Clone)]
+pub struct ProofCollectorSettlement {
+    pub portal_address: Address,
+    pub l1_provider: DynProvider<TempoNetwork>,
 }
 
 /// Durable JSON spool plus an in-memory index of pending block proofs.
@@ -285,6 +496,20 @@ impl ProofStore {
     }
 }
 
+#[derive(Debug)]
+struct ProofStoreState {
+    pruned_through: u64,
+    proofs: BTreeMap<u64, Arc<StoredBlockProof>>,
+}
+
+/// Immutable proof material collected for one executed Zone block, possibly not yet canonical.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredBlockProof {
+    pub format_version: u32,
+    pub witness: ZoneExecutionWitness,
+}
+
 impl StoredBlockProof {
     fn validate(&self) -> Result<()> {
         ensure!(
@@ -308,19 +533,12 @@ impl StoredBlockProof {
     }
 }
 
-fn sync_directory(directory: &Path) -> Result<()> {
-    File::open(directory)
-        .wrap_err_with(|| format!("open proof directory {}", directory.display()))?
-        .sync_all()
-        .wrap_err_with(|| format!("sync proof directory {}", directory.display()))
-}
-
-/// Read/prune handle shared with the shadow prover and settlement monitor.
-#[derive(Clone, Debug)]
-pub struct ProofCollectorHandle {
-    store: Arc<ProofStore>,
-    status: watch::Receiver<CollectorStatus>,
-    requests: mpsc::Sender<CollectRequest>,
+#[derive(Clone, Debug, Default)]
+enum CollectorStatus {
+    #[default]
+    Reconciling,
+    Ready,
+    Failed(Arc<eyre::Report>),
 }
 
 struct CollectRequest {
@@ -329,244 +547,26 @@ struct CollectRequest {
     response: oneshot::Sender<Result<()>>,
 }
 
-impl ProofCollectorHandle {
-    /// Collect one executed block before it becomes canonical.
-    ///
-    /// Success means the proof file and its directory have both been synced. Dropping this
-    /// future does not cancel an already queued request or authorize canonicalization.
-    pub async fn collect_and_persist(&self, number: u64, hash: B256) -> Result<()> {
-        let (response, result) = oneshot::channel();
-        let result = async {
-            self.requests
-                .send(CollectRequest {
-                    number,
-                    hash,
-                    response,
-                })
-                .await
-                .context("proof collector stopped")?;
-            result.await.context("proof collector dropped request")?
-        };
-        let mut status = self.status.clone();
-        tokio::pin!(result);
-        loop {
-            if let CollectorStatus::Failed(failure) = &*status.borrow() {
-                return Err(CollectionUnavailable(failure.clone()).into());
-            }
-            tokio::select! {
-                result = &mut result => return result,
-                changed = status.changed() => { changed.context("proof collector stopped")?; }
-            }
-        }
-    }
+#[derive(Debug)]
+struct CollectionUnavailable(Arc<eyre::Report>);
 
-    /// Wait for a reconciled, complete inclusive range of retained proofs.
-    pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
-        ensure!(from <= to, "invalid proof range {from}..={to}");
-        let mut status = self.status.clone();
-        loop {
-            ensure!(
-                from > self.store.state.read().pruned_through,
-                "requested proof range {from}..={to} has already been settled and pruned"
-            );
-            if matches!(*status.borrow(), CollectorStatus::Ready)
-                && let Ok(proofs) = self.store.snapshot(from, to)
-            {
-                return Ok(proofs);
-            }
-            if let CollectorStatus::Failed(failure) = &*status.borrow() {
-                return Err(CollectionUnavailable(failure.clone()).into());
-            }
-            status
-                .changed()
-                .await
-                .context("proof collector stopped before the requested range was available")?;
-        }
+impl std::fmt::Display for CollectionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("proof collection is unavailable")
     }
 }
 
-struct ProofCollector<P> {
-    config: ProofCollectorConfig,
-    provider: P,
-    store: Arc<ProofStore>,
-    status: watch::Sender<CollectorStatus>,
-    requests: mpsc::Receiver<CollectRequest>,
+impl std::error::Error for CollectionUnavailable {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref().as_ref())
+    }
 }
 
-/// Reload the durable spool on a blocking task, then start collection until shutdown.
-pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
-    config: ProofCollectorConfig,
-    provider: P,
-    shutdown: CancellationToken,
-) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
-    let directory = config.directory.clone();
-    let store = Arc::new(
-        tokio::task::spawn_blocking(move || ProofStore::open(directory, 0))
-            .await
-            .context("proof store opening task panicked")??,
-    );
-    let (status_tx, status_rx) = watch::channel(CollectorStatus::default());
-    let (requests_tx, requests_rx) = mpsc::channel(16);
-    let collector = ProofCollector {
-        config,
-        provider,
-        store: store.clone(),
-        status: status_tx,
-        requests: requests_rx,
-    };
-    let handle = ProofCollectorHandle {
-        store,
-        status: status_rx,
-        requests: requests_tx,
-    };
-    let task = tokio::spawn(collector.run(shutdown));
-    Ok((handle, task))
-}
-
-impl<P: ZoneSequencerProvider> ProofCollector<P> {
-    async fn run(mut self, shutdown: CancellationToken) {
-        info!(
-            target: "zone::sequencer::proofs",
-            directory = %self.config.directory.display(),
-            "Proof collector started"
-        );
-        let mut canonical = self.provider.canonical_state_stream();
-        let mut fallback = tokio::time::interval(FALLBACK_POLL_INTERVAL);
-
-        loop {
-            match self.reconcile_and_collect().await {
-                Ok(()) => {
-                    self.status.send_replace(CollectorStatus::Ready);
-                }
-                Err(error) => {
-                    error!(target: "zone::sequencer::proofs", %error, "Proof collection failed");
-                    self.status
-                        .send_replace(CollectorStatus::Failed(Arc::new(error)));
-                    if shutdown
-                        .run_until_cancelled(tokio::time::sleep(RETRY_INTERVAL))
-                        .await
-                        .is_none()
-                    {
-                        return;
-                    }
-                    continue;
-                }
-            }
-
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => return,
-                request = self.requests.recv() => {
-                    let Some(request) = request else {
-                        warn!(target: "zone::sequencer::proofs", "Proof collection request channel closed");
-                        return;
-                    };
-                    let result = self.collect_and_persist(request.number, request.hash).await;
-                    let _ = request.response.send(result);
-                }
-                _ = fallback.tick() => {}
-                notification = canonical.next() => {
-                    let Some(notification) = notification else {
-                        warn!(target: "zone::sequencer::proofs", "Canonical state stream closed");
-                        return;
-                    };
-                    if notification.reverted().is_some() {
-                        self.status.send_replace(CollectorStatus::Reconciling);
-                        info!(target: "zone::sequencer::proofs", "Reconciling proof spool after canonical reorg");
-                    }
-                }
-            }
-        }
-    }
-
-    async fn reconcile_and_collect(&self) -> Result<()> {
-        if let Some(settlement) = &self.config.settlement {
-            // A syncing follower may not have the portal anchor locally yet. Retry before
-            // collecting, so startup never tries to reconstruct already-settled history.
-            let anchor = resolve_portal_zone_anchor(
-                &self.provider,
-                settlement.portal_address,
-                &settlement.l1_provider,
-            )
-            .await?;
-            let store = self.store.clone();
-            tokio::task::spawn_blocking(move || store.prune_through(anchor.block_number))
-                .await
-                .context("proof pruning task panicked")??;
-        }
-        let head = self.provider.best_block_number()?;
-        let store = self.store.clone();
-        let provider = self.provider.clone();
-        tokio::task::spawn_blocking(move || {
-            store.reconcile(head, |number| Ok(provider.block_hash(number)?))
-        })
-        .await
-        .context("proof reconciliation task panicked")??;
-
-        let start = self.store.state.read().pruned_through.saturating_add(1);
-        for number in start..=head {
-            let block_hash = self
-                .provider
-                .block_hash(number)?
-                .ok_or_eyre(format!("canonical Zone block {number} has no hash"))?;
-            if self.store.contains(number, block_hash) {
-                continue;
-            }
-            self.collect_and_persist(number, block_hash).await?;
-        }
-        Ok(())
-    }
-
-    async fn collect_and_persist(&self, number: u64, block_hash: B256) -> Result<()> {
-        if self.store.contains(number, block_hash) {
-            return Ok(());
-        }
-        if self.store.state.read().proofs.contains_key(&number) {
-            self.invalidate_from(number).await?;
-        }
-        let proof = self.collect_block(number, block_hash).await?;
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.insert(proof))
-            .await
-            .context("proof persistence task panicked")??;
-        self.status.send_modify(|_| {});
-        info!(
-            target: "zone::sequencer::proofs",
-            zone_block = number,
-            %block_hash,
-            "Collected and persisted block proofs"
-        );
-        Ok(())
-    }
-
-    async fn invalidate_from(&self, number: u64) -> Result<()> {
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.invalidate_from(number))
-            .await
-            .context("proof invalidation task panicked")?
-    }
-
-    async fn collect_block(&self, number: u64, block_hash: B256) -> Result<StoredBlockProof> {
-        let witness = self
-            .config
-            .debug_api
-            .zone_execution_witness(block_hash.into())
-            .await
-            .map_err(|error| eyre::eyre!(error.to_string()))
-            .wrap_err_with(|| format!("collect witness for Zone block {number}"))?;
-        ensure!(
-            witness.block_hash == block_hash,
-            "collected witness does not match Zone block {number} ({block_hash})"
-        );
-        ensure!(
-            witness.execution_witness.headers.len() <= 1,
-            "Zone block {number} reads an older BLOCKHASH"
-        );
-        Ok(StoredBlockProof {
-            format_version: FORMAT_VERSION,
-            witness,
-        })
-    }
+fn sync_directory(directory: &Path) -> Result<()> {
+    File::open(directory)
+        .wrap_err_with(|| format!("open proof directory {}", directory.display()))?
+        .sync_all()
+        .wrap_err_with(|| format!("sync proof directory {}", directory.display()))
 }
 
 #[cfg(test)]
