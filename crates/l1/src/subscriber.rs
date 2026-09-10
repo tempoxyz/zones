@@ -485,6 +485,11 @@ type L1ProcessedEvents = (
     Option<Vec<alloy_primitives::Log>>,
     Vec<FinalizedBatchSubmission>,
 );
+type FetchedL1Block = (
+    SealedHeader<TempoHeader>,
+    L1ProcessedEvents,
+    BTreeMap<Address, VerifiedAccountState>,
+);
 
 /// Sink for leadership transitions decoded from verified finalized receipts.
 ///
@@ -943,17 +948,7 @@ where
         l1_provider: &'a impl Provider<TempoNetwork>,
         range: RangeInclusive<u64>,
         authenticate_roots: bool,
-    ) -> impl Stream<
-        Item = Result<
-            (
-                SealedHeader<TempoHeader>,
-                L1ProcessedEvents,
-                BTreeMap<Address, VerifiedAccountState>,
-            ),
-            L1SubscriberError,
-        >,
-    > + Send
-    + 'a {
+    ) -> impl Stream<Item = Result<FetchedL1Block, L1SubscriberError>> + Send + 'a {
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.block_tracker.clone();
