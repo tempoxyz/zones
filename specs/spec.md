@@ -133,7 +133,7 @@ Each zone is operated by a **sequencer set**. Exactly one active sequencer is th
 
 The admin may also schedule permanent abdication of independently controlled portal capabilities.
 
-On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced. The current proving backend re-executes the batch in an AWS Nitro Enclave and submits a Nitro attestation; its verifier policy authenticates the enclave image and the batch commitment carried by that attestation.
+On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
 On Tempo, each zone has a **portal** that locks deposited tokens. All user deposits encrypt the zone recipient and memo to a registered sequencer encryption key. In closed access mode, only allowed accounts may initiate deposits and refund recipients must also be allowed; open access mode skips both membership checks. Decrypted zone recipients need not be allowed Tempo accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
@@ -892,7 +892,7 @@ An unbounded multi-header block does not solve the problem: header validation gr
 
 This avoids historical **state proofs** at every intermediate recovery root; it does not skip authentication. Every header remains RLP-decoded and parent-linked, the terminal block's reads remain Merkle-proven, and settlement may separately include header ancestry to an EIP-2935 anchor.
 
-> **Note:** The prover goes live only after T13 activates TIP-1096. Activation and transition details are specified in TIP-1096; this document specifies the active protocol.
+> **Note:** The prover and production Nitro verifier go live with T13. Until then, `ZonePortal` uses the existing stub verifier. Activation and transition details are specified in TIP-1096.
 
 ### Block Header Format
 
@@ -1138,7 +1138,7 @@ Methods where the user explicitly supplies a mismatched parameter return explici
 
 ## Proving System
 
-The proving system is proof-agnostic. The core is a state transition function that takes trusted configuration and a witness, executes zone blocks, and outputs commitments for onchain verification. The onchain verifier is abstracted behind `IVerifier`, and the portal does not care how the proof was produced. The current proving backend runs the state transition function in an AWS Nitro Enclave and binds its output into a signed Nitro attestation.
+The proving system is proof-agnostic. The core is a state transition function that takes trusted configuration and a witness, executes zone blocks, and outputs commitments for onchain verification. The onchain verifier is abstracted behind `IVerifier`, and the portal does not care how the proof was produced. The Nitro proving backend runs the state transition function in an AWS Nitro Enclave and binds its output into a signed Nitro attestation.
 
 The prover assumes [multi-block Tempo imports](#multi-block-tempo-imports) are active. It authenticates the complete Tempo header sequence while requiring Tempo state proofs only for checkpoints where execution actually reads Tempo state.
 
@@ -1454,7 +1454,7 @@ Reads are derived, verified, and decoded on demand during execution: the `TempoS
 
 ### Nitro Attestation
 
-The current settlement profile uses AWS Nitro Enclaves. After successful replay, the prover computes the EIP-712 struct hash of the following value:
+The Nitro settlement profile uses AWS Nitro Enclaves. After successful replay, the prover computes the EIP-712 struct hash of the following value:
 
 ```solidity
 /// Data placed in the Nitro attestation document's `user_data` field.
@@ -1492,7 +1492,7 @@ pub struct ProofBundle {
 }
 ```
 
-A production Nitro verifier MUST validate the COSE signature and certificate chain, enforce the accepted enclave image/PCR policy, require `user_data` to equal the canonical batch hash, and reject any verifier configuration other than the policy it implements. The portal itself treats `verifierConfig` and `proof` as opaque bytes. The reference Solidity `Verifier` in this repository is a permissive prototype and does not by itself provide production Nitro verification.
+The Nitro verifier MUST validate the COSE signature and certificate chain, enforce the accepted enclave image/PCR policy, require `user_data` to equal the canonical batch hash, and reject any verifier configuration other than the policy it implements. The portal itself treats `verifierConfig` and `proof` as opaque bytes.
 
 ### Prover Service and Deployment
 
