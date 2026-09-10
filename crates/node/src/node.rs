@@ -845,7 +845,10 @@ where
                 parent_chain_id: l1_chain_id,
                 zone_id: config.zone_id,
                 chain_spec: evm_chain_spec.clone(),
-                debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+                debug_api: Arc::new(NodeZoneDebugApi::new(
+                    handle.eth_handlers().api.clone(),
+                    l1_provider.clone(),
+                )),
                 prover_address: config.prover_address.clone(),
             });
 
