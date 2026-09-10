@@ -231,6 +231,9 @@ The following table lists every privileged action and the role authorized to inv
 | `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer with a threshold certificate** |
 | `processWithdrawals(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `advanceTempo(...)` | [`ZoneInbox`](#izoneinbox) (zone-side) | **zone system caller (`address(0)`) only** |
+| `advanceTempoHeaders(...)` | [`ZoneInbox`](#izoneinbox) (zone-side) | **zone system caller (`address(0)`) only** |
+| `finalizeTempo(headers)` | [`TempoState`](#itempostate) (zone-side) | **`ZoneInbox` only**; static calls are rejected |
 | `setTempoGasRate(rate)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `setMaxWithdrawalsPerBlock(limit)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `finalizeWithdrawalBatch(...)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **zone system caller (`address(0)`) only** |
@@ -242,7 +245,7 @@ Rationale notes:
 - **Capability abdication is admin-only** because it permanently removes a Portal configuration surface after the delay.
 - **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
 - **Encryption public-key management is admin- or sequencer-authorized**. Both paths require a proof of possession from the corresponding encryption private key, so neither role can register a public key it cannot decrypt with.
-- **Zone-side system calls** to `ZoneOutbox` use `msg.sender == address(0)`. Withdrawal finalization is system-only; sequencers may call the gas-rate and withdrawal-limit setters directly.
+- **Zone-side system calls** to `ZoneInbox` and `ZoneOutbox.finalizeWithdrawalBatch` use `msg.sender == address(0)`. Withdrawal finalization is system-only —`TempoState.finalizeTempo` is only callable only by `ZoneInbox`—. Sequencers may call the outbox gas-rate and withdrawal-limit setters directly.
 - **Withdrawal processing is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
 
 <br>
@@ -374,11 +377,11 @@ explicit operator-configured forced-recovery procedure.
 
 For each zone block, the leader selects transactions, advances the Tempo anchor, executes the
 block, persists it, and broadcasts it over P2P. Checkpoint-only blocks contain no user or portal
-work and have no designated leader. Followers accept other live blocks only from the leader
-scheduled for the block's embedded Tempo anchor, then execute, validate, canonicalize, and persist
-the block locally. They validate checkpoint-only header ranges independently. Missing blocks are
-recovered through bounded P2P backfill, and portal work crossed by checkpoint-only blocks remains
-deferred until the next block.
+work; their leader is selected by their first imported Tempo header. Followers accept live blocks
+only from the scheduled leader, then execute, validate, canonicalize, and persist the block
+locally. They validate checkpoint-only header ranges independently. Missing blocks are recovered
+through bounded P2P backfill, and portal work crossed by checkpoint-only blocks remains deferred
+until the next block.
 
 At a batch boundary, settlement proceeds as follows:
 
@@ -940,7 +943,7 @@ Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a gene
 
 Both inbox operations use `TempoState.finalizeTempo(bytes[] headers)`. The function requires a nonempty range of at most 1024 headers. The first header must be the immediate child of the stored checkpoint; each later header must increment the block number and name the preceding header hash as its parent. The function stores the final number and hash and emits the final header's state root in `TempoBlockFinalized`.
 
-The final imported Tempo timestamp, including its millisecond component, is a lower bound for the executing zone block timestamp. This permits catch-up blocks to use current wall-clock time without allowing a zone block to predate the Tempo state or fork rules it imports.
+The final imported Tempo timestamp, including its millisecond component, is a lower bound for the executing zone block timestamp. This permits catch-up blocks to use current wall-clock time without allowing a zone block to predate the Tempo state it imports.
 
 Canonical deployed Zones start with the nonzero pre-portal Tempo checkpoint recorded in genesis. Their first import begins with its immediate child—the portal-creation block—and ordinary parent-hash and consecutive-number validation applies from that block onward. The standalone zero-hash genesis template MUST be anchored before use and MUST NOT bootstrap a deployed portal from an arbitrary later snapshot.
 
@@ -1428,7 +1431,7 @@ The stateless execution function must reject the witness on any failed check, mi
    After all terminal-block user transactions, execute `ZoneOutbox.finalizeWithdrawalBatch(count, block.number, encryptedSenders)` as the final system transaction from `address(0)`. It updates `ZoneOutbox.lastBatch` and constructs the public withdrawal hash chain. The encrypted-sender array is part of each encoded withdrawal and follows [Authenticated Withdrawals](#authenticated-withdrawals). No intermediate or checkpoint-only block may call finalization; see [Withdrawal Batching](#withdrawal-batching).
 
 9. **Assemble and carry the canonical block header.**
-   Apply production pre- and post-execution changes, calculate the witness-backed post-state root, and use Tempo's canonical block assembler to derive the transaction root, receipt root, logs bloom, gas fields, timestamp fields, and fork-dependent fields specified in [Block Header Format](#block-header-format). Compute the block hash from the complete header and carry that header into the next block.
+   Apply production pre- and post-execution changes under the rules selected by the zone block timestamp, calculate the witness-backed post-state root, and use Tempo's canonical block assembler to derive the transaction root, receipt root, logs bloom, gas fields, timestamp fields, and fork-dependent fields specified in [Block Header Format](#block-header-format). Compute the block hash from the complete header and carry that header into the next block.
 
 10. **Extract post-state commitments.**
     Read the final `ZoneInbox.processedDepositQueueHash`, `ZoneInbox.processedDepositNumber`, `ZoneInbox.processedEnabledTokenCount`, `ZoneOutbox.lastBatch.withdrawalQueueHash`, `ZoneOutbox.lastBatch.withdrawalBatchIndex`, `TempoState.tempoBlockNumber`, and `TempoState.tempoBlockHash`. Require the withdrawal batch index to equal `public_inputs.expected_withdrawal_batch_index`.
@@ -1482,6 +1485,8 @@ struct NitroBatchAttestation {
 
 `verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, portal, and zone prevents cross-domain reuse; binding both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
 
+When checking the attestation, the Nitro verifier MUST reconstruct `parentChainId` from `block.chainid`, `verifier` from `address(this)`, and `portal` from `msg.sender`, and MUST require `zoneId == IZonePortal(msg.sender).zoneId()`. It reconstructs the remaining digest fields from the arguments supplied by `ZonePortal` to `verify`; it MUST NOT trust domain values copied from the proof or prover witness.
+
 The prover asks the Nitro Secure Module to place this 32-byte hash in the attestation document's `user_data`. It returns:
 
 ```rust
@@ -1498,7 +1503,7 @@ The Nitro verifier MUST validate the COSE signature and certificate chain, enfor
 
 The settlement prover runs the state transition function inside a Nitro Enclave. The parent node collects the complete `BatchWitness`; the enclave performs no RPC or filesystem reads while handling it. A configured settlement sequencer MUST use a remote attesting prover. In-process execution is available for observational shadow validation but does not produce a settlement proof.
 
-The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by UTF-8 JSON. The request contains `version`, a caller-selected `requestId`, and `witness`. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule.
+The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by UTF-8 JSON. The request contains `version`, a caller-selected `requestId`, and `witness`. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification and portal independently of the witness.
 
 Errors use stable machine-readable categories: `malformed_request`, `unsupported_version`, `unsupported_chain`, `verification_failed`, `attestation_unavailable`, `request_too_large`, `truncated_frame`, and `internal_error`. A successful state transition for which the Nitro Secure Module cannot produce an attestation returns `attestation_unavailable`, not an unattested success.
 
@@ -2094,10 +2099,14 @@ interface ITempoState {
     event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
     error InvalidTimestamp();
+    error OnlyZoneInbox();
+    error StaticCallNotAllowed();
 
     function tempoBlockHash() external view returns (bytes32);
     function tempoBlockNumber() external view returns (uint64);
 
+    /// @notice Finalize consecutive Tempo headers. Only callable by ZoneInbox.
+    /// @dev State-changing; static calls are rejected.
     function finalizeTempo(bytes[] calldata headers) external;
 }
 ```
@@ -2148,12 +2157,19 @@ interface IZoneInbox {
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
     error InvalidTokenEnablementHash();
+    error OnlySequencer();
 
     function processedDepositQueueHash() external view returns (bytes32);
     function processedDepositNumber() external view returns (uint64);
     function processedTokenEnablementHash() external view returns (bytes32);
     function processedEnabledTokenCount() external view returns (uint64);
+
+    /// @notice Authenticate Tempo ancestry without processing portal work.
+    /// @dev Only callable by the zone system caller (address(0)).
     function advanceTempoHeaders(bytes[] calldata headers) external;
+
+    /// @notice Advance Tempo and process the complete portal-work suffix.
+    /// @dev Only callable by the zone system caller (address(0)).
     function advanceTempo(
         bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
@@ -2250,13 +2266,13 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its read method
 
 ## Network Upgrades and Hard Fork Activation
 
-Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
+Zones activate hard fork upgrades in lockstep with Tempo. A zone block's timestamp selects its execution rules. The node MUST NOT produce a block under new rules until the finalized Tempo chain has activated the same fork, even when the block imports an older Tempo checkpoint during catch-up.
 
 At the T9 boundary, Tempo copies the complete runtime bytecode from hardfork-specified portal implementation, verifier, and messenger source deployments to their fixed protocol-managed addresses, equivalent to `EXTCODECOPY`. The ZoneFactory owner cannot invoke these copies or replace the installed runtimes. Any later replacement requires a Tempo hardfork and uses the same copy operation at that hardfork boundary. Replacing the portal implementation upgrades every portal proxy and therefore MUST preserve the portal storage layout.
 
-Zone nodes and provers select execution rules from the imported Tempo block and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
+Zone nodes and provers select execution rules from the zone block timestamp and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
 
-A settlement batch MAY contain zone blocks from both sides of a Tempo hard fork. Crossing a hard fork does not itself create a batch boundary. The prover MUST execute every zone block under the Tempo rules selected by that block's imported Tempo anchor, including historical rules for blocks before the fork. Batch submission uses the portal ABI, settlement-attestation format, verifier, and accepted prover image active on Tempo when the batch is submitted; the active prover image MUST therefore support every historical fork represented in the batch.
+A settlement batch MAY contain zone blocks from both sides of a Tempo hard fork. Crossing a hard fork does not itself create a batch boundary. The prover MUST execute every zone block under the Tempo rules selected by that block's timestamp, including historical rules for blocks before the fork. Batch submission uses the portal ABI, settlement-attestation format, verifier, and accepted prover image active on Tempo when the batch is submitted; the active prover image MUST therefore support every historical fork represented in the batch.
 
 No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements are consensus changes coordinated with that activation.
 
