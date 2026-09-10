@@ -99,6 +99,7 @@ impl ProofCollectorHandle {
     }
 
     /// Wait for a reconciled, complete inclusive range of retained proofs.
+    /// Missing witnesses at or below the background attempt cursor fail the range.
     pub async fn wait_for_range(&self, from: u64, to: u64) -> Result<Vec<Arc<StoredBlockProof>>> {
         ensure!(from <= to, "invalid proof range {from}..={to}");
         let mut reconciled = self.reconciled.clone();
@@ -107,10 +108,18 @@ impl ProofCollectorHandle {
                 from > self.store.state.read().pruned_through,
                 "requested proof range {from}..={to} has already been settled and pruned"
             );
-            if *reconciled.borrow()
-                && let Ok(proofs) = self.store.snapshot(from, to)
-            {
-                return Ok(proofs);
+            if *reconciled.borrow() {
+                {
+                    let state = self.store.state.read();
+                    if let Some(number) = (from..=to.min(state.attempted_through))
+                        .find(|number| !state.proofs.contains_key(number))
+                    {
+                        bail!("witness collection failed for Zone block {number}");
+                    }
+                }
+                if let Ok(proofs) = self.store.snapshot(from, to) {
+                    return Ok(proofs);
+                }
             }
             reconciled
                 .changed()
@@ -176,11 +185,8 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
                 }
                 _ = fallback.tick() => {}
                 notification = canonical.next() => {
-                    let Some(notification) = notification else {
+                    if notification.is_none() {
                         return;
-                    };
-                    if notification.reverted().is_some() {
-                        self.reconciled.send_replace(false);
                     }
                 }
             }
@@ -216,16 +222,27 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
         .context("proof reconciliation task panicked")??;
         self.reconciled.send_replace(true);
 
-        let start = self.store.state.read().pruned_through.saturating_add(1);
+        let start = self.store.state.read().attempted_through.saturating_add(1);
         for number in start..=head {
             let block_hash = self
                 .provider
                 .block_hash(number)?
                 .ok_or_eyre(format!("canonical Zone block {number} has no hash"))?;
-            if self.store.contains(number, block_hash) {
-                continue;
+            if !self.store.contains(number, block_hash)
+                && let Err(error) = self.collect_and_persist(block_hash).await
+            {
+                error!(
+                    target: "zone::sequencer::proofs",
+                    zone_block = number,
+                    %block_hash,
+                    error = ?error,
+                    "Witness collection failed; skipping block"
+                );
             }
-            self.collect_and_persist(block_hash).await?;
+            // Only this ordered background pass advances the cursor. Explicit requests
+            // may collect higher blocks without attempting the intervening heights.
+            self.store.state.write().attempted_through = number;
+            self.reconciled.send_modify(|_| {});
         }
         Ok(())
     }
@@ -360,6 +377,9 @@ impl ProofStore {
             directory,
             state: RwLock::new(ProofStoreState {
                 pruned_through,
+                // Retry missing witnesses after restart; retained files do not imply that
+                // all intervening heights have been attempted.
+                attempted_through: pruned_through,
                 proofs,
                 processed_through: None,
                 shadow_generation: 0,
@@ -488,6 +508,7 @@ impl ProofStore {
         )?;
         state.proofs.retain(|number, _| *number > through);
         state.pruned_through = through;
+        state.attempted_through = state.attempted_through.max(through);
         Ok(())
     }
 
@@ -512,9 +533,16 @@ impl ProofStore {
 
 #[derive(Debug)]
 struct ProofStoreState {
+    /// If there's a live shadow-prover, this is the highest block it has processed so far.
+    /// Witnesses at or above that block should not be pruned.
     processed_through: Option<u64>,
-    shadow_generation: u64,
+    /// The highest block that has been pruned from the proof store.
+    /// No witnesses below this block are available.
     pruned_through: u64,
+    /// The highest block we've attempted to fetch witnesses for.
+    /// Any block below it either has a stored proof or failed collection and will never have.
+    attempted_through: u64,
+    shadow_generation: u64,
     proofs: BTreeMap<u64, Arc<StoredBlockProof>>,
 }
 
@@ -582,6 +610,61 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[tokio::test]
+    async fn failed_attempt_wakes_range_waiters_without_blocking_later_proofs() {
+        use futures::FutureExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
+        let (reconciled_tx, reconciled) = watch::channel(true);
+        let (requests, _receiver) = mpsc::channel(1);
+        let handle = ProofCollectorHandle {
+            store: store.clone(),
+            reconciled,
+            requests,
+        };
+        // An explicit request may persist a later block without attempting block 1.
+        store.insert(proof(2, B256::repeat_byte(2))).unwrap();
+        let waiter = handle.wait_for_range(1, 3);
+        tokio::pin!(waiter);
+        assert!(waiter.as_mut().now_or_never().is_none());
+
+        // Background collection fails block 1. The range fails even though block 3
+        // is still pending, allowing the shadow worker to move to its next batch.
+        store.state.write().attempted_through = 1;
+        reconciled_tx.send_modify(|_| {});
+        let error = waiter.as_mut().now_or_never().unwrap().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("witness collection failed for Zone block 1")
+        );
+        assert_eq!(handle.wait_for_range(2, 2).await.unwrap().len(), 1);
+        assert!(handle.wait_for_range(3, 3).now_or_never().is_none());
+
+        // A later explicit retry can still make the failed block available.
+        store.insert(proof(1, B256::repeat_byte(1))).unwrap();
+        assert_eq!(handle.wait_for_range(1, 2).await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn attempt_cursor_follows_pruning_and_resets_on_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(directory.path().to_path_buf(), 10).unwrap();
+        assert_eq!(store.state.read().attempted_through, 10);
+        store.prune_through(12).unwrap();
+        assert_eq!(store.state.read().attempted_through, 12);
+
+        store.state.write().attempted_through = 20;
+        store.prune_through(15).unwrap();
+        assert_eq!(store.state.read().attempted_through, 20);
+        store.insert(proof(21, B256::repeat_byte(21))).unwrap();
+        drop(store);
+        let reopened = ProofStore::open(directory.path().to_path_buf(), 15).unwrap();
+        assert_eq!(reopened.state.read().attempted_through, 15);
+        assert!(reopened.contains(21, B256::repeat_byte(21)));
     }
 
     #[test]
@@ -701,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_retains_staged_child_but_reorg_invalidates_it() {
+    fn restart_retains_staged_child_until_a_different_block_is_canonical() {
         let directory = tempfile::tempdir().unwrap();
         let parent_hash = B256::repeat_byte(1);
         let staged_hash = B256::repeat_byte(2);
@@ -717,10 +800,13 @@ mod tests {
             .unwrap();
         assert!(store.contains(2, staged_hash));
         store
-            .reconcile(
-                1,
-                |number| Ok((number == 1).then_some(B256::repeat_byte(3))),
-            )
+            .reconcile(2, |number| {
+                Ok(Some(if number == 1 {
+                    parent_hash
+                } else {
+                    B256::repeat_byte(3)
+                }))
+            })
             .unwrap();
         assert!(store.state.read().proofs.is_empty());
         assert!(fs::read_dir(directory.path()).unwrap().next().is_none());
