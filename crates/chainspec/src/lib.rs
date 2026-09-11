@@ -16,10 +16,7 @@ use std::{fmt::Display, sync::Arc};
 use tempo_chainspec::{
     TempoChainSpec, TempoConsensusSpec,
     hardfork::TempoHardfork,
-    spec::{
-        DEV, TEMPO_T7_BASE_FEE_CAP, TempoHardforks, chainspec_from_chain_id,
-        tempo_t7_next_block_base_fee,
-    },
+    spec::{DEV, TempoHardforks, chainspec_from_chain_id, tempo_t7_next_block_base_fee},
 };
 use tempo_primitives::TempoHeader;
 pub use zone_hardfork::ZoneHardfork;
@@ -218,23 +215,18 @@ impl EthChainSpec for ZoneChainSpec {
 
     fn next_block_base_fee(&self, parent: &TempoHeader, target_timestamp: u64) -> Option<u64> {
         let target_fork = self.zone_hardfork_at(target_timestamp);
-        if !target_fork.is_z1() {
-            return Some(0);
+        if target_fork.is_z1() {
+            let parent_base_fee = parent
+                .inner
+                .base_fee_per_gas
+                .expect("Zone blocks are expected to have a base fee");
+            Some(tempo_t7_next_block_base_fee(
+                parent_base_fee,
+                parent.inner.gas_used,
+            ))
+        } else {
+            Some(0)
         }
-
-        // A zero-fee Z0 parent cannot seed Tempo's controller at its intended starting price.
-        if !self.zone_hardfork_at(parent.inner.timestamp).is_z1() {
-            return Some(TEMPO_T7_BASE_FEE_CAP);
-        }
-
-        let parent_base_fee = parent
-            .inner
-            .base_fee_per_gas
-            .expect("Z1 Zone blocks are expected to have a base fee");
-        Some(tempo_t7_next_block_base_fee(
-            parent_base_fee,
-            parent.inner.gas_used,
-        ))
     }
 }
 
@@ -329,7 +321,7 @@ mod tests {
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
     use tempo_chainspec::spec::{
-        DEV, MODERATO, TEMPO_T7_BASE_FEE_FLOOR, TEMPO_T7_BASE_FEE_GAS_TARGET,
+        DEV, MODERATO, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_FLOOR, TEMPO_T7_BASE_FEE_GAS_TARGET,
     };
     use zone_primitives::constants::zone_chain_id;
 
@@ -496,13 +488,13 @@ mod tests {
     }
 
     #[test]
-    fn next_block_base_fee_seeds_cap_on_z1_activation() {
+    fn next_block_base_fee_uses_parent_fee_on_z1_activation() {
         let zone = dev_zone_spec_with_z1_at(2, 100);
         let parent = header(99, 0, 0);
 
         assert_eq!(
             zone.next_block_base_fee(&parent, 100),
-            Some(TEMPO_T7_BASE_FEE_CAP)
+            Some(tempo_t7_next_block_base_fee(0, 0))
         );
     }
 

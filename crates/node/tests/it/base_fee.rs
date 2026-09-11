@@ -68,6 +68,11 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
         start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, z1_genesis()?)
             .await?;
 
+    let genesis = zone
+        .provider()
+        .get_block_by_number(0.into())
+        .await?
+        .expect("Zone genesis block");
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
     let first = zone
@@ -77,8 +82,11 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
         .expect("first Zone block");
     assert_eq!(
         first.header.base_fee_per_gas(),
-        Some(TEMPO_T7_BASE_FEE_CAP),
-        "the Z1 activation block must seed the dynamic controller at its cap"
+        Some(tempo_t7_next_block_base_fee(
+            genesis.header.base_fee_per_gas().expect("genesis base fee"),
+            genesis.header.gas_used(),
+        )),
+        "the Z1 activation block must adjust from its parent"
     );
 
     fixture.inject_empty_block(zone.deposit_queue());
@@ -91,7 +99,10 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
     assert_eq!(
         second.header.base_fee_per_gas(),
         Some(tempo_t7_next_block_base_fee(
-            TEMPO_T7_BASE_FEE_CAP,
+            first
+                .header
+                .base_fee_per_gas()
+                .expect("first block base fee"),
             first.header.gas_used(),
         )),
         "post-activation blocks must adjust from their parent's fee and gas usage"
