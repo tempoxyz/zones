@@ -16,7 +16,10 @@ use std::{fmt::Display, sync::Arc};
 use tempo_chainspec::{
     TempoChainSpec, TempoConsensusSpec,
     hardfork::TempoHardfork,
-    spec::{DEV, TempoHardforks, chainspec_from_chain_id},
+    spec::{
+        DEV, TEMPO_T7_BASE_FEE_CAP, TempoHardforks, chainspec_from_chain_id,
+        tempo_t7_next_block_base_fee,
+    },
 };
 use tempo_primitives::TempoHeader;
 pub use zone_hardfork::ZoneHardfork;
@@ -213,8 +216,25 @@ impl EthChainSpec for ZoneChainSpec {
         self.inner.final_paris_total_difficulty()
     }
 
-    fn next_block_base_fee(&self, _parent: &TempoHeader, _target_timestamp: u64) -> Option<u64> {
-        Some(0)
+    fn next_block_base_fee(&self, parent: &TempoHeader, target_timestamp: u64) -> Option<u64> {
+        let target_fork = self.zone_hardfork_at(target_timestamp);
+        if !target_fork.is_z1() {
+            return Some(0);
+        }
+
+        // A zero-fee Z0 parent cannot seed Tempo's controller at its intended starting price.
+        if !self.zone_hardfork_at(parent.inner.timestamp).is_z1() {
+            return Some(TEMPO_T7_BASE_FEE_CAP);
+        }
+
+        let parent_base_fee = parent
+            .inner
+            .base_fee_per_gas
+            .expect("Z1 Zone blocks are expected to have a base fee");
+        Some(tempo_t7_next_block_base_fee(
+            parent_base_fee,
+            parent.inner.gas_used,
+        ))
     }
 }
 
@@ -308,13 +328,34 @@ mod tests {
     use super::*;
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
-    use tempo_chainspec::spec::{DEV, MODERATO};
+    use tempo_chainspec::spec::{
+        DEV, MODERATO, TEMPO_T7_BASE_FEE_FLOOR, TEMPO_T7_BASE_FEE_GAS_TARGET,
+    };
     use zone_primitives::constants::zone_chain_id;
 
     fn dev_zone_spec(zone_id: u32) -> ZoneChainSpec {
         let mut genesis = DEV.genesis().clone();
         genesis.config.chain_id = zone_chain_id(DEV.chain().id(), zone_id).unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
+    }
+
+    fn dev_zone_spec_with_z1_at(zone_id: u32, timestamp: u64) -> ZoneChainSpec {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), zone_id).unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("z1Time".into(), timestamp)
+            .unwrap();
+        ZoneChainSpec::from_genesis(genesis).unwrap()
+    }
+
+    fn header(timestamp: u64, base_fee: u64, gas_used: u64) -> TempoHeader {
+        let mut header = TempoHeader::default();
+        header.inner.timestamp = timestamp;
+        header.inner.base_fee_per_gas = Some(base_fee);
+        header.inner.gas_used = gas_used;
+        header
     }
 
     #[test]
@@ -351,14 +392,7 @@ mod tests {
 
     #[test]
     fn parses_z1_timestamp_and_activates_at_boundary() {
-        let mut genesis = DEV.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 5).unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("z1Time".into(), 100)
-            .unwrap();
-        let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
+        let zone = dev_zone_spec_with_z1_at(5, 100);
 
         assert_eq!(zone.zone_hardfork_at(99), ZoneHardfork::Z0);
         assert_eq!(zone.zone_hardfork_at(100), ZoneHardfork::Z1);
@@ -444,13 +478,73 @@ mod tests {
     }
 
     #[test]
-    fn next_block_base_fee_is_zero() {
+    fn next_block_base_fee_is_zero_without_z1() {
         let zone = dev_zone_spec(2);
         let parent = zone.genesis_header();
         let timestamp = parent.inner.timestamp;
 
         assert_ne!(DEV.next_block_base_fee(parent, timestamp), Some(0));
         assert_eq!(zone.next_block_base_fee(parent, timestamp), Some(0));
+    }
+
+    #[test]
+    fn next_block_base_fee_is_zero_before_z1() {
+        let zone = dev_zone_spec_with_z1_at(2, 100);
+        let parent = header(98, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_GAS_TARGET);
+
+        assert_eq!(zone.next_block_base_fee(&parent, 99), Some(0));
+    }
+
+    #[test]
+    fn next_block_base_fee_seeds_cap_on_z1_activation() {
+        let zone = dev_zone_spec_with_z1_at(2, 100);
+        let parent = header(99, 0, 0);
+
+        assert_eq!(
+            zone.next_block_base_fee(&parent, 100),
+            Some(TEMPO_T7_BASE_FEE_CAP)
+        );
+    }
+
+    #[test]
+    fn next_block_base_fee_adjusts_after_z1_activation() {
+        let zone = dev_zone_spec_with_z1_at(2, 100);
+        let empty_parent = header(100, TEMPO_T7_BASE_FEE_CAP, 0);
+        let busy_parent = header(
+            100,
+            TEMPO_T7_BASE_FEE_FLOOR,
+            TEMPO_T7_BASE_FEE_GAS_TARGET * 3,
+        );
+
+        assert_eq!(
+            zone.next_block_base_fee(&empty_parent, 101),
+            Some(TEMPO_T7_BASE_FEE_CAP * 7 / 8)
+        );
+        assert_eq!(
+            zone.next_block_base_fee(&busy_parent, 101),
+            Some(750_000_000)
+        );
+    }
+
+    #[test]
+    fn next_block_base_fee_respects_t7_target_and_bounds() {
+        let zone = dev_zone_spec_with_z1_at(2, 100);
+        let at_target = header(100, TEMPO_T7_BASE_FEE_CAP / 2, TEMPO_T7_BASE_FEE_GAS_TARGET);
+        let at_floor = header(100, TEMPO_T7_BASE_FEE_FLOOR, 0);
+        let at_cap = header(100, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_GAS_TARGET * 3);
+
+        assert_eq!(
+            zone.next_block_base_fee(&at_target, 101),
+            Some(TEMPO_T7_BASE_FEE_CAP / 2)
+        );
+        assert_eq!(
+            zone.next_block_base_fee(&at_floor, 101),
+            Some(TEMPO_T7_BASE_FEE_FLOOR)
+        );
+        assert_eq!(
+            zone.next_block_base_fee(&at_cap, 101),
+            Some(TEMPO_T7_BASE_FEE_CAP)
+        );
     }
 
     #[test]
