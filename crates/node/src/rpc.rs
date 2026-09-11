@@ -942,8 +942,15 @@ where
         Box::pin(async move {
             let fork = self.zone_fork()?;
             if fork.is_z1() {
-                let gas_price = EthFees::gas_price(&self.eth.api).await.map_err(internal)?;
-                to_raw(&gas_price)
+                let base_fee = self
+                    .eth
+                    .api
+                    .provider()
+                    .latest_header()
+                    .map_err(internal)?
+                    .and_then(|header| header.base_fee_per_gas())
+                    .ok_or_else(|| JsonRpcError::internal("latest block has no base fee"))?;
+                to_raw(&U256::from(base_fee))
             } else {
                 to_raw(&U256::from(TEMPO_T1_BASE_FEE))
             }
@@ -965,6 +972,23 @@ where
                 EthFees::fee_history(&self.eth.api, block_count, newest_block, reward_percentiles)
                     .await
                     .map_err(internal)?;
+            if let Some(successor_block) = history
+                .gas_used_ratio
+                .len()
+                .checked_sub(1)
+                .and_then(|offset| history.oldest_block.checked_add(offset as u64))
+                .and_then(|end_block| end_block.checked_add(1))
+                && let Some(successor) =
+                    EthBlocks::rpc_block_header(&self.eth.api, BlockId::number(successor_block))
+                        .await
+                        .map_err(internal)?
+                && let (Some(trailing_fee), Some(successor_fee)) = (
+                    history.base_fee_per_gas.last_mut(),
+                    successor.base_fee_per_gas(),
+                )
+            {
+                *trailing_fee = u128::from(successor_fee);
+            }
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
             redact_fee_history(&mut history, self.zone_fork()?);
             to_raw(&history)
@@ -1150,10 +1174,20 @@ where
             self.enforce_authorized(&mut request, &auth)?;
 
             let fork = self.zone_fork()?;
-            if !fork.is_z1() {
-                // Avoid leaking dynamic fee estimates through missing fee fields before Z1.
-                apply_public_fee_policy(&mut request);
-            }
+            let (gas_price, max_fee_per_gas) = if fork.is_z1() {
+                let base_fee = self
+                    .eth
+                    .api
+                    .provider()
+                    .latest_header()
+                    .map_err(internal)?
+                    .and_then(|header| header.base_fee_per_gas())
+                    .ok_or_else(|| JsonRpcError::internal("latest block has no base fee"))?;
+                (u128::from(base_fee), u128::from(base_fee).saturating_mul(2))
+            } else {
+                (u128::from(TEMPO_T0_BASE_FEE), u128::from(TEMPO_T0_BASE_FEE))
+            };
+            apply_public_fee_policy(&mut request, gas_price, max_fee_per_gas);
 
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
                 .await
@@ -1571,7 +1605,11 @@ fn redact_fee_history(history: &mut FeeHistory, fork: ZoneHardfork) {
 /// Prefill missing transaction fee fields with public, deterministic values before calling reth's
 /// transaction filler, so `eth_fillTransaction` does not expose dynamic fee estimates derived from
 /// private zone activity.
-fn apply_public_fee_policy(request: &mut TempoTransactionRequest) {
+fn apply_public_fee_policy(
+    request: &mut TempoTransactionRequest,
+    gas_price: u128,
+    max_fee_per_gas: u128,
+) {
     if request.inner.has_eip4844_fields() && request.inner.max_fee_per_blob_gas.is_none() {
         request.inner.max_fee_per_blob_gas = Some(0);
     }
@@ -1581,7 +1619,7 @@ fn apply_public_fee_policy(request: &mut TempoTransactionRequest) {
     }
 
     if matches!(request.inner.transaction_type, Some(0 | 1)) {
-        request.set_gas_price(u128::from(TEMPO_T0_BASE_FEE));
+        request.set_gas_price(gas_price);
         return;
     }
 
@@ -1590,7 +1628,7 @@ fn apply_public_fee_policy(request: &mut TempoTransactionRequest) {
         request.set_max_priority_fee_per_gas(0);
     }
     if request.max_fee_per_gas().is_none() {
-        request.set_max_fee_per_gas(u128::from(TEMPO_T0_BASE_FEE) + priority_fee);
+        request.set_max_fee_per_gas(max_fee_per_gas.saturating_add(priority_fee));
     }
 }
 
@@ -1873,7 +1911,11 @@ mod tests {
     fn apply_public_fee_policy_prefills_missing_fees() {
         let mut request = TempoTransactionRequest::default();
 
-        apply_public_fee_policy(&mut request);
+        apply_public_fee_policy(
+            &mut request,
+            u128::from(TEMPO_T0_BASE_FEE),
+            u128::from(TEMPO_T0_BASE_FEE),
+        );
 
         assert_eq!(request.gas_price(), None);
         assert_eq!(
@@ -1884,11 +1926,26 @@ mod tests {
     }
 
     #[test]
+    fn apply_public_fee_policy_defaults_to_zero_tip_with_dynamic_base_fee() {
+        let mut request = TempoTransactionRequest::default();
+
+        apply_public_fee_policy(&mut request, 600_000_000, 1_200_000_000);
+
+        assert_eq!(request.gas_price(), None);
+        assert_eq!(request.max_fee_per_gas(), Some(1_200_000_000));
+        assert_eq!(request.max_priority_fee_per_gas(), Some(0));
+    }
+
+    #[test]
     fn apply_public_fee_policy_prefills_legacy_gas_price() {
         let mut request = TempoTransactionRequest::default();
         request.inner.transaction_type = Some(0);
 
-        apply_public_fee_policy(&mut request);
+        apply_public_fee_policy(
+            &mut request,
+            u128::from(TEMPO_T0_BASE_FEE),
+            u128::from(TEMPO_T0_BASE_FEE),
+        );
 
         assert_eq!(request.gas_price(), Some(u128::from(TEMPO_T0_BASE_FEE)));
         assert_eq!(request.max_fee_per_gas(), None);
@@ -1900,7 +1957,11 @@ mod tests {
         let mut request = TempoTransactionRequest::default();
         request.set_max_priority_fee_per_gas(7);
 
-        apply_public_fee_policy(&mut request);
+        apply_public_fee_policy(
+            &mut request,
+            u128::from(TEMPO_T0_BASE_FEE),
+            u128::from(TEMPO_T0_BASE_FEE),
+        );
 
         assert_eq!(request.max_priority_fee_per_gas(), Some(7));
         assert_eq!(
@@ -1914,7 +1975,11 @@ mod tests {
         let mut request = TempoTransactionRequest::default();
         request.inner.blob_versioned_hashes = Some(Vec::new());
 
-        apply_public_fee_policy(&mut request);
+        apply_public_fee_policy(
+            &mut request,
+            u128::from(TEMPO_T0_BASE_FEE),
+            u128::from(TEMPO_T0_BASE_FEE),
+        );
 
         assert_eq!(request.inner.max_fee_per_blob_gas, Some(0));
     }

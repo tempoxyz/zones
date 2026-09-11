@@ -3,12 +3,15 @@
 use alloy::{
     consensus::BlockHeader as _,
     network::ReceiptResponse as _,
-    primitives::{TxKind, U256},
+    primitives::{Address, TxKind, U256},
     providers::Provider as _,
+    rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
 };
 use alloy_eips::eip2718::Encodable2718;
+use alloy_rpc_types_eth::{BlockNumberOrTag, FeeHistory};
 use alloy_signer::SignerSync as _;
+use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_chainspec::spec::{TEMPO_T7_BASE_FEE_CAP, tempo_t7_next_block_base_fee};
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_primitives::{
@@ -18,12 +21,30 @@ use tempo_primitives::{
         calc_gas_balance_spending,
     },
 };
+use zone_node::rpc::auth::AuthContext;
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 
-use crate::utils::{DEFAULT_TIMEOUT, start_local_zone_with_fixture_and_withdrawal_batch_interval};
+use crate::utils::{
+    DEFAULT_TIMEOUT, ZoneTestNode, start_local_zone_with_fixture_and_withdrawal_batch_interval,
+};
 
 const ZONE_ID: u32 = 1;
 const FEE_BALANCE: u128 = 1_000_000;
+const PRIORITY_FEE: u128 = 1_000_000_000;
+
+async fn redacted_rpc(
+    zone: &ZoneTestNode,
+) -> eyre::Result<std::sync::Arc<dyn zone_node::rpc::ZoneRpcApi>> {
+    zone.rpc_api(zone_node::rpc::RedactedRpcConfig {
+        listen_addr: ([127, 0, 0, 1], 0).into(),
+        zone_id: ZONE_ID,
+        chain_id: zone.provider().get_chain_id().await?,
+        max_auth_token_validity: zone_node::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+        max_response_size: 160 * 1024 * 1024,
+        zone_portal: Address::ZERO,
+    })
+    .await
+}
 
 fn sponsored_transaction(
     sender: &PrivateKeySigner,
@@ -33,6 +54,7 @@ fn sponsored_transaction(
     let mut transaction = TempoTransaction {
         chain_id,
         max_fee_per_gas: TEMPO_T7_BASE_FEE_CAP as u128,
+        max_priority_fee_per_gas: PRIORITY_FEE,
         gas_limit: 500_000,
         calls: vec![Call {
             to: TxKind::Call(sender.address()),
@@ -88,8 +110,13 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
         )),
         "the Z1 activation block must adjust from its parent"
     );
+    let rpc = redacted_rpc(&zone).await?;
+    let gas_price = rpc
+        .gas_price()
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))?;
     assert_eq!(
-        zone.provider().get_gas_price().await?,
+        serde_json::from_str::<U256>(gas_price.get())?,
         u128::from(
             first
                 .header
@@ -97,6 +124,24 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
                 .expect("first block base fee")
         ),
         "eth_gasPrice must follow the active Zone base fee"
+    );
+    let fee_history = rpc
+        .fee_history(1, BlockNumberOrTag::Number(0), Some(Vec::new()))
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))?;
+    let fee_history: FeeHistory = serde_json::from_str(fee_history.get())?;
+    assert_eq!(
+        fee_history.base_fee_per_gas,
+        vec![
+            u128::from(genesis.header.base_fee_per_gas().expect("genesis base fee")),
+            u128::from(
+                first
+                    .header
+                    .base_fee_per_gas()
+                    .expect("first block base fee")
+            ),
+        ],
+        "fee history must use the canonical Z1 successor fee at the fork boundary"
     );
 
     fixture.inject_empty_block(zone.deposit_queue());
@@ -165,6 +210,55 @@ async fn sponsored_transaction_settles_nonzero_base_fee() -> eyre::Result<()> {
     assert!(
         receipt.effective_gas_price > 0,
         "Z1 transaction must pay a nonzero base fee"
+    );
+    let block = provider
+        .get_block_by_number(
+            receipt
+                .block_number()
+                .expect("mined transaction block number")
+                .into(),
+        )
+        .await?
+        .expect("mined transaction block");
+    let base_fee = block.header.base_fee_per_gas().expect("block base fee");
+    assert!(
+        receipt.effective_gas_price > u128::from(base_fee),
+        "transaction must include a priority fee"
+    );
+    let rpc = redacted_rpc(&zone).await?;
+    let gas_price = rpc
+        .gas_price()
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))?;
+    assert_eq!(
+        serde_json::from_str::<U256>(gas_price.get())?,
+        u128::from(base_fee),
+        "eth_gasPrice must not include the sampled priority fee"
+    );
+
+    let filled = rpc
+        .fill_transaction(
+            TempoTransactionRequest {
+                inner: TransactionRequest {
+                    from: Some(sender.address()),
+                    to: Some(TxKind::Call(sender.address())),
+                    gas: Some(21_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            AuthContext {
+                caller: sender.address(),
+                expires_at: u64::MAX,
+                keychain_key_id: None,
+            },
+        )
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))?;
+    let filled: serde_json::Value = serde_json::from_str(filled.get())?;
+    assert_eq!(
+        filled["tx"]["maxPriorityFeePerGas"], "0x0",
+        "eth_fillTransaction must default the priority fee to zero"
     );
 
     let actual_fee = calc_gas_balance_spending(receipt.gas_used, receipt.effective_gas_price);
