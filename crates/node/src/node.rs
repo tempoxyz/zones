@@ -65,7 +65,8 @@ use std::{
 use tempo_alloy::TempoNetwork;
 use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
 use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, node::TempoConsensusBuilder,
+    rpc::TempoEthApiBuilder,
 };
 use tempo_precompiles::tip20::TIP20Token;
 use tempo_primitives::{
@@ -1812,7 +1813,9 @@ where
     type Consensus = TempoConsensus<ZoneChainSpec>;
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(TempoConsensus::new(ctx.chain_spec())
+        Ok(TempoConsensusBuilder::default()
+            .build_consensus(ctx)
+            .await?
             .with_allow_equal_timestamps(true)
             .with_allowed_future_block_time_millis(100))
     }
