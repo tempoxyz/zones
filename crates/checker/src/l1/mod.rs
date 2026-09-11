@@ -56,7 +56,6 @@ impl From<L1ReadError> for AttemptError {
 /// Recognized Portal events for one exact anchored L1 block.
 #[derive(Debug)]
 pub(crate) struct L1BlockEvidence {
-    block: BlockNumHash,
     events: Vec<L1PortalEvent>,
 }
 
@@ -89,10 +88,6 @@ pub(crate) fn validate_rpc_header(
 }
 
 impl L1BlockEvidence {
-    pub(crate) const fn block(&self) -> BlockNumHash {
-        self.block
-    }
-
     /// Return authenticated Portal events in receipt order.
     pub(crate) fn portal_events(&self) -> impl Iterator<Item = &L1PortalEvent> {
         self.events.iter()
@@ -140,7 +135,6 @@ fn collect_tracked_l1_block_evidence(
             .map_err(finding)?;
     }
     Ok(L1BlockEvidence {
-        block: evidence.block,
         events: collector.finish(),
     })
 }
@@ -247,7 +241,7 @@ fn collect_l1_block_evidence(
             .map_err(finding)?;
     }
     let events = event_collector.finish();
-    Ok(L1BlockEvidence { block, events })
+    Ok(L1BlockEvidence { events })
 }
 
 fn classify_contract_error(error: alloy_contract::Error) -> L1ReadError {
@@ -403,7 +397,6 @@ mod tests {
         };
 
         let evidence = collect_tracked_l1_block_evidence(portal, parent, tracked).unwrap();
-        assert_eq!(evidence.block(), BlockNumHash::new(BLOCK, HASH));
         assert!(matches!(
             evidence.portal_events().next(),
             Some(L1PortalEvent::TokenEnabled { token: observed }) if *observed == token
