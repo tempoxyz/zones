@@ -214,8 +214,8 @@ impl EthChainSpec for ZoneChainSpec {
     }
 
     fn next_block_base_fee(&self, parent: &TempoHeader, target_timestamp: u64) -> Option<u64> {
-        let target_fork = self.zone_hardfork_at(target_timestamp);
-        if target_fork.is_z1() {
+        let fork = self.zone_hardfork_at(target_timestamp);
+        if fork.is_z1() {
             let parent_base_fee = parent
                 .inner
                 .base_fee_per_gas

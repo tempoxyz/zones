@@ -26,7 +26,7 @@ use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_provider::{CanonStateSubscriptions, HeaderProvider};
+use reth_provider::{CanonStateSubscriptions, ChainSpecProvider, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -36,7 +36,7 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, BlockReaderIdExt, StateProviderFactory};
 use reth_trie_common::{ExecutionWitnessMode, HashedPostState};
 use tempo_alloy::{
     TempoNetwork,
@@ -53,6 +53,7 @@ use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
 };
+use zone_chainspec::{ZoneChainSpec, ZoneHardfork, ZoneHardforks};
 use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
@@ -830,7 +831,24 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
 impl<Api> ZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
+    Api::Provider: ChainSpecProvider<ChainSpec = ZoneChainSpec>,
 {
+    fn zone_fork(&self) -> Result<ZoneHardfork, JsonRpcError> {
+        let header = self
+            .eth
+            .api
+            .provider()
+            .latest_header()
+            .map_err(internal)?
+            .ok_or_else(|| JsonRpcError::internal("latest block not found"))?;
+        Ok(self
+            .eth
+            .api
+            .provider()
+            .chain_spec()
+            .zone_hardfork_at(header.timestamp()))
+    }
+
     fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
         Box::pin(async move {
             let block = EthBlocks::rpc_block(&self.eth.api, id, false)
@@ -851,6 +869,7 @@ where
 impl<Api> zone_rpc::ZoneRpcApi for ZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
+    Api::Provider: ChainSpecProvider<ChainSpec = ZoneChainSpec>,
 {
     fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo> {
         Box::pin(async move {
@@ -920,7 +939,15 @@ where
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&U256::from(TEMPO_T1_BASE_FEE)) })
+        Box::pin(async move {
+            let fork = self.zone_fork()?;
+            if fork.is_z1() {
+                let gas_price = EthFees::gas_price(&self.eth.api).await.map_err(internal)?;
+                to_raw(&gas_price)
+            } else {
+                to_raw(&U256::from(TEMPO_T1_BASE_FEE))
+            }
+        })
     }
 
     fn max_priority_fee_per_gas(&self) -> BoxFut<'_> {
@@ -939,7 +966,7 @@ where
                     .await
                     .map_err(internal)?;
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
-            redact_fee_history(&mut history);
+            redact_fee_history(&mut history, self.zone_fork()?);
             to_raw(&history)
         })
     }
@@ -1122,9 +1149,11 @@ where
         Box::pin(async move {
             self.enforce_authorized(&mut request, &auth)?;
 
-            // Prefill the users request so the `fill_transaction` doesnt leak dynamic fee estimates via
-            // missing fee fields.
-            apply_public_fee_policy(&mut request);
+            let fork = self.zone_fork()?;
+            if !fork.is_z1() {
+                // Avoid leaking dynamic fee estimates through missing fee fields before Z1.
+                apply_public_fee_policy(&mut request);
+            }
 
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
                 .await
@@ -1525,8 +1554,10 @@ fn redact_header(header: &mut TempoHeaderResponse) {
 }
 
 /// Clear gas related fields that leak the size (and therefore tx counts)
-fn redact_fee_history(history: &mut FeeHistory) {
-    history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
+fn redact_fee_history(history: &mut FeeHistory, fork: ZoneHardfork) {
+    if !fork.is_z1() {
+        history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
+    }
     history.gas_used_ratio.fill(0.0);
     history.base_fee_per_blob_gas.fill(0);
     history.blob_gas_used_ratio.fill(0.0);
@@ -1813,7 +1844,7 @@ mod tests {
             reward: Some(vec![vec![7, 8], vec![9, 10]]),
         };
 
-        redact_fee_history(&mut history);
+        redact_fee_history(&mut history, ZoneHardfork::Z0);
 
         assert_eq!(history.oldest_block, 42);
         assert_eq!(
@@ -1824,6 +1855,18 @@ mod tests {
         assert_eq!(history.base_fee_per_blob_gas, vec![0; 3]);
         assert_eq!(history.blob_gas_used_ratio, vec![0.0; 2]);
         assert_eq!(history.reward, Some(vec![vec![0, 0], vec![0, 0]]));
+    }
+
+    #[test]
+    fn redact_fee_history_preserves_base_fees_at_z1() {
+        let mut history = FeeHistory {
+            base_fee_per_gas: vec![1, 2, 3],
+            ..Default::default()
+        };
+
+        redact_fee_history(&mut history, ZoneHardfork::Z1);
+
+        assert_eq!(history.base_fee_per_gas, vec![1, 2, 3]);
     }
 
     #[test]

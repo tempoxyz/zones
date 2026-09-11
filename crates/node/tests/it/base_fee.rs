@@ -88,6 +88,16 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
         )),
         "the Z1 activation block must adjust from its parent"
     );
+    assert_eq!(
+        zone.provider().get_gas_price().await?,
+        u128::from(
+            first
+                .header
+                .base_fee_per_gas()
+                .expect("first block base fee")
+        ),
+        "eth_gasPrice must follow the active Zone base fee"
+    );
 
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
