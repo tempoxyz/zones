@@ -104,19 +104,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             let url = url
                 .parse()
                 .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
-            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
-                .map_err(|error| {
-                    eyre::eyre!(
-                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
-                    )
-                })?
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
-            eyre::ensure!(
-                !portal_address.is_zero(),
-                "L1_PORTAL_ADDRESS must be nonzero"
-            );
-            Some((url, portal_address))
+            Some(url)
         }
         Ok(_) | Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
@@ -139,8 +127,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             warn!(target: "reth::cli", "--block.interval-ms is deprecated, has no effect, and will be removed in the next release");
         }
 
-        let zone_id = builder.config().chain.zone_id();
-        validate_deprecated_zone_id(args.zone_id, zone_id)?;
+        let (zone_id, portal_address) = genesis_identity(&builder.config().chain, &args);
 
         let manifest_mode = args.sequencer_manifest.is_some();
         validate_p2p_transaction_size_limit(
@@ -163,7 +150,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
         let mut node = ZoneNode::new(
             args.l1_rpc_url.clone(),
-            args.portal_address,
+            portal_address,
             args.l1_fetch_concurrency,
             Duration::from_millis(args.l1_retry_connection_interval_ms),
         )
@@ -195,7 +182,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 let node = node.with_portal_evidence_retention();
                 let checker = CheckerExEx::new(CheckerConfig {
                     l1_rpc_url: args.l1_rpc_url.clone(),
-                    portal_address: args.portal_address,
+                    portal_address,
                     zone_id,
                     zone_chain_id: builder.config().chain.chain().id(),
                     database_path: builder.config().datadir().data_dir().join("checker"),
@@ -214,14 +201,12 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 }
 
 /// Creates the EVM config used by CLI subcommands.
-fn cli_evm_config(
-    chain_spec: Arc<ZoneChainSpec>,
-    l1_config: Option<(url::Url, Address)>,
-) -> ZoneEvmConfig {
-    let Some((l1_rpc_url, portal_address)) = l1_config else {
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_config: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_config else {
         return ZoneEvmConfig::new_without_l1(chain_spec);
     };
 
+    let portal_address = tempo_precompiles::zone_factory::portal_address(chain_spec.zone_id());
     let cache = L1StateCache::default();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_http(l1_rpc_url)
@@ -382,13 +367,9 @@ pub struct ZoneArgs {
     )]
     pub l1_rpc_url: String,
 
-    /// ZonePortal contract address on L1.
-    #[arg(
-        long = "l1.portal-address",
-        env = "L1_PORTAL_ADDRESS",
-        value_parser = parse_portal_address
-    )]
-    pub portal_address: Address,
+    /// Deprecated compatibility option. Ignored; the portal is derived from genesis.
+    #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
+    pub portal_address: Option<Address>,
 
     /// Deprecated compatibility flag. Ignored.
     #[arg(
@@ -540,7 +521,7 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    /// Deprecated: validates the Zone ID encoded in the genesis chain ID.
+    /// Deprecated compatibility option. Ignored; the Zone ID is derived from genesis.
     #[arg(long = "zone.id", env = "ZONE_ID")]
     pub zone_id: Option<u32>,
 
@@ -628,24 +609,18 @@ fn parse_l1_rpc_url(l1_rpc_url: &str) -> Result<String, String> {
     Ok(l1_rpc_url.to_owned())
 }
 
-fn parse_portal_address(value: &str) -> Result<Address, String> {
-    let address = value
-        .parse::<Address>()
-        .map_err(|err| format!("invalid --l1.portal-address: {err}"))?;
-    if address.is_zero() {
-        return Err("--l1.portal-address must be nonzero".to_owned());
-    }
-    Ok(address)
-}
-
-fn validate_deprecated_zone_id(configured: Option<u32>, derived: u32) -> eyre::Result<()> {
-    if let Some(configured) = configured {
-        eyre::ensure!(
-            configured == derived,
-            "deprecated --zone.id value {configured} does not match zone ID {derived} encoded in the genesis chain ID"
+fn genesis_identity(chain: &ZoneChainSpec, args: &ZoneArgs) -> (u32, Address) {
+    let zone_id = chain.zone_id();
+    let portal_address = tempo_precompiles::zone_factory::portal_address(zone_id);
+    if args.zone_id.is_some() || args.portal_address.is_some() {
+        warn!(
+            target: "reth::cli",
+            zone_id,
+            %portal_address,
+            "--zone.id / ZONE_ID and --l1.portal-address / L1_PORTAL_ADDRESS are deprecated and ignored; using the identity derived from genesis"
         );
     }
-    Ok(())
+    (zone_id, portal_address)
 }
 
 #[cfg(test)]
@@ -655,8 +630,8 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
-        parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
+        Role, ZoneArgs, ZoneCli, genesis_identity, load_decryption_keys, load_sequencer_signer,
+        parse_l1_rpc_url, validate_p2p_transaction_size_limit,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -664,6 +639,39 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[tokio::test]
+    async fn replay_portal_follows_the_loaded_chain_spec() {
+        use alloy_evm::EvmFactory;
+        use alloy_primitives::address;
+        use reth_chainspec::EthChainSpec as _;
+        use reth_evm::ConfigureEvm;
+        use tempo_chainspec::spec::DEV;
+        use zone_primitives::constants::zone_chain_id;
+
+        // Inspect the EVM's actual L1 provider without making an RPC request.
+        for parent in [4217, 42431, 31318] {
+            for (zone_id, expected) in [
+                (7, address!("5AD0000000000000000000000000000000000007")),
+                (8, address!("5AD0000000000000000000000000000000000008")),
+            ] {
+                let mut genesis = DEV.genesis().clone();
+                genesis.config.chain_id = zone_chain_id(parent, zone_id).unwrap();
+                let spec = super::ZoneChainSpec::from_genesis_with_l1(genesis, &DEV).unwrap();
+                let config = super::cli_evm_config(
+                    std::sync::Arc::new(spec),
+                    Some("http://127.0.0.1:1".parse().unwrap()),
+                );
+                let evm = config
+                    .evm_factory()
+                    .create_evm(revm::database::EmptyDB::default(), Default::default());
+                assert_eq!(
+                    evm.ctx().journaled_state.database.l1_state().portal(),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
@@ -725,17 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn portal_address_must_be_nonzero() {
-        assert!(parse_portal_address("0x0000000000000000000000000000000000000000").is_err());
-        assert!(parse_portal_address("0x1111111111111111111111111111111111111111").is_ok());
-    }
-
-    #[test]
-    fn deprecated_zone_id_is_accepted_and_validated() {
-        assert!(validate_deprecated_zone_id(None, 7).is_ok());
-        assert!(validate_deprecated_zone_id(Some(7), 7).is_ok());
-        assert!(validate_deprecated_zone_id(Some(8), 7).is_err());
-
+    fn deprecated_args_are_accepted() {
         let parsed = ZoneArgsParser::try_parse_from([
             "tempo-zone",
             "--l1.rpc-url",
@@ -747,6 +745,44 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.zone.zone_id, Some(7));
+    }
+
+    #[test]
+    fn startup_identity_follows_genesis_after_regenesis() {
+        use alloy_genesis::Genesis;
+        use alloy_primitives::address;
+        use tempo_chainspec::TempoChainSpec;
+        use zone_chainspec::ZoneChainSpec;
+        use zone_primitives::constants::zone_chain_id;
+
+        let mut args =
+            ZoneArgsParser::try_parse_from(["tempo-zone", "--l1.rpc-url", "ws://localhost:8546"])
+                .unwrap()
+                .zone;
+
+        // Exercise reserved mainnet/Moderato IDs and a generic development
+        // parent without process-global environment overrides or RPC calls.
+        for parent_id in [4217, 42431, 31318] {
+            let mut l1_genesis = Genesis::default();
+            l1_genesis.config.chain_id = parent_id;
+            let parent = TempoChainSpec::from_genesis(l1_genesis);
+            for (zone_id, expected_portal) in [
+                (7, address!("0x5ad0000000000000000000000000000000000007")),
+                (8, address!("0x5ad0000000000000000000000000000000000008")),
+            ] {
+                let mut genesis = Genesis::default();
+                genesis.config.chain_id = zone_chain_id(parent_id, zone_id).unwrap();
+                let chain = ZoneChainSpec::from_genesis_with_l1(genesis, &parent).unwrap();
+                // The first run and the reset use the same launch config.
+                // Values left by older charts must never select the old portal.
+                for configured in [None, Some(1), Some(zone_id)] {
+                    args.zone_id = configured;
+                    args.portal_address =
+                        configured.map(tempo_precompiles::zone_factory::portal_address);
+                    assert_eq!(genesis_identity(&chain, &args), (zone_id, expected_portal));
+                }
+            }
+        }
     }
 
     #[test]
