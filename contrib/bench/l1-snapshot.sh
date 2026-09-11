@@ -281,7 +281,7 @@ l1_snapshot_prepare_expectations() {
     echo "building native ZoneFactory shared runtime artifacts"
     forge build --root "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts" --skip test --no-lint >/dev/null
 
-    local factory_hash portal_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash
+    local factory_hash portal_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash tempo_runtimes_hash
     factory_hash="$(l1_snapshot_sha256 "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/src/precompiles/zone_factory.rs")"
     portal_hash="$(l1_snapshot_artifact_hash ZonePortal)"
     verifier_hash="$(l1_snapshot_artifact_hash Verifier)"
@@ -290,6 +290,7 @@ l1_snapshot_prepare_expectations() {
     local tempo_patch="$L1_SNAPSHOT_ZONES_ROOT/contrib/bench/patches/tempo-xtask-mnemonic-file.patch"
     l1_snapshot_require_file "$tempo_patch"
     tempo_patch_hash="$(l1_snapshot_sha256 "$tempo_patch")"
+    tempo_runtimes_hash="$(l1_snapshot_sha256 "$TEMPO_ROOT/crates/contracts/src/zones.rs")"
 
     local tempo_revision="${ZONES_BENCH_TEMPO_REF:-}"
     if [[ -z "$tempo_revision" ]]; then
@@ -311,6 +312,7 @@ l1_snapshot_prepare_expectations() {
         --arg tempoRevision "${tempo_revision,,}" \
         --arg tempoHardfork "$L1_SNAPSHOT_HARDFORK" \
         --arg tempoPatchSha256 "$tempo_patch_hash" \
+        --arg tempoRuntimesSha256 "$tempo_runtimes_hash" \
         --arg genesisInputsSha256 "$genesis_inputs_hash" \
         --arg factoryArtifactSha256 "$factory_hash" \
         --arg portalArtifactSha256 "$portal_hash" \
@@ -333,7 +335,8 @@ l1_snapshot_prepare_expectations() {
           tempo: {
             revision: $tempoRevision,
             hardfork: $tempoHardfork,
-            mnemonicFilePatchSha256: $tempoPatchSha256
+            mnemonicFilePatchSha256: $tempoPatchSha256,
+            zoneRuntimesSha256: $tempoRuntimesSha256
           },
           zonesGenesis: {
             inputsSha256: $genesisInputsSha256,
