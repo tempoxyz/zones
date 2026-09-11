@@ -1924,8 +1924,8 @@ where
         ctx: &BuilderContext<Node>,
         evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::Pool> {
-        // Keep Z0 transactions admissible across the Z1 transition. The pool's current block base
-        // fee still parks transactions that are underpriced once Z1 is active.
+        // Keep pre-T13 transactions admissible across the T13 transition. The pool's current block
+        // base fee still parks transactions that are underpriced once T13 is active.
         let mut pool_config = ctx.pool_config().with_disabled_protocol_base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 

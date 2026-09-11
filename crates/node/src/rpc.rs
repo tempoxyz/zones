@@ -43,7 +43,10 @@ use tempo_alloy::{
     provider::ext::TempoProviderExt as _,
     rpc::{TempoCallBuilderExt as _, TempoHeaderResponse, TempoTransactionRequest},
 };
-use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
+use tempo_chainspec::{
+    hardfork::TempoHardfork,
+    spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE, TempoHardforks},
+};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
@@ -53,7 +56,7 @@ use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
 };
-use zone_chainspec::{ZoneChainSpec, ZoneHardfork, ZoneHardforks};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
@@ -833,7 +836,7 @@ where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
     Api::Provider: ChainSpecProvider<ChainSpec = ZoneChainSpec>,
 {
-    fn zone_fork(&self) -> Result<ZoneHardfork, JsonRpcError> {
+    fn tempo_fork(&self) -> Result<TempoHardfork, JsonRpcError> {
         let header = self
             .eth
             .api
@@ -846,7 +849,7 @@ where
             .api
             .provider()
             .chain_spec()
-            .zone_hardfork_at(header.timestamp()))
+            .tempo_hardfork_at(header.timestamp()))
     }
 
     fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
@@ -940,8 +943,8 @@ where
 
     fn gas_price(&self) -> BoxFut<'_> {
         Box::pin(async move {
-            let fork = self.zone_fork()?;
-            if fork.is_z1() {
+            let fork = self.tempo_fork()?;
+            if fork.is_t13() {
                 let base_fee = self
                     .eth
                     .api
@@ -990,7 +993,7 @@ where
                 *trailing_fee = u128::from(successor_fee);
             }
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
-            redact_fee_history(&mut history, self.zone_fork()?);
+            redact_fee_history(&mut history, self.tempo_fork()?);
             to_raw(&history)
         })
     }
@@ -1173,8 +1176,8 @@ where
         Box::pin(async move {
             self.enforce_authorized(&mut request, &auth)?;
 
-            let fork = self.zone_fork()?;
-            let (gas_price, max_fee_per_gas) = if fork.is_z1() {
+            let fork = self.tempo_fork()?;
+            let (gas_price, max_fee_per_gas) = if fork.is_t13() {
                 let base_fee = self
                     .eth
                     .api
@@ -1588,8 +1591,8 @@ fn redact_header(header: &mut TempoHeaderResponse) {
 }
 
 /// Clear gas related fields that leak the size (and therefore tx counts)
-fn redact_fee_history(history: &mut FeeHistory, fork: ZoneHardfork) {
-    if !fork.is_z1() {
+fn redact_fee_history(history: &mut FeeHistory, fork: TempoHardfork) {
+    if !fork.is_t13() {
         history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
     }
     history.gas_used_ratio.fill(0.0);
@@ -1882,7 +1885,7 @@ mod tests {
             reward: Some(vec![vec![7, 8], vec![9, 10]]),
         };
 
-        redact_fee_history(&mut history, ZoneHardfork::Z0);
+        redact_fee_history(&mut history, TempoHardfork::T12);
 
         assert_eq!(history.oldest_block, 42);
         assert_eq!(
@@ -1896,13 +1899,13 @@ mod tests {
     }
 
     #[test]
-    fn redact_fee_history_preserves_base_fees_at_z1() {
+    fn redact_fee_history_preserves_base_fees_at_t13() {
         let mut history = FeeHistory {
             base_fee_per_gas: vec![1, 2, 3],
             ..Default::default()
         };
 
-        redact_fee_history(&mut history, ZoneHardfork::Z1);
+        redact_fee_history(&mut history, TempoHardfork::T13);
 
         assert_eq!(history.base_fee_per_gas, vec![1, 2, 3]);
     }
