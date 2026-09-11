@@ -12,7 +12,9 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_rpc_types_eth::{BlockNumberOrTag, FeeHistory};
 use alloy_signer::SignerSync as _;
 use tempo_alloy::rpc::TempoTransactionRequest;
-use tempo_chainspec::spec::{TEMPO_T7_BASE_FEE_CAP, tempo_t7_next_block_base_fee};
+use tempo_chainspec::spec::{
+    TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE, TEMPO_T7_BASE_FEE_CAP, tempo_t7_next_block_base_fee,
+};
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_primitives::{
     TempoTxEnvelope,
@@ -75,19 +77,63 @@ fn sponsored_transaction(
     Ok(signed.into())
 }
 
-fn z1_genesis() -> eyre::Result<alloy::genesis::Genesis> {
+fn t13_genesis() -> eyre::Result<alloy::genesis::Genesis> {
     let mut genesis = zone_node::genesis::genesis_template()?;
     genesis
         .config
         .extra_fields
-        .insert_value("z1Time".into(), 1)?;
+        .insert_value("t13Time".into(), 1)?;
     Ok(genesis)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
+async fn z1_keeps_legacy_fees_without_t13() -> eyre::Result<()> {
+    let mut genesis = zone_node::genesis::genesis_template()?;
+    genesis
+        .config
+        .extra_fields
+        .insert_value("z1Time".into(), 0)?;
+    genesis
+        .config
+        .extra_fields
+        .insert_value("t13Time".into(), None::<u64>)?;
     let (zone, mut fixture) =
-        start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, z1_genesis()?)
+        start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, genesis).await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    zone.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
+    let block = zone
+        .provider()
+        .get_block_by_number(1.into())
+        .await?
+        .expect("first Zone block");
+    assert_eq!(block.header.base_fee_per_gas(), Some(0));
+
+    let rpc = redacted_rpc(&zone).await?;
+    let gas_price = rpc
+        .gas_price()
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))?;
+    assert_eq!(
+        serde_json::from_str::<U256>(gas_price.get())?,
+        U256::from(TEMPO_T1_BASE_FEE)
+    );
+    let history = rpc
+        .fee_history(1, BlockNumberOrTag::Number(1), Some(Vec::new()))
+        .await
+        .map_err(|err| eyre::eyre!(err.to_string()))?;
+    let history: FeeHistory = serde_json::from_str(history.get())?;
+    assert_eq!(
+        history.base_fee_per_gas,
+        vec![u128::from(TEMPO_T0_BASE_FEE); 2]
+    );
+    assert_eq!(history.gas_used_ratio, vec![0.0]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t13_activates_dynamic_base_fee() -> eyre::Result<()> {
+    let (zone, mut fixture) =
+        start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, t13_genesis()?)
             .await?;
 
     let genesis = zone
@@ -108,7 +154,7 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
             genesis.header.base_fee_per_gas().expect("genesis base fee"),
             genesis.header.gas_used(),
         )),
-        "the Z1 activation block must adjust from its parent"
+        "the T13 activation block must adjust from its parent"
     );
     let rpc = redacted_rpc(&zone).await?;
     let gas_price = rpc
@@ -141,7 +187,7 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
                     .expect("first block base fee")
             ),
         ],
-        "fee history must use the canonical Z1 successor fee at the fork boundary"
+        "fee history must use the canonical T13 successor fee at the fork boundary"
     );
 
     fixture.inject_empty_block(zone.deposit_queue());
@@ -169,7 +215,7 @@ async fn z1_activates_dynamic_base_fee() -> eyre::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn sponsored_transaction_settles_nonzero_base_fee() -> eyre::Result<()> {
     let (zone, mut fixture) =
-        start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, z1_genesis()?)
+        start_local_zone_with_fixture_and_withdrawal_batch_interval(ZONE_ID, 2, 2, t13_genesis()?)
             .await?;
     let sender = PrivateKeySigner::random();
     let fee_payer = PrivateKeySigner::random();
@@ -209,7 +255,7 @@ async fn sponsored_transaction_settles_nonzero_base_fee() -> eyre::Result<()> {
     assert!(receipt.status(), "sponsored transaction must succeed");
     assert!(
         receipt.effective_gas_price > 0,
-        "Z1 transaction must pay a nonzero base fee"
+        "T13 transaction must pay a nonzero base fee"
     );
     let block = provider
         .get_block_by_number(
