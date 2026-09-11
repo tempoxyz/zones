@@ -70,6 +70,11 @@ pub struct L1State<P> {
     /// when a subcall reverts, preserving charges for potentially incurred L1 fetch work and
     /// simplifying the accounting model.
     access_set: Rc<RefCell<HashSet<(Address, B256)>>>,
+    /// Whether a protocol-owned Inbox mint should observe Zone-local pause state.
+    ///
+    /// This is shared with the database overlay so deposits accepted on Tempo before a token was
+    /// paused can still be credited without disabling pause mirroring for user token movement.
+    local_tip20_pause: Rc<Cell<bool>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
     /// ZonePortal read through the L1 provider by explicit storage operations.
@@ -82,6 +87,7 @@ impl<P> L1State<P> {
         Self {
             anchor: Rc::new(Cell::new(None)),
             access_set: Rc::new(RefCell::new(HashSet::default())),
+            local_tip20_pause: Rc::new(Cell::new(false)),
             provider,
             portal_address,
         }
@@ -91,6 +97,7 @@ impl<P> L1State<P> {
     pub fn reset_transaction_state(&self) {
         self.anchor.set(None);
         self.access_set.borrow_mut().clear();
+        self.local_tip20_pause.set(false);
     }
 
     /// Returns the anchor selected for the current transaction, if any.
@@ -101,6 +108,29 @@ impl<P> L1State<P> {
     /// Returns the configured ZonePortal address.
     pub const fn portal(&self) -> Address {
         self.portal_address
+    }
+
+    /// Runs a protocol-owned operation against Zone-local TIP-20 pause state.
+    ///
+    /// This exception is reserved for Inbox mints that settle value already escrowed on Tempo.
+    /// All other TIP-20 operations continue to observe the finalized Tempo pause state.
+    pub fn with_local_tip20_pause<T>(&self, operation: impl FnOnce() -> T) -> T {
+        struct Restore(Rc<Cell<bool>>, bool);
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+
+        let previous = self.local_tip20_pause.replace(true);
+        let _restore = Restore(Rc::clone(&self.local_tip20_pause), previous);
+        operation()
+    }
+
+    /// Returns whether the current protocol operation should use Zone-local TIP-20 pause state.
+    pub fn uses_local_tip20_pause(&self) -> bool {
+        self.local_tip20_pause.get()
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
