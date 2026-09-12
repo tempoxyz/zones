@@ -99,8 +99,10 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_shadow_prover, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
+    ProofCollectorSettlement, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
+    attestation::AttestationDomain, spawn_proof_collector, spawn_shadow_prover,
+    spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -179,6 +181,9 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
+    /// Disable the proof gate only for synthetic fixtures without a proof-serving L1.
+    #[cfg(feature = "test-utils")]
+    pub skip_proof_persistence: bool,
     /// Shared sequencer signer used for block production and encryption.
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
@@ -769,11 +774,6 @@ where
                 .await?,
             )
         } else {
-            if let Some(ref config) = self.sequencer_config {
-                // Legacy single-sequencer mode keeps the static engine.
-                let sequencer_addr = config.sequencer_signer.address();
-                self.spawn_zone_engine(&ctx, sequencer_addr)?;
-            }
             None
         };
 
@@ -801,6 +801,7 @@ where
         let portal_address = self.portal_address;
         let debug_l1_provider = l1_provider.clone();
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
+        let data_dir = ctx.config.datadir().data_dir().to_path_buf();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -824,6 +825,47 @@ where
                 Ok(())
             })
             .await?;
+
+        let proof_collector =
+            if self.sequencer_config.is_some() || finalized_batch_submissions.is_some() {
+                // Batches settled by the startup Tempo checkpoint precede this node's
+                // shadow-proving scope, even if the live portal is further ahead.
+                let initial_processed_through = if effective_shadow_prover_config.is_some() {
+                    Some(u64::try_from(
+                        ZonePortal::new(self.portal_address, &l1_provider)
+                            .zoneHeight()
+                            .block(tempo_block_number.into())
+                            .call()
+                            .await?,
+                    )?)
+                } else {
+                    None
+                };
+                let proof_collector_config = ProofCollectorConfig {
+                    directory: data_dir.join("proofs"),
+                    debug_api: Arc::new(NodeZoneDebugApi::new(
+                        handle.eth_handlers().api.clone(),
+                        l1_provider.clone(),
+                    )),
+                    settlement: ProofCollectorSettlement {
+                        portal_address: self.portal_address,
+                        l1_provider: l1_provider.clone(),
+                    },
+                    initial_processed_through,
+                };
+                let (collector, collector_task) = spawn_proof_collector(
+                    proof_collector_config,
+                    provider.clone(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await?;
+                task_executor.spawn_critical_task("zone-proof-collector", async move {
+                    let _ = collector_task.await;
+                });
+                Some(collector)
+            } else {
+                None
+            };
         let prover_config =
             effective_shadow_prover_config
                 .as_ref()
@@ -831,10 +873,6 @@ where
                     parent_chain_id: l1_chain_id,
                     zone_id: config.zone_id,
                     chain_spec: evm_chain_spec,
-                    debug_api: Arc::new(NodeZoneDebugApi::new(
-                        handle.eth_handlers().api.clone(),
-                        l1_provider.clone(),
-                    )),
                     prover_address: config
                         .prover_runtime
                         .remote_address()
@@ -848,6 +886,9 @@ where
         ) {
             let prover = spawn_shadow_prover(
                 runtime_config,
+                proof_collector
+                    .clone()
+                    .expect("RPC shadow prover has a proof collector"),
                 self.portal_address,
                 config.batch_anchor_config,
                 provider.clone(),
@@ -907,6 +948,9 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    proof_collector
+                        .clone()
+                        .expect("sequencer has a proof collector"),
                     prover_config.clone(),
                 )?),
                 None => None,
@@ -948,6 +992,25 @@ where
             );
         } else if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
+            let last_header = provider
+                .sealed_header(provider.best_block_number()?)?
+                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let collector = proof_collector.expect("sequencer has a proof collector");
+            let engine = ZoneEngine::new(
+                provider.chain_spec(),
+                engine_handle,
+                payload_builder,
+                self.deposit_queue.clone(),
+                self.l1_block_tracker.clone(),
+                last_header,
+                sequencer_addr,
+                self.encryption_keys
+                    .clone()
+                    .expect("sequencer mode configures deposit decryption keys"),
+                self.portal_address,
+            )
+            .with_proof_collector(collector.clone());
+            task_executor.spawn_critical_task("zone-engine", engine.run());
 
             Self::launch_sequencer_tasks(
                 config,
@@ -959,6 +1022,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                Some(collector),
                 prover_config,
             )
             .await?;
@@ -1374,6 +1438,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
+        proof_collector: ProofCollectorHandle,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
@@ -1391,6 +1456,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            proof_collector,
             prover_config,
         })
     }
@@ -1506,36 +1572,6 @@ where
         Ok(())
     }
 
-    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
-    fn spawn_zone_engine(
-        &self,
-        ctx: &AddOnsContext<'_, N>,
-        fee_recipient: Address,
-    ) -> eyre::Result<()> {
-        let provider = ctx.node.provider();
-        let last_header = provider
-            .sealed_header(provider.best_block_number()?)?
-            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-        let engine = ZoneEngine::new(
-            provider.chain_spec(),
-            ctx.beacon_engine_handle.clone(),
-            ctx.node.payload_builder_handle().clone(),
-            self.deposit_queue.clone(),
-            self.l1_block_tracker.clone(),
-            last_header,
-            fee_recipient,
-            self.encryption_keys
-                .clone()
-                .expect("sequencer mode configures deposit decryption keys"),
-            self.portal_address,
-        );
-        ctx.node
-            .task_executor()
-            .spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned");
-        Ok(())
-    }
-
     /// Launch the redacted RPC server.
     async fn launch_redacted_rpc(
         config: ZoneRedactedRpcConfig,
@@ -1587,6 +1623,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
+        proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
@@ -1610,13 +1647,14 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            proof_collector,
             prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
-        // Critical task — node shuts down if either exits.
+        // Critical task — node shuts down if any sequencer child exits.
         task_executor.spawn_critical_task("zone-monitor", async move {
             tokio::select! {
                 res = seq_handle.withdrawal_handle => {

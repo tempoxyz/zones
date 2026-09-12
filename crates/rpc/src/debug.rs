@@ -1,6 +1,6 @@
 //! Zone-specific debug RPC extensions.
 
-use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_rpc_types_eth::BlockId;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 
 use crate::types::ZoneExecutionWitness;
@@ -10,10 +10,7 @@ use crate::types::ZoneExecutionWitness;
 pub trait ZoneDebugApi: Send + Sync {
     /// Replays a Zone block and returns its Zone and Tempo L1 state witnesses.
     /// Fails if the node's L1 provider cannot supply the required historical proofs.
-    async fn zone_execution_witness(
-        &self,
-        block: BlockNumberOrTag,
-    ) -> RpcResult<ZoneExecutionWitness>;
+    async fn zone_execution_witness(&self, block: BlockId) -> RpcResult<ZoneExecutionWitness>;
 }
 
 /// JSON-RPC transport adapter for [`ZoneDebugApi`].
@@ -22,10 +19,7 @@ pub trait ZoneDebugApiRpc {
     /// Replays a Zone block and returns its Zone and Tempo L1 state witnesses.
     /// Fails if the node's L1 provider cannot supply the required historical proofs.
     #[method(name = "zoneExecutionWitness")]
-    async fn zone_execution_witness(
-        &self,
-        block: BlockNumberOrTag,
-    ) -> RpcResult<ZoneExecutionWitness>;
+    async fn zone_execution_witness(&self, block: BlockId) -> RpcResult<ZoneExecutionWitness>;
 }
 
 #[jsonrpsee::core::async_trait]
@@ -33,10 +27,7 @@ impl<T> ZoneDebugApiRpcServer for T
 where
     T: ZoneDebugApi + 'static,
 {
-    async fn zone_execution_witness(
-        &self,
-        block: BlockNumberOrTag,
-    ) -> RpcResult<ZoneExecutionWitness> {
+    async fn zone_execution_witness(&self, block: BlockId) -> RpcResult<ZoneExecutionWitness> {
         ZoneDebugApi::zone_execution_witness(self, block).await
     }
 }

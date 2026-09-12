@@ -25,6 +25,7 @@ mod encryption_key;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
+mod proofs;
 mod prover;
 mod rpc;
 pub mod settlement;
@@ -36,6 +37,10 @@ pub use encryption_key::{
     register_encryption_key,
 };
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
+pub use proofs::{
+    ProofCollectorConfig, ProofCollectorHandle, ProofCollectorSettlement, StoredBlockProof,
+    spawn_proof_collector,
+};
 pub use prover::{
     SHADOW_PROVER_QUEUE_CAPACITY, ShadowProofAnchor, ShadowProver, ShadowProverConfig,
     spawn_shadow_prover,
@@ -146,6 +151,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
+    proof_collector: Option<ProofCollectorHandle>,
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
@@ -162,6 +168,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     let shadow_prover = prover_config.map(|prover_config| {
         prover::spawn_shadow_prover(
             prover_config,
+            proof_collector.expect("shadow prover requires a proof collector"),
             config.portal_address,
             config.batch_anchor_config,
             zone_provider.clone(),

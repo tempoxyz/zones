@@ -615,6 +615,8 @@ pub(crate) fn seed_raw_tip403_policy(
 }
 
 pub(crate) trait TestNodeHandle: Send {
+    fn proof_directory(&self) -> std::path::PathBuf;
+    fn pending_block_number(&self) -> eyre::Result<Option<u64>>;
     fn subscribe_to_canonical_state(
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives>;
@@ -635,6 +637,20 @@ where
     >,
     AddOns: RethRpcAddOns<Node>,
 {
+    fn proof_directory(&self) -> std::path::PathBuf {
+        self.node.data_dir.data_dir().join("proofs")
+    }
+
+    fn pending_block_number(&self) -> eyre::Result<Option<u64>> {
+        use alloy_consensus::BlockHeader as _;
+        use reth_provider::BlockReader as _;
+        Ok(self
+            .node
+            .provider()
+            .pending_block()?
+            .map(|block| block.number()))
+    }
+
     fn subscribe_to_canonical_state(
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives> {
@@ -657,6 +673,7 @@ where
                 config,
                 signer,
                 provider,
+                None,
                 None,
                 tokio_util::sync::CancellationToken::new(),
             )
@@ -704,6 +721,13 @@ pub(crate) struct ZoneTestNode {
 }
 
 impl ZoneTestNode {
+    pub(crate) fn proof_directory(&self) -> std::path::PathBuf {
+        self.node_handle.proof_directory()
+    }
+
+    pub(crate) fn pending_block_number(&self) -> eyre::Result<Option<u64>> {
+        self.node_handle.pending_block_number()
+    }
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
@@ -1368,6 +1392,7 @@ impl ZoneTestNode {
             zone_node = zone_node
                 .with_p2p(p2p_config)
                 .with_sequencer(ZoneSequencerAddOnsConfig {
+                    skip_proof_persistence: portal_address.is_zero(),
                     sequencer_signer: sequencer_signer.clone(),
                     l1_transaction_signer,
                     zone_id,
@@ -2764,6 +2789,8 @@ impl L1TestNode {
             .apply(|mut c| {
                 c.dev.block_time = Some(Duration::from_millis(500));
                 c.dev.finality_depth = std::num::NonZeroUsize::MIN;
+                // Witness collection must prove older L1 checkpoints during catch-up.
+                c.rpc.rpc_eth_proof_window = 100_000;
                 c
             });
 

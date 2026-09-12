@@ -17,7 +17,6 @@ use alloy_rlp::Decodable as _;
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_sol_types::SolCall as _;
 use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
-use futures::{StreamExt as _, TryStreamExt as _, stream};
 use reth_primitives_traits::RecoveredBlock;
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader};
@@ -29,24 +28,26 @@ use tokio::{
     net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, ErrorCode, PROTOCOL_VERSION, ProverConnection, VerifyRequest,
     VerifyResponse,
 };
-use zone_rpc::ZoneDebugApi;
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
+use crate::{
+    BatchAnchorConfig, BatchData, ZoneSequencerProvider,
+    metrics::ProverMetrics,
+    proofs::{ProofCollectorHandle, StoredBlockProof},
+};
 
 /// Number of shadow proof candidates allowed to wait behind the active validation.
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
-const RPC_CONCURRENCY: usize = 8;
 
 /// Typed error context for an SPF rejection or a mismatch in its output.
 /// Errors without this context mean validation could not complete and must not
@@ -64,8 +65,6 @@ pub struct ShadowProverConfig {
     pub zone_id: u32,
     /// Chain spec used to configure the SPF.
     pub chain_spec: Arc<ZoneChainSpec>,
-    /// In-process Zone debug API used to generate execution witnesses.
-    pub debug_api: Arc<dyn ZoneDebugApi>,
     /// Remote prover TCP address. When absent, execute the SPF in-process.
     pub prover_address: Option<String>,
 }
@@ -77,7 +76,6 @@ impl fmt::Debug for ShadowProverConfig {
             .field("parent_chain_id", &self.parent_chain_id)
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
-            .field("debug_api", &"<in-process>")
             .field("prover_address", &self.prover_address)
             .finish()
     }
@@ -86,6 +84,7 @@ impl fmt::Debug for ShadowProverConfig {
 #[derive(Debug, Clone)]
 pub struct ShadowProver {
     sender: mpsc::Sender<ProverJob>,
+    _shutdown: Arc<tokio_util::sync::DropGuard>,
 }
 
 /// Exact Tempo anchor committed by a finalized batch submission.
@@ -180,6 +179,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
 
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
+    proofs: ProofCollectorHandle,
     portal: Address,
     anchor_config: BatchAnchorConfig,
     zone_provider: P,
@@ -202,13 +202,19 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     };
     let metrics = ProverMetrics::default();
 
-    tokio::spawn(async move {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let progress = proofs.start_shadow_prover();
+    let shutdown_guard = Arc::new(shutdown.clone().drop_guard());
+    tokio::spawn(shutdown.run_until_cancelled_owned(async move {
         while let Some(job) = receiver.recv().await {
             metrics
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
             let started = Instant::now();
-            let result = validate_candidate(&context, &job, &metrics).await;
+            let result = match proofs.wait_for_range(job.from, job.to).await {
+                Ok(proofs) => validate_candidate(&context, &job, &proofs, &metrics).await,
+                Err(err) => Err(err),
+            };
             metrics
                 .validation_duration_seconds
                 .record(started.elapsed().as_secs_f64());
@@ -289,10 +295,14 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                     );
                 }
             }
+            progress.mark_processed(job.to);
         }
-    });
+    }));
 
-    ShadowProver { sender }
+    ShadowProver {
+        sender,
+        _shutdown: shutdown_guard,
+    }
 }
 
 impl ShadowProver {
@@ -346,6 +356,7 @@ impl ShadowProver {
 async fn validate_candidate<P: ZoneSequencerProvider>(
     context: &ProverContext<P>,
     job: &ProverJob,
+    proofs: &[Arc<StoredBlockProof>],
     metrics: &ProverMetrics,
 ) -> Result<ValidationStats> {
     ensure!(
@@ -387,16 +398,18 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     }
 
     let started = Instant::now();
-    let (zone_state_witness, tempo_state_witness) =
-        zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
+    ensure!(
+        proofs.last().map(|proof| proof.witness.block_hash) == Some(expected_next_hash),
+        "stored proof range does not end at candidate Zone hash {expected_next_hash}"
+    );
+    let (zone_state_witness, tempo_state_witness, initial_tempo_header) =
+        merge_stored_proofs(proofs, &zone_inputs)?;
     metrics
         .zone_witness_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
     let (final_tempo_header, anchor) = async {
-        let initial_tempo_header =
-            decode_tempo_header(&tempo_state_witness.initial_tempo_header_rlp)?;
         ensure!(
             initial_tempo_header.hash_slow() == zone_inputs.initial_tempo_hash,
             "parent Zone state commits Tempo block {} hash {}, but witness returned {}",
@@ -632,6 +645,66 @@ async fn verify_remotely(
     }
 }
 
+fn merge_stored_proofs(
+    proofs: &[Arc<StoredBlockProof>],
+    inputs: &ZoneInputs,
+) -> Result<(ZoneStateWitness, TempoStateWitness, TempoHeader)> {
+    ensure!(
+        proofs.len() == inputs.blocks.len(),
+        "stored proof count does not match Zone block count"
+    );
+    let first = proofs.first().ok_or_eyre("stored proof range is empty")?;
+    let mut expected_parent = inputs.parent_header.hash_slow();
+    let mut zone_nodes = BTreeMap::new();
+    let mut bytecodes = BTreeMap::new();
+    let mut tempo_nodes = BTreeMap::new();
+
+    for (proof, block) in proofs.iter().zip(&inputs.blocks) {
+        ensure!(
+            proof.witness.block_number == block.number,
+            "stored proof at height {} belongs to Zone block {}",
+            block.number,
+            proof.witness.block_number
+        );
+        ensure!(
+            proof.witness.parent_hash == expected_parent,
+            "stored proof for Zone block {} has parent {}, expected {}",
+            block.number,
+            proof.witness.parent_hash,
+            expected_parent
+        );
+        for node in &proof.witness.execution_witness.state {
+            zone_nodes
+                .entry(keccak256(node))
+                .or_insert_with(|| node.clone());
+        }
+        for code in &proof.witness.execution_witness.codes {
+            bytecodes
+                .entry(keccak256(code))
+                .or_insert_with(|| code.clone());
+        }
+        for node in &proof.witness.tempo_state {
+            tempo_nodes
+                .entry(keccak256(node))
+                .or_insert_with(|| node.clone());
+        }
+        expected_parent = proof.witness.block_hash;
+    }
+
+    let initial_tempo_header = first.witness.initial_tempo_header.clone();
+    Ok((
+        ZoneStateWitness {
+            node_pool: zone_nodes.into_values().collect(),
+            bytecodes: bytecodes.into_values().collect(),
+        },
+        TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(&initial_tempo_header)),
+            node_pool: tempo_nodes.into_values().collect(),
+        },
+        initial_tempo_header,
+    ))
+}
+
 fn build_zone_inputs<P: ZoneSequencerProvider>(
     provider: &P,
     from: u64,
@@ -802,80 +875,6 @@ fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
     let header = TempoHeader::decode(&mut input).context("decode Tempo header RLP")?;
     ensure!(input.is_empty(), "Tempo header RLP has trailing bytes");
     Ok(header)
-}
-
-async fn zone_witnesses(
-    debug_api: &dyn ZoneDebugApi,
-    from: u64,
-    to: u64,
-) -> Result<(ZoneStateWitness, TempoStateWitness)> {
-    let results = stream::iter(from..=to)
-        .map(|number| async move {
-            let started = Instant::now();
-            debug!(
-                target: "zone::sequencer::prover",
-                zone_block = number,
-                "Requesting Zone execution witness"
-            );
-            let witness = debug_api
-                .zone_execution_witness(BlockNumberOrTag::Number(number))
-                .await
-                .map_err(|error| eyre::eyre!(error.to_string()))
-                .wrap_err_with(|| {
-                    format!("debug_zoneExecutionWitness for Zone block {number}")
-                })?;
-            if witness.execution_witness.headers.len() > 1 {
-                bail!(
-                    "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"
-                );
-            }
-            debug!(
-                target: "zone::sequencer::prover",
-                zone_block = number,
-                state_nodes = witness.execution_witness.state.len(),
-                bytecodes = witness.execution_witness.codes.len(),
-                ancestor_headers = witness.execution_witness.headers.len(),
-                tempo_state_nodes = witness.tempo_state.len(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "Received Zone execution witness"
-            );
-            Ok::<_, eyre::Report>((number, witness))
-        })
-        .buffer_unordered(RPC_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-
-    let mut state = BTreeMap::new();
-    let mut codes = BTreeMap::new();
-    let mut tempo_nodes = BTreeMap::new();
-    let mut initial_tempo_header_rlp = None;
-    for (number, witness) in results {
-        if number == from {
-            initial_tempo_header_rlp = Some(Bytes::from(alloy_rlp::encode(
-                &witness.initial_tempo_header,
-            )));
-        }
-        for node in witness.execution_witness.state {
-            state.entry(keccak256(&node)).or_insert(node);
-        }
-        for code in witness.execution_witness.codes {
-            codes.entry(keccak256(&code)).or_insert(code);
-        }
-        for node in witness.tempo_state {
-            tempo_nodes.entry(keccak256(&node)).or_insert(node);
-        }
-    }
-
-    Ok((
-        ZoneStateWitness {
-            node_pool: state.into_values().collect(),
-            bytecodes: codes.into_values().collect(),
-        },
-        TempoStateWitness {
-            initial_tempo_header_rlp: initial_tempo_header_rlp.ok_or_eyre("empty witness range")?,
-            node_pool: tempo_nodes.into_values().collect(),
-        },
-    ))
 }
 
 async fn tempo_header(provider: &DynProvider<TempoNetwork>, number: u64) -> Result<TempoHeader> {
