@@ -41,11 +41,11 @@ use crate::{
     prover::ShadowProver,
     resolve_portal_zone_anchor,
     settlement::{
-        BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
-        WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch, fetch_finalized_batch_boundaries,
-        read_zone_block_snapshot,
+        AtomicWithdrawalSlot, BatchAnchorConfig, BatchData, BatchSubmission, BatchSubmitError,
+        BatchSubmitter, FinalizedBatchLog, WithdrawalPage, ZoneBlockSnapshot,
+        fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
     },
-    withdrawals::SharedWithdrawalStore,
+    withdrawals::{SharedWithdrawalStore, WithdrawalBatchLimits},
 };
 
 /// Maximum number of times to retry a failed batch submission before resyncing.
@@ -70,6 +70,9 @@ pub struct ZoneMonitorConfig {
     pub portal_address: Address,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
+    /// Withdrawal planner limits, shared with the standalone processor. Bounds the slots the
+    /// batch submitter may process atomically with settlement.
+    pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// Shared P2P attestations, required after a settlement signer set is activated.
     pub attestation_store: Option<AttestationStore>,
 }
@@ -504,7 +507,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// - Advances `prev_zone_block_hash`, `prev_processed_deposit_hash`, and
     ///   `last_submitted_zone_block` to reflect the submitted range.
     /// - Stores withdrawals under the receipt's assigned portal queue index when
-    ///   the batch included withdrawals.
+    ///   the batch included withdrawals, unless the submission already processed
+    ///   the slot in the same transaction.
     /// - Signals the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
@@ -566,13 +570,27 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 return Ok(());
             }
 
+            // Only the first attempt may drain the slot atomically. A combined transaction
+            // declares more gas than settlement alone, so after any failure, including bounded
+            // non-inclusion of that transaction, retries submit the batch by itself and leave
+            // the slot to the standalone processor.
+            let atomic_slot = (attempt == 1).then_some(AtomicWithdrawalSlot {
+                withdrawals: &withdrawals,
+                max_batch_gas: self.config.withdrawal_batch_limits.max_batch_gas,
+            });
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(batch_data, shutdown)
+                .submit_batch(batch_data, atomic_slot, shutdown)
                 .await
             {
-                Ok(event) => {
+                Ok(BatchSubmission {
+                    event,
+                    transaction_hash,
+                    block_number,
+                    gas_used,
+                    withdrawals_processed,
+                }) => {
                     let portal_index = if event.withdrawalQueueIndex == NO_QUEUE_INDEX {
                         None
                     } else {
@@ -592,6 +610,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         withdrawal_batch_index = event.withdrawalBatchIndex,
                         withdrawal_queue_index = %event.withdrawalQueueIndex,
                         withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
+                        %transaction_hash,
+                        l1_block = ?block_number,
+                        gas_used,
+                        withdrawals_processed,
                         "Batch successfully submitted to L1"
                     );
                     self.metrics.batch_submit_success_total.increment(1);
@@ -613,7 +635,20 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.update_submission_lag();
 
                     // Store withdrawals under the logical portal queue index assigned on-chain.
-                    if let Some(portal_index) = portal_index {
+                    // A slot processed atomically with the submission is already consumed, so
+                    // there is nothing left for the standalone processor: the combined call is
+                    // only sent against an empty portal queue, so it can only have drained the
+                    // slot this submission enqueued.
+                    if withdrawals_processed {
+                        self.metrics.atomic_withdrawal_slots_total.increment(1);
+                        self.metrics
+                            .atomic_withdrawals_processed_total
+                            .increment(withdrawals.len() as u64);
+                        info!(
+                            count = withdrawals.len(),
+                            "Withdrawals processed in the batch submission transaction"
+                        );
+                    } else if let Some(portal_index) = portal_index {
                         if !withdrawals.is_empty() {
                             let count = withdrawals.len();
                             let mut store = self.withdrawal_store.lock();
@@ -1008,6 +1043,7 @@ mod tests {
             poll_interval: Duration::from_secs(1),
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
+            withdrawal_batch_limits: WithdrawalBatchLimits::default(),
             attestation_store: None,
         };
         let l1_provider = mock_provider(l1);
@@ -1107,6 +1143,7 @@ mod tests {
             poll_interval: Duration::from_secs(1),
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
+            withdrawal_batch_limits: WithdrawalBatchLimits::default(),
             attestation_store: None,
         };
 
