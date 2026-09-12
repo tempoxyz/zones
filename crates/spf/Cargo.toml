@@ -40,6 +40,8 @@ revm.workspace = true
 serde = { workspace = true, optional = true }
 thiserror = "2"
 
+tracing.workspace = true
+
 [features]
 default = ["serde"]
 serde = [
