@@ -41,7 +41,8 @@ pub use prover::{
     spawn_shadow_prover,
 };
 pub use settlement::{
-    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
+    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatchSubmission,
+    resolve_portal_zone_anchor,
 };
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,

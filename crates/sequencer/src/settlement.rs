@@ -335,6 +335,69 @@ impl BatchSubmitter {
         batch: &BatchData,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
+        let signer = self.signer.as_ref();
+        let metadata = self
+            .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
+            .await?;
+        self.validate_submission_metadata(batch, metadata)?;
+        let certificate = if let Some(store) = &self.attestation_store {
+            let threshold = metadata.sequencer_threshold as usize;
+            info!(
+                zone_height = batch.zone_height,
+                threshold, "Waiting for settlement quorum"
+            );
+            Some(
+                self.wait_for_settlement_or_portal_progress(
+                    store,
+                    batch.zone_height,
+                    threshold,
+                    batch.prev_block_hash,
+                    shutdown,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let prepared = self
+            .prepare_submission_with_metadata(batch, certificate, metadata)
+            .await?;
+        self.send_prepared(prepared).await
+    }
+
+    /// Return the current settlement threshold after validating mutable portal metadata for
+    /// `batch`. Actors use this bounded query before inspecting the attestation store.
+    pub async fn settlement_threshold(&self, batch: &BatchData) -> Result<usize> {
+        let signer = self.signer.as_ref();
+        let metadata = self
+            .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
+            .await?;
+        self.validate_submission_metadata(batch, metadata)?;
+        Ok(metadata.sequencer_threshold as usize)
+    }
+
+    /// Validate all immutable inputs for a submission without sending an L1 transaction.
+    pub async fn prepare_submission(
+        &self,
+        batch: &BatchData,
+        certificate: Option<SettlementCertificate>,
+    ) -> std::result::Result<PreparedBatchSubmission, BatchSubmitError> {
+        let signer = self.signer.as_ref();
+        let metadata = self
+            .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
+            .await?;
+        self.validate_submission_metadata(batch, metadata)?;
+        self.prepare_submission_with_metadata(batch, certificate, metadata)
+            .await
+    }
+
+    async fn prepare_submission_with_metadata(
+        &self,
+        batch: &BatchData,
+        certificate: Option<SettlementCertificate>,
+        metadata: PortalSubmissionMetadata,
+    ) -> std::result::Result<PreparedBatchSubmission, BatchSubmitError> {
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -349,47 +412,34 @@ impl BatchSubmitter {
 
         let verifier_config = Bytes::new();
         let signer = self.signer.as_ref();
-        let metadata = self
-            .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
-            .await?;
-        self.validate_submission_metadata(batch, metadata)?;
-        let (certificate, anchor_mode, current_l1_block) =
-            if let Some(store) = &self.attestation_store {
-                let threshold = metadata.sequencer_threshold as usize;
-                info!(
-                    zone_height = batch.zone_height,
-                    threshold, "Waiting for settlement quorum"
-                );
-                let certificate = self
-                    .wait_for_settlement_or_portal_progress(
-                        store,
-                        batch.zone_height,
-                        threshold,
-                        batch.prev_block_hash,
-                        shutdown,
-                    )
-                    .await?;
-                let anchor_mode = match self
-                    .validate_certificate(batch, batch.zone_height, metadata, &certificate)
-                    .await
-                {
-                    Ok(anchor_mode) => anchor_mode,
-                    Err(err) => {
+        if self.attestation_store.is_some() && certificate.is_none() {
+            return Err(eyre::eyre!(
+                "settlement certificate is required when an attestation store is configured"
+            )
+            .into());
+        }
+        let (anchor_mode, current_l1_block) = if let Some(certificate) = &certificate {
+            let anchor_mode = match self
+                .validate_certificate(batch, batch.zone_height, metadata, certificate)
+                .await
+            {
+                Ok(anchor_mode) => anchor_mode,
+                Err(err) => {
+                    if let Some(store) = &self.attestation_store {
                         store.remove_settlement(batch.zone_height, certificate.digest);
-                        return Err(err.into());
                     }
-                };
-                let current_l1_block = self
-                    .l1_provider
-                    .get_block_number()
-                    .await
-                    .map_err(|error| BatchSubmitError::Other(error.into()))?;
-                (Some(certificate), anchor_mode, current_l1_block)
-            } else {
-                let (anchor_mode, current_l1_block) =
-                    self.resolve_anchor_mode(batch.tempo_block_number).await?;
-                (None, anchor_mode, current_l1_block)
+                    return Err(err.into());
+                }
             };
+            let current_l1_block = self
+                .l1_provider
+                .get_block_number()
+                .await
+                .map_err(|error| BatchSubmitError::Other(error.into()))?;
+            (anchor_mode, current_l1_block)
+        } else {
+            self.resolve_anchor_mode(batch.tempo_block_number).await?
+        };
         let recent_tempo_block_number = anchor_mode.recent_block_number();
         // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
         // cannot land before N+1, so anchoring to the current tip is valid at execution time.
@@ -432,10 +482,46 @@ impl BatchSubmitter {
             )?]
         };
 
+        Ok(PreparedBatchSubmission {
+            batch: batch.clone(),
+            anchor_mode,
+            block_transition,
+            deposit_transition,
+            verifier_config,
+            signatures,
+            recent_tempo_block_number,
+            current_l1_block,
+            anchors_to_current_tip,
+            used_settlement_certificate: certificate.is_some(),
+        })
+    }
+
+    /// Send one fully validated submission and observe its bounded receipt wait.
+    ///
+    /// Nonce acquisition intentionally remains on this side of the admission boundary.
+    pub async fn send_prepared(
+        &self,
+        prepared: PreparedBatchSubmission,
+    ) -> std::result::Result<ZonePortal::BatchSubmitted, BatchSubmitError> {
+        let PreparedBatchSubmission {
+            batch,
+            anchor_mode,
+            block_transition,
+            deposit_transition,
+            verifier_config,
+            signatures,
+            recent_tempo_block_number,
+            current_l1_block,
+            anchors_to_current_tip,
+            used_settlement_certificate,
+        } = prepared;
+
         // Refetch the committed lane nonce for every submission attempt. The provider's
         // process-local nonce cache advances before a send is known to have succeeded, so
         // relying on it after a failed send can create an unfillable 2D-nonce gap.
-        let submission_address = signer
+        let submission_address = self
+            .signer
+            .as_ref()
             .ok_or_eyre("batch submission requires the local sequencer signer")?
             .address();
         let nonce = self
@@ -493,7 +579,7 @@ impl BatchSubmitter {
 
         let event = self.decode_batch_submitted(receipt.logs())?;
 
-        if let (Some(store), Some(_)) = (&self.attestation_store, &certificate) {
+        if let (Some(store), true) = (&self.attestation_store, used_settlement_certificate) {
             store.remove_submitted(batch.zone_height);
         }
 
@@ -1190,6 +1276,36 @@ pub struct BatchData {
     pub withdrawal_batch_index: u64,
 }
 
+/// Immutable, validated calldata inputs for one `submitBatch` attempt.
+///
+/// The committed nonce is deliberately absent: it is fetched by
+/// [`BatchSubmitter::send_prepared`] after the caller's final admission check.
+#[derive(Debug, Clone)]
+pub struct PreparedBatchSubmission {
+    batch: BatchData,
+    anchor_mode: AnchorMode,
+    block_transition: BlockTransition,
+    deposit_transition: DepositQueueTransition,
+    verifier_config: Bytes,
+    signatures: Vec<Bytes>,
+    recent_tempo_block_number: u64,
+    current_l1_block: u64,
+    anchors_to_current_tip: bool,
+    used_settlement_certificate: bool,
+}
+
+impl PreparedBatchSubmission {
+    /// Portal predecessor against which this submission was prepared.
+    pub const fn expected_portal_hash(&self) -> B256 {
+        self.batch.prev_block_hash
+    }
+
+    /// Zone height committed by this submission.
+    pub const fn zone_height(&self) -> u64 {
+        self.batch.zone_height
+    }
+}
+
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizedBatch {
@@ -1279,7 +1395,9 @@ struct ResolvedAncestry {
 /// `submit_batch` can use ancestry mode when the batch-final block's
 /// `tempoBlockNumber` has fallen outside the configured direct-submission
 /// window.
-#[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
+#[allow(dead_code)]
+// Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
+#[derive(Debug, Clone)]
 enum AnchorMode {
     /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
     /// reads its hash directly. No extra proof data required.
