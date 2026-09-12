@@ -50,12 +50,13 @@ Provision and run a fresh zone against its WebSocket endpoint:
 
 ```bash
 cargo run --release --bin tempo-zone -- dev \
+  --reset \
   --l1.rpc-url ws://127.0.0.1:8545
 ```
 
 The default Anvil dev key is used automatically. The zone HTTP RPC listens on
 `http://127.0.0.1:9545`; generated metadata and node data are written under
-`/tmp/tempo-zone-dev`.
+`/tmp/tempo-zone-dev`. Omit `--reset` on subsequent runs to reload the saved zone.
 
 Older Anvil builds only add Tempo fields to Ethereum headers at the RPC layer.
 The dev command rejects those builds because Zones require canonical Tempo block
