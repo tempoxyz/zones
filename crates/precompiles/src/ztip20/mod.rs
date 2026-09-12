@@ -165,10 +165,11 @@ mod tests {
     use crate::{
         TempoState,
         test_utils::{
-            MockL1Reader, TestContext, call_precompile, test_context, test_env,
+            MockL1Reader, TestContext, call_precompile, test_context, test_env, test_env_at,
             test_storage_provider,
         },
     };
+    use zone_hardfork::ZoneHardfork;
 
     const TEMPO_BLOCK_NUMBER: u64 = 7;
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
@@ -220,6 +221,10 @@ mod tests {
         }
 
         fn new_at(spec: TempoHardfork) -> eyre::Result<Self> {
+            Self::new_at_zone(spec, ZoneHardfork::Z0)
+        }
+
+        fn new_at_zone(spec: TempoHardfork, zone_hardfork: ZoneHardfork) -> eyre::Result<Self> {
             let token = PATH_USD_ADDRESS;
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
@@ -251,7 +256,7 @@ mod tests {
                 })?;
             }
 
-            let env = test_env(&ctx);
+            let env = test_env_at(&ctx, zone_hardfork);
             let precompile = crate::create_tip20_precompile(token, &env);
 
             Ok(Self {
@@ -536,7 +541,7 @@ mod tests {
 
     #[test]
     fn t11_strict_decoding_precedes_read_privacy() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new_at(TempoHardfork::T11)?;
+        let mut harness = PrecompileHarness::new_at_zone(TempoHardfork::T11, ZoneHardfork::Z1)?;
         let mut calldata = ITIP20::balanceOfCall {
             account: harness.alice,
         }
