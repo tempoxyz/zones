@@ -97,7 +97,6 @@ lto = "fat"
 codegen-units = 1
 strip = "none"
 debug = "none"
-panic = "abort"
 incremental = false
 
 [workspace.dependencies]
