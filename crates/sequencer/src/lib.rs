@@ -21,6 +21,7 @@ pub mod abi {
 }
 
 pub mod attestation;
+pub mod batch_submission;
 mod encryption_key;
 mod metrics;
 pub mod monitor;
@@ -31,6 +32,11 @@ pub mod settlement;
 pub mod withdrawals;
 
 pub use attestation::AttestationStore;
+pub use batch_submission::{
+    BatchCandidate, BatchResync, BatchSubmissionActor, BatchSubmissionBackend,
+    BatchSubmissionHandle, BatchSubmissionRole, ConfirmedBatchSubmission, SubmissionAnchor,
+    batch_submission_actor,
+};
 pub use encryption_key::{
     EncryptionKeyProof, encryption_key_identity, prove_encryption_key_possession,
     register_encryption_key,
