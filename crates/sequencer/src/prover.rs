@@ -962,6 +962,7 @@ async fn resolve_ancestry_anchor(
     anchor_number: u64,
     expected_anchor_hash: Option<B256>,
 ) -> Result<Anchor> {
+    crate::settlement::validate_ancestry_range(checkpoint_number, anchor_number)?;
     let mut expected_parent = checkpoint_hash;
     let mut ancestry_headers = Vec::with_capacity((anchor_number - checkpoint_number) as usize);
     for number in checkpoint_number + 1..=anchor_number {
@@ -1093,6 +1094,15 @@ mod tests {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(Asserter::new())
             .erased()
+    }
+
+    #[tokio::test]
+    async fn oversized_prover_ancestry_is_rejected_before_fetching() {
+        let error = resolve_ancestry_anchor(&mocked_l1_provider(), 10, B256::ZERO, u64::MAX, None)
+            .await
+            .err()
+            .expect("oversized range must fail");
+        assert!(error.to_string().contains("exceeds the recovery limit"));
     }
 
     #[tokio::test]

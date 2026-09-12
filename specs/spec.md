@@ -399,10 +399,19 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
-- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
-  the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
-  extended while active. Proof-verified batch submission continues so settlement remains current
-  and an expired pause does not require recovery across the full pause interval.
+- `pause()`: Pause all new deposits, Zone block production, and L1 withdrawal processing for the
+  public `PAUSE_DURATION` constant of 30 days. Nodes stop production at a block boundary after
+  observing the pause in finalized Tempo state. Followers also retain, but do not import, peer
+  blocks and refuse settlement signatures while the pause is active. Leaders also defer new
+  settlement signatures and broadcasts. The pause expires automatically and cannot be extended
+  while active. After an admin resume or automatic expiry, nodes attempt to catch up finalized
+  Tempo anchors and buffered peer blocks. Historical catch-up requires an archive-capable L1
+  endpoint. Historical execution replay and settlement ancestry are limited to 262,144 headers;
+  larger gaps require operator recovery. Automatic recovery across a full 30-day production
+  freeze is not currently supported. Startup waits for a successful finalized pause-state read,
+  retrying and logging RPC failures without a retry limit. Storage-read retry defaults are unchanged.
+  Finalized leadership, key rotation, token, and cache updates continue independently of the
+  bounded execution queue while paused.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one

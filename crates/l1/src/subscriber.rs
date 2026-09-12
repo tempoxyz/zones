@@ -4,7 +4,7 @@ use crate::{
     state::EnabledTokenRegistry,
 };
 use eyre::{OptionExt as _, WrapErr as _};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
@@ -14,12 +14,18 @@ use std::collections::BTreeMap;
 /// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
 pub const MAX_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
 
+/// Maximum ancestry span materialized for historical replay or settlement (about 36 hours).
+pub const MAX_L1_REPLAY_BLOCKS: u64 = 262_144;
+
 #[derive(Debug, Default)]
 struct L1BlockTrackerState {
     observed: BTreeMap<u64, L1BlockObservation>,
     recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
+    portal_pause: Option<(NumHash, bool)>,
+    control_plane: Option<NumHash>,
+    pending: BTreeMap<u64, (SealedHeader<TempoHeader>, L1ProcessedEvents)>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,9 +143,95 @@ impl L1BlockTracker {
             .map(|observation| observation.hash)
     }
 
-    /// Return the highest independently observed L1 anchor.
+    /// Return the highest L1 anchor admitted to the bounded execution tracker.
     pub fn latest(&self) -> Option<NumHash> {
         self.state.read().latest
+    }
+
+    /// Highest finalized block whose governance events and cache invalidations are applied.
+    /// This cursor advances independently of the queue consumed by Zone blocks.
+    pub fn control_plane_latest(&self) -> Option<NumHash> {
+        self.state.read().control_plane
+    }
+
+    fn validate_control_plane_block(&self, block: NumHash, parent_hash: B256) -> eyre::Result<()> {
+        let state = self.state.read();
+        if let Some(observed) = state.observed.get(&block.number) {
+            eyre::ensure!(
+                observed.hash == block.hash,
+                "control-plane block conflicts with retained L1 anchor {}",
+                block.number
+            );
+        }
+        if let Some(previous) = state.control_plane {
+            eyre::ensure!(
+                block.number == previous.number.saturating_add(1) && parent_hash == previous.hash,
+                "non-contiguous finalized control-plane block: previous {previous:?}, new {block:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Return whether finalized Portal state currently pauses block production.
+    pub fn portal_paused(&self) -> bool {
+        self.state
+            .read()
+            .portal_pause
+            .is_some_and(|(_, paused)| paused)
+    }
+
+    /// Reject missing code once the Portal has been observed on finalized L1.
+    pub fn validate_portal_absence(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.state.read().portal_pause.is_none(),
+            "finalized Portal code disappeared after deployment; preserving the previous pause state"
+        );
+        Ok(())
+    }
+
+    /// Apply an exact finalized Portal snapshot, rejecting contradictory observations.
+    /// Returns whether the effective pause value changed. Older observations are ignored.
+    pub fn observe_portal_pause(&self, block: NumHash, paused: bool) -> eyre::Result<bool> {
+        let mut state = self.state.write();
+        if let Some((current, current_paused)) = state.portal_pause {
+            if current.number > block.number {
+                return Ok(false);
+            }
+            if current.number == block.number {
+                eyre::ensure!(
+                    current.hash == block.hash,
+                    "conflicting finalized Portal block hashes at height {}",
+                    block.number
+                );
+                eyre::ensure!(
+                    current_paused == paused,
+                    "contradictory Portal pause observations for block {}",
+                    block.hash
+                );
+                return Ok(false);
+            }
+        }
+        if let Some(observation) = state.observed.get(&block.number) {
+            eyre::ensure!(
+                observation.hash == block.hash,
+                "Portal snapshot conflicts with authenticated L1 block {}",
+                block.number
+            );
+        }
+        let changed = state
+            .portal_pause
+            .map_or(paused, |(_, current)| current != paused);
+        state.portal_pause = Some((block, paused));
+        drop(state);
+        if changed {
+            self.changed.send_replace(());
+        }
+        Ok(changed)
+    }
+
+    /// Subscribe to validated L1-state changes, including portal pause transitions.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
 
     /// Return whether `number` fits inside the bounded subscriber lookahead window.
@@ -296,6 +388,13 @@ impl L1BlockTracker {
         portal_evidence: Option<AuthenticatedPortalLogs>,
     ) -> eyre::Result<()> {
         let mut state = self.state.write();
+        if let Some((snapshot, _)) = state.portal_pause {
+            eyre::ensure!(
+                snapshot.number != block.number || snapshot.hash == block.hash,
+                "authenticated L1 block {} conflicts with the finalized Portal snapshot",
+                block.number
+            );
+        }
         if let Some(observation) = state.observed.get(&block.number) {
             eyre::ensure!(
                 observation.hash == block.hash,
@@ -380,12 +479,14 @@ impl L1BlockTracker {
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-type L1ProcessedEvents = (
-    L1PortalEvents,
-    HashSet<Address>,
-    Option<Vec<alloy_primitives::Log>>,
-    Vec<FinalizedBatchSubmission>,
-);
+#[derive(Debug, Clone)]
+pub(crate) struct L1ProcessedEvents {
+    pub(crate) portal_events: L1PortalEvents,
+    pub(crate) invalidated: HashSet<Address>,
+    pub(crate) portal_logs: Option<Vec<alloy_primitives::Log>>,
+    pub(crate) finalized_batches: VecDeque<FinalizedBatchSubmission>,
+    pub(crate) portal_pause: Option<bool>,
+}
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
     (address == TIP403_REGISTRY_ADDRESS
@@ -427,7 +528,6 @@ pub struct L1SubscriberConfig {
 }
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
-#[derive(Clone)]
 pub struct L1Subscriber<P> {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) zone_provider: P,
@@ -441,7 +541,8 @@ pub struct L1Subscriber<P> {
     pub(crate) block_tracker: L1BlockTracker,
     /// Optional sink for leadership transitions.
     pub(crate) leadership_sink: Option<Arc<dyn LeadershipSink>>,
-    /// Optional observational channel for finalized accepted batch submissions.
+    /// Optional execution-side channel for finalized accepted batch submissions.
+    /// Its backpressure must never stop finalized governance observation.
     pub(crate) finalized_batch_submissions:
         Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
     /// Private encryption keys bound by finalized Portal rotation events.
@@ -666,7 +767,23 @@ where
         l1_provider: &impl Provider<TempoNetwork>,
         mut stream: HeaderStream,
     ) -> Result<(), L1SubscriberError> {
-        let mut next_block = self.next_block_to_sync()?;
+        let checkpoint = self
+            .zone_provider
+            .latest()
+            .map_err(eyre::Report::from)?
+            .tempo_num_hash()
+            .map_err(eyre::Report::from)?;
+        if checkpoint.hash == B256::ZERO {
+            return Err(eyre::eyre!("zone genesis is not anchored to an L1 block").into());
+        }
+        let mut next_block = self
+            .block_tracker
+            .state
+            .write()
+            .control_plane
+            .get_or_insert(checkpoint)
+            .number
+            .saturating_add(1);
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued in the stream.
@@ -679,12 +796,65 @@ where
         Err(eyre::eyre!("L1 head notification stream ended").into())
     }
 
-    /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
-    ///
-    /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
-    /// parallel, then processes them sequentially (event extraction and enqueue).
-    /// Receipts are fetched by the corresponding block
-    /// hash and validated against the header's receipts root before processing.
+    /// Fetch and authenticate one finalized block before either reader uses its events.
+    async fn fetch_block(
+        &self,
+        provider: &impl Provider<TempoNetwork>,
+        block_number: u64,
+    ) -> Result<(SealedHeader<TempoHeader>, L1ProcessedEvents), L1SubscriberError> {
+        let start = std::time::Instant::now();
+        let header_resp = provider
+            .get_header_by_number(block_number.into())
+            .await
+            .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
+            .ok_or_else(|| {
+                self.subscriber_metrics.fetch_failures.increment(1);
+                eyre::eyre!("L1 header not found for block {block_number}")
+            })?;
+        if header_resp.number() != block_number {
+            return Err(L1SubscriberError::Fatal {
+                block_number,
+                stage: "L1 header number validation",
+                source: eyre::eyre!(
+                    "requested L1 block {block_number}, received {}",
+                    header_resp.number()
+                ),
+            });
+        }
+        let header = SealedHeader::seal_slow(header_resp.inner.inner);
+        let events = self.fetch_events(provider, &header).await?;
+        debug!(
+            block_number,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Fetched and validated L1 block data"
+        );
+        Ok((header, events))
+    }
+
+    async fn fetch_events(
+        &self,
+        provider: &impl Provider<TempoNetwork>,
+        header: &SealedHeader<TempoHeader>,
+    ) -> Result<L1ProcessedEvents, L1SubscriberError> {
+        let block_number = header.number();
+        let receipts = fetch_and_verify_receipts_for_header(
+            provider,
+            header.num_hash(),
+            header.receipts_root(),
+            header.logs_bloom(),
+        )
+        .await
+        .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?;
+        // A recognized log that cannot be decoded must fail before any state is published.
+        self.extract_events(header.num_hash(), &receipts)
+            .inspect_err(|_| self.subscriber_metrics.decode_fence_failures.increment(1))
+            .map_err(L1SubscriberError::fatal_from_err(
+                block_number,
+                "portal event decoding",
+            ))
+    }
+
+    /// Apply finalized governance continuously, independent of execution backpressure.
     #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(
         &self,
@@ -692,85 +862,23 @@ where
         from: u64,
         to: u64,
     ) -> Result<(), L1SubscriberError> {
-        use futures::stream;
-
-        let concurrency = self.config.l1_fetch_concurrency.max(1);
-        let subscriber_metrics = self.subscriber_metrics.clone();
-        let block_tracker = self.block_tracker.clone();
-
-        let mut fetched = stream::iter(from..=to)
-            .map(move |block_number| {
-                let provider = l1_provider;
-                let subscriber_metrics = subscriber_metrics.clone();
-                let block_tracker = block_tracker.clone();
-                async move {
-                    block_tracker.wait_for_capacity(block_number).await?;
-                    let start = std::time::Instant::now();
-                    let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let header_resp =
-                        async {
-                            let header = provider.get_header_by_number(block_number.into()).await?;
-                            Ok::<_, L1SubscriberError>(header.ok_or_eyre(format!(
-                                "L1 header not found for block {block_number}"
-                            ))?)
-                        }
-                        .await
-                        .inspect_err(|_| {
-                            fetch_failures.increment(1);
-                        })?;
-                    let block_hash = header_resp.hash();
-                    let block = NumHash::new(block_number, block_hash);
-                    let expected_receipts_root = header_resp.receipts_root();
-                    let expected_logs_bloom = header_resp.logs_bloom();
-                    let receipts = fetch_and_verify_receipts_for_header(
-                        provider,
-                        block,
-                        expected_receipts_root,
-                        expected_logs_bloom,
-                    )
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
-                    let elapsed = start.elapsed();
-                    debug!(
-                        block_number,
-                        %block_hash,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        receipts = receipts.len(),
-                        "Fetched and validated L1 block data"
-                    );
-                    let header = header_resp.inner.inner;
-                    Ok::<_, L1SubscriberError>((header, receipts))
-                }
-            })
-            .buffered(concurrency);
-
+        let mut fetched = futures::stream::iter(from..=to)
+            .map(|number| self.fetch_block(l1_provider, number))
+            .buffered(self.config.l1_fetch_concurrency.max(1));
         let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
-
-        while let Some((header, receipts)) = fetched.try_next().await? {
-            let block_number = header.number();
-            let block_hash = header.hash_slow();
-            // Decoding fails closed: a decode failure of a recognized portal log aborts this
-            // block before anything is enqueued or any cache advances.
-            let processed_events = self
-                .extract_events(NumHash::new(block_number, block_hash), &receipts)
-                .inspect_err(|_| {
-                    self.subscriber_metrics.decode_fence_failures.increment(1);
-                })
-                .map_err(L1SubscriberError::fatal_from_err(
-                    block_number,
-                    "portal event decoding",
-                ))?;
-            let (events, invalidated, portal_logs, finalized_batches) = processed_events;
+        while let Some((sealed, processed_events)) = fetched.try_next().await? {
+            let block_number = sealed.number();
+            let events = &processed_events.portal_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
-            let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
-            // Publish the leadership transition _before_ the activation block becomes
-            // consumable.
+            self.block_tracker
+                .validate_control_plane_block(anchor, sealed.parent_hash())
+                .map_err(L1SubscriberError::fatal_from_err(
+                    block_number,
+                    "control-plane continuity",
+                ))?;
             if let Some(sink) = &self.leadership_sink {
                 let transition =
                     events
@@ -801,44 +909,30 @@ where
                         ))?;
                 }
             }
-            let appended = self
-                .deposit_queue
-                .try_enqueue_sealed(sealed, events.clone())
-                .wrap_err_with(|| {
-                    format!("unexpected discontinuity while enqueueing L1 block {block_number}")
-                })?;
-            if let Some((parent_hash, logs)) = portal_evidence {
-                self.block_tracker.record_with_portal_evidence(
-                    anchor,
-                    parent_hash,
-                    events.clone(),
-                    logs,
-                )?;
-            } else {
+            if let Some(paused) = processed_events.portal_pause {
                 self.block_tracker
-                    .record_with_portal_events(anchor, events.clone())?;
+                    .observe_portal_pause(anchor, paused)
+                    .map_err(L1SubscriberError::fatal_from_err(
+                        block_number,
+                        "portal pause observation",
+                    ))?;
             }
-            if let Some(sender) = &self.finalized_batch_submissions {
-                for submission in finalized_batches {
-                    sender
-                        .send(submission)
-                        .await
-                        .map_err(|_| L1SubscriberError::Fatal {
-                            block_number,
-                            stage: "finalized batch observer delivery",
-                            source: eyre::eyre!(
-                                "finalized batch submission observer is unavailable"
-                            ),
-                        })?;
+            self.apply_enabled_token_events(events);
+            self.update_l1_state_anchor(block_number, &processed_events.invalidated);
+            self.record_portal_event_metrics(events);
+            // Wake the queue reader only after all governance state is applied.
+            {
+                let mut state = self.block_tracker.state.write();
+                // Preserve the execution window without making governance wait for its consumer.
+                let consumed = *state.pruned_through.get_or_insert(from.saturating_sub(1));
+                if block_number <= consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS) {
+                    state
+                        .pending
+                        .insert(block_number, (sealed, processed_events));
                 }
+                state.control_plane = Some(anchor);
             }
-            // Publish derived L1 state only after the header has been admitted to every
-            // configured retention sink and the contiguous observation tracker.
-            self.apply_enabled_token_events(&events);
-            self.update_l1_state_anchor(block_number, &invalidated);
-            if appended {
-                self.subscriber_metrics.blocks_enqueued.increment(1);
-            }
+            self.block_tracker.changed.send_replace(());
             processed += 1;
 
             if processed.is_multiple_of(100) {
@@ -866,6 +960,182 @@ where
         Ok(())
     }
 
+    /// Fill execution history up to the observer's cursor. A full queue only blocks this loop.
+    pub(crate) async fn follow_anchors(
+        &self,
+        provider: &impl Provider<TempoNetwork>,
+    ) -> Result<(), L1SubscriberError> {
+        let mut changed = self.block_tracker.changed.subscribe();
+        let mut next = self.next_block_to_sync()?;
+        loop {
+            if let Some(tip) = self.block_tracker.control_plane_latest()
+                && next <= tip.number
+            {
+                if let Err(error) = self.backfill_anchors(provider, next, tip.number).await {
+                    if !error.should_retry() {
+                        return Err(error);
+                    }
+                    // A missing historical block must not cancel live L1 observation.
+                    warn!(%error, next, "L1 execution history unavailable, retrying");
+                    tokio::time::sleep(self.config.retry_connection_interval).await;
+                    next = self.next_block_to_sync()?;
+                    continue;
+                }
+                next = tip.number.saturating_add(1);
+                continue;
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
+        }
+    }
+
+    pub(crate) async fn backfill_anchors(
+        &self,
+        provider: &impl Provider<TempoNetwork>,
+        from: u64,
+        to: u64,
+    ) -> Result<(), L1SubscriberError> {
+        let mut changed = self.block_tracker.changed.subscribe();
+        let mut replay = VecDeque::new();
+        for number in from..=to {
+            while self
+                .block_tracker
+                .control_plane_latest()
+                .is_none_or(|tip| tip.number < number)
+            {
+                changed
+                    .changed()
+                    .await
+                    .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
+            }
+            self.block_tracker.wait_for_capacity(number).await?;
+            // Take a clone until delivery completes, so reconnects cannot lose observer events.
+            let cached = self
+                .block_tracker
+                .state
+                .read()
+                .pending
+                .get(&number)
+                .cloned();
+            let (header, events) = if let Some(cached) = cached {
+                replay.pop_front();
+                cached
+            } else {
+                if replay.is_empty() {
+                    let tip = self
+                        .block_tracker
+                        .control_plane_latest()
+                        .expect("governance reached this block");
+                    replay = self.replay_headers(provider, number, tip).await?;
+                }
+                let header = replay
+                    .pop_front()
+                    .ok_or_eyre("missing authenticated replay header")?;
+                let events = self.fetch_events(provider, &header).await?;
+                // Keep the in-flight replay block too: reconnects must retain observer progress.
+                self.block_tracker
+                    .state
+                    .write()
+                    .pending
+                    .insert(number, (header.clone(), events.clone()));
+                (header, events)
+            };
+            let anchor = header.num_hash();
+            let parent_hash = header.parent_hash();
+            if let Some(sender) = &self.finalized_batch_submissions {
+                for submission in events.finalized_batches {
+                    sender
+                        .send(submission)
+                        .await
+                        .map_err(|_| L1SubscriberError::Fatal {
+                            block_number: number,
+                            stage: "finalized batch observer delivery",
+                            source: eyre::eyre!(
+                                "finalized batch submission observer is unavailable"
+                            ),
+                        })?;
+                    // No await between delivery and removal: cancellation can only leave the
+                    // undelivered suffix for the next connection.
+                    self.block_tracker
+                        .state
+                        .write()
+                        .pending
+                        .get_mut(&number)
+                        .expect("in-flight block retained")
+                        .1
+                        .finalized_batches
+                        .pop_front();
+                }
+            }
+            let appended = self
+                .deposit_queue
+                .try_enqueue_sealed(header, events.portal_events.clone())
+                .wrap_err_with(|| {
+                    format!(
+                        "unexpected discontinuity while enqueueing L1 block {}",
+                        anchor.number
+                    )
+                })?;
+            if let Some(logs) = events.portal_logs {
+                self.block_tracker.record_with_portal_evidence(
+                    anchor,
+                    parent_hash,
+                    events.portal_events,
+                    logs,
+                )?;
+            } else {
+                self.block_tracker
+                    .record_with_portal_events(anchor, events.portal_events)?;
+            }
+            self.block_tracker.state.write().pending.remove(&number);
+            if appended {
+                self.subscriber_metrics.blocks_enqueued.increment(1);
+            }
+        }
+        Ok(())
+    }
+
+    /// Authenticate discarded history backwards from the exact governance tip before enqueueing.
+    /// This path is used only after execution has fallen outside the retained window.
+    /// Each parent hash depends on the preceding response, so this bounded walk is serial and
+    /// must finish before execution advances. Large gaps can take substantial time to authenticate.
+    pub(crate) async fn replay_headers(
+        &self,
+        provider: &impl Provider<TempoNetwork>,
+        from: u64,
+        tip: NumHash,
+    ) -> Result<VecDeque<SealedHeader<TempoHeader>>, L1SubscriberError> {
+        if from > tip.number {
+            return Err(eyre::eyre!("replay start is above its governance anchor").into());
+        }
+        if tip.number - from >= MAX_L1_REPLAY_BLOCKS {
+            return Err(eyre::eyre!("L1 replay gap {from}..={} exceeds the {MAX_L1_REPLAY_BLOCKS}-block recovery limit; operator recovery required", tip.number).into());
+        }
+        let mut expected_hash = tip.hash;
+        let mut headers = VecDeque::new();
+        for number in (from..=tip.number).rev() {
+            let response = provider
+                .get_header_by_hash(expected_hash)
+                .await?
+                .ok_or_eyre(format!("missing historical L1 header {expected_hash}"))?;
+            let header = SealedHeader::seal_slow(response.inner.inner);
+            if header.number() != number || header.hash() != expected_hash {
+                return Err(L1SubscriberError::Fatal {
+                    block_number: number,
+                    stage: "historical L1 ancestry validation",
+                    source: eyre::eyre!(
+                        "historical header does not match governance ancestry at {number}"
+                    ),
+                });
+            }
+            expected_hash = header.parent_hash();
+            headers.push_front(header);
+        }
+        Ok(headers)
+    }
+
     /// Run the L1 subscriber, reconnecting after transient RPC failures.
     ///
     /// The subscriber follows only the L1 `finalized` tag. WebSocket
@@ -883,7 +1153,10 @@ where
                     portal = %self.config.portal_address,
                     "Following finalized L1 blocks"
                 );
-                self.follow_finalized(&provider, header_stream).await
+                tokio::try_join!(
+                    self.follow_finalized(&provider, header_stream),
+                    self.follow_anchors(&provider),
+                )
             }
             .await;
 
@@ -924,6 +1197,7 @@ where
         } else {
             Vec::new()
         };
+        let mut portal_pause = None;
 
         for receipt in receipts {
             let retain_receipt_logs = portal_logs.is_some() && receipt.status();
@@ -940,11 +1214,15 @@ where
                     {
                         invalidated.insert(address);
                     }
-                    portal_events
+                    if let Some(transition) = portal_events
                         .push_log(log, block_number)
                         .wrap_err_with(|| {
                             format!("failed to decode a portal event in L1 block {block_number}")
-                        })?;
+                        })?
+                    {
+                        // The last transition in canonical log order is the block's final state.
+                        portal_pause = Some(transition);
+                    }
                 } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
                     invalidated.extend([address, log.address()]);
                 }
@@ -955,8 +1233,13 @@ where
         for event in &portal_events.enabled_tokens {
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
-        self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs, finalized_batches))
+        Ok(L1ProcessedEvents {
+            portal_events,
+            invalidated,
+            portal_logs,
+            finalized_batches: finalized_batches.into(),
+            portal_pause,
+        })
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
