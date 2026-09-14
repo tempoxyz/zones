@@ -325,18 +325,12 @@ impl ZoneEngine {
         let AvailableTempoImport {
             l1_block,
             checkpoint_headers,
+            wall_clock_timestamp_millis,
         } = available;
         let checkpoint_only = !checkpoint_headers.is_empty();
         let final_header = checkpoint_headers.last().unwrap_or(&l1_block.header);
         let l1_num_hash = final_header.num_hash();
 
-        // The L1 timestamp is a lower bound so a Zone block anchored after an L1 timestamp-based
-        // fork cannot predate it. Use wall-clock time to avoid backdating transactions during
-        // catch-up, while allowing multiple blocks in the same millisecond.
-        let wall_clock_timestamp_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
         let timestamp_millis = zone_timestamp_millis(
             final_header.timestamp_millis(),
             self.last_header.timestamp_millis(),
@@ -474,6 +468,7 @@ impl AvailableBlockDrain for ZoneEngine {
         Ok(Some(AvailableTempoImport {
             l1_block,
             checkpoint_headers,
+            wall_clock_timestamp_millis,
         }))
     }
 
@@ -494,6 +489,7 @@ impl AvailableBlockDrain for ZoneEngine {
 struct AvailableTempoImport {
     l1_block: L1BlockDeposits,
     checkpoint_headers: Vec<SealedHeader<TempoHeader>>,
+    wall_clock_timestamp_millis: u64,
 }
 
 impl AvailableTempoImport {
@@ -648,6 +644,12 @@ mod tests {
                 events: Default::default(),
             },
             checkpoint_headers: (90..=110).map(|number| header(number, number)).collect(),
+            wall_clock_timestamp_millis: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .try_into()
+                .unwrap(),
         };
 
         assert_eq!(available.leader_anchor(), None);
