@@ -45,7 +45,7 @@ impl ZoneInbox {
                        self.view_refund(l1, msg_sender, call.token, call.owner)
                     }),
                     claimRefund(call) => crate::dispatch::mutate(call, msg_sender, |caller, call| {
-                        self.claim_refund(caller, call.token)
+                        self.claim_refund(l1, caller, call.token)
                     }),
                     advanceTempo(call) => {
                         if self.storage.is_static() {
