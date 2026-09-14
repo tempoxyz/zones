@@ -17,22 +17,40 @@ pub(crate) struct StatelessSparseTrie {
     inner: SparseStateTrie,
 }
 
+/// Index a flat witness node pool by node hash.
+///
+/// This is the flat-witness indexing step from `StatelessSparseTrie`. It is
+/// separate from [`StatelessSparseTrie::new`] so that a pool shared by several
+/// state roots is hashed once instead of once per root.
+pub(crate) fn index_node_pool(
+    node_pool: &[Bytes],
+) -> Result<B256Map<Bytes>, StatelessSparseTrieError> {
+    let mut nodes = B256Map::default();
+
+    for node in node_pool {
+        let node_hash = keccak256(node);
+        if nodes.insert(node_hash, node.clone()).is_some() {
+            return Err(StatelessSparseTrieError::DuplicateNodeHash { node_hash });
+        }
+    }
+
+    Ok(nodes)
+}
+
 impl StatelessSparseTrie {
     /// Construct and validate a sparse trie from a flat witness node pool.
     pub(crate) fn new(
         state_root: B256,
         node_pool: &[Bytes],
     ) -> Result<Self, StatelessSparseTrieError> {
-        // This is the flat-witness indexing step from `StatelessSparseTrie`.
-        let mut nodes = B256Map::default();
+        Self::from_indexed_nodes(state_root, &index_node_pool(node_pool)?)
+    }
 
-        for node in node_pool {
-            let node_hash = keccak256(node);
-            if nodes.insert(node_hash, node.clone()).is_some() {
-                return Err(StatelessSparseTrieError::DuplicateNodeHash { node_hash });
-            }
-        }
-
+    /// Construct and validate a sparse trie from an already indexed node pool.
+    pub(crate) fn from_indexed_nodes(
+        state_root: B256,
+        nodes: &B256Map<Bytes>,
+    ) -> Result<Self, StatelessSparseTrieError> {
         let mut inner = SparseStateTrie::new();
         if state_root == EMPTY_ROOT_HASH {
             inner.set_accounts_trie(RevealableSparseTrie::revealed_empty());
@@ -43,7 +61,7 @@ impl StatelessSparseTrie {
         }
 
         guarded(|| {
-            let multiproof = DecodedMultiProofV2::from_witness(state_root, &nodes)
+            let multiproof = DecodedMultiProofV2::from_witness(state_root, nodes)
                 .map_err(|_| StatelessSparseTrieError::InvalidNodeEncoding)?;
             inner
                 .reveal_decoded_multiproof_v2(multiproof)
