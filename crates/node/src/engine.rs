@@ -725,6 +725,10 @@ mod tests {
                 events: Default::default(),
             },
             checkpoint_headers: vec![header(90, 90), header(91, 91)],
+            wall_clock_timestamp_millis: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
         };
         assert_eq!(
             available.apply_permit(&permit),
