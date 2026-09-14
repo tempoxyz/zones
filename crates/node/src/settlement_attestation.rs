@@ -44,30 +44,6 @@ pub(crate) struct AttestationContext {
     pub(crate) l1_block_tracker: zone_l1::L1BlockTracker,
 }
 
-impl AttestationContext {
-    pub(crate) fn new(
-        domain: AttestationDomain,
-        pinned_sequencer_set_version: Option<u64>,
-        signer: Option<PrivateKeySigner>,
-        addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-        store: AttestationStore,
-        l1_provider: DynProvider<TempoNetwork>,
-        anchor_config: BatchAnchorConfig,
-        l1_block_tracker: zone_l1::L1BlockTracker,
-    ) -> Self {
-        Self {
-            domain,
-            pinned_sequencer_set_version,
-            signer,
-            addresses,
-            store,
-            l1_provider,
-            anchor_config,
-            l1_block_tracker,
-        }
-    }
-}
-
 /// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
 const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -292,7 +268,7 @@ where
         if gap < context.anchor_config.effective_window() {
             (commitments.tempo_block_number, commitments.tempo_block_hash)
         } else {
-            let anchor_number = recovery_anchor_number(context, number, l1_tip);
+            let anchor_number = l1_tip.saturating_sub(context.anchor_config.safety_margin());
             let header = context
                 .l1_provider
                 .get_header_by_number(anchor_number.into())
@@ -334,20 +310,6 @@ where
         withdrawalQueueHash: withdrawal_queue_hash,
         verifierConfigHash: alloy_primitives::keccak256(Bytes::new()),
     }))
-}
-
-fn recovery_anchor_number(context: &AttestationContext, height: u64, l1_tip: u64) -> u64 {
-    // Keep retries on the same statement long enough for honest followers to answer. The caller
-    // still rebuilds the statement and verifies the anchor against current L1 state.
-    context
-        .store
-        .latest_settlement_anchor(height)
-        .filter(|anchor| {
-            l1_tip
-                .checked_sub(*anchor)
-                .is_some_and(|age| age < context.anchor_config.effective_window())
-        })
-        .unwrap_or_else(|| l1_tip.saturating_sub(context.anchor_config.safety_margin()))
 }
 
 fn validate_sequencer_set_version(
@@ -519,9 +481,6 @@ pub(crate) async fn collect_leader_settlements<P>(
                 last_scanned = head;
             }
             _ = retry.tick(), if pending_boundary.is_some() => {
-                if context.l1_block_tracker.portal_paused() {
-                    continue;
-                }
                 let number = pending_boundary.expect("guarded by is_some");
                 match propose_settlement(&provider, number, &commands, &context).await {
                     Ok(true) => {}
@@ -666,7 +625,6 @@ where
     let (_, signatures) = context
         .store
         .insert_settlement(context.domain, signer, signed);
-    eyre::ensure!(signatures > 0, "settlement proposal is no longer retained");
     commands
         .send(P2pCommand::BroadcastSettlementProposal(
             attestation.encode(),
@@ -702,20 +660,20 @@ mod tests {
             .observe_portal_pause(alloy_eips::NumHash::new(10, B256::repeat_byte(1)), true)
             .unwrap();
         let store = AttestationStore::default();
-        let context = AttestationContext::new(
-            AttestationDomain {
+        let context = AttestationContext {
+            domain: AttestationDomain {
                 l1_chain_id: 1337,
                 portal_address: alloy_primitives::Address::repeat_byte(1),
                 zone_id: 7,
             },
-            None,
-            Some(PrivateKeySigner::random()),
-            HashMap::new(),
-            store.clone(),
+            pinned_sequencer_set_version: None,
+            signer: Some(PrivateKeySigner::random()),
+            addresses: HashMap::new(),
+            store: store.clone(),
             l1_provider,
-            BatchAnchorConfig::default(),
-            tracker,
-        );
+            anchor_config: BatchAnchorConfig::default(),
+            l1_block_tracker: tracker,
+        };
         let (commands, mut receiver) = mpsc::channel(1);
         for _ in 0..10 {
             let error = propose_settlement(&provider, 10, &commands, &context)
@@ -735,99 +693,6 @@ mod tests {
             )
             .await
             .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn recovery_retries_preserve_delayed_quorum_and_refresh_before_expiry() {
-        let leader = PrivateKeySigner::random();
-        let follower = PrivateKeySigner::random();
-        let domain = AttestationDomain {
-            l1_chain_id: 1337,
-            portal_address: alloy_primitives::Address::repeat_byte(1),
-            zone_id: 7,
-        };
-        let context = AttestationContext::new(
-            domain,
-            None,
-            Some(leader.clone()),
-            HashMap::new(),
-            AttestationStore::default(),
-            ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect_mocked_client(Asserter::new())
-                .erased(),
-            BatchAnchorConfig::new(100, 10).unwrap(),
-            zone_l1::L1BlockTracker::default(),
-        );
-        let statement = |anchor| SettlementAttestation {
-            zoneId: 7,
-            sequencerSetVersion: 3,
-            zoneHeight: U256::from(10),
-            withdrawalBatchIndex: U256::from(1),
-            verifier: alloy_primitives::Address::repeat_byte(2),
-            tempoBlockNumber: 100,
-            anchorBlockNumber: anchor,
-            anchorBlockHash: B256::repeat_byte(3),
-            blockTransitionHash: B256::repeat_byte(4),
-            depositQueueTransitionHash: B256::repeat_byte(5),
-            withdrawalQueueHash: B256::repeat_byte(6),
-            verifierConfigHash: B256::repeat_byte(7),
-        };
-        let original = recovery_anchor_number(&context, 10, 10_000);
-        assert_eq!(original, 9_990);
-        // More retries than the eight retained digest slots, with a continually advancing L1.
-        for tip in 10_000..10_030 {
-            let anchor = recovery_anchor_number(&context, 10, tip);
-            assert_eq!(anchor, original);
-            context.store.insert_settlement(
-                domain,
-                leader.address(),
-                SignedSettlementAttestation::sign(statement(anchor), domain, &leader).unwrap(),
-            );
-        }
-        let response =
-            SignedSettlementAttestation::sign(statement(original), domain, &follower).unwrap();
-        assert_eq!(response.recover_signer(domain).unwrap(), follower.address());
-        assert_eq!(
-            context
-                .store
-                .insert_follower_settlement(domain, leader.address(), follower.address(), response,)
-                .unwrap(),
-            2
-        );
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let certificate = tokio::time::timeout(
-            Duration::from_secs(1),
-            context.store.wait_for_settlement(10, 2, &shutdown),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(certificate.attestation.anchorBlockNumber, original);
-
-        let refresh_tip = original + context.anchor_config.effective_window();
-        assert_eq!(
-            recovery_anchor_number(&context, 10, refresh_tip - 1),
-            original
-        );
-        let refreshed = recovery_anchor_number(&context, 10, refresh_tip);
-        assert_eq!(
-            refreshed,
-            refresh_tip - context.anchor_config.safety_margin()
-        );
-        context.store.insert_settlement(
-            domain,
-            leader.address(),
-            SignedSettlementAttestation::sign(statement(refreshed), domain, &leader).unwrap(),
-        );
-        assert_eq!(
-            recovery_anchor_number(&context, 10, refresh_tip + 1),
-            refreshed
-        );
-        // A different boundary cannot inherit this proposal's anchor.
-        assert_eq!(
-            recovery_anchor_number(&context, 11, refresh_tip + 1),
-            refreshed + 1
         );
     }
 

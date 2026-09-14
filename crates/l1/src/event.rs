@@ -88,8 +88,8 @@ impl L1PortalEvents {
         TokenEnabled::SIGNATURE_HASH,
         SequencerEncryptionKeyUpdated::SIGNATURE_HASH,
         LeaderUpdated::SIGNATURE_HASH,
-        abi::ZonePortal::PortalPaused::SIGNATURE_HASH,
-        abi::ZonePortal::PortalResumed::SIGNATURE_HASH,
+        PortalPaused::SIGNATURE_HASH,
+        PortalResumed::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -151,7 +151,7 @@ impl L1PortalEvents {
             );
             return Ok(None);
         }
-        let pause_transition = match ZonePortalEvents::decode_log(&log.inner)?.data {
+        match ZonePortalEvents::decode_log(&log.inner)?.data {
             ZonePortalEvents::DepositMade(event) => {
                 info!(
                     l1_block = block_number,
@@ -162,7 +162,6 @@ impl L1PortalEvents {
                 );
                 self.deposits
                     .push(L1Deposit::Deposit(Deposit::from_event(event)));
-                None
             }
             ZonePortalEvents::WithdrawalBounceBack(event) => {
                 info!(
@@ -175,7 +174,6 @@ impl L1PortalEvents {
                 self.deposits.push(L1Deposit::WithdrawalBounceBack(
                     WithdrawalBounceBackDeposit::from_bounce_back(event),
                 ));
-                None
             }
             ZonePortalEvents::TokenEnabled(event) => {
                 info!(
@@ -192,7 +190,6 @@ impl L1PortalEvents {
                     symbol: event.symbol,
                     currency: event.currency,
                 });
-                None
             }
             ZonePortalEvents::SequencerEncryptionKeyUpdated(event) => {
                 info!(
@@ -209,7 +206,6 @@ impl L1PortalEvents {
                     key_index: event.keyIndex,
                     activation_block: event.activationBlock,
                 });
-                None
             }
             ZonePortalEvents::LeaderUpdated(event) => {
                 info!(
@@ -226,7 +222,6 @@ impl L1PortalEvents {
                     epoch: event.epoch,
                     activation_tempo_block: event.activationTempoBlock,
                 });
-                None
             }
             ZonePortalEvents::PortalPaused(event) => {
                 info!(
@@ -234,7 +229,7 @@ impl L1PortalEvents {
                     account = %event.account,
                     "Portal-wide pause observed on L1"
                 );
-                Some(true)
+                return Ok(Some(true));
             }
             ZonePortalEvents::PortalResumed(event) => {
                 info!(
@@ -242,11 +237,11 @@ impl L1PortalEvents {
                     account = %event.account,
                     "Portal-wide resume observed on L1"
                 );
-                Some(false)
+                return Ok(Some(false));
             }
-            _ => None,
-        };
-        Ok(pause_transition)
+            _ => {}
+        }
+        Ok(None)
     }
 
     /// Return the leadership transition in this block, if any.

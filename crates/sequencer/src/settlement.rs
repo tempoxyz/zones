@@ -86,20 +86,21 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 /// How often a quorum wait rechecks whether another leader has advanced the portal.
 const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Maximum number of encoded L1 headers retained between ancestry submissions.
+/// Maximum L1 ancestry span (about 36 hours) materialized for one settlement, and the number of
+/// encoded L1 headers retained between ancestry submissions.
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
 /// map overhead while covering more than the current Zone E recovery gap.
-const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = zone_l1::MAX_L1_REPLAY_BLOCKS as u32;
+const MAX_ANCESTRY_HEADERS: u64 = 262_144;
+const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = MAX_ANCESTRY_HEADERS as u32;
 
 /// Refuse recovery ranges that cannot fit in the bounded ancestry cache.
 /// Oversized gaps require operator recovery rather than an unbounded allocation.
 pub(crate) fn validate_ancestry_range(from: u64, to: u64) -> Result<()> {
     eyre::ensure!(
         to.checked_sub(from)
-            .is_some_and(|span| span < zone_l1::MAX_L1_REPLAY_BLOCKS),
-        "L1 ancestry range {from}..={to} exceeds the recovery limit of {} headers; operator recovery is required; automatic ancestry replay across this gap is unsupported",
-        zone_l1::MAX_L1_REPLAY_BLOCKS
+            .is_some_and(|span| span < MAX_ANCESTRY_HEADERS),
+        "L1 ancestry range {from}..={to} exceeds the recovery limit of {MAX_ANCESTRY_HEADERS} headers; operator recovery is required; automatic ancestry replay across this gap is unsupported"
     );
     Ok(())
 }

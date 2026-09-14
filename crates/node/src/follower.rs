@@ -403,10 +403,6 @@ where
         leader: &P2pPeerId,
         proposal: Vec<u8>,
     ) -> eyre::Result<u64> {
-        eyre::ensure!(
-            !self.context.l1_block_tracker.portal_paused(),
-            "portal is paused; refusing to sign a settlement proposal"
-        );
         let proposal = SettlementAttestation::decode(&proposal)?;
         let height: u64 = proposal
             .zoneHeight
@@ -434,8 +430,8 @@ where
             "settlement proposal does not match follower state"
         );
 
-        // L1 reads above may yield while a pause finalizes. Re-check immediately before using the
-        // quorum key so a proposal that raced the first gate cannot obtain an honest signature.
+        // Read the gate after the asynchronous L1 validation above and immediately before using the
+        // quorum key, so a pause that finalizes during validation cannot obtain an honest signature.
         eyre::ensure!(
             !self.context.l1_block_tracker.portal_paused(),
             "portal is paused; refusing to sign a settlement proposal"
@@ -482,7 +478,7 @@ where
                 Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
                     tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
                 }
-                Ok(PeerBlockImportOutcome::Paused(_)) => {
+                Ok(PeerBlockImportOutcome::Paused) => {
                     debug!(target: "zone::p2p", "Ignoring already-canonical peer block while the portal is paused");
                 }
                 Ok(PeerBlockImportOutcome::Imported) => {}
@@ -505,7 +501,7 @@ where
     async fn process_pending_blocks(&mut self) -> bool {
         match self.import_pending_blocks().await {
             Ok(PeerBlockImportOutcome::Cancelled) => return false,
-            Ok(PeerBlockImportOutcome::Paused(_)) => {
+            Ok(PeerBlockImportOutcome::Paused) => {
                 debug!(target: "zone::p2p", "Portal is paused; retaining peer blocks for import after resume");
             }
             Ok(PeerBlockImportOutcome::TimedOut {
@@ -537,20 +533,13 @@ where
     async fn import_pending_blocks(&mut self) -> eyre::Result<PeerBlockImportOutcome> {
         loop {
             if self.context.l1_block_tracker.portal_paused() {
-                return Ok(PeerBlockImportOutcome::Paused(None));
+                return Ok(PeerBlockImportOutcome::Paused);
             }
             let head = self.context.provider.best_block_number()?;
             let Some(block) = self.pending.take_next_after(head) else {
                 return Ok(PeerBlockImportOutcome::Imported);
             };
             match self.import_peer_block(block).await? {
-                PeerBlockImportOutcome::Paused(Some(block)) => {
-                    let block = *block;
-                    let number = block.block.header.number();
-                    let dropped = self.pending.insert(number, block);
-                    debug_assert!(dropped.is_none());
-                    return Ok(PeerBlockImportOutcome::Paused(None));
-                }
                 PeerBlockImportOutcome::Imported => {}
                 outcome => return Ok(outcome),
             }
@@ -558,7 +547,7 @@ where
     }
 
     async fn import_peer_block(
-        &self,
+        &mut self,
         peer_block: PendingPeerBlock,
     ) -> eyre::Result<PeerBlockImportOutcome> {
         let block = SealedBlock::seal_slow(peer_block.block);
@@ -590,15 +579,6 @@ where
             eyre::bail!(
                 "peer block gap: local head is {best_block}, received height {block_number}, expected {expected_number}"
             );
-        }
-
-        if self.context.l1_block_tracker.portal_paused() {
-            return Ok(PeerBlockImportOutcome::Paused(Some(Box::new(
-                PendingPeerBlock {
-                    block: block.into_block(),
-                    live_sender: peer_block.live_sender,
-                },
-            ))));
         }
 
         // 2. Block's parent hash is correct
@@ -670,12 +650,16 @@ where
         // The anchor observation publishes its finalized pause transition before waking this
         // import. This is the block-boundary fence that prevents importing the pause block itself.
         if self.context.l1_block_tracker.portal_paused() {
-            return Ok(PeerBlockImportOutcome::Paused(Some(Box::new(
+            // Put the block back so it is imported after resume; the height was just taken.
+            let dropped = self.pending.insert(
+                block_number,
                 PendingPeerBlock {
                     block: block.into_block(),
                     live_sender: peer_block.live_sender,
                 },
-            ))));
+            );
+            debug_assert!(dropped.is_none());
+            return Ok(PeerBlockImportOutcome::Paused);
         }
 
         // The subscriber normally enqueues immediately after recording this observation. Enqueueing
@@ -788,9 +772,8 @@ async fn wait_for_validated_peer_anchor(
 #[derive(Debug)]
 enum PeerBlockImportOutcome {
     Imported,
-    /// Import stopped at the pause boundary. Direct imports return the retained block; the
-    /// pending-buffer wrapper reinserts it and returns `None`.
-    Paused(Option<Box<PendingPeerBlock>>),
+    /// Import stopped at the pause boundary, retaining the block in the pending buffer.
+    Paused,
     Cancelled,
     TimedOut {
         block_number: u64,

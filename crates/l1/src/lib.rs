@@ -69,8 +69,8 @@ pub(crate) mod rpc {
 use crate::abi::{
     Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
-        WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, LeaderUpdated, PortalPaused, PortalResumed, SequencerEncryptionKeyUpdated,
+        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 
@@ -98,7 +98,7 @@ pub use state::L1StateCache;
 pub use subscriber::{
     AuthenticatedPortalLogs, FinalizedBatchSubmission, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, L1SubscriberError, LeadershipSink, MAX_L1_LOOKAHEAD_BLOCKS,
-    MAX_L1_REPLAY_BLOCKS, extract_finalized_batch_submissions, verify_receipts_against_header,
+    extract_finalized_batch_submissions, verify_receipts_against_header,
 };
 
 #[cfg(test)]

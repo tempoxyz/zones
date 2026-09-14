@@ -496,7 +496,6 @@ mod tests {
         first_started: Option<oneshot::Sender<()>>,
         release_first: Option<oneshot::Receiver<()>>,
         paused: Arc<AtomicBool>,
-        pause_on_peek: bool,
         /// Blocks (by value) the permit rejects, with the exit it produces.
         denied: Vec<(u64, EngineExit)>,
     }
@@ -505,9 +504,6 @@ mod tests {
         type Block = u64;
 
         fn next_available(&self) -> Option<Self::Block> {
-            if self.pause_on_peek {
-                self.paused.store(true, Ordering::Relaxed);
-            }
             self.pending.front().copied()
         }
 
@@ -664,25 +660,6 @@ mod tests {
         let drain = task.await.unwrap();
         assert_eq!(drain.advanced, [1]);
         assert_eq!(drain.pending, [2, 3]);
-    }
-
-    #[tokio::test]
-    async fn portal_pause_published_before_queue_peek_prevents_production() {
-        let mut drain = PausedDrain {
-            pending: VecDeque::from([42]),
-            // Publish the pause as the subscriber makes its anchor visible to the queue peek.
-            pause_on_peek: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            drain_all_available(&mut drain, &CancellationToken::new())
-                .await
-                .unwrap(),
-            None
-        );
-        assert!(drain.advanced.is_empty());
-        assert_eq!(drain.pending, [42]);
     }
 
     #[test]

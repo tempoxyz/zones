@@ -2288,7 +2288,8 @@ async fn test_global_pause_stops_and_resumes_block_production() -> eyre::Result<
         "the Zone imported the pause block instead of stopping before it"
     );
 
-    // Governance continues on L1 while the Zone anchor and block height remain frozen.
+    // Ingestion keeps following finalized L1 within its lookahead window while the Zone anchor
+    // and block height remain frozen, so governance landing during the pause is applied.
     let token = l1
         .create_tip20("PausedUSD", "pUSD", B256::with_last_byte(0x7f))
         .await?;
@@ -2311,7 +2312,7 @@ async fn test_global_pause_stops_and_resumes_block_production() -> eyre::Result<
         "governance update during the production pause",
         || async {
             Ok((tracker
-                .control_plane_latest()
+                .latest()
                 .is_some_and(|block| block.number >= governance_block)
                 && zone.enabled_tokens().read().contains(&token))
             .then_some(token))

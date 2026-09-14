@@ -404,14 +404,15 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
   observing the pause in finalized Tempo state. Followers also retain, but do not import, peer
   blocks and refuse settlement signatures while the pause is active. Leaders also defer new
   settlement signatures and broadcasts. The pause expires automatically and cannot be extended
-  while active. After an admin resume or automatic expiry, nodes attempt to catch up finalized
-  Tempo anchors and buffered peer blocks. Historical catch-up requires an archive-capable L1
-  endpoint. Historical execution replay and settlement ancestry are limited to 262,144 headers;
-  larger gaps require operator recovery. Automatic recovery across a full 30-day production
-  freeze is not currently supported. Startup waits for a successful finalized pause-state read,
-  retrying and logging RPC failures without a retry limit. Storage-read retry defaults are unchanged.
-  Finalized leadership, key rotation, token, and cache updates continue independently of the
-  bounded execution queue while paused.
+  while active. Nodes observe `resume()` and automatic expiry by polling finalized Portal state,
+  independently of L1 ingestion; ingestion itself simply stops at its bounded lookahead while
+  nothing is consumed and continues contiguously from there after the pause clears, so no
+  historical replay is needed. Buffered peer blocks are imported after resume. Historical
+  catch-up requires an L1 endpoint that serves the missed finalized headers, receipts, and
+  anchored state. Settlement ancestry is limited to 262,144 headers; a boundary further behind
+  the L1 tip settles only once the Zone has caught up to within that span. Startup retries
+  finalized pause-state RPC failures without a limit; if Portal deployment has not finalized yet,
+  the watcher continues checking after startup. Storage-read retry defaults are unchanged.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
