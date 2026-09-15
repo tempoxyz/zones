@@ -1200,7 +1200,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
 }
 
 #[test]
-fn forced_exit_execution_remains_disabled_before_processing_is_implemented() {
+fn forced_exit_rejects_malformed_outer_encoding() {
     let queued = QueuedDeposit {
         depositType: DepositType::ForcedExit,
         rejected: false,
@@ -1211,3 +1211,6 @@ fn forced_exit_execution_remains_disabled_before_processing_is_implemented() {
         Err(ZonePrecompileError::MalformedCalldata)
     ));
 }
+
+#[path = "forced_tests.rs"]
+mod forced_tests;
