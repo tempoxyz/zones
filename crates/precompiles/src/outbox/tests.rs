@@ -942,7 +942,7 @@ impl Harness {
                 &l1,
                 caller,
                 ForcedWithdrawalRequest {
-                    request_id: 7,
+                    private_request_hash: B256::repeat_byte(7),
                     token: self.token,
                     account: ALICE,
                     recipient: BOB,
@@ -1004,7 +1004,10 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
         })
         .expect("forced withdrawal event");
     assert_eq!(Withdrawal::from_forced_requested_event(&event.data), forced);
-    assert_eq!(forced.senderTag, exithatch::sender_tag(PORTAL, 7));
+    assert_eq!(
+        forced.senderTag,
+        Withdrawal::sender_tag(ALICE, B256::repeat_byte(7), forced.fallbackNonce)
+    );
     assert_eq!(forced.fallbackNonce, 2);
     assert_eq!(forced.amount, 999_900);
     assert_eq!(h.balance_of(ALICE)?, U256::ZERO);
@@ -1038,8 +1041,8 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
     }
     let pending = h.pending()?;
     assert_eq!(pending.len(), 2);
-    assert_eq!(pending[1].sender, Address::ZERO);
-    assert_eq!(pending[1].txHash, B256::ZERO);
+    assert_eq!(pending[1].sender, ALICE);
+    assert_eq!(pending[1].txHash, B256::repeat_byte(7));
     assert!(pending[1].revealTo.is_empty());
     // Invalid finalization must preserve both pending entries and the forced tag.
     assert!(
@@ -1060,13 +1063,6 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
     let hash = ZoneOutboxAbi::finalizeWithdrawalBatchCall::abi_decode_returns(&finalized.bytes)?;
     assert_eq!(hash, Withdrawal::queue_hash(&[original, forced.clone()]));
     assert!(h.pending()?.is_empty());
-    {
-        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || -> TempoResult<()> {
-            assert_eq!(ZoneOutbox::new().forced_sender_tags[1].read()?, B256::ZERO);
-            Ok(())
-        })?;
-    }
     let calldata = ZoneOutboxAbi::consumeFallbackRecipientCall {
         fallbackNonce: forced.fallbackNonce,
     }
@@ -1134,7 +1130,6 @@ fn forced_withdrawal_policy_and_fatal_failures_leave_no_partial_state() -> eyre:
             );
             let mut outbox = ZoneOutbox::new();
             assert_eq!(outbox.next_withdrawal_index.read()?, 0);
-            assert_eq!(outbox.forced_sender_tags[0].read()?, B256::ZERO);
             outbox.last_fallback_nonce.write(0)
         })?;
     }
@@ -1222,7 +1217,7 @@ fn forced_withdrawal_preserves_native_reward_hooks_and_outer_rollback() -> eyre:
         let outer = StorageCtx::default().checkpoint();
         let mut outbox = ZoneOutbox::new();
         let request = ForcedWithdrawalRequest {
-            request_id: 1,
+            private_request_hash: B256::repeat_byte(1),
             token: h.token,
             account: ALICE,
             recipient: BOB,
@@ -1245,7 +1240,6 @@ fn forced_withdrawal_preserves_native_reward_hooks_and_outer_rollback() -> eyre:
         assert_eq!(outbox.last_fallback_nonce.read()?, 0);
         assert_eq!(outbox.pending_withdrawals.len()?, 0);
         assert_eq!(outbox.fallback_recipient(1)?, Address::ZERO);
-        assert_eq!(outbox.forced_sender_tags[0].read()?, B256::ZERO);
         Ok(())
     })
 }
@@ -1270,7 +1264,7 @@ fn forced_withdrawal_missing_l1_state_and_out_of_gas_are_fatal() -> eyre::Result
                 &l1,
                 ZONE_INBOX_ADDRESS,
                 ForcedWithdrawalRequest {
-                    request_id: 7,
+                    private_request_hash: B256::repeat_byte(7),
                     token: h.token,
                     account: ALICE,
                     recipient: BOB,

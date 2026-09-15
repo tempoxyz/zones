@@ -1,4 +1,4 @@
-//! Inbox-only building block. Authorization/replay/outcome processing is connected in PR3.
+//! Inbox-only building block. Authorization and replay processing are connected in PR3.
 use super::*;
 use crate::error::ZonePrecompileError;
 use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
@@ -6,7 +6,8 @@ use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
 /// Private authenticated input; never emitted as a public L1 attribution.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ForcedWithdrawalRequest {
-    pub request_id: u64,
+    /// Hash of the canonical decrypted payload including its verified root signature.
+    pub private_request_hash: B256,
     pub token: Address,
     pub account: Address,
     pub recipient: Address,
@@ -56,13 +57,13 @@ impl ZoneOutbox {
         }
         let checkpoint = self.storage.checkpoint();
         let ForcedWithdrawalRequest {
-            request_id,
+            private_request_hash,
             token,
             account,
             recipient,
             amount,
         } = request;
-        if request_id == 0 || account.is_zero() || recipient.is_zero() || amount == 0 {
+        if account.is_zero() || recipient.is_zero() || amount == 0 {
             return Err(ZonePrecompileError::MalformedCalldata.into());
         }
         if !l1
@@ -115,23 +116,19 @@ impl ZoneOutbox {
             .checked_add(1)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         let index = self.next_withdrawal_index.read()?;
-        let tag = exithatch::sender_tag(l1.portal(), request_id);
-        if tag.is_zero() {
-            return Err(TempoPrecompileError::under_overflow().into());
-        }
         self.last_fallback_nonce.write(nonce)?;
         self.fallback_recipients[nonce].write(account)?;
         let pending = PendingWithdrawal {
             token: request.token,
+            sender: account,
+            tx_hash: private_request_hash,
             to: recipient,
             amount,
             fallback_nonce: nonce,
             ..Default::default()
         };
-        let mut withdrawal = pending.clone().into_withdrawal(Bytes::new())?;
-        withdrawal.senderTag = tag;
+        let withdrawal = pending.clone().into_withdrawal(Bytes::new())?;
         self.pending_withdrawals.push(pending)?;
-        self.forced_sender_tags[index].write(tag)?;
         self.next_withdrawal_index.write(
             index
                 .checked_add(1)
@@ -140,7 +137,7 @@ impl ZoneOutbox {
         self.emit_event(ZoneOutboxEvent::forced_withdrawal_requested(
             index,
             request.token,
-            tag,
+            withdrawal.senderTag,
             recipient,
             amount,
             nonce,
