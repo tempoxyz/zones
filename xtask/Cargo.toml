@@ -23,7 +23,6 @@ zone-precompiles = { workspace = true, features = ["std"] }
 zone-p2p.workspace = true
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
-tempo-revm.workspace = true
 
 alloy = { workspace = true, features = [
   "contract",

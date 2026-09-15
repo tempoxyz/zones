@@ -1,7 +1,7 @@
 //! Error types for zone-specific precompiles.
 
 use alloy_sol_types::SolInterface;
-use revm::precompile::{PrecompileOutput, PrecompileResult};
+use evm2::precompiles::{PrecompileError, PrecompileResult};
 use tempo_precompiles::IntoPrecompileResult;
 use tempo_zone_contracts::{TempoStateError, ZoneInboxError, ZoneOutboxError, ZonePortalError};
 
@@ -44,9 +44,9 @@ pub enum ZonePrecompileError {
 }
 
 impl IntoPrecompileResult for ZonePrecompileError {
-    fn into_precompile_result(self, gas: u64, reservoir: u64) -> PrecompileResult {
+    fn into_precompile_result(self) -> PrecompileResult {
         let data = match self {
-            Self::Tempo(error) => return error.into_precompile_result(gas, reservoir),
+            Self::Tempo(error) => return error.into_precompile_result(),
             Self::L1State(error) => return Err(error.into()),
             Self::Portal(error) => error.abi_encode(),
             Self::Outbox(error) => error.abi_encode(),
@@ -54,7 +54,7 @@ impl IntoPrecompileResult for ZonePrecompileError {
             Self::Inbox(error) => error.abi_encode(),
             Self::MalformedCalldata => Default::default(),
         };
-        Ok(PrecompileOutput::revert(gas, data.into(), reservoir))
+        Err(PrecompileError::Revert(data.into()))
     }
 }
 

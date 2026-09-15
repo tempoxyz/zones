@@ -17,9 +17,9 @@ use crate::{
     },
     identity::{Ed25519Identity, Secp256k1Identity},
     network::{
-        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
-        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL,
-        SETTLEMENT_SIGNATURE_CHANNEL, TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
+        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
+        MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
+        TRANSACTION_CHANNEL,
     },
     routing::{RoutingMembership, RoutingPolicy},
 };
@@ -396,33 +396,28 @@ fn run(
         )?;
         oracle.track(0, peers);
         let (block_sender, block_receiver) =
-            commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
+            commonware.register(BLOCK_CHANNEL, network::block_quota());
         let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
             SETTLEMENT_PROPOSAL_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
         let (settlement_signature_sender, settlement_signature_receiver) = commonware.register(
             SETTLEMENT_SIGNATURE_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
 
         // The backfill request and responses are on separate channels
         let (backfill_request_sender, backfill_request_receiver) = commonware.register(
             BACKFILL_REQUEST_CHANNEL,
             network::backfill_request_quota(),
-            BLOCK_BACKLOG,
         );
         let (backfill_response_sender, backfill_response_receiver) = commonware.register(
             BACKFILL_RESPONSE_CHANNEL,
             network::backfill_response_quota(),
-            BLOCK_BACKLOG,
         );
         let (transaction_sender, transaction_receiver) = commonware.register(
             TRANSACTION_CHANNEL,
             network::transaction_quota(),
-            TRANSACTION_BACKLOG,
         );
         let mut network_task = commonware.start();
 

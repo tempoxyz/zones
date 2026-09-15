@@ -39,7 +39,6 @@ tempo-alloy.workspace = true
 tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
-tempo-revm = { workspace = true, features = ["reth"] }
 
 # zones
 tempo-zone-contracts = { workspace = true, features = ["rpc", "std"] }

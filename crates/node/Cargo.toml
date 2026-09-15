@@ -48,7 +48,6 @@ reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-revm = { workspace = true, features = ["witness"] }
 reth-rpc.workspace = true
 reth-rpc-api.workspace = true
 reth-rpc-builder.workspace = true
@@ -124,7 +123,6 @@ serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
-tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true

@@ -1,18 +1,20 @@
 //! Adapter between Tempo's protocol fee hooks and the Zone fee manager.
 
-use alloy_evm::{
-    Database,
-    revm::context::{Journal, result::EVMError},
-};
 use alloy_primitives::{Address, U256};
+use evm2::{
+    Evm,
+    registry::{HandlerError, HandlerResult},
+};
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_evm::{ProtocolFeeContext, ProtocolFeeManager};
+use tempo_evm::{
+    ProtocolFeeManager, TempoEvmTypes, TempoInvalidTransaction, TempoStateAccess, TempoTx,
+    TempoTxEnv,
+};
 use tempo_precompiles::{
     error::Result,
-    storage::{ContractStorage, StorageActions},
+    storage::{ContractStorage, StorageActions, StorageCtx},
     tip20::TIP20Token,
 };
-use tempo_revm::{TempoInvalidTransaction, TempoStateAccess, TempoTx, TempoTxEnv};
 use zone_precompiles::ZoneFeeManager;
 
 /// Resolves the fee token selected by a Zone transaction against the supplied state view.
@@ -45,39 +47,38 @@ impl ZoneProtocolFeeManager {
     }
 }
 
-impl<DB> ProtocolFeeManager<DB> for ZoneProtocolFeeManager
-where
-    DB: Database,
-{
+impl ProtocolFeeManager for ZoneProtocolFeeManager {
     fn get_fee_token(
         &self,
-        journal: &mut Journal<DB>,
+        host: &mut Evm<'_, TempoEvmTypes>,
         tx: &TempoTxEnv,
         _fee_payer: Address,
         spec: TempoHardfork,
-        actions: StorageActions,
     ) -> Result<Address> {
         // Tempo's transaction handler calls this hook. The trait default reads the L1
         // TipFeeManager, so Zones must override it to resolve their genesis-configured default.
-        resolve_fee_token(journal, tx, spec, actions)
+        let actions = host.ext().actions.clone();
+        resolve_fee_token(host, tx, spec, actions)
     }
 
     fn validate_fee_token(
         &self,
-        journal: &mut Journal<DB>,
+        host: &mut Evm<'_, TempoEvmTypes>,
         fee_token: Address,
         spec: TempoHardfork,
-        actions: StorageActions,
-    ) -> core::result::Result<(), EVMError<DB::Error, TempoInvalidTransaction>> {
-        let initialized = journal
+    ) -> HandlerResult<()> {
+        let actions = host.ext().actions.clone();
+        let initialized = host
             .with_read_only_storage_ctx(spec, actions, || {
                 // The handler validates the TIP-20 prefix before entering this hook.
                 TIP20Token::from_address_unchecked(fee_token).is_initialized()
             })
-            .map_err(|error| EVMError::Custom(error.to_string()))?;
+            .map_err(|error| HandlerError::External(error.to_string().into()))?;
 
         if !initialized {
-            return Err(TempoInvalidTransaction::InvalidFeeToken(fee_token).into());
+            return Err(HandlerError::external(
+                TempoInvalidTransaction::InvalidFeeToken(fee_token),
+            ));
         }
 
         Ok(())
@@ -85,28 +86,28 @@ where
 
     fn collect_fee_pre_tx(
         &self,
-        ctx: ProtocolFeeContext<'_, DB>,
+        host: &mut Evm<'_, TempoEvmTypes>,
         fee_payer: Address,
         fee_token: Address,
         max_amount: U256,
         beneficiary: Address,
         _skip_liquidity_check: bool,
     ) -> Result<Address> {
-        ctx.enter(|| {
+        StorageCtx::enter_evm_without_tip1060_accounting(host, || {
             ZoneFeeManager::new().collect_fee_pre_tx(fee_payer, fee_token, max_amount, beneficiary)
         })
     }
 
     fn collect_fee_post_tx(
         &self,
-        ctx: ProtocolFeeContext<'_, DB>,
+        host: &mut Evm<'_, TempoEvmTypes>,
         fee_payer: Address,
         actual_spending: U256,
         refund_amount: U256,
         fee_token: Address,
         beneficiary: Address,
     ) -> Result<U256> {
-        ctx.enter(|| {
+        StorageCtx::enter_evm_without_tip1060_accounting(host, || {
             ZoneFeeManager::new().collect_fee_post_tx(
                 fee_payer,
                 actual_spending,

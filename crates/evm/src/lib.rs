@@ -10,30 +10,26 @@
 mod database;
 mod executor;
 mod fee_manager;
+mod opcode_config;
 pub mod precompiles;
-mod zone_evm;
+mod validation;
 
 pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::{ZoneBlockExecutor, ZoneTxResult};
-pub use zone_evm::{ZoneEvm, validate_transaction};
+pub use validation::validate_transaction;
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
-    precompiles::{L1State, L1StorageReader, extend_zone_precompiles},
-};
-use alloy_evm::{
-    Database, Evm, EvmEnv, EvmFactory,
-    block::BlockExecutorFactory,
-    precompiles::PrecompilesMap,
-    revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
+    opcode_config::{zone_execution_config, zone_tx_registry},
+    precompiles::{L1StorageReader, ZonePrecompiles},
 };
 use alloy_primitives::{Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};
+use evm2::evm::DynDatabase;
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
-    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
-    block::StateDB,
-    execute::{BlockAssembler, BlockAssemblerInput},
+    BlockAssembler, BlockAssemblerInput, BlockExecutorFactory, ConfigureEngineEvm, ConfigureEvm,
+    EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{
@@ -45,26 +41,23 @@ use std::{
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
 use tempo_evm::{
-    FeeTokenResolver, TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig,
-    TempoEvmError, TempoHaltReason, TempoNextBlockEnvAttributes, TempoStateAccess,
-    evm::{TempoEvm, TempoEvmFactory},
+    FeeTokenResolver, TempoBlockAssembler, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmEnv,
+    TempoEvmError, TempoEvmExt, TempoEvmTypes, TempoNextBlockEnvAttributes, TempoStateAccess,
+    TempoTxEnv, evm::TempoEvm,
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{error::Result as TempoResult, storage::actions::StorageActions};
-use tempo_primitives::{
-    Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
-};
-use tempo_revm::TempoTxEnv;
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tempo_zone_contracts as _;
 use zone_chainspec::{ZoneChainSpec, ZoneHardforks};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
-type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
+/// Zone execution uses Tempo's EVM2 type family and a Zone-configured database and precompile set.
+pub type ZoneEvm<'a> = TempoEvm<'a>;
 
 /// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
-    chain_spec: Arc<ZoneChainSpec>,
     l1_reader: L1,
     portal_address: Address,
 }
@@ -74,83 +67,11 @@ where
     L1: L1StorageReader,
 {
     /// Creates a factory with the canonical Zone chain spec, L1 reader, and portal address.
-    pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_reader: L1, portal_address: Address) -> Self {
+    pub fn new(_chain_spec: Arc<ZoneChainSpec>, l1_reader: L1, portal_address: Address) -> Self {
         Self {
-            chain_spec,
             l1_reader,
             portal_address,
         }
-    }
-
-    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>>(
-        &self,
-        evm: TempoEvm<L1OverlayDB<DB, L1>, I>,
-        l1: L1State<L1>,
-        zone_hardfork: zone_hardfork::ZoneHardfork,
-    ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
-        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new());
-        let cfg = evm.ctx().cfg.clone();
-        let actions = StorageActions::disabled();
-        let non_creditable_slots = evm.non_creditable_slots();
-        let (_, _, precompiles) = evm.components_mut();
-        extend_zone_precompiles(
-            precompiles,
-            &cfg,
-            zone_hardfork,
-            l1,
-            actions,
-            non_creditable_slots,
-        );
-        evm
-    }
-}
-
-impl<L1> EvmFactory for ZoneEvmFactory<L1>
-where
-    L1: L1StorageReader,
-{
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I, L1>;
-    type Context<DB: Database> = TempoCtx<L1OverlayDB<DB, L1>>;
-    type Tx = <TempoEvmFactory as EvmFactory>::Tx;
-    type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
-    type HaltReason = TempoHaltReason;
-    type Spec = tempo_chainspec::hardfork::TempoHardfork;
-    type BlockEnv = TempoBlockEnv;
-    type Precompiles = PrecompilesMap;
-
-    fn create_evm<DB: Database>(
-        &self,
-        db: DB,
-        input: EvmEnv<Self::Spec, Self::BlockEnv>,
-    ) -> Self::Evm<DB, NoOpInspector> {
-        let zone_hardfork = self
-            .chain_spec
-            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
-        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
-        let l1 = db.l1_state().clone();
-        let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(
-            self.register_precompiles(evm, l1, zone_hardfork),
-            zone_hardfork,
-        )
-    }
-
-    fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
-        &self,
-        db: DB,
-        input: EvmEnv<Self::Spec, Self::BlockEnv>,
-        inspector: I,
-    ) -> Self::Evm<DB, I> {
-        let zone_hardfork = self
-            .chain_spec
-            .zone_hardfork_at(input.block_env.timestamp.saturating_to::<u64>());
-        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
-        let l1 = db.l1_state().clone();
-        let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(
-            self.register_precompiles(evm, l1, zone_hardfork),
-            zone_hardfork,
-        )
     }
 }
 
@@ -171,21 +92,21 @@ impl ZoneBlockAssembler {
 
 impl<L1> BlockAssembler<ZoneEvmConfig<L1>> for ZoneBlockAssembler
 where
-    L1: L1StorageReader,
+    L1: L1StorageReader + 'static,
 {
     type Block = Block;
 
     fn assemble_block(
         &self,
         input: BlockAssemblerInput<'_, '_, ZoneEvmConfig<L1>, TempoHeader>,
-    ) -> Result<Self::Block, alloy_evm::block::BlockExecutionError> {
+    ) -> Result<Self::Block, reth_evm::BlockExecutionError> {
         let BlockAssemblerInput {
             evm_env,
             execution_ctx,
             parent,
             transactions,
             output,
-            bundle_state,
+            execution_state,
             state_provider,
             state_root,
             block_access_list_hash,
@@ -199,7 +120,7 @@ where
                 parent,
                 transactions,
                 output,
-                bundle_state,
+                execution_state,
                 state_provider,
                 state_root,
                 block_access_list_hash,
@@ -314,30 +235,62 @@ impl<L1> fmt::Debug for ZoneEvmConfig<L1> {
 
 impl<L1> BlockExecutorFactory for ZoneEvmConfig<L1>
 where
-    L1: L1StorageReader,
+    L1: L1StorageReader + 'static,
 {
     type EvmFactory = ZoneEvmFactory<L1>;
-    type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
+    type EvmTypes = TempoEvmTypes;
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type TxExecutionResult = ZoneTxResult<TempoHaltReason, TempoTxType>;
-    type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>> =
-        ZoneBlockExecutor<'a, DB, I, L1>;
+    type Evm<'a> = ZoneEvm<'a>;
+    type EvmEnv = TempoEvmEnv;
+    type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
+    type Executor<'a> = ZoneBlockExecutor<'a, L1>;
+
+    fn create_executor<'a>(
+        &'a self,
+        evm: Self::Evm<'a>,
+        ctx: Self::ExecutionCtx<'a>,
+    ) -> Self::Executor<'a>
+    where
+        Self: 'a,
+    {
+        ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
+    }
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         &self.zone_factory
     }
 
-    fn create_executor<'a, DB, I>(
-        &'a self,
-        evm: ZoneEvm<DB, I, L1>,
-        ctx: Self::ExecutionCtx<'a>,
-    ) -> Self::Executor<'a, DB, I>
+    fn evm_with_env<'a, DB>(&self, db: DB, env: Self::EvmEnv) -> Self::Evm<'a>
     where
-        DB: StateDB,
-        I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
+        DB: DynDatabase + 'a,
     {
-        ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
+        let zone_hardfork = self
+            .chain_spec
+            .zone_hardfork_at(env.block.timestamp.to::<u64>());
+        let db = L1OverlayDB::new(
+            db,
+            self.zone_factory.l1_reader.clone(),
+            self.zone_factory.portal_address,
+        );
+        let l1 = db.l1_state().clone();
+        let ext = TempoEvmExt::default().with_fee_manager(ZoneProtocolFeeManager::new());
+        let precompiles = ZonePrecompiles::<TempoEvmTypes, L1>::new(
+            env.tempo_spec,
+            ext.actions.clone(),
+            ext.non_creditable_slots.clone(),
+            l1,
+            zone_hardfork,
+        );
+        evm2::Evm::new_with_execution_config_and_ext(
+            zone_execution_config(env.tempo_spec, env.version),
+            env.tempo_spec,
+            env.block,
+            zone_tx_registry::<L1>(env.tempo_spec),
+            db,
+            precompiles,
+            ext,
+        )
     }
 }
 
@@ -371,19 +324,23 @@ where
         let mut env = self.inner.next_evm_env(parent, attributes)?;
         // TempoEvmConfig is concrete over TempoChainSpec, so apply the Zone fee policy after
         // delegating the rest of the environment construction.
-        env.block_env.inner.basefee = self
+        let basefee = self
             .chain_spec
             .next_block_base_fee(parent, attributes.timestamp)
             .unwrap_or_default();
+        env.block.basefee = alloy_primitives::U256::from_limbs([basefee, 0, 0, 0]);
         Ok(env)
     }
 
     fn context_for_block<'a>(
         &self,
         block: &'a SealedBlock<Block>,
-    ) -> Result<TempoBlockExecutionCtx<'a>, Self::Error> {
+    ) -> Result<TempoBlockExecutionCtx<'a>, Self::Error>
+    where
+        Self: 'a,
+    {
         use alloy_consensus::BlockHeader;
-        use alloy_evm::eth::EthBlockExecutionCtx;
+        use reth_evm_ethereum::EthBlockExecutionCtx;
         use std::borrow::Cow;
 
         Ok(TempoBlockExecutionCtx {
@@ -402,9 +359,7 @@ where
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: block.header().consensus_context,
-            subblock_fee_recipients: Default::default(),
         })
     }
 
@@ -432,9 +387,7 @@ where
         &self,
         payload: &'a TempoExecutionData,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
-        let mut context = self.context_for_block(&payload.block)?;
-        context.validator_set = payload.validator_set.clone();
-        Ok(context)
+        self.context_for_block(&payload.block)
     }
 
     fn tx_iterator_for_payload(

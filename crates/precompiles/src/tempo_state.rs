@@ -10,11 +10,10 @@ use crate::{
     storage::{L1State, L1StorageReader},
 };
 use alloy_consensus::BlockHeader;
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolError;
-use revm::precompile::PrecompileResult;
+use evm2::precompiles::PrecompileResult;
 use tempo_precompiles::{
     EncodePrecompileResult, charge_input_cost, dispatch, error::TempoPrecompileError,
     storage::Handler, view,
@@ -38,21 +37,6 @@ pub struct TempoState {
 pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
 
 impl TempoState {
-    /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
-    ///
-    /// The shared L1 storage state is anchored by this precompile's finalized checkpoint.
-    pub fn create<P: L1StorageReader>(
-        l1: L1State<P>,
-        env: &crate::ZonePrecompileEnv,
-    ) -> DynPrecompile {
-        crate::execution::create_precompile(
-            "TempoState",
-            env,
-            crate::execution::NoCallRules,
-            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
-        )
-    }
-
     /// Initializes the predeploy account code and checkpoint from the genesis Tempo header.
     pub fn initialize(&mut self, header_rlp: &[u8]) -> tempo_precompiles::Result<()> {
         self.__initialize()?;
@@ -81,7 +65,7 @@ impl TempoState {
     }
 
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
-        Ok(self.storage.revert_output(error.abi_encode().into()))
+        self.storage.revert_result(error.abi_encode().into())
     }
 
     /// Validate and apply a finalized Tempo checkpoint transition.
@@ -110,7 +94,9 @@ impl TempoState {
             return Err(TempoStateError::invalid_rlp_data().into());
         }
         self.storage.with_block_env(|zone_block| {
-            if zone_block.timestamp_millis() < U256::from(header.timestamp_millis()) {
+            if zone_block.ext.timestamp_millis(zone_block.timestamp)
+                < U256::from(header.timestamp_millis())
+            {
                 return Err(TempoStateError::invalid_timestamp());
             }
             Ok(())
@@ -146,7 +132,7 @@ impl TempoState {
         }
 
         self.finalize_checkpoint(l1, call.header)
-            .encode_precompile_result(0, 0, |()| Bytes::new())
+            .encode_precompile_result(|()| Bytes::new())
     }
 
     /// Returns the currently finalized Tempo block number from Zone state.

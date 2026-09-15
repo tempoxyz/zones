@@ -5,27 +5,25 @@
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
 use alloy_consensus::TxReceipt as _;
-use alloy_evm::{
-    Database, Evm, RecoveredTx,
-    block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
-        ExecutableTx, GasOutput, TxResult,
-    },
-    eth::{EthBlockExecutor, EthTxResult},
-};
+use alloy_eip7928::{BlockAccessIndex, BlockAccessList};
 use alloy_sol_types::{SolCall as _, SolEvent as _};
-use reth_evm::block::StateDB;
-use reth_revm::{Inspector, context::result::ResultAndState};
-use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
+use evm2::{TxResultWithState, evm::Bal};
+use reth_evm::{
+    BlockExecutionError, BlockExecutionOutput, BlockExecutor, BlockTransactionResult,
+    BlockValidationError, ExecutorTx, GasOutput, RecoveredTx,
+};
+use reth_evm_ethereum::{EthBlockExecutor, EthTransactionResultWithState};
+use reth_execution_types::HashedPostState;
+use std::sync::Arc;
+use tempo_evm::{TempoBlockExecutionCtx, TempoEvmTypes, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::evm::TempoContext;
 use tempo_zone_contracts::IZoneOutbox;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-use crate::{L1OverlayDB, ZoneEvm};
+use crate::{ZoneEvm, database::validate_pending_state};
 
 /// The current transaction-ordering phase of a zone block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,13 +38,6 @@ enum ZoneBlockPhase {
 
 impl ZoneBlockPhase {
     fn validate_transaction(self, tx: &TempoTxEnvelope) -> Result<Self, BlockExecutionError> {
-        if tx.subblock_proposer().is_some() {
-            return Err(BlockValidationError::msg(
-                "subblock transactions are not supported in zone blocks",
-            )
-            .into());
-        }
-
         let tx_kind = ZoneTransactionKind::classify(tx);
 
         match (self, tx_kind) {
@@ -116,24 +107,14 @@ impl ZoneTransactionKind {
 
 /// Zone transaction result with the block phase to apply if the result is committed.
 #[derive(Debug)]
-pub struct ZoneTxResult<H, T> {
-    inner: EthTxResult<H, T>,
+pub struct ZoneTxResult {
+    inner: EthTransactionResultWithState<TempoEvmTypes, TempoTxType>,
     next_phase: ZoneBlockPhase,
 }
 
-impl<H, T> TxResult for ZoneTxResult<H, T>
-where
-    H: Send + 'static,
-    T: Send + 'static,
-{
-    type HaltReason = H;
-
-    fn result(&self) -> &ResultAndState<Self::HaltReason> {
+impl BlockTransactionResult<TempoEvmTypes> for ZoneTxResult {
+    fn result(&self) -> &TxResultWithState<TempoEvmTypes> {
         self.inner.result()
-    }
-
-    fn into_result(self) -> ResultAndState<Self::HaltReason> {
-        self.inner.into_result()
     }
 }
 
@@ -143,20 +124,19 @@ where
 /// finalization of requested withdrawals, then delegates ordinary execution to
 /// [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or end-of-block
 /// metadata requirements.
-pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
-    inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
+pub struct ZoneBlockExecutor<'a, L1: L1StorageReader = L1StateProvider> {
+    inner: EthBlockExecutor<'a, TempoEvmTypes, TempoReceiptBuilder>,
     phase: ZoneBlockPhase,
+    _l1: core::marker::PhantomData<fn() -> L1>,
 }
 
-impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
+impl<'a, L1> ZoneBlockExecutor<'a, L1>
 where
-    DB: StateDB,
     L1: L1StorageReader,
-    I: Inspector<TempoContext<L1OverlayDB<DB, L1>>>,
 {
     /// Create a zone block executor for `evm` and the current block context.
     pub fn new(
-        evm: ZoneEvm<DB, I, L1>,
+        evm: ZoneEvm<'a>,
         ctx: TempoBlockExecutionCtx<'a>,
         chain_spec: &'a ZoneChainSpec,
     ) -> Self {
@@ -168,25 +148,25 @@ where
                 TempoReceiptBuilder::default(),
             ),
             phase: ZoneBlockPhase::AwaitingAdvanceTempo,
+            _l1: core::marker::PhantomData,
         }
     }
 }
 
-impl<'a, DB, I, L1> BlockExecutor for ZoneBlockExecutor<'a, DB, I, L1>
+impl<'a, L1> BlockExecutor for ZoneBlockExecutor<'a, L1>
 where
-    DB: StateDB,
-    L1: L1StorageReader,
-    I: Inspector<TempoContext<L1OverlayDB<DB, L1>>>,
+    L1: L1StorageReader + 'static,
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type Evm = ZoneEvm<DB, I, L1>;
-    type Result = ZoneTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
+    type Evm = ZoneEvm<'a>;
+    type TransactionResultWithState = ZoneTxResult;
+    type BlockAccessList = Bal;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         if self
             .inner
-            .ctx
+            .context()
             .withdrawals
             .as_ref()
             .is_some_and(|withdrawals| !withdrawals.is_empty())
@@ -199,13 +179,11 @@ where
 
     fn execute_transaction_without_commit(
         &mut self,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<Self::Result, BlockExecutionError> {
+        tx: impl ExecutorTx<Self>,
+    ) -> Result<Self::TransactionResultWithState, BlockExecutionError> {
         let (mut tx_env, recovered) = tx.into_parts();
         // Remove any prewarming-specific context that was added to the tx env.
-        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
-            tempo_tx_env.expiring_nonce_idx = None;
-        }
+        tx_env.inner_mut().set_expiring_nonce_idx(None);
 
         let next_phase = self.phase.validate_transaction(recovered.tx())?;
 
@@ -213,21 +191,25 @@ where
             .inner
             .execute_transaction_without_commit((tx_env, recovered));
 
-        self.evm_mut().clear_l1_overlay_state();
-        Ok(ZoneTxResult {
-            inner: result?,
-            next_phase,
-        })
+        let inner = result?;
+        validate_pending_state(&inner.result().pending_state)
+            .map_err(BlockExecutionError::other)?;
+
+        Ok(ZoneTxResult { inner, next_phase })
     }
 
-    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
+    fn commit_transaction(
+        &mut self,
+        output: Self::TransactionResultWithState,
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.phase.advance_to(output.next_phase);
         self.inner.commit_transaction(output.inner)
     }
 
-    fn finish(
+    fn finish_with_block_access_list(
         self,
-    ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+    ) -> Result<(BlockExecutionOutput<Self::Receipt>, Option<BlockAccessList>), BlockExecutionError>
+    {
         if self.phase == ZoneBlockPhase::AwaitingAdvanceTempo {
             return Err(BlockValidationError::msg(
                 "zone block is missing its advanceTempo system transaction",
@@ -253,7 +235,7 @@ where
             .into());
         }
 
-        self.inner.finish()
+        self.inner.finish_with_block_access_list()
     }
 
     fn evm_mut(&mut self) -> &mut Self::Evm {
@@ -266,6 +248,33 @@ where
 
     fn receipts(&self) -> &[Self::Receipt] {
         self.inner.receipts()
+    }
+
+    fn set_state_hook(&mut self, hook: impl FnMut(HashedPostState) + Send + 'static) -> bool {
+        self.inner.set_state_hook(hook);
+        true
+    }
+
+    fn convert_block_access_list(
+        block_access_list: &BlockAccessList,
+    ) -> Result<Self::BlockAccessList, BlockExecutionError> {
+        Bal::try_from(block_access_list.as_slice()).map_err(BlockExecutionError::other)
+    }
+
+    fn set_block_access_list(&mut self, block_access_list: Arc<Self::BlockAccessList>) {
+        self.inner.set_block_access_list(block_access_list);
+    }
+
+    fn set_block_access_index(&mut self, index: BlockAccessIndex) {
+        self.inner.set_block_access_index(index);
+    }
+
+    fn enable_block_access_list_builder(&mut self) {
+        self.inner.enable_block_access_list_builder();
+    }
+
+    fn take_block_access_list(&mut self) -> Option<BlockAccessList> {
+        self.inner.take_block_access_list()
     }
 }
 

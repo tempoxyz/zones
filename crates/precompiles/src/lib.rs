@@ -33,18 +33,20 @@
 extern crate alloc;
 
 macro_rules! zone_precompile {
-    ($env:expr, $precompile:path) => {
-        zone_precompile!($env, $precompile, $crate::execution::NoCallRules)
-    };
-    ($env:expr, $precompile:path, $rules:expr) => {
-        $crate::execution::create_precompile(
-            stringify!($precompile),
-            &$env,
-            $rules,
-            |data, caller| {
-                tempo_precompiles::Precompile::call(&mut <$precompile>::new(), data, caller)
-            },
+    ($evm:expr, $message:expr, $gas:expr, $env:expr, $precompile:path) => {
+        zone_precompile!(
+            $evm,
+            $message,
+            $gas,
+            $env,
+            $precompile,
+            $crate::execution::NoCallRules
         )
+    };
+    ($evm:expr, $message:expr, $gas:expr, $env:expr, $precompile:path, $rules:expr) => {
+        $crate::execution::execute_precompile($evm, $message, $gas, $env, $rules, |data, caller| {
+            tempo_precompiles::Precompile::call(&mut <$precompile>::new(), data, caller)
+        })
     };
 }
 
@@ -91,10 +93,14 @@ pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
-use revm::context::CfgEnv;
+use evm2::{
+    Evm, EvmTypes, Precompiles as BasePrecompiles, SpecId,
+    evm::precompile::PrecompileProvider,
+    interpreter::{GasTracker, Message},
+    precompiles::{PrecompileError, PrecompileResult},
+};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _,
@@ -107,8 +113,7 @@ use tempo_precompiles::{
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token, is_tip20_prefix},
     tip403_registry::TIP403Registry,
 };
-#[cfg(feature = "std")]
-use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+use tempo_primitives::TempoBlockExt;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 use zone_hardfork::ZoneHardfork;
 
@@ -119,104 +124,190 @@ use zone_hardfork::ZoneHardfork;
 /// the same Tempo anchor and the same storage-credit accounting state during a transaction.
 ///
 /// Existing Tempo precompiles that are not supported by Zones are explicitly removed here.
-pub fn extend_zone_precompiles<P>(
-    precompiles: &mut PrecompilesMap,
-    cfg: &CfgEnv<TempoHardfork>,
-    zone_hardfork: ZoneHardfork,
+#[derive(Debug)]
+pub struct ZonePrecompiles<T: evm2::EvmTypesHost, P> {
+    base: BasePrecompiles<T>,
+    env: ZonePrecompileEnv,
     l1: L1State<P>,
-    actions: StorageActions,
-    non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
-) where
+}
+
+impl<T, P> ZonePrecompiles<T, P>
+where
+    T: evm2::EvmTypesHost,
     P: L1StorageReader,
 {
-    let env = ZonePrecompileEnv::new(cfg, zone_hardfork, actions, non_creditable_slots);
+    pub fn new(
+        spec: TempoHardfork,
+        actions: StorageActions,
+        non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
+        l1: L1State<P>,
+        zone_hardfork: ZoneHardfork,
+    ) -> Self {
+        // Tempo used Prague's built-ins before T1C and follows its configured EVM fork after it.
+        let base_spec = if spec.is_t1c() {
+            spec.into()
+        } else {
+            SpecId::PRAGUE
+        };
+        Self {
+            base: BasePrecompiles::base(base_spec),
+            env: ZonePrecompileEnv::new(spec, zone_hardfork, actions, non_creditable_slots),
+            l1,
+        }
+    }
 
-    precompiles.set_precompile_lookup(move |address: &Address| {
-        #[cfg(feature = "std")]
-        if *address == ZONE_OUTBOX_ADDRESS {
-            return Some(create_outbox_precompile(l1.clone(), &env));
+    /// Clears bookkeeping that is valid only for the current transaction attempt.
+    pub fn reset_transaction_state(&mut self) {
+        self.l1.reset_transaction_state();
+    }
+}
+
+impl<T, P> PrecompileProvider<T> for ZonePrecompiles<T, P>
+where
+    T: EvmTypes<BlockEnvExt = TempoBlockExt>,
+    P: L1StorageReader,
+{
+    fn addresses(&self) -> alloc::vec::Vec<Address> {
+        self.base.addresses()
+    }
+
+    fn contains(&self, address: &Address) -> bool {
+        self.base.contains(address)
+            || is_tip20_prefix(*address)
+            || matches!(
+                *address,
+                TEMPO_STATE_ADDRESS
+                    | ZONE_INBOX_ADDRESS
+                    | ZONE_FEE_MANAGER_ADDRESS
+                    | TIP403_REGISTRY_ADDRESS
+                    | NONCE_PRECOMPILE_ADDRESS
+                    | ACCOUNT_KEYCHAIN_ADDRESS
+                    | RECEIVE_POLICY_GUARD_ADDRESS
+                    | STORAGE_CREDITS_ADDRESS
+            )
+            || cfg!(feature = "std") && *address == tempo_zone_contracts::ZONE_OUTBOX_ADDRESS
+    }
+
+    fn execute(
+        &mut self,
+        evm: &mut Evm<'_, T>,
+        message: &Message<T>,
+        gas: &mut GasTracker,
+    ) -> Option<PrecompileResult> {
+        let address = message.code_address;
+        if let Some(result) = self.base.execute(evm, message, gas) {
+            return Some(result);
         }
 
-        if is_tip20_prefix(*address) {
-            Some(create_tip20_precompile(*address, &env))
-        } else if *address == TEMPO_STATE_ADDRESS {
-            Some(TempoState::create(l1.clone(), &env))
-        } else if *address == ZONE_INBOX_ADDRESS {
-            Some(ZoneInbox::create(l1.clone(), &env))
-        } else if *address == ZONE_FEE_MANAGER_ADDRESS {
-            Some(zone_precompile!(env, ZoneFeeManager))
-        } else if *address == TIP403_REGISTRY_ADDRESS {
-            Some(zone_precompile!(
-                env,
+        let result = if is_tip20_prefix(address) {
+            execution::execute_precompile(
+                evm,
+                message,
+                gas,
+                &self.env,
+                ztip20::TIP20Rules,
+                |data, caller| {
+                    TIP20Token::from_address_unchecked(address)
+                        .call(data, caller)
+                        .map_err(|error| match error {
+                            PrecompileError::Revert(bytes)
+                                if bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) =>
+                            {
+                                PrecompileError::Revert(
+                                    crate::ztip20::InsufficientBalance {}.abi_encode().into(),
+                                )
+                            }
+                            error => error,
+                        })
+                },
+            )
+        } else if address == TEMPO_STATE_ADDRESS {
+            execution::execute_precompile(
+                evm,
+                message,
+                gas,
+                &self.env,
+                execution::NoCallRules,
+                |data, caller| TempoState::new().call_with_l1_state(&self.l1, data, caller),
+            )
+        } else if address == ZONE_INBOX_ADDRESS {
+            execution::execute_precompile(
+                evm,
+                message,
+                gas,
+                &self.env,
+                execution::NoCallRules,
+                |data, caller| ZoneInbox::new().call(&self.l1, data, caller),
+            )
+        } else if address == ZONE_FEE_MANAGER_ADDRESS {
+            zone_precompile!(evm, message, gas, &self.env, ZoneFeeManager)
+        } else if address == TIP403_REGISTRY_ADDRESS {
+            zone_precompile!(
+                evm,
+                message,
+                gas,
+                &self.env,
                 TIP403Registry,
                 tip403_proxy::Tip403Rules
-            ))
-        } else if *address == NONCE_PRECOMPILE_ADDRESS {
-            Some(zone_precompile!(env, NonceManager, nonce::NonceRules))
-        } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-            Some(zone_precompile!(
-                env,
+            )
+        } else if address == NONCE_PRECOMPILE_ADDRESS {
+            zone_precompile!(
+                evm,
+                message,
+                gas,
+                &self.env,
+                NonceManager,
+                nonce::NonceRules
+            )
+        } else if address == ACCOUNT_KEYCHAIN_ADDRESS {
+            zone_precompile!(
+                evm,
+                message,
+                gas,
+                &self.env,
                 AccountKeychain,
                 account_keychain::AccountKeychainRules
-            ))
-        } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
-            Some(zone_precompile!(
-                env,
+            )
+        } else if address == RECEIVE_POLICY_GUARD_ADDRESS {
+            zone_precompile!(
+                evm,
+                message,
+                gas,
+                &self.env,
                 ReceivePolicyGuard,
                 receive_policy_guard::ReceivePolicyGuardRules
-            ))
-        } else if *address == STORAGE_CREDITS_ADDRESS {
-            Some(zone_precompile!(
-                env,
+            )
+        } else if address == STORAGE_CREDITS_ADDRESS {
+            zone_precompile!(
+                evm,
+                message,
+                gas,
+                &self.env,
                 StorageCredits,
                 storage_credits::StorageCreditsRules
-            ))
+            )
         } else {
-            // unsupported L1 precompiles:
-            // TIP20Factory, TipFeeManager, TIP20ChannelReserve, StablecoinDEX
-            None
-        }
-    });
-}
+            #[cfg(feature = "std")]
+            if address == tempo_zone_contracts::ZONE_OUTBOX_ADDRESS {
+                return Some(execution::execute_precompile(
+                    evm,
+                    message,
+                    gas,
+                    &self.env,
+                    execution::NoCallRules,
+                    |data, caller| {
+                        let (tx_hash, fee_payer) = tx_context::current_transaction()
+                            .unwrap_or((Default::default(), caller));
+                        ZoneOutbox::new()
+                            .call_with_transaction(&self.l1, data, caller, tx_hash, fee_payer)
+                    },
+                ));
+            }
+            return None;
+        };
 
-/// Creates the native ZoneOutbox over ordinary Zone storage and the L1-mirrored portal account.
-#[cfg(feature = "std")]
-pub fn create_outbox_precompile<P>(l1: L1State<P>, env: &ZonePrecompileEnv) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
-    execution::create_precompile(
-        "ZoneOutbox",
-        env,
-        execution::NoCallRules,
-        move |data, caller| {
-            let (tx_hash, fee_payer) =
-                tx_context::current_transaction().unwrap_or((Default::default(), caller));
-            ZoneOutbox::new().call_with_transaction(&l1, data, caller, tx_hash, fee_payer)
-        },
-    )
-}
-
-/// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
-pub fn create_tip20_precompile(address: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
-    // Redacts TIP20 transfer from reverts that reveal user balances to the spender.
-    let redact = |mut res: revm::precompile::PrecompileOutput| {
-        if res.is_revert() && res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
-            res.bytes = crate::ztip20::InsufficientBalance {}.abi_encode().into();
-        }
-        res
-    };
-
-    execution::create_precompile(
-        "TIP20Token",
-        env,
-        ztip20::TIP20Rules,
-        move |data, caller| {
-            TIP20Token::from_address_unchecked(address)
-                .call(data, caller)
-                .map(redact)
-        },
-    )
+        Some(result)
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]

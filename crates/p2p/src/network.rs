@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{AddressableTrackedPeers, authenticated::lookup};
 use commonware_runtime::{Quota, Supervisor as _};
-use commonware_utils::{NZU32, ordered::Map};
+use commonware_utils::{NZU32, NZUsize, ordered::Map};
 use eyre::WrapErr as _;
 
 use crate::ZoneManifest;
@@ -72,8 +72,13 @@ fn setup_commonware_config(
     listen: SocketAddr,
     bypass_ip_check: bool,
 ) -> lookup::Config<PrivateKey> {
-    let mut config =
-        lookup::Config::recommended(ed25519_private_key, namespace, listen, MAX_MESSAGE_SIZE);
+    let mut config = lookup::Config::recommended(
+        ed25519_private_key,
+        namespace,
+        listen,
+        NZUsize!(32),
+        MAX_MESSAGE_SIZE,
+    );
 
     // Sequencers communicate over private pod or VPC addresses in a multi-AZ deployment.
     config.allow_private_ips = true;

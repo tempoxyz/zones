@@ -19,10 +19,13 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
-use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
+use evm2::{
+    Evm, EvmTypes,
+    interpreter::{GasTracker, Message, MessageKind},
+    precompiles::{PrecompileError, PrecompileHalt, PrecompileResult},
+};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
@@ -38,9 +41,9 @@ use tempo_precompiles::{
 use zone_hardfork::ZoneHardfork;
 
 /// Shared EVM configuration and accounting state installed for every Zone precompile wrapper.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ZonePrecompileEnv {
-    cfg: revm::context::CfgEnv<TempoHardfork>,
+    spec: TempoHardfork,
     zone_hardfork: ZoneHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
@@ -49,13 +52,13 @@ pub struct ZonePrecompileEnv {
 impl ZonePrecompileEnv {
     /// Captures the active EVM configuration and transaction-local storage accounting state.
     pub fn new(
-        cfg: &revm::context::CfgEnv<TempoHardfork>,
+        spec: TempoHardfork,
         zone_hardfork: ZoneHardfork,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
-            cfg: cfg.clone(),
+            spec,
             zone_hardfork,
             actions,
             non_creditable_slots,
@@ -98,94 +101,84 @@ pub(crate) trait CallRules: 'static {
 pub(crate) struct NoCallRules;
 impl CallRules for NoCallRules {}
 
-pub(crate) fn create_precompile(
-    id: &'static str,
+pub(crate) fn execute_precompile<T>(
+    evm: &mut Evm<'_, T>,
+    message: &Message<T>,
+    gas: &mut GasTracker,
     env: &ZonePrecompileEnv,
     rules: impl CallRules,
-    execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
-) -> DynPrecompile {
-    let env = env.clone();
-    DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
-        if !input.is_direct_call() {
-            return Ok(PrecompileOutput::revert(
-                0,
-                SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-                input.reservoir,
-            ));
-        }
+    execute: impl FnOnce(&[u8], Address) -> PrecompileResult,
+) -> PrecompileResult
+where
+    T: EvmTypes<BlockEnvExt = tempo_primitives::TempoBlockExt>,
+{
+    if message.destination != message.code_address {
+        return Err(PrecompileError::Revert(
+            SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
+        ));
+    }
 
-        let (data, caller) = (input.data, input.caller);
-        let Ok(input_gas) = input_cost(env.cfg.spec, data.len()) else {
-            return Ok(PrecompileOutput::halt(
-                PrecompileHalt::OutOfGas,
-                input.reservoir,
-            ));
-        };
-        if input.gas < input_gas {
-            return Ok(PrecompileOutput::halt(
-                PrecompileHalt::OutOfGas,
-                input.reservoir,
-            ));
-        }
+    let (data, caller) = (message.input.as_ref(), message.caller);
+    let Ok(input_gas) = input_cost(env.spec, data.len()) else {
+        return Err(PrecompileHalt::OutOfGas.into());
+    };
+    if gas.remaining() < input_gas {
+        return Err(PrecompileHalt::OutOfGas.into());
+    }
 
-        let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
-        if fixed_gas.is_some_and(|gas| input.gas < gas) {
-            return Ok(PrecompileOutput::halt(
-                PrecompileHalt::OutOfGas,
-                input.reservoir,
-            ));
-        }
+    let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
+    if fixed_gas.is_some_and(|fixed_gas| gas.remaining() < fixed_gas) {
+        return Err(PrecompileHalt::OutOfGas.into());
+    }
 
-        let mut storage = EvmPrecompileStorageProvider::new(
-            input.internals,
-            fixed_gas.map_or(input.gas, |_| u64::MAX),
-            input.reservoir,
-            env.cfg.spec,
-            env.cfg.enable_amsterdam_eip8037,
-            input.is_static,
-            env.cfg.gas_params.clone(),
-        )
+    let is_static = message.caller_is_static || message.kind == MessageKind::StaticCall;
+    let mut fixed_gas_tracker = GasTracker::new(u64::MAX);
+    let storage_gas = if fixed_gas.is_some() {
+        &mut fixed_gas_tracker
+    } else {
+        &mut *gas
+    };
+    let mut storage = EvmPrecompileStorageProvider::new(evm, storage_gas, env.spec, is_static)
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
-        if fixed_gas.is_some() {
-            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
-            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
-            storage.set_tip1060_storage_credits(false);
-        }
+    if fixed_gas.is_some() {
+        // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
+        // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
+        storage.set_tip1060_storage_credits(false);
+    }
 
-        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
-            CallCheck::Continue => execute(data, caller),
-            CallCheck::Revert(output) => {
-                let s = StorageCtx::default();
-                let output = s.revert_output(output);
-                add_input_cost(s, data, Ok(output))
-            }
-            CallCheck::Error(error) => {
-                let s = StorageCtx::default();
-                let result = s.error_result(error);
-                add_input_cost(s, data, result)
-            }
-        });
-        if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
-            output.gas_used = gas;
-            // Disable refunds to not leak any data about previous storage values.
-            output.gas_refunded = 0;
+    let result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
+        CallCheck::Continue => execute(data, caller),
+        CallCheck::Revert(output) => add_input_cost(
+            StorageCtx::default(),
+            data,
+            Err(PrecompileError::Revert(output)),
+        ),
+        CallCheck::Error(error) => {
+            let s = StorageCtx::default();
+            let result = s.error_result(error);
+            add_input_cost(s, data, result)
         }
-        result
-    })
+    });
+    drop(storage);
+    if fixed_gas.is_some() && matches!(result, Ok(_) | Err(PrecompileError::Revert(_))) {
+        gas.spend(fixed_gas.unwrap())
+            .expect("fixed gas availability checked above");
+    }
+    result
 }
 
 fn add_input_cost(mut s: StorageCtx, data: &[u8], res: PrecompileResult) -> PrecompileResult {
     // Fatal errors must be propagated to abort execution.
-    let mut output = res?;
+    let output = match res {
+        result @ (Ok(_) | Err(PrecompileError::Revert(_))) => result,
+        Err(error) => return Err(error),
+    };
 
-    let gas_before = s.gas_used();
     if let Some(err) = charge_input_cost(&mut s, data) {
         return err;
     }
-    let input_gas = s.gas_used().saturating_sub(gas_before);
-    output.gas_used = output.gas_used.saturating_add(input_gas);
-    Ok(output)
+    output
 }
 
 #[cfg(test)]

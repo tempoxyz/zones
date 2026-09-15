@@ -11,11 +11,8 @@ use core::{
 };
 
 use alloy_primitives::{Address, B256, U256, map::HashSet};
-use revm::{
-    context::result::AnyError,
-    interpreter::gas::{COLD_SLOAD_COST, WARM_STORAGE_READ_COST},
-    precompile::PrecompileError,
-};
+use evm2::{AnyError, precompiles::PrecompileError};
+use revm::interpreter::gas::{COLD_SLOAD_COST, WARM_STORAGE_READ_COST};
 use tempo_precompiles::{
     error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
 };
@@ -253,7 +250,7 @@ impl L1StateError {
 
 impl From<L1StateError> for PrecompileError {
     fn from(error: L1StateError) -> Self {
-        Self::FatalAny(AnyError::new(error))
+        Self::Fatal(AnyError::new(error))
     }
 }
 
