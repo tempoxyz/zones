@@ -34,6 +34,21 @@ impl ForcedExitPortalStorage {
     }
 }
 
+/// The portal runtime upgrade is the activation authority. No public setter enables this flag.
+/// Replace this bridge with the coordinated T14 check when Tempo exposes that fork.
+pub(crate) fn active<P: crate::L1StorageReader>(l1: &crate::L1State<P>) -> crate::ZoneResult<bool> {
+    if l1.portal().is_zero() {
+        return Ok(false);
+    }
+    let state = ForcedExitPortalStorage::new(l1.portal());
+    let version = l1.read_l1(&state.forced_exit_version)?;
+    match version {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(crate::ZonePrecompileError::MalformedCalldata),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
