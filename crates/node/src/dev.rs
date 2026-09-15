@@ -2,8 +2,9 @@
 //!
 //! Provisions a self-contained zone against a Tempo dev L1: funds the dev account,
 //! uses TIP-1091's protocol-managed `ZoneFactory`, calls `createZone`, registers the
-//! sequencer encryption key, and builds an L1-anchored genesis. The `tempo-zone dev`
-//! command wraps [`provision_zone`] and then runs the zone node.
+//! sequencer encryption key, and builds an L1-anchored genesis. The
+//! `tempo-zone dev --reset` command wraps [`provision_zone`] and then runs the zone node; subsequent
+//! `tempo-zone dev` invocations reuse the saved zone.
 
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
@@ -239,8 +240,13 @@ pub use command::DevCommand;
 mod command {
     use std::path::{Path, PathBuf};
 
+    use alloy_genesis::Genesis;
     use alloy_primitives::Address;
+    use alloy_provider::{Provider as _, ProviderBuilder};
     use alloy_signer_local::PrivateKeySigner;
+    use serde::{Deserialize, Serialize};
+    use tempo_alloy::TempoNetwork;
+    use tempo_zone_contracts::ZonePortal;
 
     use super::{ProvisionConfig, provision_zone};
     use crate::cli::ZoneCli;
@@ -250,12 +256,9 @@ mod command {
     const DEFAULT_DEV_KEY: &str =
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-    /// Provisions a fresh zone against a Tempo dev L1 and runs the zone node.
+    /// Runs a saved zone, or provisions a fresh one when `--reset` is passed.
     #[derive(Debug, clap::Parser)]
-    #[command(
-        name = "dev",
-        about = "Provision a fresh zone against a Tempo dev L1 and run the zone node"
-    )]
+    #[command(name = "dev", about = "Run a local zone against a Tempo dev L1")]
     pub struct DevCommand {
         /// Tempo L1 WebSocket RPC URL.
         #[arg(
@@ -299,9 +302,13 @@ mod command {
         #[arg(long = "dev.allowed-account")]
         allowed_accounts: Vec<Address>,
 
-        /// Directory for genesis.json, zone.json, node data, and logs. Wiped on start.
+        /// Directory for genesis.json, zone.json, node data, and logs.
         #[arg(long, default_value_os_t = default_datadir())]
         datadir: PathBuf,
+
+        /// Wipe the datadir and provision a fresh zone before running.
+        #[arg(long)]
+        reset: bool,
 
         /// Zone RPC listener address.
         #[arg(long = "http.addr", default_value = "127.0.0.1")]
@@ -326,16 +333,10 @@ mod command {
     }
 
     impl DevCommand {
-        /// Provisions the zone, writes `genesis.json` and `zone.json` to the datadir,
-        /// and runs the zone node.
+        /// Loads and validates a saved zone, or provisions a fresh one with `--reset`, then runs
+        /// the zone node.
         pub fn run(self) -> eyre::Result<()> {
             ensure_ws_url(&self.l1_rpc_url)?;
-            let dev_key: PrivateKeySigner = self
-                .dev_key
-                .strip_prefix("0x")
-                .unwrap_or(&self.dev_key)
-                .parse()
-                .map_err(|err| eyre::eyre!("invalid --dev.key: {err}"))?;
             let ws_port = self
                 .http_port
                 .checked_add(1)
@@ -345,16 +346,21 @@ mod command {
                 .checked_add(2)
                 .ok_or_else(|| eyre::eyre!("--http.port too large for the P2P port"))?;
 
-            prepare_datadir(&self.datadir)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let zone = if self.reset {
+                reset_datadir(&self.datadir)?;
+                let dev_key: PrivateKeySigner = self
+                    .dev_key
+                    .strip_prefix("0x")
+                    .unwrap_or(&self.dev_key)
+                    .parse()
+                    .map_err(|err| eyre::eyre!("invalid --dev.key: {err}"))?;
+                let allowed_accounts = self.allowed_accounts.clone();
 
-            let allowed_accounts = self.allowed_accounts.clone();
-
-            // Provision on a scoped runtime; the node builds its own afterwards.
-            let provisioned = {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?;
-                runtime.block_on(provision_zone(ProvisionConfig {
+                // Provision on a scoped runtime; the node builds its own afterwards.
+                let provisioned = runtime.block_on(provision_zone(ProvisionConfig {
                     l1_rpc_url: self.l1_rpc_url.clone(),
                     dev_key: dev_key.clone(),
                     factory: self.factory_address,
@@ -364,47 +370,58 @@ mod command {
                     zone_gateways: self.zone_gateways.clone(),
                     allowed_accounts: allowed_accounts.clone(),
                     rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),
-                }))?
+                }))?;
+
+                let genesis_path = self.datadir.join("genesis.json");
+                std::fs::write(
+                    &genesis_path,
+                    serde_json::to_string_pretty(&provisioned.genesis)?,
+                )?;
+
+                // zone.json metadata for downstream tooling, matching `create-zone`.
+                // `sequencerKey` is a well-known dev key; `just zone-up` reads it.
+                let zone = SavedZone {
+                    zone_id: provisioned.zone_id,
+                    chain_id: provisioned.chain_id,
+                    portal: provisioned.portal,
+                    initial_token: self.initial_token,
+                    access_mode: self.access_mode,
+                    gateway_mode: self.gateway_mode,
+                    zone_gateways: self.zone_gateways.clone(),
+                    allowed_accounts,
+                    admin: dev_key.address(),
+                    sequencer: dev_key.address(),
+                    sequencer_key: self.dev_key.clone(),
+                    tempo_anchor_block: provisioned.anchor_block_number,
+                    zone_factory: provisioned.factory,
+                    rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),
+                };
+                super::write_owner_only(
+                    &self.datadir.join("zone.json"),
+                    serde_json::to_string_pretty(&zone)?.as_bytes(),
+                )?;
+                zone
+            } else {
+                let zone = load_saved_zone(&self.datadir)?;
+                runtime.block_on(validate_saved_zone(&self.l1_rpc_url, &zone))?;
+                zone
             };
+            drop(runtime);
 
             let genesis_path = self.datadir.join("genesis.json");
-            std::fs::write(
-                &genesis_path,
-                serde_json::to_string_pretty(&provisioned.genesis)?,
-            )?;
-
-            // zone.json metadata for downstream tooling, matching `create-zone`.
-            // `sequencerKey` is a well-known dev key; `just zone-up` reads it.
-            let zone_json = serde_json::json!({
-                "zoneId": provisioned.zone_id,
-                "chainId": provisioned.chain_id,
-                "portal": format!("{}", provisioned.portal),
-                "initialToken": format!("{}", self.initial_token),
-                "accessMode": self.access_mode,
-                "gatewayMode": self.gateway_mode,
-                "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                "admin": format!("{}", dev_key.address()),
-                "sequencer": format!("{}", dev_key.address()),
-                "sequencerKey": self.dev_key,
-                "tempoAnchorBlock": provisioned.anchor_block_number,
-                "zoneFactory": format!("{}", provisioned.factory),
-                "rpcUrl": format!("http://{}:{}", self.http_addr, self.http_port),
-            });
-            super::write_owner_only(
-                &self.datadir.join("zone.json"),
-                serde_json::to_string_pretty(&zone_json)?.as_bytes(),
-            )?;
             let sequencer_key_path = self.datadir.join("sequencer.key");
-            super::write_owner_only(&sequencer_key_path, self.dev_key.as_bytes())?;
+            super::write_owner_only(&sequencer_key_path, zone.sequencer_key.as_bytes())?;
 
-            println!("Zone provisioned!");
-            println!("  Zone ID:      {}", provisioned.zone_id);
-            println!("  Chain ID:     {}", provisioned.chain_id);
-            println!("  ZoneFactory:  {}", provisioned.factory);
-            println!("  Portal:       {}", provisioned.portal);
-            println!("  Anchor block: {}", provisioned.anchor_block_number);
-            println!("  Dev account:  {}", dev_key.address());
+            println!(
+                "Zone {}!",
+                if self.reset { "provisioned" } else { "loaded" }
+            );
+            println!("  Zone ID:      {}", zone.zone_id);
+            println!("  Chain ID:     {}", zone.chain_id);
+            println!("  ZoneFactory:  {}", zone.zone_factory);
+            println!("  Portal:       {}", zone.portal);
+            println!("  Anchor block: {}", zone.tempo_anchor_block);
+            println!("  Dev account:  {}", zone.admin);
             println!(
                 "  HTTP RPC:     http://{}:{}",
                 self.http_addr, self.http_port
@@ -424,7 +441,7 @@ mod command {
                 "--l1.rpc-url",
                 &self.l1_rpc_url,
                 "--l1.portal-address",
-                &provisioned.portal.to_string(),
+                &zone.portal.to_string(),
                 "--http",
                 "--http.addr",
                 &self.http_addr,
@@ -463,6 +480,65 @@ mod command {
         std::env::temp_dir().join("tempo-zone-dev")
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SavedZone {
+        zone_id: u32,
+        chain_id: u64,
+        portal: Address,
+        initial_token: Address,
+        access_mode: bool,
+        gateway_mode: bool,
+        zone_gateways: Vec<Address>,
+        allowed_accounts: Vec<Address>,
+        admin: Address,
+        sequencer: Address,
+        sequencer_key: String,
+        tempo_anchor_block: u64,
+        zone_factory: Address,
+        rpc_url: String,
+    }
+
+    fn load_saved_zone(datadir: &Path) -> eyre::Result<SavedZone> {
+        let zone_path = datadir.join("zone.json");
+        let genesis_path = datadir.join("genesis.json");
+        let zone = serde_json::from_slice(&std::fs::read(&zone_path).map_err(|err| {
+            eyre::eyre!(
+                "failed to read saved zone metadata at {}: {err}; run with --reset to provision a fresh zone",
+                zone_path.display()
+            )
+        })?)?;
+        let _: Genesis = serde_json::from_slice(&std::fs::read(&genesis_path).map_err(|err| {
+            eyre::eyre!(
+                "failed to read saved genesis at {}: {err}; run with --reset to provision a fresh zone",
+                genesis_path.display()
+            )
+        })?)?;
+        Ok(zone)
+    }
+
+    async fn validate_saved_zone(l1_rpc_url: &str, zone: &SavedZone) -> eyre::Result<()> {
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(l1_rpc_url)
+            .await?;
+        eyre::ensure!(
+            !provider.get_code_at(zone.portal).await?.is_empty(),
+            "saved ZonePortal {} has no code; run with --reset to provision a fresh zone",
+            zone.portal
+        );
+        let portal_zone_id = ZonePortal::new(zone.portal, &provider)
+            .zoneId()
+            .call()
+            .await?;
+        eyre::ensure!(
+            portal_zone_id == zone.zone_id,
+            "saved ZonePortal {} reports zone ID {portal_zone_id}, but zone.json contains {}; run with --reset to provision a fresh zone",
+            zone.portal,
+            zone.zone_id
+        );
+        Ok(())
+    }
+
     /// Ensures the L1 RPC URL uses a WebSocket scheme, as `tempo-zone node` requires.
     fn ensure_ws_url(l1_rpc_url: &str) -> eyre::Result<()> {
         let url: url::Url = l1_rpc_url
@@ -478,10 +554,8 @@ mod command {
 
     /// Wipes and recreates the datadir.
     ///
-    /// Every run provisions a fresh zone anchored to fresh L1 state, so stale node
-    /// data can never be reused. Refuses to wipe a directory that does not look
-    /// like a previous dev datadir.
-    fn prepare_datadir(datadir: &Path) -> eyre::Result<()> {
+    /// Refuses to wipe a directory that does not look like a previous dev datadir.
+    fn reset_datadir(datadir: &Path) -> eyre::Result<()> {
         if datadir.exists() {
             let is_dev_datadir =
                 datadir.join("zone.json").exists() || std::fs::read_dir(datadir)?.next().is_none();
@@ -512,6 +586,12 @@ mod command {
 
             assert_eq!(redacted.redacted_rpc_port, 9544);
             assert_eq!(private.redacted_rpc_port, 9544);
+        }
+
+        #[test]
+        fn reset_flag_is_accepted() {
+            let command = DevCommand::try_parse_from(["dev", "--reset"]).unwrap();
+            assert!(command.reset);
         }
 
         #[test]
