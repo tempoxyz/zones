@@ -14,7 +14,7 @@ use tempo_evm::consensus::TempoConsensus;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
-use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
+use zone_l1::state::{L1RpcClient, L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
@@ -228,7 +228,8 @@ fn cli_evm_config(
         .erased();
     let runtime_handle = tokio::runtime::Handle::current();
     let config = L1StateProviderConfig::default();
-    let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+    let rpc_client = L1RpcClient::from_provider(provider, runtime_handle);
+    let l1_provider = L1StateProvider::with_client(config, cache, rpc_client);
     ZoneEvmConfig::new(chain_spec, l1_provider, portal_address)
 }
 

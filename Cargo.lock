@@ -13903,6 +13903,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
+ "reth-trie-common",
  "schnellru",
  "serde",
  "serde_json",
@@ -14116,6 +14117,7 @@ name = "zone-primitives"
 version = "0.3.1"
 dependencies = [
  "alloy-primitives",
+ "serde",
  "tempo-hardfork",
  "thiserror 2.0.18",
 ]

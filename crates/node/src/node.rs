@@ -91,7 +91,10 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt, encryption_key_address,
-    state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
+    state::{
+        EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig,
+        VerifiedL1StateCache,
+    },
 };
 use zone_p2p::{
     BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pCommand, P2pConfig,
@@ -258,6 +261,8 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: L1StateCache,
+    /// Account-root-keyed slot values authenticated for payload construction.
+    verified_l1_state_cache: Option<VerifiedL1StateCache>,
     /// Shared registry of tokens enabled for this zone.
     enabled_tokens: EnabledTokenRegistry,
     /// L1 anchors independently observed and applied by the subscriber.
@@ -293,6 +298,7 @@ impl ZoneNode {
         let deposit_queue = DepositQueue::default();
 
         let l1_state_cache = L1StateCache::new();
+        let verified_l1_state_cache = (!portal_address.is_zero()).then(VerifiedL1StateCache::new);
         let enabled_tokens = EnabledTokenRegistry::default();
         let l1_block_tracker = L1BlockTracker::default();
         let l1_config = L1SubscriberConfig {
@@ -316,6 +322,7 @@ impl ZoneNode {
             l1_config,
             l1_state_provider_config,
             l1_state_cache,
+            verified_l1_state_cache,
             enabled_tokens,
             l1_block_tracker,
             encryption_keys: None,
@@ -476,6 +483,8 @@ where
     l1_config: L1SubscriberConfig,
     /// Shared L1 state cache updated by the subscriber.
     l1_state_cache: L1StateCache,
+    /// Shared authenticated account roots and payload-proved slot values.
+    verified_l1_state_cache: Option<VerifiedL1StateCache>,
     /// Shared registry of tokens enabled for this zone.
     enabled_tokens: EnabledTokenRegistry,
     /// L1 anchors independently observed and applied by the subscriber.
@@ -515,6 +524,7 @@ where
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
         l1_state_cache: L1StateCache,
+        verified_l1_state_cache: Option<VerifiedL1StateCache>,
         enabled_tokens: EnabledTokenRegistry,
         l1_block_tracker: L1BlockTracker,
         encryption_keys: Option<EncryptionKeyRing>,
@@ -537,6 +547,7 @@ where
             deposit_queue,
             l1_config,
             l1_state_cache,
+            verified_l1_state_cache,
             enabled_tokens,
             l1_block_tracker,
             encryption_keys,
@@ -745,6 +756,7 @@ where
             self.deposit_queue.clone(),
             self.enabled_tokens.clone(),
             self.l1_state_cache.clone(),
+            self.verified_l1_state_cache.clone(),
             self.l1_block_tracker.clone(),
             leadership_sink,
             finalized_batch_submission_sender,
@@ -1736,6 +1748,9 @@ where
             self.enabled_tokens.clone(),
         );
         let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
+        if let Some(verified_l1_state_cache) = self.verified_l1_state_cache.clone() {
+            payload_factory = payload_factory.with_verified_l1_state_cache(verified_l1_state_cache);
+        }
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
             payload_factory = payload_factory.with_withdrawal_reveal_encryptor(encryptor);
         }
@@ -1755,6 +1770,7 @@ where
             self.deposit_queue.clone(),
             self.l1_config.clone(),
             self.l1_state_cache.clone(),
+            self.verified_l1_state_cache.clone(),
             self.enabled_tokens.clone(),
             self.l1_block_tracker.clone(),
             self.encryption_keys.clone(),

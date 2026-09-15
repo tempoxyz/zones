@@ -5,9 +5,8 @@
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
 use crate::utils::{
-    L1TestNode, PolicySeed, RouterCallbackArgs, RouterDepositArgs, STABLECOIN_DEX_ADDRESS,
-    WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, poll_until,
-    seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
+    L1TestNode, RouterCallbackArgs, RouterDepositArgs, STABLECOIN_DEX_ADDRESS, WithdrawalArgs,
+    ZoneAccount, ZoneCreationConfig, ZoneTestNode, poll_until, spawn_sequencer,
     spawn_sequencer_with_config, start_real_p2p_cluster, start_real_p2p_cluster_with_active_nodes,
 };
 use alloy::{
@@ -2288,7 +2287,7 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
 async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    use tempo_contracts::precompiles::{ITIP20, ITIP403Registry::PolicyType};
+    use tempo_contracts::precompiles::ITIP20;
 
     let l1 = L1TestNode::start().await?;
     let portal_address = l1.deploy_zone().await?;
@@ -2296,30 +2295,14 @@ async fn test_deposit_policy_failure_bounces_to_tempo_refund_recipient() -> eyre
     l1.change_transfer_policy_id(PATH_USD_ADDRESS, policy_id)
         .await?;
 
+    // The Portal cannot inspect an encrypted recipient, so it accepts and escrows the deposit.
+    // Zone execution decrypts the recipient and enforces this authenticated L1 policy state.
+    let rejected_recipient = l1.signer_at(2).address();
+    l1.blacklist_address(policy_id, rejected_recipient).await?;
+    assert!(!l1.is_authorized(policy_id, rejected_recipient).await?);
+
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-
-    // Keep the recipient authorized on Tempo so the portal accepts and escrows
-    // the deposit, while pinning the zone policy view to the rejecting state.
-    let rejected_recipient = l1.admin_address();
-    assert!(l1.is_authorized(policy_id, rejected_recipient).await?);
-    let policy_block = l1.provider().get_block_number().await?;
-    seed_raw_tip403_token_policy(
-        &mut zone.l1_state_cache().lock(),
-        policy_block,
-        PATH_USD_ADDRESS,
-        policy_id,
-    );
-    let blocked_members = [(rejected_recipient, true)];
-    seed_raw_tip403_policy(
-        zone.l1_state_cache(),
-        policy_block,
-        &[PolicySeed::simple(
-            policy_id,
-            PolicyType::BLACKLIST,
-            &blocked_members,
-        )],
-    )?;
 
     let depositor = l1.user_signer();
     let tempo_refund_recipient = depositor.address();
