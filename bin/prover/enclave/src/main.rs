@@ -264,7 +264,7 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
             };
         }
     };
-    let config = SpfConfig::new(Arc::new(zone_spec), request.witness.public_inputs.portal);
+    let config = SpfConfig::new(Arc::new(zone_spec));
 
     let public_inputs = request.witness.public_inputs.clone();
     match prove_zone_batch(&config, request.witness) {
@@ -343,7 +343,7 @@ fn nitro_attestation(_digest: alloy_primitives::B256) -> Result<Vec<u8>, String>
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{Address, B256, Bytes};
+    use alloy_primitives::{B256, Bytes};
     use reth_trie_common::EMPTY_ROOT_HASH;
     use tempo_primitives::TempoHeader;
     use zone_spf::{
@@ -488,7 +488,6 @@ mod tests {
             public_inputs: PublicInputs {
                 parent_chain_id: 42_431,
                 zone_id: 1,
-                portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
                 anchor_block_number: 2,
                 anchor_block_hash: B256::ZERO,

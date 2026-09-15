@@ -11,7 +11,7 @@ use std::{
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
 use alloy_eips::eip2718::Encodable2718 as _;
-use alloy_primitives::{Address, B256, Bytes, keccak256};
+use alloy_primitives::{B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_rlp::Decodable as _;
 use alloy_rpc_types_eth::BlockNumberOrTag;
@@ -138,7 +138,6 @@ struct ValidationStats {
 
 struct ProverContext<P> {
     config: SettlementProverConfig,
-    portal: Address,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 }
@@ -192,14 +191,12 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
 
 pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     config: SettlementProverConfig,
-    portal: Address,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 ) -> SettlementProver {
     SettlementProver {
         sender: spawn_prover(
             config,
-            portal,
             zone_provider,
             l1_provider,
             SETTLEMENT_PROVER_QUEUE_CAPACITY,
@@ -210,14 +207,12 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
 /// Spawn observational validation for finalized RPC-follower submissions.
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
-    portal: Address,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 ) -> ShadowProver {
     ShadowProver {
         sender: spawn_prover(
             config,
-            portal,
             zone_provider,
             l1_provider,
             SHADOW_PROVER_QUEUE_CAPACITY,
@@ -227,7 +222,6 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
 
 fn spawn_prover<P: ZoneSequencerProvider>(
     config: SettlementProverConfig,
-    portal: Address,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
     queue_capacity: usize,
@@ -242,7 +236,6 @@ fn spawn_prover<P: ZoneSequencerProvider>(
     let (sender, mut receiver) = mpsc::channel::<ProverJob>(queue_capacity);
     let context = ProverContext {
         config,
-        portal,
         zone_provider,
         l1_provider,
     };
@@ -519,7 +512,6 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         public_inputs: PublicInputs {
             parent_chain_id: context.config.parent_chain_id,
             zone_id: context.config.zone_id,
-            portal: context.portal,
             tempo_block_number: final_tempo_header.number(),
             anchor_block_number: anchor.block_number(batch.tempo_block_number),
             anchor_block_hash: anchor.block_hash(),
@@ -538,7 +530,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             verify_remotely(address, context.config.zone_id, job, &witness, metrics).await?;
         (output, Some(proof_bundle))
     } else {
-        let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
+        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
         let attempt = witness.clone();
         let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
             .await
@@ -1377,7 +1369,7 @@ mod tests {
             parent_hash: B256::ZERO,
             timestamp: 0,
             timestamp_millis_part: 0,
-            beneficiary: Address::ZERO,
+            beneficiary: alloy_primitives::Address::ZERO,
             tempo_import: TempoImport::Full {
                 header_rlp: Bytes::new(),
                 deposits: Vec::new(),

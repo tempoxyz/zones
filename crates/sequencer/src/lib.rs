@@ -161,12 +161,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     .await
     .expect("valid L1 RPC URL");
     let settlement_prover = prover_config.map(|prover_config| {
-        prover::spawn_settlement_prover(
-            prover_config,
-            config.portal_address,
-            zone_provider.clone(),
-            l1_provider.clone(),
-        )
+        prover::spawn_settlement_prover(prover_config, zone_provider.clone(), l1_provider.clone())
     });
     let sequencer_address = signer.address();
 

@@ -1156,7 +1156,7 @@ pub fn prove_zone_batch(
 ) -> Result<BatchOutput, Error>
 ```
 
-It takes trusted verifier configuration and a complete witness of zone blocks and their dependencies, executes EVM state transitions (including system transactions), and outputs commitments for onchain verification. `SpfConfig` contains the composed `ZoneChainSpec` and expected portal address; `BatchWitness` is untrusted. The function derives the zone chain ID from the witness's parent chain ID and zone ID and requires the derived chain and public portal to match the trusted configuration.
+It takes trusted verifier configuration and a complete witness of zone blocks and their dependencies, executes EVM state transitions (including system transactions), and outputs commitments for onchain verification. `SpfConfig` contains the composed `ZoneChainSpec`; `BatchWitness` is untrusted. The function derives the zone chain ID from the witness's parent chain ID and zone ID and requires the derived chain to match the trusted configuration. The execution portal is derived from the zone ID encoded in the trusted chain specification using the TIP-1091 portal address rule: the 12-byte prefix `0x5ad000000000000000000000` followed by the zone ID encoded as an 8-byte big-endian integer.
 
 The core commitment is the zone block hash transition, not the raw state root.
 
@@ -1164,7 +1164,7 @@ The core commitment is the zone block hash transition, not the raw state root.
 
 The witness contains everything needed to re-execute one batch:
 
-- **PublicInputs**: `parent_chain_id`, `zone_id`, `portal`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, and `expected_withdrawal_batch_index`.
+- **PublicInputs**: `parent_chain_id`, `zone_id`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, and `expected_withdrawal_batch_index`.
 - **BatchWitness**: the public inputs, the canonical parent `TempoHeader`, zone blocks in execution order, the initial zone-state witness, the Tempo-state witness, and optional Tempo ancestry headers used to reach the settlement anchor.
 - **TempoImport**: either a `Full` import containing one header and its portal-work calldata, or a `CheckpointOnly` import containing a bounded consecutive header range.
 - **ZoneBlock**: block metadata, the Tempo import, optional finalization inputs, and raw signed user transaction envelopes.
@@ -1182,7 +1182,7 @@ flowchart TB
     subgraph BW["BatchWitness"]
         direction TB
 
-        PI["PublicInputs<br/>parent_chain_id<br/>zone_id<br/>portal<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index"]
+        PI["PublicInputs<br/>parent_chain_id<br/>zone_id<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index"]
         PH["parent_header: TempoHeader<br/>state_root<br/>number<br/>timestamp<br/>canonical header fields"]
 
         subgraph ZBL["zone_blocks"]
@@ -1228,7 +1228,6 @@ The prover-side inputs are defined concretely below. Types that mirror the oncha
 /// Selected by the verifier rather than supplied by the witness.
 pub struct SpfConfig {
     chain_spec: Arc<ZoneChainSpec>,
-    portal: Address,
 }
 
 /// Public values that the verifier binds to a submitted batch proof.
@@ -1238,9 +1237,6 @@ pub struct PublicInputs {
 
     /// Zone identifier used with parent_chain_id to derive the zone chain ID.
     pub zone_id: u32,
-
-    /// ZonePortal whose state governs Tempo-backed execution.
-    pub portal: Address,
 
     /// Final Tempo checkpoint committed by this batch.
     pub tempo_block_number: u64,
@@ -1401,7 +1397,7 @@ The first submitted batch is represented specially at the portal boundary. Its w
 The stateless execution function must reject the witness on any failed check, missing read, or inconsistent state transition. A correct implementation proceeds in the following order:
 
 1. **Bind trusted zone configuration.**
-   Reject an empty batch. Derive the zone chain ID from `public_inputs.parent_chain_id` and `public_inputs.zone_id` under the rules in [Chain ID](#chain-id), require it to match `config.chain_spec`, and require `public_inputs.portal == config.portal`.
+   Reject an empty batch. Derive the zone chain ID from `public_inputs.parent_chain_id` and `public_inputs.zone_id` under the rules in [Chain ID](#chain-id), require it to match `config.chain_spec`, and derive the canonical TIP-1091 portal from the zone ID in `config.chain_spec`. All portal reads during execution MUST use this derived address.
 
 2. **Initialize the zone state.**
    Apply the [shared trie proof format](#shared-trie-proof-format) to `parent_header.state_root` and `zone_state_witness`. Index the node pool, resolve account and storage values on first access, and require every non-empty code hash to have a matching bytecode preimage. `BLOCKHASH(n)` resolves through the EIP-2935 history contract at slot `n % 8191`; missing trie nodes or bytecode are errors rather than zero values. Capture the pre-state `ZoneInbox.processedDepositQueueHash`, `processedDepositNumber`, and `processedEnabledTokenCount`; these become the previous ends of the public queue transitions.
@@ -1464,7 +1460,6 @@ The Nitro settlement profile uses AWS Nitro Enclaves. After successful replay, t
 struct NitroBatchAttestation {
     uint256 parentChainId;
     address verifier;
-    address portal;
     uint32 zoneId;
     uint64 tempoBlockNumber;
     uint64 anchorBlockNumber;
@@ -1483,9 +1478,9 @@ struct NitroBatchAttestation {
 }
 ```
 
-`verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, portal, and zone prevents cross-domain reuse; binding both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
+`verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, and zone prevents cross-domain reuse because the portal is uniquely derived from the zone ID on that parent chain; binding both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
 
-When checking the attestation, the Nitro verifier MUST reconstruct `parentChainId` from `block.chainid`, `verifier` from `address(this)`, and `portal` from `msg.sender`, and MUST require `zoneId == IZonePortal(msg.sender).zoneId()`. It reconstructs the remaining digest fields from the arguments supplied by `ZonePortal` to `verify`; it MUST NOT trust domain values copied from the proof or prover witness.
+When checking the attestation, the Nitro verifier MUST reconstruct `parentChainId` from `block.chainid`, `verifier` from `address(this)`, and MUST require `msg.sender == portalAddress(zoneId)` using the same canonical TIP-1091 derivation as the SPF. Merely checking `zoneId == IZonePortal(msg.sender).zoneId()` is insufficient because an arbitrary contract can report that ID. It reconstructs the remaining digest fields from the arguments supplied by `ZonePortal` to `verify`; it MUST NOT trust domain values copied from the proof or prover witness.
 
 The prover asks the Nitro Secure Module to place this 32-byte hash in the attestation document's `user_data`. It returns:
 
@@ -1503,7 +1498,7 @@ The Nitro verifier MUST validate the COSE signature and certificate chain, enfor
 
 The settlement prover runs the state transition function inside a Nitro Enclave. The parent node collects the complete `BatchWitness`; the enclave performs no RPC or filesystem reads while handling it. A configured settlement sequencer MUST use a remote attesting prover. In-process execution is available for observational shadow validation but does not produce a settlement proof.
 
-The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by UTF-8 JSON. The request contains `version`, a caller-selected `requestId`, and `witness`. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification and portal independently of the witness.
+The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by UTF-8 JSON. The request contains `version`, a caller-selected `requestId`, and `witness`. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification independently of the witness and derive the portal from its zone ID.
 
 Errors use stable machine-readable categories: `malformed_request`, `unsupported_version`, `unsupported_chain`, `verification_failed`, `attestation_unavailable`, `request_too_large`, `truncated_frame`, and `internal_error`. A successful state transition for which the Nitro Secure Module cannot produce an attestation returns `attestation_unavailable`, not an unattested success.
 

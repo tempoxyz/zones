@@ -872,12 +872,7 @@ where
         if let (Some(runtime_config), Some(submissions)) =
             (shadow_prover_config, finalized_batch_submissions)
         {
-            let prover = spawn_shadow_prover(
-                runtime_config,
-                self.portal_address,
-                provider.clone(),
-                l1_provider.clone(),
-            );
+            let prover = spawn_shadow_prover(runtime_config, provider.clone(), l1_provider.clone());
             task_executor.spawn_critical_task(
                 "rpc-follower-shadow-prover",
                 RpcFollowerShadowProver::new(

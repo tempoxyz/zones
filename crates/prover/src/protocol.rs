@@ -16,7 +16,6 @@ sol! {
     struct NitroBatchAttestation {
         uint256 parentChainId;
         address verifier;
-        address portal;
         uint32 zoneId;
         uint64 tempoBlockNumber;
         uint64 anchorBlockNumber;
@@ -116,14 +115,13 @@ pub enum ErrorCode {
 
 /// Construct the exact digest committed as Nitro attestation `user_data`.
 ///
-/// The calling portal is bound independently of the Zone ID because every portal delegates to the
-/// same fixed verifier. The parent chain, verifier, and portal prevent cross-domain replay; every
-/// portal-facing commitment prevents reuse for a different batch.
+/// The parent chain, verifier, and Zone ID prevent cross-domain replay. The verifier must
+/// require its caller to be the canonical portal derived from the Zone ID. Every portal-facing
+/// commitment prevents reuse for a different batch.
 pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &BatchOutput) -> B256 {
     let attestation = NitroBatchAttestation {
         parentChainId: alloy_primitives::U256::from(public_inputs.parent_chain_id),
         verifier: ZONE_VERIFIER_ADDRESS,
-        portal: public_inputs.portal,
         zoneId: public_inputs.zone_id,
         tempoBlockNumber: public_inputs.tempo_block_number,
         anchorBlockNumber: public_inputs.anchor_block_number,
@@ -199,17 +197,29 @@ mod tests {
 
         let public_inputs = PublicInputs {
             parent_chain_id: 42_431,
-            portal: alloy_primitives::address!("0x1111111111111111111111111111111111111111"),
             zone_id: 12,
             tempo_block_number: 9,
             anchor_block_number: 10,
             anchor_block_hash: B256::with_last_byte(11),
             expected_withdrawal_batch_index: 13,
         };
+        assert!(
+            serde_json::to_value(&public_inputs)
+                .unwrap()
+                .get("portal")
+                .is_none()
+        );
+        let digest = nitro_batch_attestation_hash(&public_inputs, &output);
+        let mut other_zone = public_inputs.clone();
+        other_zone.zone_id += 1;
+        assert_ne!(nitro_batch_attestation_hash(&other_zone, &output), digest);
+        let mut other_parent = public_inputs.clone();
+        other_parent.parent_chain_id += 1;
+        assert_ne!(nitro_batch_attestation_hash(&other_parent, &output), digest);
         assert_eq!(
             nitro_batch_attestation_hash(&public_inputs, &output),
             alloy_primitives::b256!(
-                "0xdf555b114bb028244692775b994c6a766999bd3f68307c9985fcf0122c449b01"
+                "0xc01ffd959ca368959c0724a9de479a8fc678f36ff608cc0565f6cfd86e98202e"
             ),
         );
     }
@@ -238,7 +248,6 @@ mod tests {
         };
         let public_inputs = PublicInputs {
             parent_chain_id: 1,
-            portal: alloy_primitives::Address::ZERO,
             zone_id: 1,
             tempo_block_number: 1,
             anchor_block_number: 1,
