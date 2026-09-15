@@ -181,6 +181,75 @@ async fn l1_block_tracker_waits_for_exact_observation() {
     waiter.await.unwrap().unwrap();
 }
 
+#[test]
+fn l1_block_tracker_keeps_the_newest_portal_pause_state() {
+    let tracker = L1BlockTracker::default();
+
+    assert!(!tracker.portal_paused());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(11, B256::with_last_byte(11)), true)
+            .unwrap()
+    );
+    assert!(tracker.portal_paused());
+
+    assert!(
+        !tracker
+            .observe_portal_pause(NumHash::new(10, B256::with_last_byte(10)), false)
+            .unwrap()
+    );
+    assert!(tracker.portal_paused());
+
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(12, B256::with_last_byte(12)), false)
+            .unwrap()
+    );
+    assert!(!tracker.portal_paused());
+}
+
+#[test]
+fn l1_block_tracker_rejects_conflicting_pause_snapshots() {
+    let tracker = L1BlockTracker::default();
+    let block = NumHash::new(11, B256::repeat_byte(1));
+    assert!(tracker.observe_portal_pause(block, true).unwrap());
+    assert!(!tracker.observe_portal_pause(block, true).unwrap());
+    assert!(tracker.observe_portal_pause(block, false).is_err());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(11, B256::repeat_byte(2)), false)
+            .is_err()
+    );
+    assert!(tracker.portal_paused());
+    assert!(tracker.validate_portal_absence().is_err());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(12, B256::repeat_byte(3)), false)
+            .unwrap()
+    );
+    assert!(!tracker.portal_paused());
+}
+
+#[tokio::test]
+async fn l1_block_tracker_notifies_pause_state_subscribers() {
+    let tracker = L1BlockTracker::default();
+    let mut changes = tracker.subscribe_changes();
+
+    for (number, paused) in [(11, true), (12, false)] {
+        tracker
+            .observe_portal_pause(
+                NumHash::new(number, B256::with_last_byte(number as u8)),
+                paused,
+            )
+            .unwrap();
+        changes
+            .changed()
+            .await
+            .expect("pause-state subscription must remain open");
+        assert_eq!(tracker.portal_paused(), paused);
+    }
+}
+
 #[tokio::test]
 async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
     let tracker = L1BlockTracker::default();
@@ -210,11 +279,14 @@ fn l1_block_tracker_retains_authenticated_portal_logs_after_consumption() {
         Default::default(),
     );
     tracker
-        .record_with_portal_evidence(
+        .record_observation(
             anchor,
-            parent_hash,
             L1PortalEvents::default(),
-            vec![log.clone()],
+            Some(AuthenticatedPortalLogs {
+                block: anchor,
+                parent_hash,
+                logs: vec![log.clone()],
+            }),
         )
         .unwrap();
 
@@ -368,7 +440,7 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
     assert!(
         skipped
             .to_string()
-            .contains("non-contiguous first L1 observation")
+            .contains("non-contiguous L1 observation: expected 11, got 12")
     );
     assert_eq!(tracker.latest(), None);
     assert_eq!(tracker.next_observation_number(), Some(11));
@@ -748,25 +820,26 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 
 #[tokio::test]
 async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
-    let subscriber = test_subscriber(9);
+    let checkpoint = seal(make_test_header(9)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
 
-    let header_10 = make_test_header(10);
+    let header_10 = make_chained_header(10, checkpoint.hash);
     let header_11 = make_chained_header(11, header_hash(&header_10));
     let header_12 = make_chained_header(12, header_hash(&header_11));
     let anchor_12 = seal(header_12.clone()).num_hash();
 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
-    push_header_and_empty_receipts(&asserter, header_10);
+    push_header_and_empty_receipts(&asserter, header_10.clone());
 
     // One newHeads notification wakes the subscriber. The finalized tag has
     // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
-    push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
+    push_header_and_empty_receipts(&asserter, header_11.clone());
+    push_header_and_empty_receipts(&asserter, header_12.clone());
 
     let err = subscriber
         .follow_finalized(&l1_provider, Box::pin(futures::stream::iter([()])))
@@ -1662,7 +1735,10 @@ fn extracts_finalized_batch_submission_for_observer() {
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let submissions = subscriber
+        .extract_events(block, &[receipt])
+        .unwrap()
+        .finalized_batches;
 
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].block, block);
@@ -1711,7 +1787,10 @@ fn finalized_batch_observer_ignores_rpc_log_metadata() {
     );
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let submissions = subscriber
+        .extract_events(block, &[receipt])
+        .unwrap()
+        .finalized_batches;
 
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].block, block);
@@ -1748,10 +1827,11 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs, _) = subscriber.extract_events(block, &[receipt]).unwrap();
-    assert!(events.deposits.is_empty());
-    assert!(events.leader_transitions.is_empty());
-    assert_eq!(portal_logs.unwrap().len(), 1);
+    let processed = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert!(processed.portal_events.deposits.is_empty());
+    assert!(processed.portal_events.leader_transitions.is_empty());
+    assert_eq!(processed.portal_pause, None);
+    assert_eq!(processed.portal_logs.unwrap().len(), 1);
 }
 
 #[test]
@@ -1787,9 +1867,10 @@ fn pause_events_invalidate_cached_portal_storage() {
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
     let block = NumHash::new(1, B256::with_last_byte(0x10));
-    let (_, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
-    assert!(invalidated.contains(&portal));
-    subscriber.update_l1_state_anchor(1, &invalidated);
+    let processed = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert!(processed.portal_pause.unwrap());
+    assert!(processed.invalidated.contains(&portal));
+    subscriber.update_l1_state_anchor(1, &processed.invalidated);
     assert_eq!(
         subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
         None
@@ -1928,7 +2009,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(header_response(header_10.clone())));
-    asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(vec![receipt.clone()]));
 
     assert_eq!(
         subscriber
@@ -1992,4 +2073,113 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
     assert_eq!(subscriber.block_tracker.latest(), None);
+}
+
+#[tokio::test]
+async fn subscriber_rejects_the_wrong_header_number_before_publishing() {
+    let subscriber = test_subscriber(9);
+    let asserter = Asserter::new();
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(make_test_header(10))));
+    asserter.push_success(&Some(header_response(make_test_header(11))));
+    let error = subscriber
+        .sync_finalized_once(&provider, 10)
+        .await
+        .unwrap_err();
+    assert!(!error.should_retry());
+    assert!(
+        error
+            .to_string()
+            .contains("requested L1 block 10, received 11")
+    );
+    assert!(subscriber.block_tracker.latest().is_none());
+    assert!(subscriber.deposit_queue.last_enqueued().is_none());
+    assert!(!subscriber.block_tracker.portal_paused());
+    assert!(asserter.read_q().is_empty());
+}
+
+/// A portal pause stops consumption, so the single ingestion pipeline wedges at the lookahead
+/// bound without fetching past it. Once the finalized-state poller clears the gate and the
+/// consumer releases capacity, the same pipeline continues contiguously: nothing was dropped, so
+/// no historical replay is required.
+#[tokio::test]
+async fn paused_subscriber_wedges_at_lookahead_then_resumes_contiguously() {
+    let checkpoint = seal(make_test_header(0)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
+    let tracker = subscriber.block_tracker.clone();
+    let queue = subscriber.deposit_queue.clone();
+    tracker.observe_portal_pause(checkpoint, true).unwrap();
+    assert_eq!(subscriber.next_block_to_sync().unwrap(), 1);
+
+    let tip = MAX_L1_LOOKAHEAD_BLOCKS + 1;
+    let mut parent = checkpoint.hash;
+    let mut headers = Vec::new();
+    for number in 1..=tip {
+        let header = make_chained_header(number, parent);
+        parent = header_hash(&header);
+        headers.push(header);
+    }
+    let asserter = Asserter::new();
+    asserter.push_success(&Some(header_response(headers.last().unwrap().clone())));
+    for header in &headers[..headers.len() - 1] {
+        push_header_and_empty_receipts(&asserter, header.clone());
+    }
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let sync = subscriber.sync_finalized_once(&provider, 1);
+    tokio::pin!(sync);
+    let mut changes = tracker.subscribe_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut sync => panic!("ingestion must wedge at the lookahead bound: {result:?}"),
+            () = async {
+                while tracker.latest().is_none_or(|latest| latest.number < tip - 1) {
+                    changes.changed().await.unwrap();
+                }
+            } => {}
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut sync)
+            .await
+            .is_err(),
+        "ingestion must wedge at the lookahead bound while nothing is consumed"
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.latest().map(|block| block.number), Some(tip - 1));
+    assert_eq!(
+        queue.last_enqueued().map(|block| block.number),
+        Some(tip - 1)
+    );
+    assert!(!tracker.has_capacity_for(tip));
+    assert!(
+        asserter.read_q().is_empty(),
+        "the block beyond the lookahead must not be fetched while wedged"
+    );
+
+    // The poller observes resume (or expiry) independently of ingestion, the engine consumes the
+    // first queued anchor, and pruning releases exactly one block of capacity.
+    tracker
+        .observe_portal_pause(NumHash::new(tip, parent), false)
+        .unwrap();
+    let first = queue.peek().unwrap().header.num_hash();
+    queue.confirm(first).unwrap();
+    tracker.prune_through(first.number);
+    push_header_and_empty_receipts(&asserter, headers.last().unwrap().clone());
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), &mut sync)
+            .await
+            .unwrap()
+            .unwrap(),
+        tip + 1
+    );
+    assert!(!tracker.portal_paused());
+    assert_eq!(tracker.latest(), Some(NumHash::new(tip, parent)));
+    assert_eq!(queue.last_enqueued(), Some(NumHash::new(tip, parent)));
+    assert!(asserter.read_q().is_empty());
 }

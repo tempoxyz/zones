@@ -16,9 +16,9 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use alloy_consensus::{BlockHeader as _, Sealable as _};
+use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockNumberOrTag, NumHash};
-use alloy_network::{ReceiptResponse as _, primitives::HeaderResponse as _};
+use alloy_network::ReceiptResponse as _;
 use alloy_primitives::{Address, B256, Bloom, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
@@ -69,8 +69,8 @@ pub(crate) mod rpc {
 use crate::abi::{
     Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
-        WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, LeaderUpdated, PortalPaused, PortalResumed, SequencerEncryptionKeyUpdated,
+        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 

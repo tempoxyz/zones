@@ -82,12 +82,14 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 5] = [
+    const SIGNATURE_HASHES: [B256; 7] = [
         DepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerEncryptionKeyUpdated::SIGNATURE_HASH,
         LeaderUpdated::SIGNATURE_HASH,
+        PortalPaused::SIGNATURE_HASH,
+        PortalResumed::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -139,14 +141,15 @@ impl L1PortalEvents {
     ///
     /// Logs whose topic0 does not match a known portal event are skipped.
     /// Known events that fail to decode return an error.
-    pub fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<()> {
+    /// Portal-wide pause and resume events return the new paused state.
+    pub(crate) fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<Option<bool>> {
         if !Self::is_known_event(log) {
             debug!(
                 l1_block = block_number,
                 topic0 = ?log.topic0(),
                 "Skipping unknown portal event"
             );
-            return Ok(());
+            return Ok(None);
         }
         match ZonePortalEvents::decode_log(&log.inner)?.data {
             ZonePortalEvents::DepositMade(event) => {
@@ -220,9 +223,25 @@ impl L1PortalEvents {
                     activation_tempo_block: event.activationTempoBlock,
                 });
             }
+            ZonePortalEvents::PortalPaused(event) => {
+                info!(
+                    l1_block = block_number,
+                    account = %event.account,
+                    "Portal-wide pause observed on L1"
+                );
+                return Ok(Some(true));
+            }
+            ZonePortalEvents::PortalResumed(event) => {
+                info!(
+                    l1_block = block_number,
+                    account = %event.account,
+                    "Portal-wide resume observed on L1"
+                );
+                return Ok(Some(false));
+            }
             _ => {}
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Return the leadership transition in this block, if any.
