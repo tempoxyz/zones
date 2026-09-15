@@ -10,6 +10,8 @@ import {
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptionKeyEntry,
+    ForcedExit,
+    ForcedExitMetadata,
     IVerifier,
     IZoneMessenger,
     IZonePortal,
@@ -51,6 +53,9 @@ contract ZonePortal is IZonePortal {
     ///      This provides a stable pricing basis for deposits while allowing the admin
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
+
+    /// @notice Fixed TIP-1012 compensation in six-decimal token base units.
+    uint128 public constant FORCED_EXIT_COMPENSATION = 100_000;
 
     /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
@@ -222,6 +227,18 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Time after which the corresponding configuration surface is permanently closed.
     mapping(Capability => uint64) public abdicationEffectiveAt;
+
+    /// @dev Slot 28 belongs to TIP-1096's token cursor in the T13 runtime. Reserve the entire
+    ///      slot here so a main-based build never aliases that upgrade's appended storage.
+    ///      This will need to be conflict-resolved before merging.
+    uint256 private _reservedT13TokenCursor;
+
+    /// @notice Protocol admission version. Zero disables forced exits.
+    /// @dev No public setter: only a coordinated protocol upgrade may activate admission after
+    ///      all nodes support execution and settlement. Existing/new portals remain disabled.
+    uint64 public forcedExitVersion;
+    uint64 public forcedExitCount;
+    mapping(uint64 requestId => ForcedExitMetadata) public forcedExitRequests;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -987,6 +1004,72 @@ contract ZonePortal is IZonePortal {
         return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
+    /// @inheritdoc IZonePortal
+    function requestForcedExit(
+        address token,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted
+    )
+        external
+        whenNotPaused
+        returns (uint64 requestId, uint64 depositNumber)
+    {
+        if (forcedExitVersion != 1) revert ForcedExitsNotActive();
+        _requireAllowedDepositor(msg.sender);
+
+        // Enabled tokens have already passed the native TIP-20 factory validation. TIP-20
+        // decimals are fixed at six. depositsActive controls principal deposits only.
+        if (!_tokenConfigs[token].enabled) revert TokenNotEnabled();
+        if (
+            !Secp256k1Lib.isCompressedYParity(encrypted.ephemeralPubkeyYParity)
+                || !Secp256k1Lib.isValidX(encrypted.ephemeralPubkeyX)
+        ) {
+            revert InvalidEphemeralPubkey();
+        }
+        uint256 length = encrypted.ciphertext.length;
+        if (length < 384 || length > 2368 || length % 32 != 0) {
+            revert InvalidForcedExitCiphertextLength(length);
+        }
+        _validateEncryptionKey(keyIndex);
+
+        // Native TIP-20 calls revert on failure, which reverts this whole transaction.
+        ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION);
+        ITIP20(token).transfer(admin, FORCED_EXIT_COMPENSATION);
+
+        requestId = ++forcedExitCount;
+        ForcedExit memory entry = ForcedExit({
+            requestId: requestId,
+            token: token,
+            keyIndex: keyIndex,
+            encrypted: encrypted,
+            feePayer: msg.sender,
+            requestedAtBlock: uint64(block.number),
+            requestedAtTime: uint64(block.timestamp)
+        });
+
+        // Ordinary deposits, withdrawal bounce-backs, and forced-exit requests all enter 
+        // the same ordered inbox queue.
+        depositNumber = _recordDeposit(
+            DepositQueueLib.enqueueForcedExit(currentDepositQueueHash, entry),
+            MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+        );
+        forcedExitRequests[requestId] = ForcedExitMetadata(token, depositNumber);
+
+        emit ForcedExitRequested(depositNumber, entry);
+    }
+
+    function _validateEncryptionKey(uint256 keyIndex) internal view {
+        (bool valid,) = isEncryptionKeyValid(keyIndex);
+        if (!valid) {
+            if (keyIndex >= _encryptionKeys.length) {
+                revert InvalidEncryptionKeyIndex(keyIndex);
+            }
+            EncryptionKeyEntry storage key = _encryptionKeys[keyIndex];
+            EncryptionKeyEntry storage nextKey = _encryptionKeys[keyIndex + 1];
+            revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
+        }
+    }
+
     function _deposit(
         address _token,
         uint128 amount,
@@ -1027,16 +1110,7 @@ contract ZonePortal is IZonePortal {
             );
         }
 
-        // Validate encryption key
-        (bool valid,) = isEncryptionKeyValid(keyIndex);
-        if (!valid) {
-            if (keyIndex >= _encryptionKeys.length) {
-                revert InvalidEncryptionKeyIndex(keyIndex);
-            }
-            EncryptionKeyEntry storage key = _encryptionKeys[keyIndex];
-            EncryptionKeyEntry storage nextKey = _encryptionKeys[keyIndex + 1];
-            revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
-        }
+        _validateEncryptionKey(keyIndex);
 
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 

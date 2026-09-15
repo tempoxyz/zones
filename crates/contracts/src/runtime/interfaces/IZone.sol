@@ -90,7 +90,8 @@ struct DepositQueueTransition {
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
     WithdrawalBounceBack, // Internal withdrawal bounce-back entry
-    Deposit // User deposit with hidden recipient and memo
+    Deposit, // User deposit with hidden recipient and memo
+    ForcedExit // Root-authorized full-balance withdrawal request
 }
 
 struct WithdrawalBounceBackDeposit {
@@ -125,6 +126,60 @@ struct Deposit {
     address tempoRefundRecipient; // Tempo recipient for a failed-deposit refund
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     DepositPayload encrypted; // Encrypted (to, memo)
+}
+
+/// @notice Root authorization encrypted inside a forced-exit request.
+struct ForcedExitAuthorization {
+    address account;
+    uint256 zoneChainId;
+    address token;
+    address recipient;
+    uint256 nonce;
+    uint64 admitBefore;
+}
+
+/// @notice Complete public entry committed to the mixed inbox queue.
+struct ForcedExit {
+    uint64 requestId;
+    address token;
+    uint256 keyIndex;
+    DepositPayload encrypted;
+    address feePayer;
+    uint64 requestedAtBlock;
+    uint64 requestedAtTime;
+}
+
+enum ForcedExitStatus {
+    Exited,
+    Empty,
+    Rejected
+}
+
+/// @notice TIP-1012 reason assignments; encoded as uint16 in outcomes.
+enum ForcedExitReason {
+    None,
+    InvalidPayload,
+    InvalidAuthorization,
+    NonceAlreadyConsumed,
+    BalanceOverflow,
+    PolicyRejected
+}
+
+struct ForcedExitOutcome {
+    uint64 requestId;
+    uint64 depositNumber;
+    address token;
+    address recipient;
+    ForcedExitStatus status;
+    uint16 reason;
+    uint128 amount;
+    bytes32 withdrawalHash;
+}
+
+/// @notice Admission identity retained for subsequent outcome validation.
+struct ForcedExitMetadata {
+    address token;
+    uint64 depositNumber;
 }
 
 /// @notice Historical record of an encryption key with its activation block
@@ -413,6 +468,21 @@ struct TokenConfig {
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
 
+    event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
+    event ForcedExitOutcomes(uint64 indexed withdrawalBatchIndex, ForcedExitOutcome[] outcomes);
+
+    /// @notice Queue an encrypted root authorization; processing is performed by the Zone.
+    /// @dev Requires protocol activation, an unpaused portal, an eligible fee payer, an enabled
+    ///      token, a valid bounded envelope/key, and shared public inbox capacity.
+    ///      Collects 100_000 base units from msg.sender and immediately pays the portal admin.
+    function requestForcedExit(
+        address token,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted
+    )
+        external
+        returns (uint64 requestId, uint64 depositNumber);
+
     /// @notice Emitted after a batch is accepted by `submitBatch`.
     /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
     ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
@@ -552,6 +622,8 @@ interface IZonePortal {
     error NoEncryptionKeyAtBlock(uint64 blockNumber);
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
+    error InvalidForcedExitCiphertextLength(uint256 actual);
+    error ForcedExitsNotActive();
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);
