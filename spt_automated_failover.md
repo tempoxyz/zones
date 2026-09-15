@@ -2,12 +2,13 @@
 
 ```mermaid
 sequenceDiagram
+    participant C as External controller
     participant A as Outgoing leader
     participant Q as Surviving sequencers
     participant L as ZonePortal
     participant B as Successor
     alt Planned shutdown
-        A->>Q: Request leadership transfer
+        C->>A: Keep process alive and request leadership transfer
     else Chain stops advancing
         Q->>Q: Detect stalled block production and start recovery
     end
@@ -21,319 +22,207 @@ sequenceDiagram
 
 ## Motivation
 
-The production permit assigns each Tempo anchor to one leader, but the system is missing automatic failover when that leader exits or stops responding. A shutdown hook can coordinate a healthy leader's departure, but OOM, partition, or a handoff that exceeds its deadline requires surviving sequencers to recover without that process. The recommended hardfork adds quorum-backed recovery from an agreed checkpoint and makes block durability part of the commit rule; the existing portal can support graceful handoff as an interim implementation but cannot by itself provide that recovery guarantee.
+The production permit assigns each Tempo anchor to one leader, but the system is missing automatic failover when that leader exits or stops responding. The departing process is the wrong owner for failover because crashes, OOM, host loss, and hard kills remove it before any callback can run. A controller outside the Zone process can coordinate a healthy drain and detect abrupt loss without changing Reth. The recommended hardfork adds quorum-backed recovery from an agreed checkpoint and makes block durability part of the commit rule; the existing portal can support controller-driven graceful handoff as an interim implementation but cannot by itself provide that recovery guarantee.
 
 ## Leader Handoff
 
-Keep L1 finality as the authority for a new leader, and add a certified recovery transition that assigns the successor the first anchor after a preserved checkpoint even when that anchor predates the leadership transaction. Both graceful transfer and abrupt failure use this transition after the hardfork. A healthy leader can keep producing during preparation, but production pauses when the quorum closes its epoch and resumes after the new transition finalizes. This pause removes the requirement that the outgoing process survive until L1 completes.
+Keep L1 finality as the authority for a new leader, and add a certified recovery transition that assigns the successor the first anchor after a preserved checkpoint even when that anchor predates the leadership transaction. Both graceful transfer and abrupt failure use this transition after the hardfork. Before the hardfork, the external controller uses ordinary `setLeader` only while the old leader is healthy and uses the existing forced-recovery workflow after a crash. A healthy leader can keep producing during preparation, but production pauses when the quorum closes its epoch and resumes after the new transition finalizes. This pause removes the requirement that the outgoing process survive until L1 completes.
 
 The existing portal sets activation to `block.number` in [`_setLeader`](crates/contracts/src/runtime/tempo/ZonePortal.sol), while [`ProductionPermit::check`](crates/node/src/engine.rs) and the role controller advance by the next Tempo anchor. If A last produced anchor 100 and its replacement transaction activates at 110, B cannot produce 101–109 under the ordinary schedule. The current manifest recovery override fills that gap by assigning a chosen leader from a canonical checkpoint, but its safety relies on operator coordination; `canonical_recovery_height` explicitly establishes only local ancestry.
 
-## Graceful Handoff
+## External Failover Controller
 
-The outgoing leader starts the transfer while it can still produce blocks. With the current portal, it continues through the L1-selected activation boundary as shown below; with the certified checkpoint transition, it stops at the agreed checkpoint and surviving sequencers finish the transfer even if its shutdown deadline expires.
+The controller runs outside every Zone process and owns graceful termination orchestration, health detection, candidate selection, transaction identity, and the failover deadline. Reth remains pinned at its current revision and keeps its current signal, panic, cancellation, and shutdown behavior.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant E as Recoverable exit source
-    participant R as Runtime
-    participant A as Outgoing sequencer
-    participant B as Replacement sequencer
-    participant P as Finalized on-chain authority
+    participant S as Process supervisor
+    participant C as Failover controller
+    participant A as Current leader
+    participant B as Replacement
+    participant P as Finalized ZonePortal
 
-    E->>R: Signal, command exit, error, or supervised panic
-    R->>R: Preserve first exit reason and hold global cancellation
-    R->>A: Start one coordinator with a 15-second total deadline
-    A->>A: Canonicalize a new block while still authorized
-    A->>B: Check identity, readiness, authority version, key state, and prefix
-    B-->>A: Report readiness and the same post-trigger checkpoint
-
-    alt No replacement proves the new checkpoint
-        A-->>R: Normal handoff is unsafe and requires checkpoint recovery
-    else A replacement is viable
-        Note over A,B: Preparation failures may try the next configured candidate
-        A->>P: Invoke one version-fenced leadership change
-        Note over A,P: The target is immutable from provider invocation onward
-        par Outgoing work while authority is pending
-            A->>A: Produce every block still assigned to A
-        and Authority transition
-            P-->>A: Inclusion receipt does not prove success
-            P-->>A: Finalized activation block H
-            P-->>B: Finalized activation block H
-        end
-        A->>A: Production permit rejects H and later
-        B->>B: Production permit allows H and later
-        B->>B: Canonicalize H or a later block on A's exact prefix
-        B-->>A: Prove finalized authority, local canonical production, and checkpoint ancestry
-        alt Required proof arrives before the shared deadline
-            A-->>R: Handoff complete
-        else Revert, ambiguity, external winner, inconsistent proof, or timeout
-            A-->>R: Handoff unproven and target remains fixed
-        end
+    alt Planned termination
+        S->>C: Request drain of A
+        C->>A: Read baseline status
+        C->>C: Keep A running; do not deliver SIGTERM yet
+        A-->>C: Report a newer canonical local-production checkpoint
+        C->>B: Probe readiness and exact checkpoint
+        B-->>C: Report matching identity, authority, and prefix
+        C->>A: Invoke one epoch-fenced setLeader(B)
+        P-->>C: Finalize B at activation H
+        B-->>C: Prove local canonical production at or after H
+        C-->>S: Drain complete; terminate A
+    else Crash or failed health check
+        C->>A: Probe
+        A--xC: Unavailable or unable to extend the chain
+        C->>C: Do not call ordinary setLeader
+        C->>B: Collect survivor checkpoints
+        C-->>S: Start existing forced-recovery workflow
     end
-    R->>R: Preserve the original result and begin normal shutdown
 ```
 
-One coordinator owns the in-process handoff state and its monotonic deadline, but production authority remains entirely with the existing portal transition: the coordinator submits the change and reports success only after it observes finalized authority and canonical production by the replacement.
+The controller never infers safety from a Unix exit reason. A planned drain is a control-plane request made before the supervisor signals the process. A crash is inferred from bounded health and chain-progress observations after A is already unavailable or unusable. Both cases use the same manifest-derived successor preference, but only the healthy path may use the existing portal handoff.
 
-### Handoff Triggers and Eligibility
+### Candidate Discovery from the Manifest
 
-The Reth runner records the first exit reason and passes it to one opt-in async hook before global cancellation. After the Zone node registers that hook, Reth invokes it for every exit path that remains observable in-process:
+The manifest already contains the candidate name, Ed25519 identity, individual secp256k1 address, quorum standing, and stable node order. It does not contain an operator HTTP endpoint: `nodes[].address` is the Commonware P2P `host:port`, whose protocol, port, TLS policy, and routing cannot safely imply an operator RPC URL.
 
-- SIGTERM received from any sender;
-- SIGINT received from any sender;
-- clean or error completion of the node command future;
-- a panic unwound from the node command future; and
-- `PanickedTaskError` from any task registered with Reth's critical-task APIs.
+Add an optional operational field:
 
-The hook never changes the exit result: signal and command outcomes retain their current semantics, while panics remain nonzero failures.
+```toml
+[[nodes]]
+name = "follower-a"
+ed25519_public_key = "0xfa..."
+secp256k1_address = "0x2222222222222222222222222222222222222222"
+address = "follower-a.zone.internal:9200"
+operator_rpc_url = "https://follower-a-operator.zone.internal"
+```
 
-| Exit source | Handoff behavior |
+`operator_rpc_url` is excluded from the membership digest and every consensus, settlement, and P2P namespace calculation. Existing manifests remain valid. A quorum node without the field remains a member but is ineligible as an automatic candidate because the controller cannot inspect it. RPC-only nodes may carry an endpoint for observation but are never promotion candidates.
+
+The controller derives candidates by iterating manifest nodes in file order, excluding the finalized current leader and `rpc_only` entries, then retaining nodes with a valid HTTP(S) `operator_rpc_url` and a secp256k1 address that finalized `ZonePortal` still reports active. Manifest order is the deterministic failover preference; RPC completion order never changes it. This removes `--sequencer.handoff-candidate` and its environment variable entirely.
+
+### Controller Triggers and Ownership
+
+For planned maintenance, the supervisor calls the controller first and does not send SIGTERM to A until the controller returns or its 15-second graceful-drain deadline expires. The controller records one operation ID, one baseline checkpoint, and one immutable target after provider invocation. Duplicate drain requests join the same operation.
+
+For unplanned failure, the controller combines process health with missing canonical progress. A failed health check alone never grants production authority. If A cannot return and extend a canonical checkpoint, the controller cannot safely use ordinary `setLeader`: its activation anchor may leave earlier A-owned anchors unfilled. It instead gathers exact matching checkpoints from the surviving quorum and enters the existing forced-recovery deployment workflow. Before the hardfork this controller is a trusted operator automation boundary; it must not choose a checkpoint from height alone or restart only part of the fleet.
+
+| Trigger | Required behavior |
 | --- | --- |
-| SIGTERM or SIGINT | Tokio delivers the signal to the runner, which invokes the registered hook once before global cancellation. |
-| Node command returns `Ok` or `Err` | The runner invokes the registered hook once before returning the original command result. |
-| Node command or registered critical task unwinds | The runner invokes the hook outside the failed future and preserves the panic result without assuming that the failed component remains usable. |
-| SIGKILL, aborting panic, OOM/segfault, host loss, or unmonitored task panic | The departing process cannot invoke the hook; recovery is operator-coordinated before the hardfork and survivor-driven afterward. |
-
-When a critical task panics, the task manager reports the failure without releasing global shutdown until the bounded hook finishes; the runner invokes the hook outside the failed task, catches a second unwind from the hook, and still returns the original panic as a failure. Every Zone task whose loss should terminate the node must therefore use Reth's critical-task API or an equivalent supervisor, because Reth cannot initiate handoff for a panic it never observes.
-
-`crates/node/src/role.rs` currently contains a leader-generation child panic by tearing down and restarting the complete generation, so a successful restart remains local recovery rather than a process handoff. If teardown or restart cannot be proved complete, the role controller must report a fatal outcome to Reth; implementation must also inventory every Zone spawn site and classify detached work as critical, explicitly supervised, or non-fatal so that a safety-critical panic cannot disappear outside the exit path.
-
-Startup failures before hook registration and Reth binaries that never register a hook retain the current shutdown behavior, which keeps this change scoped to the Zone node lifecycle rather than adding process-global panic handling.
+| Planned drain request while A is healthy | Keep A running, prove new canonical progress and successor observation, submit one normal handoff, prove B production, then signal A. |
+| A exits cleanly before the drain completes | Stop the normal handoff attempt and enter forced recovery; the process result needs no interpretation. |
+| Panic, OOM, SIGKILL, host loss, or failed health with stalled progress | Enter forced recovery without requiring code in A to execute. |
+| Health probe fails but canonical progress continues | Do not fail over; classify the controller path or endpoint as degraded. |
+| Canonical progress stalls but A remains reachable | Do not call `setLeader`; collect diagnostic state and enter forced recovery if the bounded policy confirms the stall. |
+| Duplicate or racing controller triggers | Reuse the persisted operation ID and never create another target or logical submission. |
 
 ### Canonical Prefix Requirement
 
 `setLeader` changes ownership at activation anchor H but cannot fill an earlier anchor assigned to A, so B remains fenced if A stops before completing the prefix through H-1.
 
-Before invoking the provider, A must canonicalize a newly available anchor after the first exit reason is recorded, publish the local marker, and receive B's report that it observed the same block. This post-trigger proof covers the engine, finalized-L1 subscription, role controller, persistence, and P2P delivery as one usable production path; the coordinator cannot infer that path is healthy from a signal alone, and it cannot complete the proof when no new anchor arrives before the deadline.
+For a planned drain, the controller records A's `last_locally_produced`, waits for a strictly newer marker, verifies it through canonical block-by-number, and requires B to return the same block at that height before invoking the provider. This proves the production and replication path while A is deliberately kept alive. If the proof fails, the controller sends no ordinary handoff transaction and reports that forced recovery is required.
 
-If a required component has failed or the proof does not complete within the shared deadline, the coordinator skips `setLeader`, records `forced_recovery_required`, and returns the original exit result so the existing procedure can select a common checkpoint. Before the hardfork this requires operator coordination; after activation, surviving sequencers run the recovery protocol below.
+For an abrupt crash there is no post-trigger A proof. The controller must not pretend that a pre-crash tip closes A's assigned prefix. It selects a common survivor checkpoint only through the existing forced-recovery procedure before the hardfork, or through certified quorum recovery after activation.
 
-Automatic handoff is opt-in through an ordered candidate list:
+### Replacement Readiness and Selection
 
-```text
---sequencer.handoff-candidate b=https://zone-b-private.example
---sequencer.handoff-candidate c=https://zone-c-private.example
---sequencer.handoff-timeout 15s
-```
+Candidate probes run concurrently under one deadline, while selection follows manifest order. A candidate must report:
 
-The feature requires manifest mode, and an empty list preserves current behavior; startup rejects duplicate names, the local node, unknown manifest members, RPC-only members, invalid HTTP(S) URLs, and a zero timeout.
-
-### Replacement Selection
-
-The coordinator may probe candidates concurrently to stay within the deadline, but it always selects the first eligible candidate in configured order, independent of RPC completion order.
-
-B must report:
-
-- the configured node name, Zone ID, portal address, membership digest, and pinned set version expected by A;
-- an active quorum identity, not the local node or an RPC-only member;
-- the same finalized leader and epoch as A;
-- follower role, promotion readiness, and no pending leadership transition;
+- the manifest node name, Ed25519 identity, Zone ID, portal address, membership digest, and pinned set version expected by the controller;
+- an individual secp256k1 identity that matches the manifest and remains an active portal sequencer;
+- follower role, promotion readiness, no pending leadership transition, and the same finalized leader and epoch;
 - the active finalized deposit-decryption key;
-- a canonical tip at most one block behind A, with the same block hash as A at B's height.
+- a canonical tip at most one block behind A, with the same hash as A at that height; and
+- the exact canonical post-drain checkpoint produced by A.
 
-These readiness fields establish that B can take over from A's current chain state, but they do not replace the post-trigger production proof or make an incomplete A-owned prefix safe to hand off.
+A forged operator response can prevent a graceful handoff but cannot grant production authority: the portal validates membership and epoch fencing, A signs the normal transition, and each node's production permit follows finalized authority.
 
-The status RPC remains a private operator endpoint: a forged response within that deployment boundary can prevent handoff, but portal membership, A's signing key, and the local production permit prevent it from granting B production authority.
+### Leader Change and Success Proof
 
-### Leader Change Submission
-
-Immediately before sending, A re-reads the finalized portal leader and epoch and calls the contract only if A remains leader and B remains active:
+Immediately before submission, the controller asks A to re-read finalized portal membership, leader, epoch, and its committed `ADMIN_OPS_NONCE_KEY` nonce. A may submit only while it remains the finalized leader:
 
 ```text
 setLeader(B, currentEpoch)
 ```
 
-A signs with its individual secp256k1 key and uses `ADMIN_OPS_NONCE_KEY`, leaving the batch-submission and withdrawal nonce lanes unchanged.
+Preparation failures may try the next manifest candidate. Provider invocation freezes the target permanently, including transport errors, reverts, missing receipts, and ambiguous responses. The controller persists the target and transaction hash, when known, so a restart resumes observation and never creates a second logical send.
 
-Split the existing client into preparation, provider invocation, and receipt observation so the coordinator can distinguish failures that occur before the L1 request from outcomes that become ambiguous after it. A candidate-specific preparation failure may return the coordinator to `Probing`, but provider invocation fixes the target for the rest of the process, so transport errors, reverts, lost responses, and missing receipts can never cause a transaction for another target.
+A receipt is intermediate evidence. Success requires finalized B authority, B's local `leader` role, a B-local production marker at or after activation, canonical block-by-number equality for that marker, and preservation of A's recorded checkpoint. Only then may the supervisor terminate A. An external finalized winner is honored and never overwritten.
 
-### Block Production Handover
+### Transaction Continuity
 
-While candidate probes, inclusion, and finality are pending, A continues accepting valid transactions and producing every anchor that its permit still assigns to A, provided the exit-triggering failure did not remove a required production component. Starting the hook does not cancel, pause, fence, or rebuild the leader generation; if the coordinator cannot prove post-trigger progress, it stops before provider invocation and reports that forced recovery is required.
+Run the existing local-origin forwarder in leader generations as well as follower generations. It continues to forward only locally originated live entries, use the bounded command queue and 256-entry reconciliation batches, retry on the existing interval, and avoid re-flooding P2P-origin transactions. Pool validity, eviction, replacement, pricing, and inclusion rules remain unchanged.
 
-#### Success Criteria
+### Deadlines and Outcomes
 
-The coordinator reports success only after B observes the finalized leader and epoch, enters the local `leader` role, and canonicalizes a locally produced block at H or later whose ancestry preserves A's pre-submit checkpoint; an inclusion receipt proves none of those local effects.
+One 15-second deadline covers the planned-drain proof, candidate probes, finalized L1 reads, provider invocation, finality, promotion, and successor production evidence. Every nested network operation uses only the remaining time. After success or deadline, the controller releases the supervisor request; the supervisor then uses the node's unchanged Reth shutdown behavior. Configure at least a 30-second supervisor grace period to leave room for the 15-second controller phase and existing process shutdown.
 
-`zone_getSequencerInfo` gains a bounded `last_locally_produced` anchor, number, and hash marker that the engine publishes only after the fork-choice update succeeds and `canonical_block_by_number(height).hash == marker.hash`; `newPayload` alone is insufficient because canonicalization happens during the later fork-choice update. The marker identifies the producing process, while canonical block-by-number lookup and A's recorded checkpoint establish that the block is on the expected chain; the beneficiary cannot provide the same evidence because quorum members may share the block-production key.
+Crash recovery has no dependency on A's process lifetime and therefore no 15-second completion promise. It remains bounded per probe and retry, emits progress, and stops safely when it lacks a matching survivor checkpoint, deployment authority, L1 finality, or quorum.
 
-### Transaction Continuity During Handoff
-
-Run the existing local-origin forwarder in leader generations as well as follower generations. It continues to:
-
-- forward only locally originated, still-live pool entries;
-- use the existing bounded P2P command queue and 256-entry reconciliation batches;
-- retry on the existing reconciliation interval;
-- avoid re-flooding transactions received from P2P;
-- leave validation, eviction, replacement, pricing, and inclusion rules unchanged.
-
-This reuses the existing wire protocol to replicate transactions submitted directly to A, but it guarantees neither delivery to B before H nor eventual inclusion.
-
-### Failure Outcomes and Exit Deadline
-
-One 15-second budget covers candidate probes, finalized L1 reads, transaction broadcast, receipt observation, finality, successor promotion, and production evidence, and every nested network operation uses only the remaining time. Signals and panics use the same deadline so a degraded node cannot extend its lifetime through retries.
-
-After the hook returns, Reth resumes shutdown and preserves the original result, including `PanickedTaskError` and its nonzero status. Both signal and panic paths use the existing five-second graceful-task wait and five-second runtime-drop wait, which puts the schedulable process at a 25-second upper bound and leaves five seconds of overhead when a supervisor, including Kubernetes with `terminationGracePeriodSeconds >= 30`, escalates to a hard kill at 30 seconds.
-
-| Failure | Required behavior |
-| --- | --- |
-| Local node is not the current quorum leader | Return immediately to normal shutdown. |
-| A critical task or command future panics | Preserve the panic as the process result while surviving tasks run the bounded coordinator, which may submit a portal handoff only after proving post-trigger production. |
-| The failed task was required for handoff or production | Skip the provider call because `setLeader` cannot repair an incomplete A-owned prefix, record `forced_recovery_required`, preserve the original failure, and exit on time. |
-| Any exit trigger lacks post-trigger prefix progress | Skip the provider call and record `forced_recovery_required` even when the first reason was a signal, because the signal may race with or conceal a production failure. |
-| The handoff hook itself panics | Catch the unwind at the Reth boundary, record one bounded hook-failure outcome, and resume the original shutdown path without recursively invoking the hook. |
-| No candidate passes preflight | Emit a bounded failure outcome and begin normal shutdown. |
-| Portal state changed before provider invocation | Honor the finalized winner; do not overwrite it. |
-| Candidate-specific failure before provider invocation | Mark that candidate tried and probe the next configured candidate within the same deadline. |
-| Provider invocation returns an error or the transaction reverts | Record failure without nominating another target because provider invocation has already frozen the selection. |
-| Send/receipt outcome is ambiguous | Keep observing the fixed target/finalized portal until deadline; never retarget. |
-| B does not prove canonical production | Wait only until the shared deadline, then begin normal shutdown. |
-| Duplicate or racing exit triggers | Treat the first exit reason as authoritative and reuse its coordinator result without starting another submission. |
-
-## Graceful Handoff Implementation Plan
+## Compatible Controller Implementation Plan
 
 | ID | Step | Required behavior |
 | --- | --- | --- |
-| C1 | Capture recoverable exits before shutdown | Classify and preserve the first SIGTERM, SIGINT, command completion/error/unwind, or registered critical-task unwind; after hook registration, hold task-manager shutdown ownership while the hook runs before global cancellation, catch hook panics, and preserve existing behavior for binaries or exits without a registered hook. |
-| C14 | Register the handoff hook at node readiness | Store one hook in a runtime-owned, cloneable one-shot registrar reachable from the node's task executor, register it after its dependencies are live but before leader readiness, and avoid process globals so exits before registration remain unchanged. |
-| C15 | Supervise and classify panics | Start process handoff for command and critical-task unwinds, retain local recovery when a complete generation restart succeeds, escalate an unproven restart to Reth, and audit detached spawn sites so every safety-critical panic reaches a supervisor. |
-| C2 | Gate handoff to eligible leaders | Attempt handoff only for the current finalized leader in manifest-based multi-sequencer mode with an individual L1 signer, returning followers, RPC-only nodes, fenced nodes, and legacy single sequencers directly to shutdown. |
-| C3 | Load and validate candidate configuration | Validate a repeatable ordered `NAME=URL` list and 15-second default timeout at startup, with an empty list disabling automatic handoff. |
-| C4 | Validate replacement readiness | Select a replacement only from private operator status that proves matching identity, deployment, membership, finalized state, readiness, decryption key, and canonical prefix. |
-| C6 | Keep production live and prove the prefix | Keep surviving A tasks running so A produces every anchor assigned by its permit, and require A's post-trigger canonical production plus B's observation before provider invocation or fall back to forced recovery. |
-| C5 | Submit one leader change | Re-read finalized portal state and prepare one CAS-fenced `setLeader` on the admin nonce lane, allowing candidate-specific preparation failures to resume probing but freezing the target permanently at provider invocation. |
-| C9 | Freeze the target and handle uncertain outcomes | Skip ineligible candidates before provider invocation, freeze the selected target at invocation even if the call returns an error or later reverts, honor any external finalized winner, and release shutdown on deadline without installing local authority. |
-| C7 | Verify successful handover | Treat a receipt as intermediate evidence and require finalized B authority, B's local leader role, B-local production at H or later, canonical block-by-number equality for B's marker, and ancestry from A's checkpoint. |
-| C13 | Replicate leader-local transactions | Run existing local-origin forwarding in both leader and follower generations; do not re-flood P2P-origin transactions or change pool validity rules. |
-| C8 | Enforce the process deadline | Fit one 15-second handoff deadline and two 5-second shutdown waits inside a 30-second supervisor grace period, applying the same bound to panic-triggered recovery even without an external deadline. |
-| C10 | Resume the original shutdown path | After the hook, preserve the existing engine-persistence, P2P, task, and runtime shutdown order while giving surviving tasks on the panic path the same bounded drain and retaining the original panic or error result. |
-| C12 | Add bounded operational telemetry | Emit phase and outcome metrics plus structured logs with bounded identity, target, epoch, transaction hash, activation anchor, and latency fields, excluding keys, transaction bodies, auth tokens, endpoint labels, and unbounded error labels. |
-| C11 | Preserve protocol compatibility | Do not change portal ABI/storage, activation semantics, settlement certificates, block format, P2P wire format, manual handoff, or forced recovery. |
+| C1 | Add the external controller | Add `xtask/src/admin/failover.rs` as a long-lived or one-shot supervisor entry point using the existing admin snapshot, leader-change, and configuration clients; do not patch Reth. |
+| C2 | Extend manifest discovery | Add optional `nodes[].operator_rpc_url`, validate HTTP(S), keep it out of membership digests and protocol namespaces, and derive ordered quorum candidates directly from manifest order. |
+| C3 | Separate planned drain from crash recovery | Accept an explicit pre-signal drain request for healthy maintenance; detect unavailable or stalled leaders independently and route them to forced recovery without inspecting an exit reason. |
+| C4 | Prove the outgoing prefix | Record A's canonical production marker, require a strictly newer marker during the drain, verify canonical block-by-number, and require the candidate to observe the exact block before normal submission. |
+| C5 | Validate replacement readiness | Check manifest identity, active portal membership, finalized deployment and epoch, follower readiness, decryption key, lag, and canonical prefix for every candidate. |
+| C6 | Submit one leader change | Re-read finalized authority and the committed admin nonce through A, permit submission only while A remains leader, allow another candidate only before invocation, and persist the fixed target and transaction identity afterward. |
+| C7 | Prove takeover before termination | Require finalized B authority, local leader role, canonical B-local production at or after activation, and ancestry from A's checkpoint before authorizing the supervisor to signal A. |
+| C8 | Automate the existing crash path | When A cannot provide post-trigger progress, collect exact survivor checkpoints and drive the existing coordinated forced-recovery manifest rollout/restart; never use ordinary `setLeader` to bridge a missing prefix. |
+| C9 | Preserve transaction availability | Run existing local-origin forwarding in leader and follower generations without changing the P2P wire protocol or pool rules. |
+| C10 | Persist controller idempotency | Store operation ID, trigger class, baseline, selected target, expected epoch, transaction hash, and terminal state; duplicate triggers and controller restarts resume the same operation. |
+| C11 | Add bounded telemetry | Emit finite trigger, phase, and outcome labels plus bounded node, epoch, checkpoint, transaction, and latency fields; exclude endpoint URLs, tokens, transaction bodies, and unbounded errors. |
+| C12 | Preserve compatibility | Keep Reth, portal ABI/storage, activation semantics, settlement certificates, block format, P2P wire format, manual handoff, and forced-recovery validation unchanged. |
 
-## Graceful Handoff Invariants
+## Compatible Controller Invariants
 
 | ID | Property |
 | --- | --- |
-| I1 | Two honest nodes never produce or accept different canonical blocks for the same Tempo anchor; only the leader selected by finalized authority for that anchor may produce. |
-| I2 | Leadership epochs remain monotonic and contiguous, so stale or competing handoffs cannot roll authority back or bypass active-sequencer membership. |
-| I3 | A successful handoff preserves every pre-handoff canonical hash, has no missing or duplicate height/anchor, assigns A before H and B from H, and leaves B able to continue production and settlement. |
-| I4 | Every recoverable-exit hook reaches process exit within 25 seconds while the outgoing process remains schedulable, which completes before a supervisor's configured 30-second hard-kill deadline. |
-| I5 | While the hook is active, every valid local transaction still live in A's pool remains eligible for bounded forwarding; duplicate delivery cannot create duplicate canonical inclusion. |
-| I6 | The coordinator never submits to self, an RPC-only/unknown/inactive member, a mismatched deployment, a non-ready node, or a node known to be on a conflicting prefix. |
-| I7 | One recoverable process exit produces at most one target nomination and one logical `setLeader` submission attempt; ambiguity can never trigger a different target. |
-| I8 | The first exit reason is immutable, so a successful handoff cannot mask a critical panic and a later signal or panic cannot start a second coordinator. |
-| I9 | A normal handoff requires post-trigger proof that A can extend and deliver the prefix; failure to prove viability produces `forced_recovery_required` rather than a false success. |
+| I1 | Only finalized portal authority or the existing consistently deployed forced-recovery directive can authorize production. |
+| I2 | A planned handoff submits only after A extends the chain during the drain and B proves the exact same checkpoint. |
+| I3 | An abrupt failure never uses ordinary `setLeader` to skip anchors assigned to the unavailable leader. |
+| I4 | Manifest order determines candidate preference; probe completion order cannot change the winner. |
+| I5 | Provider invocation creates one immutable target and one logical submission across controller retries and restarts. |
+| I6 | The supervisor does not signal a healthy A until B proves finalized authority and canonical production, or the graceful deadline expires. |
+| I7 | Existing manifests and nodes without controller configuration preserve their current behavior. |
+| I8 | Operational RPC URLs cannot change membership identity, quorum thresholds, P2P namespaces, settlement, or consensus digests. |
 
-## Graceful Handoff Code Changes
+## Compatible Controller Code Changes
 
 | Area | Change |
 | --- | --- |
-| Pinned Reth `crates/cli/runner` | Replace the nested races with an explicit first `ExitReason`, catch command-future unwinds, invoke and bound the registered hook for every post-registration exit, return the original result, and make graceful-task and runtime-drop timeouts injectable for tests without changing production defaults. |
-| Pinned Reth `crates/tasks` | Separate critical-panic reporting from global-shutdown ownership so surviving tasks remain live during a runtime-owned, one-shot `PreShutdownHookRegistrar` reached through `TaskExecutor`, then fire cancellation once in the existing shutdown order. |
-| `crates/node/src/cli.rs` | Parse and validate ordered candidate endpoints and the shared handoff timeout. |
-| `crates/node/src/rpc.rs` | Extract the existing leader-change L1 client for internal reuse, separate preparation/provider invocation/receipt waiting, and add the canonical local-production marker to private status. |
-| `crates/node/src/node.rs` | Build the coordinator from live schedule, role, engine, L1, signer, P2P, and provider handles, then register it exactly once before reporting leader readiness so earlier exits retain current shutdown behavior. |
-| `crates/node/src/role.rs` and `engine.rs` | Preserve contained generation restart, escalate an unproven restart, expose production viability, and publish the local marker only after canonical fork-choice and block-by-number verification without changing permit semantics. |
-| `crates/node/src/tx_forwarding.rs` | Start the existing forwarder in leader generations and retain bounded reconciliation/non-reflood behavior. |
-| Node telemetry/docs | Add exit-reason plus terminal outcome/phase metrics, operator logs, unwind/abort build guidance, configuration, failure recovery, and rollout order. |
-| Deployment repository | Before enabling candidates, set and verify a hard-kill grace of at least 30 seconds through the supervisor's equivalent of Kubernetes `terminationGracePeriodSeconds`; this repository contains no deployment manifests to change. |
+| `crates/p2p/src/manifest.rs` | Parse optional `operator_rpc_url`, expose it operationally, preserve node order, and exclude it from membership digests and P2P identity. |
+| `xtask/src/admin/config.rs` | Prefer manifest-derived named endpoints; retain explicit `--operator-rpc` only as an operator override for old manifests and emergency access. |
+| `xtask/src/admin/failover.rs` | Own planned-drain and crash state machines, deadlines, persisted idempotency, ordered selection, fixed-target submission, forced-recovery orchestration, and telemetry. |
+| `xtask/src/admin/snapshot.rs` | Return canonical local-production markers, exact block hashes, finalized authority, readiness, and membership evidence needed by the controller. |
+| `crates/node/src/rpc.rs` | Expose canonical `last_locally_produced`; keep `zone_setLeader` epoch-fenced and callable only through the finalized current leader's individual signer. |
+| `crates/node/src/role.rs`, `engine.rs`, and `tx_forwarding.rs` | Publish canonical local production and run the existing local-origin forwarder in leader generations without changing production permits. |
+| Existing node and P2P tests | Preserve shutdown, panic, wire-format, settlement, manual-handoff, and forced-recovery behavior because Reth and protocol surfaces do not change. |
+| Deployment configuration | Invoke the controller before planned process termination, grant it bounded access to operator RPC/L1/deployment APIs, persist its operation state, and configure at least 30 seconds of supervisor grace. |
 
-Keep the coordinator cohesive and private behind a narrow `HandoffIo` test seam for candidate snapshots, finalized portal reads, transaction preparation/invocation/receipt, canonical block lookup, production viability, and monotonic time; candidate selection, epoch fencing, and retargeting remain production logic rather than being copied into test fakes.
+Keep the controller behind a narrow `FailoverIo` test seam for manifest loading, snapshots, finalized portal reads, transaction preparation/invocation/receipt, deployment updates, canonical block lookup, persistent state, and monotonic time. Candidate ordering, epoch fencing, target immutability, and crash-versus-drain routing remain production logic rather than behavior copied into test fakes.
 
-## Graceful Handoff Components
-
-The arrows represent calls, finalized events, or data transfer between concrete components. `ZonePortal` owns durable leadership authority, each Zone database owns its canonical chain, the Reth runner owns the first exit reason, and the handoff coordinator owns only in-process transition state.
+## Compatible Controller Components
 
 ```mermaid
 flowchart TB
     supervisor["Process supervisor"]
-    clients["Zone clients"]
-    ops["Telemetry sink"]
-    portal[("ZonePortal state<br/>C5 C11 I2 I7")]
+    controller["External failover controller<br/>C1 C3 C6 C8 C10"]
+    state[("Controller operation store<br/>C10 I5")]
+    manifest["Zone manifest<br/>C2 I4 I8"]
+    portal[("Finalized ZonePortal<br/>C5 C6 I1")]
+    a["Leader A operator RPC<br/>C4 C6"]
+    b["Candidate B operator RPC<br/>C5 C7"]
+    deployment["Deployment control plane<br/>C8"]
+    txmesh["Existing P2P transaction channel<br/>C9"]
 
-    subgraph outgoing["Outgoing Zone process A"]
-        command["Node command"]
-        critical["Critical tasks"]
-        runner["Reth runner<br/>C1 C8 C10 I4 I8"]
-        registrar["Hook registrar<br/>C14"]
-        coordinator["Handoff coordinator<br/>C2 C3 C4 C9 C15 I6 I7 I9"]
-        viability["Production monitor<br/>C6 C15 I9"]
-        subscriber["L1 subscriber A<br/>C7"]
-        schedule["Leader schedule A<br/>C6 C7 I1 I2"]
-        roles["Role controller A<br/>C6 C10"]
-        permit["Production permit A<br/>C6 I1"]
-        pool["Transaction pool A<br/>C13 I5"]
-        engine["Block producer A<br/>C6 I3 I9"]
-        adb[("Canonical database A<br/>C7 I3 I9")]
-    end
-
-    subgraph network["Quorum P2P"]
-        txmesh["Transaction channel<br/>C13 I5"]
-        blockmesh["Block channel<br/>C6 I3 C11"]
-    end
-
-    subgraph replacement["Replacement Zone process B"]
-        status["Sequencer status RPC<br/>C4 C7 I6"]
-        bsubscriber["L1 subscriber B<br/>C7"]
-        bschedule["Leader schedule B<br/>C7 I1 I2"]
-        broles["Role controller B<br/>C7"]
-        bpermit["Production permit B<br/>C7 I1"]
-        bpool["Transaction pool B<br/>C13 I5"]
-        bengine["Block producer B<br/>C7 I3"]
-        bdb[("Canonical database B<br/>C7 I3")]
-    end
-
-    supervisor -->|"deliver signal"| runner
-    command -->|"return or unwind"| runner
-    critical -->|"report panic"| runner
-    coordinator -->|"register hook"| registrar
-    runner -->|"take hook"| registrar
-    registrar -->|"run hook"| coordinator
-    coordinator -->|"start proof"| viability
-    engine -->|"publish marker"| viability
-    status -->|"report checkpoint"| viability
-    viability -->|"return proof"| coordinator
-    coordinator -->|"probe readiness"| status
-    coordinator -->|"submit setLeader"| portal
-    portal -->|"publish finality"| subscriber
-    portal -->|"publish finality"| bsubscriber
-    subscriber -->|"update schedule"| schedule
-    bsubscriber -->|"update schedule"| bschedule
-    schedule -->|"select role"| roles
-    roles -->|"install permit"| permit
-    permit -->|"authorize anchor"| engine
-    bschedule -->|"select role"| broles
-    broles -->|"install permit"| bpermit
-    bpermit -->|"authorize anchor"| bengine
-    clients -->|"submit transaction"| pool
-    pool -->|"select transaction"| engine
-    pool -->|"forward transaction"| txmesh
-    txmesh -->|"deliver transaction"| bpool
-    bpool -->|"select transaction"| bengine
-    engine -->|"commit block"| adb
-    engine -->|"publish block"| blockmesh
-    blockmesh -->|"store block"| bdb
-    bengine -->|"commit block"| bdb
-    status -->|"confirm takeover"| coordinator
-    coordinator -->|"finish hook"| runner
-    runner -->|"cancel tasks"| roles
-    coordinator -->|"record outcome"| ops
+    supervisor -->|"drain before signal"| controller
+    controller -->|"persist operation"| state
+    controller -->|"derive ordered candidates"| manifest
+    controller -->|"read finalized authority"| portal
+    controller -->|"prove progress / submit"| a
+    controller -->|"probe / prove takeover"| b
+    controller -->|"authorize SIGTERM after proof"| supervisor
+    controller -->|"crash: coordinated forced recovery"| deployment
+    a -->|"local transactions"| txmesh
+    txmesh -->|"replicate"| b
 ```
 
 ## Timeout and Production Ownership
 
-In the compatible path, A keeps producing while `setLeader` is pending because finalized authority still assigns those anchors to A. Starting B immediately on SIGTERM would either fail B's permit check or require bypassing it; A might still have an in-flight block, other nodes may never see the signal, and the L1 transaction may revert. A local signal therefore cannot transfer authority.
-
-The 15-second hook deadline bounds A's waiting, not the network's recovery time. At expiry A preserves the transaction identity and original exit result, then begins its bounded shutdown; the pending L1 transaction may still finalize afterward.
+In a planned drain, A keeps producing while `setLeader` is pending because the supervisor has not signaled it and finalized authority still assigns those anchors to A. The 15-second deadline bounds controller waiting; on expiry the supervisor may terminate A, and any unproven or incomplete transition is reconciled through the crash path.
 
 | Timeout point | Service behavior |
 | --- | --- |
-| Before submission | A exits while the portal still names A; followers cannot fill the missing anchors without recovery. |
-| After submission, before finality | A exits with an unresolved external operation; surviving nodes observe its eventual outcome before submitting against the current epoch. If A did not finish the prefix before the eventual activation anchor, ordinary handoff still leaves a gap. |
-| After finality, before B produces | B can proceed if it has the complete prefix; if B also fails, another recovery round is required. |
-| During hardfork recovery | A may exit at any point because surviving replicas persist the recovery state. They retain vote locks and reconcile finalized portal state; timeout never cancels an L1 transaction or releases a lock. |
+| Before submission | Send nothing; keep A when policy allows, or terminate it and enter forced recovery. |
+| After ambiguous submission | Persist the fixed target and transaction identity, observe finalized authority, and never retarget. |
+| After finality, before B produces | Keep A until the drain deadline; if proof remains absent, enter recovery after termination. |
+| During forced or hardfork recovery | A is not required. Survivors preserve the selected checkpoint and reconcile authority before production resumes. |
 
 A future activation-anchor argument can schedule a healthy transfer but still assumes A survives to that point. A historical checkpoint argument addresses the missing-prefix problem only if it identifies the chain, preserves committed data, and prevents the old leader from committing more history. Neither a height alone nor a successful `setLeader` receipt establishes those properties.
 
@@ -416,7 +305,7 @@ The hardfork simplifies recovery ownership by giving graceful shutdown and OOM t
 | R3 | Implement certified epoch closure and the versioned portal transition, including domain separation, quorum validation, membership fencing, exact checkpoint binding, settled-state checks, and old-ABI retirement. |
 | R4 | Separate finalized L1 observation from next-anchor execution; implement epoch-ordered recovery records in schedule, production permits, import validation, startup, and replay without rolling back committed blocks. |
 | R5 | Separate speculative execution from committed RPC head and receipts; update settlement certificate domains and validation so delayed old-epoch work cannot extend a closed prefix. |
-| R6 | Connect the pre-shutdown hook to the same supervisor; end local waiting on its deadline while survivors finish the durable transition or recover its failed successor. |
+| R6 | Connect the external controller's planned-drain and crash triggers to the recovery supervisors; the controller may release process termination while survivors finish the durable transition or recover its failed successor. |
 | R7 | Activate protocol, portal, node, and wire-format changes together at a defined fork boundary after all voting nodes upgrade and the initial committed checkpoint is agreed; fence unsupported nodes and retain old replay rules below the fork. |
 
 The code seams are `ZonePortal.sol` and `IZonePortal.sol` for transition and settlement verification; `crates/l1` for event decoding and independent finality tracking; `crates/p2p/src/manifest.rs` for epoch/checkpoint authority; node `engine.rs`, `role.rs`, and `node.rs` for commitment, recovery, and startup; RPC head/receipt handling; and sequencer attestation collection and storage for durable, epoch-bound certificates. The existing forced-recovery override supplies useful checkpoint plumbing, but its operator-trust assumption must not become the automatic election rule.
@@ -429,17 +318,17 @@ The code seams are `ZonePortal.sol` and `IZonePortal.sol` for transition and set
 | RI2 | Competing leaders may execute speculative work, but two conflicting blocks cannot both commit at the same height; old-epoch work cannot commit after certified closure. |
 | RI3 | Every transition binds one successor and one exact preserved checkpoint to an epoch and membership version, and survives restarts without conflicting votes or certificates. |
 | RI4 | The successor commits only after finalized authorization and verified local checkpoint data; delayed old transactions and certificates cannot roll back authority or extend a closed epoch. |
-| RI5 | A's shutdown ends within its local deadline, while service recovery continues under the surviving quorum; recovery needs eventual quorum communication, data availability, and L1 finality. |
+| RI5 | The supervisor releases A on its configured drain deadline, while service recovery continues under the surviving quorum; recovery needs eventual quorum communication, data availability, and L1 finality. |
 
 ## Complete System View
 
 ```mermaid
 flowchart TD
     supervisor["Process supervisor"]
+    controller["External failover controller"]
     portal[("ZonePortal state")]
     rpc["Clients and RPC"]
     subgraph voters["Voting sequencer processes"]
-        hook["Shutdown hook"]
         recovery["Recovery supervisor"]
         consensus["Replication and view change"]
         log[("Blocks, votes, and locks")]
@@ -448,8 +337,9 @@ flowchart TD
         engine["Execution engine"]
         settlement["Settlement attestor"]
     end
-    supervisor -->|"deliver signal"| hook
-    hook -->|"request transfer"| recovery
+    supervisor -->|"planned drain or crash event"| controller
+    controller -->|"request transfer"| recovery
+    controller -->|"authorize process termination"| supervisor
     recovery -->|"start view change"| consensus
     consensus -->|"persist before vote"| log
     consensus -->|"certify transition"| recovery
@@ -467,54 +357,50 @@ flowchart TD
 
 ### Compatibility Coverage
 
-The following C/I/T cases cover the pre-hardfork graceful path. The recovery cases afterward cover the recommended hardfork, where quorum commitment replaces local execution as the preservation boundary and the old ABI is disabled at activation.
+The following C/I/T cases cover the pre-hardfork external-controller path. The recovery cases afterward cover the recommended hardfork, where quorum commitment replaces operator-coordinated forced recovery and the old ABI is disabled at activation.
 
 ### Unit and Model Tests
 
 | ID | Covers | Test to write and exact oracle |
 | --- | --- | --- |
-| T1 | C1, C10, I4, I8 | Drive the pinned Reth runner with SIGTERM, SIGINT, clean command completion, returned command error, command-future panic, and `PanickedTaskError`; after registration, each trigger must run the same hook while surviving tasks remain live, expose the first reason, cancel exactly once, and preserve the original result, while runs before registration or without a hook retain current behavior. |
-| T1R | C1, C14, I8 | Clone the runtime-owned registrar through `TaskExecutor`, race registration against every exit reason, and verify that a second registration fails, one post-registration invocation wins, pre-registration exit remains unchanged, and dropping the node or hook cannot leave a process-global callback. |
-| T2 | C1, C8, C10, I4, I8 | Install one hook that never returns and one that panics, pausing Tokio time for the async 15-second deadline while testing Reth's `std::time` graceful-task and runtime-drop waits with reduced injected deadlines; each case must cancel and release every guard once without adding ten real seconds to the test. |
-| T3 | C2, C3, C11 | Table-test empty, valid, duplicate, self, unknown, RPC-only, malformed-URL, zero-timeout, no-manifest, no-individual-signer, follower, fenced, and current-leader configurations, requiring only the finalized eligible leader to enter `Probing` and an empty candidate list to preserve current startup and shutdown behavior. |
-| T4 | C3, C4, I6 | Generate RPC completion order independently from configured order while varying every identity, membership, readiness, finalized-state, deposit-key, lag, and prefix predicate; an independent reference predicate must always choose the first configured eligible node and preserve a minimized seed on failure. |
-| T5 | C5, C9, I2, I7, I8 | Model candidate preparation failures, external epoch changes, provider invocation and errors, known or unknown transaction hashes, receipt success/revert/loss, finalized winners, duplicate triggers, and deadline expiry; failures may resume `Probing` before invocation, while invocation makes the first reason, target, and single logical send immutable. |
-| T6 | C7, I1, I3 | Evaluate every combination of receipt, finalized authority, local role, pre-fork-choice marker, canonical marker, block-by-hash presence, canonical block-by-number equality, and checkpoint ancestry; only the fully canonical combination may succeed, while beneficiary identity, receipt, and noncanonical block presence must fail. |
-| T7 | C13, I5 | Exercise leader-local forwarding with a full command queue, delayed reconciliation, replacement or eviction, and P2P-origin duplicates; live local entries must retry in batches no larger than 256 and reach a healthy peer, while P2P-origin entries are never re-flooded and canonical inclusion remains unique. |
-| T8 | C12 | Feed every terminal outcome and phase maliciously long endpoint and error text, then verify that logs and metrics remain bounded, use finite label values, emit one terminal outcome per run, and contain no configured secret or endpoint value. |
+| T1 | C2, C12, I7, I8 | Parse old and new manifests with missing, valid, malformed, duplicate, and credential-bearing operator URLs; old manifests remain valid, invalid configured URLs fail, URLs never alter membership digests or P2P namespaces, and serialized diagnostics redact userinfo. |
+| T2 | C2, C5, I4 | Randomize RPC completion order while varying manifest order, current leader, `rpc_only`, missing endpoint, portal membership, identity, readiness, key, lag, and prefix predicates; an independent reference predicate must always select the first eligible manifest node. |
+| T3 | C3, C4, C8, I2, I3 | Model planned drain, clean early exit, panic, OOM-equivalent disappearance, health-only failure, progress-only stall, and healthy progress; only an explicit drain with new A production and exact B observation may enter normal submission, while unavailable or unproven A routes to forced recovery. |
+| T4 | C6, C10, I5 | Model preparation failures, external epoch changes, provider errors, known or unknown transaction hashes, receipt success/revert/loss, controller restart, duplicate triggers, and deadline expiry; failures may choose another candidate before invocation, while invocation persists one immutable target and logical send. |
+| T5 | C7, I1, I2, I6 | Evaluate every combination of receipt, finalized authority, local role, pre-fork-choice marker, canonical marker, canonical block-by-number equality, and checkpoint ancestry; only the fully canonical combination authorizes the supervisor to terminate A. |
+| T6 | C8, I1, I3 | Feed survivor snapshots with equal heights and conflicting hashes, matching ancestors, missing bodies, different portal epochs, and partial deployment updates; forced recovery proceeds only from one exact checkpoint accepted by the existing validation on every restarted node. |
+| T7 | C9 | Exercise leader-local forwarding with a full command queue, delayed reconciliation, replacement or eviction, and P2P-origin duplicates; live local entries retry in batches no larger than 256, while P2P-origin entries are never re-flooded. |
+| T8 | C11 | Feed every trigger, terminal outcome, and phase maliciously long endpoint and error text; metrics use finite labels, emit one terminal result per operation, and expose no URL, credential, token, transaction body, or unbounded error. |
 
 ### E2E Failover Tests
 
-Run a real Tempo dev L1 with three independent manifest-mode Zone processes, using an OS signal rather than task cancellation for SIGTERM and named unwinding failpoints for panics. The Portal and standard block RPC form the external oracle, with process-local events used only where RPC cannot identify the producing node.
+Run a real Tempo dev L1, an external controller, a controllable process supervisor, and three independent manifest-mode Zone processes. The Portal and standard block RPC form the external oracle; controller state and process-local production markers provide attribution and idempotency evidence.
 
 | ID | Fault schedule | Required result |
 | --- | --- | --- |
-| T9 — happy path | Submit immediately executable funded transactions directly to A, wait until B observes them, advance L1 continuously, then send A SIGTERM. | Portal activates B at H; A produces through H-1 and never at/after H; B produces H and later on the same prefix; every node agrees on hashes; each frozen test transaction remains in B's pool or is included at most once; settlement passes H; A exits within 25 seconds. |
-| T10 — L1 delay and ambiguity | Independently delay A's provider response, receipt visibility, and finalized-tag advancement, then drop the response after the proxy forwards the transaction once. | A keeps producing while authorized, does not treat the receipt as completion, never changes the target after provider invocation, and exits by the deadline whether the transaction eventually succeeds or loses the epoch race. |
-| T11 — candidate failure by phase | Partition or pause B before preflight, during preparation, after provider invocation, and after finality but before canonical local-production evidence. | The next configured eligible candidate may win before invocation, but no other target may be nominated afterward; every process remains bound by finalized authority and A begins shutdown on time. |
-| T12 — concurrent authority change | Race SIGTERM with `tempo-xtask admin leader set`, duplicate SIGTERM delivery, and duplicate/replayed receipt and finality notifications. | Portal CAS produces one monotonic successor; all schedules apply it idempotently; the coordinator either observes the external winner or its fixed target, but never overwrites the winner or sends again. |
-| T13 — activation-boundary restart | Delay transaction forwarding, `newPayload`, canonical fork-choice, and marker publication around H; restart B before and after each boundary. | A pre-FCU block never counts toward success; after restart, canonical block-by-number and checkpoint ancestry agree, no pre-H hash changes, no height/anchor is skipped, and production plus settlement resume. |
-| T14 — no eligible successor / invoked revert | Make every candidate unreachable, stale, inactive, key-mismatched, or prefix-conflicting; in a separate run, let B pass preparation before its transaction returns a definite revert. | The first run sends nothing, while the second keeps B frozen and never tries C; both report a bounded reason and begin shutdown within the same 15-second hook budget. |
-| T15 — panic classes | Add test-only failpoints to the node command future and every critical Zone task, then separately panic a leader-generation child, a deliberately detached noncritical task, startup before hook registration, and a `panic = "abort"` child process while also racing a terminating panic with SIGTERM. | Command and critical-task panics run one hook and exit nonzero with the first reason, a contained generation panic restarts without handoff, pre-registration and detached panics do not invoke the hook, the spawn audit finds no safety-critical detached work, and the aborting child establishes the non-recoverable boundary. |
-| T16 — failed production path | Stall or unwind the L1 subscriber, role controller, and P2P supervisor before provider invocation; force contained engine recovery to fail; trigger SIGTERM on an already stalled A; race SIGTERM with a production panic; and use a healthy control where A canonicalizes and B observes a new post-trigger anchor. | Every unhealthy or racing case skips `setLeader` and reports `forced_recovery_required` because B remains fenced on A's missing anchor, while the healthy control may submit only after local and peer proof match. |
+| T9 — planned drain | Submit funded transactions directly to A, request a controller drain while L1 advances, and let the controller release SIGTERM only after proof. | A produces through H-1, B produces H and later on the same prefix, settlement passes H, forwarded transactions remain eligible, and the supervisor never signals A before B's canonical production proof. |
+| T10 — L1 delay and ambiguity | Delay provider response, receipts, and finalized-tag advancement, then drop the response after forwarding the transaction once. | A stays alive until the drain deadline, the persisted target never changes, a controller restart resumes observation, and no second transaction is constructed. |
+| T11 — candidate failure by phase | Partition or pause the first manifest candidate before preflight, during preparation, after invocation, and after finality but before production evidence. | The next eligible manifest node may win only before invocation; afterward the operation remains bound to the first target and A remains until success or deadline. |
+| T12 — concurrent authority change | Race a drain with `tempo-xtask admin leader set`, duplicate controller requests, and replayed receipt/finality notifications. | Portal epochs remain monotonic, the controller honors an external finalized winner, and persisted idempotency prevents overwrite or resend. |
+| T13 — abrupt process loss | Kill A with SIGKILL, simulate OOM and host loss, and separately crash critical production components before the controller drain. | No case calls ordinary `setLeader`; the controller gathers survivor checkpoints and either completes the existing coordinated forced-recovery rollout or stops safely without authorizing production. |
+| T14 — false suspicion | Break only A's operator RPC while block production continues, then stall production while the process endpoint remains healthy. | Endpoint failure alone does not change leadership; a confirmed production stall routes to recovery and never uses a healthy-looking process response as prefix proof. |
+| T15 — activation restart | Restart B before finality, promotion, fork choice, and marker publication. | A pre-FCU block never counts, B never produces before H, checkpoint ancestry remains unchanged, and only canonical B-local production completes the drain. |
+| T16 — supervisor contract | Deliver SIGTERM only after success in one run and at the 15-second controller deadline in another; crash the controller and resume it between every persisted phase. | A uses unchanged Reth shutdown behavior, every resumed operation retains its target and transaction identity, and the supervisor's 30-second grace accommodates controller plus process shutdown. |
 
 ### Chaos Tests
 
-Run three independent Zone processes with separately controlled P2P and L1 paths to cover timing failures that unit tests and a normal E2E run cannot reproduce reliably; the test runner remains an implementation choice.
-
 | Scenario | Failure introduced | Expected result |
 | --- | --- | --- |
-| Split authority view | Partition P2P and per-node L1 views across activation H; delay schedule updates, permit checks, canonical fork-choice, and block delivery. | Every `(anchor, height)` has one producer and one canonical hash, with A producing only before H, B only from H, monotonic epochs, and the same prefix after healing. |
-| Ambiguous leader-change submission | Drop or delay the provider response and receipt; race a manual leader change, duplicate exit triggers, and replayed finality notifications. | Provider invocation fixes one target, so the coordinator cannot retarget or resend and reports success only after finalized B authority and canonical B production at H or later. |
-| Outgoing production failure | Stall or panic A's L1 subscriber, role controller, engine, or P2P path before triggering exit; also race the production failure with SIGTERM. | The coordinator may call `setLeader` only after A canonicalizes a new post-trigger block and B observes the same hash, with every failed proof requiring checkpoint recovery. |
-| Replacement restart during activation | Pause or restart B before finality, promotion, canonical fork-choice, and publication of its local block marker. | B never produces before H, a noncanonical block never proves success, A's prefix remains unchanged, and B resumes from the correct block after healing. |
-| Transactions in flight | Fill forwarding queues, delay and duplicate relays, then trigger handoff and restore the network. | Transactions observed by a surviving quorum pool remain in B's pool or become canonical with at most one inclusion, while transactions seen only by A have no delivery guarantee. |
-| Exit deadlines | Fault handoff dependencies during signal and panic exits while A remains schedulable; separately pause the process after exit begins. | A schedulable process preserves the first exit reason and exits within 25 seconds, while an unschedulable process reaches the 30-second hard-kill ceiling and requires checkpoint recovery. |
-| Recovery after healing | Combine L1/P2P partitions, B pause/restart, and dropped bounded-channel events, then restore all processes and links and freeze the target heights. | B produces through the frozen finalized anchor and settlement reaches the frozen Zone height within the configured recovery deadline. |
+| Split authority view | Partition controller, P2P, and per-node L1 views around activation H. | No ordinary submission occurs without matching finalized state and prefix; every produced anchor follows locally finalized authority, and healed nodes converge. |
+| Ambiguous submission | Drop provider responses and receipts while racing manual leadership changes and controller restarts. | One persisted target and logical send survive every retry; success still requires finalized authority and canonical successor production. |
+| Outgoing production failure | Stall or crash A's subscriber, role controller, engine, or P2P path before or during a planned drain. | Missing new production or missing peer observation blocks normal handoff and routes to forced recovery. |
+| Conflicting survivor tips | Give surviving nodes equal heights with different hashes, then heal the network. | The controller never chooses by height or majority response timing; existing forced recovery starts only after one exact checkpoint is consistently deployed and locally validated. |
+| Transactions in flight | Fill forwarding queues, delay relays, and terminate A after successful takeover. | Transactions already observed by a surviving pool remain live or become canonical at most once; transactions seen only by A retain no delivery guarantee. |
+| Controller and deployment loss | Restart the controller and partially apply a forced-recovery manifest update. | Persisted operation identity prevents a second nomination, and partial fleet rollout cannot produce because existing startup and checkpoint validation fail closed. |
 
 ### Regression Tests
 
-Run existing Portal contract tests; RPC/admin handoff tests; planned, lagged, and ahead-scheduled handoff tests; forced-recovery tests; network-chaos and restart tests; and legacy single-sequencer tests unchanged. The new behavior is acceptable only if those suites retain their current assertions and the automatic path remains disabled without candidate configuration.
+Run existing Reth shutdown and panic tests unchanged; Portal contract tests; RPC/admin handoff tests; planned, lagged, and ahead-scheduled handoff tests; forced-recovery tests; P2P wire golden tests; network-chaos and restart tests; and legacy single-sequencer tests. Existing manifests without `operator_rpc_url` must retain identical node behavior, and no automatic controller runs unless deployment explicitly starts it.
 
 ### Hardfork Recovery Tests
 
@@ -540,7 +426,8 @@ Measure recovery as detection + view change + data transfer + L1 inclusion/final
 
 | Metric | Type | Labels | Purpose |
 | --- | --- | --- | --- |
-| `zone_handoff_attempts_total` | Counter | exit reason, outcome | One terminal result for every handoff run. |
-| `zone_handoff_duration_seconds` | Histogram | outcome | Total time spent before shutdown resumes. |
-| `zone_handoff_phase_duration_seconds` | Histogram | phase | Time spent proving viability, probing, submitting, waiting for finality, and proving production. |
-| `zone_handoff_forced_recovery_total` | Counter | reason | Failures that could not safely use normal leader handoff. |
+| `zone_failover_operations_total` | Counter | trigger, outcome | One terminal result for every persisted controller operation. |
+| `zone_failover_duration_seconds` | Histogram | trigger, outcome | Planned-drain or crash-recovery duration, reported separately. |
+| `zone_failover_phase_duration_seconds` | Histogram | phase | Time spent proving viability, probing, submitting, waiting for finality, proving production, or coordinating forced recovery. |
+| `zone_failover_forced_recovery_total` | Counter | reason | Triggers that could not safely use ordinary leader handoff. |
+| `zone_failover_controller_restarts_total` | Counter | phase | Persisted operations resumed after controller restart. |
