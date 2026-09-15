@@ -12,8 +12,7 @@ on:
           - "maxperf"
           - "profiling"
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: build-${{ github.head_ref }}
@@ -23,9 +22,11 @@ jobs:
   build:
     permissions:
       contents: read
-    uses: tempoxyz/gh-actions/.github/workflows/rust-build-binaries.yml@98b1081dcf34361b576aca2ab3041772708582ef
+      id-token: write
+    uses: tempoxyz/gh-actions/.github/workflows/rust-build-binaries.yml@89eccc47fadc422ccf04b957a24125bba1596f2d # main
     with:
       binaries: tempo-zone
       profile: ${{ inputs.profile || 'maxperf' }}
+      rust-toolchain: "1.96.0"
       runs-on: depot-ubuntu-latest-16
       retention-days: 90
