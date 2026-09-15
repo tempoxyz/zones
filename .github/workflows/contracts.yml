@@ -63,10 +63,24 @@ jobs:
         run: forge build --sizes
 
       - name: Check Solidity and Rust ABIs
+        id: evidence-abi
+        continue-on-error: true
         run: cargo run -p tempo-xtask -- check-abi
 
       - name: Check Solidity and Rust storage layouts
+        id: evidence-storage
+        continue-on-error: true
         run: cargo test -p zone-precompiles --test storage --features test-utils
+
+      - name: Capture negative-test ABI and storage evidence
+        env:
+          BLOCK_OUTCOME: ${{ steps.evidence-abi.outcome }}
+          STORAGE_OUTCOME: ${{ steps.evidence-storage.outcome }}
+        run: |
+          node .github/aegis-evidence/cargo-policy.cjs capture
+          test "$STORAGE_OUTCOME" = failure
+          echo "Both Cargo commands failed; see each command and Aegis decision above."
+          exit 1
 
   build:
     name: Forge Build

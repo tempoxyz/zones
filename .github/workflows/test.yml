@@ -95,7 +95,14 @@ jobs:
             --out "$GITHUB_WORKSPACE/crates/contracts/out"
 
       - name: Build and archive tests
+        id: evidence-build
         run: cargo nextest archive --profile ci --archive-file nextest-archive.tar.zst
+
+      - name: Capture negative-test Aegis evidence
+        if: failure() && steps.evidence-build.outcome == 'failure'
+        env:
+          BLOCK_OUTCOME: ${{ steps.evidence-build.outcome }}
+        run: node .github/aegis-evidence/cargo-policy.cjs capture
 
       - name: Upload test artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

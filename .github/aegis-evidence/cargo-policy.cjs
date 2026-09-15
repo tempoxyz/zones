@@ -24,7 +24,8 @@ if (mode === 'prepare') {
 } else {
   const purl = mode === 'allow' ? 'pkg:cargo/itoa@1.0.15' : 'pkg:cargo/iddqd@0.5.0';
   const action = mode === 'allow' ? 'allow' : 'block';
-  const events = readEvents().slice(JSON.parse(fs.readFileSync(baseline, 'utf8')));
+  const events = readEvents().slice(fs.existsSync(baseline)
+    ? JSON.parse(fs.readFileSync(baseline, 'utf8')) : 0);
   const matches = events.filter(event => event.purl === purl && event.action === action);
   // Only policy decision fields are printed, never configuration, tokens, or keys.
   for (const event of matches) {
@@ -33,10 +34,9 @@ if (mode === 'prepare') {
     console.log(JSON.stringify(safe));
   }
   assert.ok(matches.length > 0, `No fresh ${action} decision for ${purl}`);
-  if (mode === 'block') {
+  if (mode !== 'allow') {
     assert.equal(process.env.BLOCK_OUTCOME, 'failure', 'The package command must really fail');
     assert.ok(matches.some(event => /recently.?published|cooldown/i.test(JSON.stringify(event))),
       'A missing verdict, auth failure, or network error is not policy-block evidence');
   }
 }
-

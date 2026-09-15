@@ -52,9 +52,16 @@ jobs:
           version: v0.15.0
 
       - name: Build binary
+        id: evidence-build
         env:
           PROFILE: ${{ inputs.profile || 'maxperf' }}
         run: cargo build --locked --bin tempo-zone --profile "$PROFILE"
+
+      - name: Capture negative-test Aegis evidence
+        if: failure() && steps.evidence-build.outcome == 'failure'
+        env:
+          BLOCK_OUTCOME: ${{ steps.evidence-build.outcome }}
+        run: node .github/aegis-evidence/cargo-policy.cjs capture
 
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

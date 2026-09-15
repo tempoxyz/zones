@@ -131,6 +131,7 @@ jobs:
         shell: bash
 
       - name: Build binary
+        id: evidence-build
         env:
           CARGO_TARGET_DIR: target
           BINARY_NAME: ${{ matrix.binary.name }}
@@ -138,6 +139,12 @@ jobs:
           PROFILE: ${{ steps.profile.outputs.profile }}
           TARGET: ${{ matrix.platform.target }}
         run: cargo build --locked --bin "$BINARY_NAME" --features "$FEATURES" --profile "$PROFILE" --target "$TARGET"
+
+      - name: Capture negative-test Aegis evidence
+        if: failure() && steps.evidence-build.outcome == 'failure'
+        env:
+          BLOCK_OUTCOME: ${{ steps.evidence-build.outcome }}
+        run: node .github/aegis-evidence/cargo-policy.cjs capture
 
       - name: Prepare binary
         id: prepare

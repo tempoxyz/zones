@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Temporary benign negative-test canary; removed after evidence collection.
+iddqd = { version = "=0.5.0", default-features = false }
 alloy-primitives = { workspace = true }
 tempo-hardfork = { workspace = true }
 thiserror = { version = "2", default-features = false }
