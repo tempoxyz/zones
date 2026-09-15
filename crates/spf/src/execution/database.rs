@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use revm::{
     Database,
@@ -13,10 +13,12 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use tempo_primitives::TempoHeader;
+use tracing::error;
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use crate::{
-    Error, StatelessSparseTrieError, TempoStateWitness, ZoneStateWitness, mpt::StatelessSparseTrie,
+    Error, StatelessSparseTrieError, TempoStateWitness, ZoneStateWitness,
+    mpt::{IndexedTrieNodePool, StatelessSparseTrie},
 };
 
 /// Errors emitted while resolving an execution read against a witness.
@@ -69,7 +71,7 @@ impl WitnessDatabase {
             node_pool,
             bytecodes,
         } = witness;
-        let state = StatelessSparseTrie::new(state_root, &node_pool)?;
+        let state = StatelessSparseTrie::new(state_root, node_pool)?;
         let mut code_by_hash = B256Map::default();
         for code in bytecodes {
             let code_hash = keccak256(&code);
@@ -179,7 +181,7 @@ pub struct TempoWitnessDatabase {
     state: Option<Arc<StatelessSparseTrie>>,
     tempo_block_hash: B256,
     tempo_block_number: u64,
-    node_pool: Arc<Vec<Bytes>>,
+    node_pool: Arc<IndexedTrieNodePool>,
     missing_read: Arc<Mutex<Option<MissingTempoStorageRead>>>,
 }
 
@@ -193,14 +195,21 @@ pub(crate) struct MissingTempoStorageRead {
 impl TempoWitnessDatabase {
     /// Construct the reader for the initial Tempo checkpoint.
     pub fn from_tempo_state_witness(witness: TempoStateWitness) -> Result<Self, Error> {
-        let node_pool = Arc::new(witness.node_pool);
-        let (state, tempo_block_hash, tempo_block_number) =
-            checkpoint_state(&witness.initial_tempo_header_rlp, node_pool.as_ref())?;
+        let (tempo_header, tempo_block_hash) = decode_header(&witness.initial_tempo_header_rlp)?;
+        let node_pool = Arc::new(IndexedTrieNodePool::new(witness.node_pool)?);
+        let state = match StatelessSparseTrie::new_with_node_pool(
+            tempo_header.state_root(),
+            node_pool.as_ref(),
+        ) {
+            Ok(state) => Some(Arc::new(state)),
+            Err(StatelessSparseTrieError::MissingStateRootNode { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
 
         Ok(Self {
             state,
             tempo_block_hash,
-            tempo_block_number,
+            tempo_block_number: tempo_header.number(),
             node_pool,
             missing_read: Arc::default(),
         })
@@ -213,13 +222,26 @@ impl TempoWitnessDatabase {
         self,
         header_rlp: &alloy_primitives::Bytes,
     ) -> Result<Self, Error> {
-        let (state, tempo_block_hash, tempo_block_number) =
-            checkpoint_state(header_rlp, self.node_pool.as_ref())?;
+        let (tempo_header, tempo_block_hash) = decode_header(header_rlp)?;
+
+        let mut state = match self.state.map(Arc::try_unwrap) {
+            Some(Ok(state)) => state,
+            Some(Err(_)) => {
+                error!("failed to unwrap old Tempo trie state, creating a new one");
+                StatelessSparseTrie::default()
+            }
+            None => StatelessSparseTrie::default(),
+        };
+        let state = match state.reset(tempo_header.state_root(), self.node_pool.as_ref()) {
+            Ok(()) => Some(Arc::new(state)),
+            Err(StatelessSparseTrieError::MissingStateRootNode { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
 
         Ok(Self {
             state,
             tempo_block_hash,
-            tempo_block_number,
+            tempo_block_number: tempo_header.number(),
             node_pool: self.node_pool,
             missing_read: self.missing_read,
         })
@@ -250,10 +272,8 @@ impl TempoWitnessDatabase {
     }
 }
 
-fn checkpoint_state(
-    header_rlp: &[u8],
-    node_pool: &[Bytes],
-) -> Result<(Option<Arc<StatelessSparseTrie>>, B256, u64), Error> {
+/// Decodes a Tempo header from its RLP-encoded form, returning the header and its hash.
+fn decode_header(header_rlp: &[u8]) -> Result<(TempoHeader, B256), Error> {
     let mut encoded_header = header_rlp;
     let header = TempoHeader::decode(&mut encoded_header)
         .map_err(|_| WitnessDatabaseError::InvalidTempoHeader)?;
@@ -261,14 +281,7 @@ fn checkpoint_state(
         return Err(WitnessDatabaseError::InvalidTempoHeader.into());
     }
 
-    let state_root = header.state_root();
-    let state = match StatelessSparseTrie::new(state_root, node_pool) {
-        Ok(state) => Some(Arc::new(state)),
-        Err(StatelessSparseTrieError::MissingStateRootNode { .. }) => None,
-        Err(error) => return Err(error.into()),
-    };
-
-    Ok((state, keccak256(header_rlp), header.number()))
+    Ok((header, keccak256(header_rlp)))
 }
 
 impl L1StorageReader for TempoWitnessDatabase {
