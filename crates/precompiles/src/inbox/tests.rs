@@ -1115,3 +1115,16 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     assert_eq!(harness.fallback_recipient(nonce)?, Address::ZERO);
     Ok(())
 }
+
+#[test]
+fn forced_exit_execution_remains_disabled_before_processing_is_implemented() {
+    let queued = QueuedDeposit {
+        depositType: DepositType::ForcedExit,
+        rejected: false,
+        depositData: alloy_primitives::Bytes::new(),
+    };
+    assert!(matches!(
+        DecodedQueuedDeposit::try_from(queued),
+        Err(ZonePrecompileError::MalformedCalldata)
+    ));
+}

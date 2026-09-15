@@ -1,8 +1,9 @@
 //! `ZonePortal` — deployed on Tempo L1.
 
 pub use ZonePortal::{
-    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, Withdrawal,
-    ZonePortalErrors as ZonePortalError,
+    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, ForcedExit,
+    ForcedExitAuthorization, ForcedExitMetadata, ForcedExitOutcome, ForcedExitReason,
+    ForcedExitStatus, Withdrawal, ZonePortalErrors as ZonePortalError,
 };
 
 use crate::{IZoneOutbox, ZoneInboxEvent};
@@ -65,6 +66,60 @@ crate::sol! {
             DepositPayload encrypted;
         }
 
+        /// @notice Root authorization encrypted inside a forced-exit request.
+        struct ForcedExitAuthorization {
+            address account;
+            uint256 zoneChainId;
+            address token;
+            address recipient;
+            uint256 nonce;
+            uint64 admitBefore;
+        }
+
+        /// @notice Complete public entry committed to the mixed inbox queue.
+        struct ForcedExit {
+            uint64 requestId;
+            address token;
+            uint256 keyIndex;
+            DepositPayload encrypted;
+            address feePayer;
+            uint64 requestedAtBlock;
+            uint64 requestedAtTime;
+        }
+
+        enum ForcedExitStatus {
+            Exited,
+            Empty,
+            Rejected
+        }
+
+        /// @notice TIP-1012 reason assignments; encoded as uint16 in outcomes.
+        enum ForcedExitReason {
+            None,
+            InvalidPayload,
+            InvalidAuthorization,
+            NonceAlreadyConsumed,
+            BalanceOverflow,
+            PolicyRejected
+        }
+
+        struct ForcedExitOutcome {
+            uint64 requestId;
+            uint64 depositNumber;
+            address token;
+            address recipient;
+            ForcedExitStatus status;
+            uint16 reason;
+            uint128 amount;
+            bytes32 withdrawalHash;
+        }
+
+        /// @notice Admission identity retained for subsequent outcome validation.
+        struct ForcedExitMetadata {
+            address token;
+            uint64 depositNumber;
+        }
+
         struct EncryptionKeyEntry {
             bytes32 x;
             uint8 yParity;
@@ -88,7 +143,16 @@ crate::sol! {
             uint64 nextDepositNumber;
         }
 
+        function requestForcedExit(address token, uint256 keyIndex, DepositPayload encrypted)
+            external returns (uint64 requestId, uint64 depositNumber);
+        function forcedExitVersion() external view returns (uint64);
+        function forcedExitCount() external view returns (uint64);
+        function forcedExitRequests(uint64 requestId) external view returns (address token, uint64 depositNumber);
+        function FORCED_EXIT_COMPENSATION() external view returns (uint128);
+
         // -- Events --
+        event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
+        event ForcedExitOutcomes(uint64 indexed withdrawalBatchIndex, ForcedExitOutcome[] outcomes);
 
         event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
@@ -219,6 +283,8 @@ crate::sol! {
         error NoEncryptionKeyAtBlock(uint64 blockNumber);
         error InvalidEphemeralPubkey();
         error InvalidCiphertextLength(uint256 actual, uint256 expected);
+        error InvalidForcedExitCiphertextLength(uint256 actual);
+        error ForcedExitsNotActive();
         error InvalidProofOfPossession();
         error DepositTooSmall();
         error TokenEnablementBlockCapacityExceeded(uint64 maximum);

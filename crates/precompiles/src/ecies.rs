@@ -5,14 +5,18 @@
 //! and AES-GCM implementations.
 
 use alloc::vec::Vec;
+use exithatch::{
+    ForcedExitAuthorization, MAX_SIGNATURE_SIZE, encode_payload, valid_ciphertext_length,
+};
+use rand::{CryptoRng, RngCore};
 
 use ::aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use k256::{
-    AffinePoint, ProjectivePoint, Scalar,
+    AffinePoint, ProjectivePoint, PublicKey, Scalar, SecretKey,
     elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
 };
-use tempo_zone_contracts::{ChaumPedersenProof, Withdrawal};
+use tempo_zone_contracts::{ChaumPedersenProof, DepositPayload, Withdrawal};
 
 use crate::{
     aes_gcm,
@@ -407,6 +411,81 @@ pub fn decrypt_authenticated_withdrawal(
     Some((sender, tx_hash))
 }
 
+/// Public values bound into the deposit-style encryption key derivation.
+#[derive(Clone, Copy, Debug)]
+pub struct EncryptionContext {
+    pub portal: Address,
+    pub key_index: U256,
+    /// Actual L1 msg.sender: the fee payer, including a relayer when used.
+    pub sender: Address,
+}
+
+/// Encrypt an authorization with fresh ephemeral key and nonce from a cryptographic RNG.
+/// Signature verification occurs in the Zone; callers may encrypt signatures made externally.
+pub fn encrypt_request<R: CryptoRng + RngCore>(
+    zone_key_x: &B256,
+    zone_key_parity: u8,
+    auth: &ForcedExitAuthorization,
+    signature: &[u8],
+    context: EncryptionContext,
+    rng: &mut R,
+) -> Option<DepositPayload> {
+    if signature.len() > MAX_SIGNATURE_SIZE {
+        return None;
+    }
+    let plaintext = encode_payload(auth, signature);
+    if !valid_ciphertext_length(plaintext.len()) {
+        return None;
+    }
+    encrypt_payload(zone_key_x, zone_key_parity, &plaintext, context, rng)
+}
+
+/// Shared envelope builder. Each operation's codec owns its plaintext-length rules.
+/// AAD is empty, matching the existing encrypted deposit protocol.
+pub fn encrypt_payload<R: CryptoRng + RngCore>(
+    zone_key_x: &B256,
+    zone_key_parity: u8,
+    plaintext: &[u8],
+    context: EncryptionContext,
+    rng: &mut R,
+) -> Option<DepositPayload> {
+    // 1. Recover and validate the Zone's compressed public key.
+    if !matches!(zone_key_parity, 2 | 3) {
+        return None;
+    }
+    let mut compressed = [0u8; 33];
+    compressed[0] = zone_key_parity;
+    compressed[1..].copy_from_slice(zone_key_x.as_slice());
+    let zone_key = PublicKey::from_sec1_bytes(&compressed).ok()?;
+
+    // 2. Generate a fresh ephemeral key pair.
+    let ephemeral = SecretKey::random(rng);
+    let encoded = ephemeral.public_key().to_encoded_point(true);
+    let x = B256::from_slice(encoded.x()?);
+
+    // 3. ECDH: derive the shared secret from the ephemeral private key and Zone public key.
+    let shared = k256::ecdh::diffie_hellman(ephemeral.to_nonzero_scalar(), zone_key.as_affine());
+
+    // 4. HKDF: derive the AES key, binding the portal, key index, ephemeral key, and sender.
+    let info = hkdf_info(&context.portal, &context.key_index, &x, &context.sender);
+    let key = hkdf_sha256(shared.raw_secret_bytes().as_ref(), b"ecies-aes-key", &info);
+
+    // 5. Encrypt the plaintext with AES-256-GCM using a fresh nonce and empty AAD.
+    let mut nonce = [0u8; 12];
+    rng.fill_bytes(&mut nonce);
+    let cipher = Aes256Gcm::new((&key).into());
+    let encrypted = cipher.encrypt(Nonce::from_slice(&nonce), plaintext).ok()?;
+    let (ciphertext, tag) = encrypted.split_at(encrypted.len() - 16);
+
+    Some(DepositPayload {
+        ephemeralPubkeyX: x,
+        ephemeralPubkeyYParity: encoded.as_bytes()[0],
+        ciphertext: ciphertext.to_vec().into(),
+        nonce: nonce.into(),
+        tag: <[u8; 16]>::try_from(tag).ok()?.into(),
+    })
+}
+
 /// Encrypt deposit data for `ZonePortal.deposit`.
 ///
 /// This is the depositor-side counterpart of [`decrypt_deposit`] — it performs
@@ -425,40 +504,23 @@ pub fn encrypt_deposit(
     portal_address: Address,
     key_index: alloy_primitives::U256,
 ) -> Option<EncryptedDepositArgs> {
-    // 1. Recover sequencer public key
-    let seq_pub = recover_point(&seq_pub_x.0, seq_pub_y_parity)?;
-
-    // 2. Generate ephemeral key pair
-    let eph_key = k256::SecretKey::random(&mut rand::thread_rng());
-    let eph_scalar: Scalar = *eph_key.to_nonzero_scalar();
-    let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * eph_scalar);
-    let (eph_pub_x, eph_pub_y_parity) = compressed_x_and_parity(&eph_pub);
-
-    // 3. ECDH: shared = eph_scalar * sequencer_pub
-    let shared_proj = ProjectivePoint::from(seq_pub) * eph_scalar;
-    let shared_affine = AffinePoint::from(shared_proj);
-    let ss_enc = shared_affine.to_encoded_point(true);
-    let shared_secret_x: [u8; 32] = ss_enc.x()?.as_slice().try_into().ok()?;
-
-    // 4. HKDF key derivation
-    let info = hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender);
-    let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
-
-    // 5. Encrypt plaintext with random nonce
-    let plaintext = build_plaintext(&to, &memo);
-    let cipher = Aes256Gcm::new((&aes_key).into());
-    let nonce_bytes: [u8; 12] = rand::random();
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let encrypted = cipher.encrypt(nonce, plaintext.as_ref()).ok()?;
-    let ciphertext = encrypted[..encrypted.len() - 16].to_vec();
-    let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().ok()?;
-
+    let payload = encrypt_payload(
+        seq_pub_x,
+        seq_pub_y_parity,
+        &build_plaintext(&to, &memo),
+        EncryptionContext {
+            sender,
+            portal: portal_address,
+            key_index,
+        },
+        &mut rand::thread_rng(),
+    )?;
     Some(EncryptedDepositArgs {
-        eph_pub_x,
-        eph_pub_y_parity,
-        ciphertext,
-        nonce: nonce_bytes,
-        tag,
+        eph_pub_x: payload.ephemeralPubkeyX,
+        eph_pub_y_parity: payload.ephemeralPubkeyYParity,
+        ciphertext: payload.ciphertext.to_vec(),
+        nonce: payload.nonce.0,
+        tag: payload.tag.0,
     })
 }
 
@@ -643,6 +705,84 @@ mod tests {
     use crate::test_utils::{EncryptedDepositFixture, assert_cp_proof_valid};
     use alloy_primitives::{Address, B256, U256};
     use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    #[test]
+    fn encryption_reuses_deposit_context_and_fresh_randomness() {
+        use ::aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let key = k256::SecretKey::from_slice(&[7; 32]).unwrap();
+        let pubkey = key.public_key().to_encoded_point(true);
+        use exithatch::{ForcedExitAuthorization, encode_payload};
+        use rand::{SeedableRng, rngs::StdRng};
+        const PORTAL: Address = Address::repeat_byte(1);
+        let a = ForcedExitAuthorization {
+            account: Address::repeat_byte(2),
+            zoneChainId: U256::from(1234),
+            token: Address::repeat_byte(3),
+            recipient: Address::repeat_byte(4),
+            nonce: U256::from(42),
+            admitBefore: 100,
+        };
+        // Envelope encryption accepts externally supplied signatures; authorization is tested
+        // independently in exithatch.
+        let sig = vec![0x33; 65];
+        let payer = Address::repeat_byte(9);
+        let mut rng = StdRng::seed_from_u64(123);
+        let mut encrypt = || {
+            super::encrypt_request(
+                &B256::from_slice(pubkey.x().unwrap()),
+                pubkey.as_bytes()[0],
+                &a,
+                &sig,
+                super::EncryptionContext {
+                    sender: payer,
+                    portal: PORTAL,
+                    key_index: U256::from(3),
+                },
+                &mut rng,
+            )
+            .unwrap()
+        };
+        let payload = encrypt();
+        let second = encrypt();
+        assert_ne!(payload.ephemeralPubkeyX, second.ephemeralPubkeyX);
+        assert_ne!(payload.nonce, second.nonce);
+        let mut compressed = vec![payload.ephemeralPubkeyYParity];
+        compressed.extend_from_slice(payload.ephemeralPubkeyX.as_slice());
+        let eph = k256::PublicKey::from_sec1_bytes(&compressed).unwrap();
+        let shared = k256::ecdh::diffie_hellman(key.to_nonzero_scalar(), eph.as_affine());
+        for context in 0..4 {
+            let info = super::hkdf_info(
+                &if context == 1 { Address::ZERO } else { PORTAL },
+                &U256::from(if context == 2 { 4 } else { 3 }),
+                &payload.ephemeralPubkeyX,
+                &if context == 3 { Address::ZERO } else { payer },
+            );
+            let aes_key =
+                super::hkdf_sha256(shared.raw_secret_bytes().as_ref(), b"ecies-aes-key", &info);
+            let mut ciphertext = payload.ciphertext.to_vec();
+            ciphertext.extend_from_slice(payload.tag.as_slice());
+            let cipher = Aes256Gcm::new((&aes_key).into());
+            let decoded = cipher.decrypt(
+                Nonce::from_slice(payload.nonce.as_slice()),
+                ciphertext.as_slice(),
+            );
+            if context == 0 {
+                assert_eq!(decoded.unwrap(), encode_payload(&a, &sig));
+                ciphertext[0] ^= 1;
+                assert!(
+                    cipher
+                        .decrypt(
+                            Nonce::from_slice(payload.nonce.as_slice()),
+                            ciphertext.as_slice()
+                        )
+                        .is_err()
+                );
+            } else {
+                assert!(decoded.is_err());
+            }
+        }
+    }
 
     #[test]
     fn test_ecies_decrypt_roundtrip() {
