@@ -839,22 +839,21 @@ where
             } = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            if let Some(sink) = &self.leadership_sink {
-                if let Some(transition) =
+            if let Some(sink) = &self.leadership_sink
+                && let Some(transition) =
                     events
                         .final_leader_transition()
                         .map_err(L1SubscriberError::fatal_from_err(
                             block_number,
                             "leadership event validation",
                         ))?
-                {
-                    sink.apply_leader_transition(transition)
-                        .wrap_err("cannot apply leadership transition")
-                        .map_err(L1SubscriberError::fatal_from_err(
-                            block_number,
-                            "leadership transition application",
-                        ))?;
-                }
+            {
+                sink.apply_leader_transition(transition)
+                    .wrap_err("cannot apply leadership transition")
+                    .map_err(L1SubscriberError::fatal_from_err(
+                        block_number,
+                        "leadership transition application",
+                    ))?;
             }
             if let Some(keys) = &self.encryption_keys {
                 for rotation in &events.encryption_key_rotations {
