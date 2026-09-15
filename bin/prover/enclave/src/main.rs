@@ -251,8 +251,6 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
             };
         }
     };
-    // TODO: Configure the Nitro prover with the actual trusted Zone chain spec and select it by
-    // the full Zone chain ID instead of synthesizing one from the parent Tempo genesis.
     let mut zone_genesis = tempo_spec.inner.genesis.clone();
     zone_genesis.config.chain_id = zone_chain_id;
     let zone_spec = match ZoneChainSpec::from_genesis_with_l1(zone_genesis, tempo_spec.as_ref()) {
