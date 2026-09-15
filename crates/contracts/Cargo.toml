@@ -16,7 +16,7 @@ zone-primitives = { workspace = true, default-features = false }
 
 # alloy
 alloy-primitives = { workspace = true, default-features = false }
-alloy-sol-types = { workspace = true, default-features = false }
+alloy-sol-types = { workspace = true, default-features = false, features = ["json"] }
 alloy-contract = { workspace = true, optional = true }
 alloy-network = { workspace = true, optional = true }
 alloy-provider = { workspace = true, optional = true }

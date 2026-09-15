@@ -437,8 +437,15 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
         .first()
         .ok_or_else(|| eyre::eyre!("topicless ZoneInbox log in block {block}"))?;
     Ok(Some(match *topic {
-        IZoneInbox::TempoAdvanced::SIGNATURE_HASH => {
-            let event = decode_event::<IZoneInbox::TempoAdvanced>(log, "TempoAdvanced", block)?;
+        IZoneInbox::TempoAdvanced_0::SIGNATURE_HASH => {
+            let event = decode_event::<IZoneInbox::TempoAdvanced_0>(log, "TempoAdvanced_0", block)?;
+            ReceiptEvent::Anchor(L1Anchor {
+                tempo_block_hash: event.tempoBlockHash,
+                tempo_block_number: event.tempoBlockNumber,
+            })
+        }
+        IZoneInbox::TempoAdvanced_1::SIGNATURE_HASH => {
+            let event = decode_event::<IZoneInbox::TempoAdvanced_1>(log, "TempoAdvanced_1", block)?;
             ReceiptEvent::Anchor(L1Anchor {
                 tempo_block_hash: event.tempoBlockHash,
                 tempo_block_number: event.tempoBlockNumber,
@@ -619,12 +626,13 @@ mod tests {
     fn anchor_log(number: u64) -> Log {
         Log {
             address: ZONE_INBOX_ADDRESS,
-            data: IZoneInbox::TempoAdvanced {
+            data: IZoneInbox::TempoAdvanced_1 {
                 tempoBlockHash: B256::repeat_byte(0xaa),
                 tempoBlockNumber: number,
                 depositsProcessed: U256::from(2),
                 newProcessedDepositQueueHash: B256::repeat_byte(0xbb),
                 lastProcessedDepositNumber: 3,
+                lastProcessedEnabledTokenCount: 4,
             }
             .encode_log_data(),
         }
@@ -910,7 +918,7 @@ mod tests {
         let malformed = Log {
             address: ZONE_INBOX_ADDRESS,
             data: LogData::new_unchecked(
-                vec![IZoneInbox::TempoAdvanced::SIGNATURE_HASH],
+                vec![IZoneInbox::TempoAdvanced_1::SIGNATURE_HASH],
                 Bytes::from(vec![0xde, 0xad]),
             ),
         };
