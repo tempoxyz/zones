@@ -212,9 +212,16 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 }
 
 fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    forge_deployed_bytecode_at(&format!("{contract}.sol"), contract)
+}
+
+fn forge_deployed_bytecode_at(
+    source: &str,
+    contract: &str,
+) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
-    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
+    let path = specs_dir.join(format!("{source}/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
         format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
@@ -2725,6 +2732,22 @@ impl L1TestNode {
     /// Start an L1 dev node with the default configuration (500ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
+    }
+
+    /// Install explicit test-only forced-exit activation; production runtime has no setter.
+    pub(crate) async fn start_with_forced_exit_test_runtime() -> eyre::Result<Self> {
+        use reth_chainspec::EthChainSpec;
+        let runtime = forge_deployed_bytecode_at("ForcedExit.t.sol", "ForcedExitPortalHarness")?;
+        Self::start_with(move |config| {
+            let mut genesis = config.chain.genesis().clone();
+            genesis
+                .alloc
+                .get_mut(&tempo_zone_contracts::ZONE_PORTAL_IMPL_ADDRESS)
+                .expect("portal implementation installed")
+                .code = Some(runtime);
+            config.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
+        })
+        .await
     }
 
     /// Start an L1 dev node, applying a closure to customise the [`NodeConfig`]
