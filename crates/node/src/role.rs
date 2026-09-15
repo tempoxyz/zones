@@ -48,7 +48,7 @@ mod zone_transaction_pool_alias {
 }
 
 use crate::{
-    EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
+    EngineExit, LocalProductionMarker, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     follower::{BlockSyncP2p, FollowerBlockSync, FollowerBlockSyncContext, PeerTipRegistry},
     replication::{
         BroadcasterShutdown, broadcast_persisted_blocks, collect_follower_settlement_signatures,
@@ -92,6 +92,8 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub peer_tips: PeerTipRegistry,
     /// Live role/readiness snapshot shared with the status RPC.
     pub status: SharedRoleStatus,
+    /// Canonical blocks produced by this process across leader generations.
+    pub local_production: LocalProductionMarker,
 }
 
 /// Live role and promotion-readiness snapshot for observability and the status RPC.
@@ -1035,6 +1037,22 @@ where
                 }
             });
 
+            // Keep locally submitted transactions replicated while this node leads so the next
+            // eligible leader already has them when authority changes. P2P-origin transactions
+            // remain external in the pool and are filtered by `forward_new_transactions`.
+            let pool = context.pool.clone();
+            let listener = pool.new_transactions_listener();
+            let commands = context.commands.clone();
+            let forward_token = token.clone();
+            tasks.spawn(async move {
+                tokio::select! {
+                    () = forward_token.cancelled() => TaskEnd::Ended("transaction-forwarding (cancelled)"),
+                    () = forward_new_transactions(pool, listener, commands) => {
+                        TaskEnd::Ended("transaction-forwarding")
+                    }
+                }
+            });
+
             let provider = context.provider.clone();
             let commands = context.commands.clone();
             let attestation = context.attestation.clone();
@@ -1124,6 +1142,7 @@ where
         context.schedule.clone(),
         context.local_ed25519_public_key.clone(),
     ))
+    .with_local_production_marker(context.local_production.clone())
 }
 
 #[cfg(test)]

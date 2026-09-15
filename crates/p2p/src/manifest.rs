@@ -679,6 +679,7 @@ pub struct ManifestNode {
     ed25519_public_key: PublicKey,
     secp256k1_address: Option<EthereumAddress>,
     address: ManifestAddress,
+    operator_rpc_url: Option<String>,
     rpc_only: bool,
 }
 
@@ -704,6 +705,11 @@ impl ManifestNode {
     /// Node's advertised P2P address.
     pub const fn address(&self) -> &ManifestAddress {
         &self.address
+    }
+
+    /// Optional HTTP endpoint used only by external operator tooling.
+    pub fn operator_rpc_url(&self) -> Option<&str> {
+        self.operator_rpc_url.as_deref()
     }
 
     /// Whether this node replicates the chain without joining the on-chain quorum.
@@ -791,6 +797,20 @@ impl ZoneManifest {
                         address: raw_node.address.clone(),
                         reason,
                     })?;
+            if let Some(endpoint) = raw_node.operator_rpc_url.as_deref() {
+                let authority = endpoint
+                    .strip_prefix("http://")
+                    .or_else(|| endpoint.strip_prefix("https://"))
+                    .and_then(|rest| rest.split('/').next());
+                if authority.is_none_or(|authority| {
+                    authority.is_empty() || authority.chars().any(char::is_whitespace)
+                }) {
+                    return Err(ManifestError::InvalidOperatorRpcUrl {
+                        node: raw_node.name.clone(),
+                        reason: "expected an HTTP(S) URL with a host".to_owned(),
+                    });
+                }
+            }
             if raw_node.rpc_only && ed25519_public_key == leader_ed25519_public_key {
                 return Err(ManifestError::RpcOnlyLeader(raw_node.name));
             }
@@ -799,6 +819,7 @@ impl ZoneManifest {
                 ed25519_public_key,
                 secp256k1_address,
                 address,
+                operator_rpc_url: raw_node.operator_rpc_url,
                 rpc_only: raw_node.rpc_only,
             });
         }
@@ -1109,6 +1130,9 @@ struct RawManifestNode {
     #[serde(default)]
     secp256k1_address: Option<String>,
     address: String,
+    /// Optional endpoint consumed by external operational tooling.
+    #[serde(default)]
+    operator_rpc_url: Option<String>,
     /// Serve RPC as a hot standby without joining the on-chain settlement quorum.
     #[serde(default)]
     rpc_only: bool,
@@ -1159,6 +1183,9 @@ pub enum ManifestError {
 
     #[error("invalid forced recovery block hash `{hash}`: {reason}")]
     InvalidRecoveryBlockHash { hash: String, reason: String },
+
+    #[error("sequencer manifest node `{node}` has invalid operator RPC URL: {reason}")]
+    InvalidOperatorRpcUrl { node: String, reason: String },
 
     #[error("sequencer manifest node `{0}` must declare a secp256k1_address")]
     MissingSecp256k1Address(String),
@@ -1688,6 +1715,53 @@ mod tests {
                 .unwrap(),
             Role::Follower
         );
+    }
+
+    #[test]
+    fn operator_rpc_url_is_optional_operational_metadata() {
+        let base = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "127.0.0.1:9201"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        );
+        let baseline = ZoneManifest::parse(&base).unwrap();
+        let configured = base.replacen(
+            "name = \"follower-a\"",
+            "name = \"follower-a\"\noperator_rpc_url = \"https://follower-a.example\"",
+            1,
+        );
+        let configured = ZoneManifest::parse(&configured).unwrap();
+
+        assert_eq!(baseline.membership_digest(), configured.membership_digest());
+        assert_eq!(
+            configured.nodes()[1].operator_rpc_url(),
+            Some("https://follower-a.example")
+        );
+    }
+
+    #[test]
+    fn rejects_non_http_operator_rpc_url() {
+        let input = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "127.0.0.1:9201"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        )
+        .replacen(
+            "name = \"follower-a\"",
+            "name = \"follower-a\"\noperator_rpc_url = \"ftp://follower-a.example\"",
+            1,
+        );
+
+        assert!(matches!(
+            ZoneManifest::parse(&input),
+            Err(ManifestError::InvalidOperatorRpcUrl { .. })
+        ));
     }
 
     #[test]

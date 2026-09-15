@@ -5,6 +5,7 @@ Zones:
 
 - `admin check`: read-only cluster health and consistency checks
 - `admin leader set`: guarded `zone_setLeader` handoff
+- `admin failover drain`: bounded external-controller handoff before process termination
 - `admin identity prepare`: generate independent per-node P2P and sequencer keys
 - `admin sequencer-set replace`: guarded one-for-one Portal membership replacement
 - `admin encryption-key prepare`: generate a replacement shared key and a
@@ -47,6 +48,10 @@ The same values can be passed with `--zone-id`, `--zone-manifest`,
 arguments. CLI values override the file. Supplying any `--operator-rpc`
 arguments replaces the file's complete node list.
 
+When `--zone-manifest` is supplied and neither source provides a node list,
+admin commands derive named endpoints from `nodes[].operator_rpc_url` in
+manifest order.
+
 ## Health checks and leader handoffs
 
 ```bash
@@ -64,7 +69,23 @@ tempo-xtask admin leader set \
 tempo-xtask admin leader set \
   --config zone-admin.toml \
   --target follower --via leader --execute
+
+# The supervisor runs this before signaling the current leader.
+tempo-xtask admin failover drain \
+  --zone-id 1 \
+  --zone-manifest zone-manifest.toml \
+  --l1-rpc-url https://tempo-rpc.example \
+  --state-file /var/lib/tempo-zone/failover.json \
+  --execute
 ```
+
+`admin failover drain` has one 15-second deadline. It waits for a new canonical
+block from the outgoing leader, requires a manifest-ordered follower to report
+the exact checkpoint, persists the chosen target before submission, and exits
+successfully only after finalized authority and canonical production move to
+the successor. A supervisor may then signal the old process. An unavailable or
+stalled leader returns an error requiring the coordinated forced-recovery
+workflow; the controller never infers safety from a process exit reason.
 
 `admin check` compares a finalized ZonePortal snapshot with all configured
 operator RPCs. It checks identity, loaded topology, membership, finalized

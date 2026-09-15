@@ -293,6 +293,18 @@ pub struct PeerTipInfo {
     pub tempo_block_hash: B256,
 }
 
+/// Most recent block canonicalized by this process while it was the active producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProductionInfo {
+    /// Tempo anchor consumed by the block.
+    pub tempo_block_number: U64,
+    /// Canonical Zone block number.
+    pub zone_height: U64,
+    /// Canonical Zone block hash.
+    pub zone_hash: B256,
+}
+
 /// Consumption and observation progress for `zone_getSequencerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,6 +387,9 @@ pub struct SequencerInfoResponse {
     /// Exact local canonical tip usable as a forced-recovery point.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_tip: Option<PeerTipInfo>,
+    /// Last block this process produced and verified as canonical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_locally_produced: Option<LocalProductionInfo>,
     /// All configured manifest members with observed tip evidence.
     pub peers: Vec<SequencerPeerInfo>,
     /// Consumption and observation progress (multi-sequencer mode only).

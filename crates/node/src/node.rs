@@ -4,7 +4,7 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
-    ZoneEngine,
+    LocalProductionMarker, ZoneEngine,
     follower::PeerTipRegistry,
     replication::{BACKFILL_SERVE_QUEUE_CAPACITY, serve_backfill_requests},
     role::{
@@ -552,6 +552,7 @@ struct P2PRuntime {
     local_ed25519_public_key: P2pPeerId,
     role_status: SharedRoleStatus,
     peer_tips: PeerTipRegistry,
+    local_production: LocalProductionMarker,
     backfill_requests_rx: Receiver<BackfillRequest>,
 }
 
@@ -886,6 +887,7 @@ where
             local_ed25519_public_key,
             role_status,
             peer_tips,
+            local_production,
             backfill_requests_rx,
         }) = p2p_runtime
         {
@@ -930,6 +932,7 @@ where
                 sequencer,
                 peer_tips,
                 status: role_status,
+                local_production,
             };
             task_executor
                 .spawn_critical_task("zone-role-controller", run_role_controller(context, sinks));
@@ -1241,6 +1244,7 @@ where
 
         let role_status: SharedRoleStatus = Default::default();
         let peer_tips = PeerTipRegistry::default();
+        let local_production = LocalProductionMarker::default();
         let relayer = match individual_signer {
             Some(signer) => {
                 use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
@@ -1276,6 +1280,7 @@ where
                 local_ed25519_public_key.clone(),
                 relayer,
                 encryption_keys,
+                local_production.clone(),
             ))
             .expect("the sequencer RPC context is installed exactly once");
 
@@ -1288,6 +1293,7 @@ where
             local_ed25519_public_key,
             role_status,
             peer_tips,
+            local_production,
             backfill_requests_rx,
         })
     }

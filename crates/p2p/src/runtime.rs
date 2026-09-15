@@ -614,10 +614,8 @@ async fn run_commands(
                 transaction_hash,
                 transaction,
             } => {
-                // Only followers run the transaction-forwarding task. Keep the outbound role
-                // fence, but send to every other quorum member so every possible successor
-                // retains the transaction before a leadership handoff. RPC-only standbys can
-                // originate transactions but never need to retain transactions from other nodes.
+                // Every initialized node forwards locally-originated transactions. In particular,
+                // the active leader keeps every possible successor warm during a handoff.
                 let policy =
                     RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership);
                 let forwarding = policy.transaction_forwarding_status();
@@ -636,7 +634,7 @@ async fn run_commands(
                     } else {
                         metrics::counter!("zone_p2p_role_invalid_messages_dropped_total")
                             .increment(1);
-                        warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on the next-anchor leader");
+                        warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command for an ineligible node");
                     }
                     continue;
                 }
