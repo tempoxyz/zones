@@ -54,13 +54,19 @@ jobs:
     runs-on: ubuntu-latest
     needs: get-version
     if: ${{ github.event.inputs.dry_run != 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@89eccc47fadc422ccf04b957a24125bba1596f2d
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          toolchain: stable
+          toolchain: 1.96.0
       - name: Verify crate version matches tag
         # Check that the Cargo version starts with the tag,
         # so that Cargo version 1.4.8 can be matched against both v1.4.8 and v1.4.8-rc.1
@@ -69,13 +75,16 @@ jobs:
         run: |
           tag="$VERSION"
           tag=${tag#v}
-          cargo_ver=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          cargo_ver=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
           [[ "$tag" == "$cargo_ver"* ]] || { echo "Tag $tag doesn’t match the Cargo version $cargo_ver"; exit 1; }
 
   build-release:
     name: Build Release Binaries
     needs: get-version
     runs-on: ${{ matrix.platform.os }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -91,6 +100,9 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@89eccc47fadc422ccf04b957a24125bba1596f2d
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,7 +111,7 @@ jobs:
       - name: Install Rust toolchain
         uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          toolchain: stable
+          toolchain: 1.96.0
           targets: ${{ matrix.platform.target }}
 
       - name: Setup mold linker
@@ -125,7 +137,7 @@ jobs:
           FEATURES: ${{ matrix.binary.features }}
           PROFILE: ${{ steps.profile.outputs.profile }}
           TARGET: ${{ matrix.platform.target }}
-        run: cargo build --bin "$BINARY_NAME" --features "$FEATURES" --profile "$PROFILE" --target "$TARGET"
+        run: cargo build --locked --bin "$BINARY_NAME" --features "$FEATURES" --profile "$PROFILE" --target "$TARGET"
 
       - name: Prepare binary
         id: prepare

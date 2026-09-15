@@ -13,20 +13,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked,id=sccache \
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
-    cargo build --profile ${RUST_PROFILE} \
+    cargo build --locked --profile ${RUST_PROFILE} \
         --bin tempo-zone --features "jemalloc" \
     && RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
-    cargo build --profile ${RUST_PROFILE} \
+    cargo build --locked --profile ${RUST_PROFILE} \
         --bin tempo-xtask
 
 # Solidity contracts compiled for shared runtimes, routers, and zone genesis artifacts.
 # Requires the crates/contracts/lib submodules to be checked out.
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS solidity
+ARG FOUNDRY_VERSION=nightly
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
-    && /root/.foundry/bin/foundryup --install nightly
+    && /root/.foundry/bin/foundryup --install ${FOUNDRY_VERSION}
 ENV PATH="/root/.foundry/bin:${PATH}"
 WORKDIR /app/crates/contracts
 COPY crates/contracts .
