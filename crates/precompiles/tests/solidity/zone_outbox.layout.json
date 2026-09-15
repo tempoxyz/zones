@@ -90,14 +90,6 @@
             "offset": 0,
             "slot": "5",
             "type": "t_mapping(t_uint64,t_address)"
-          },
-          {
-            "astId": 53,
-            "contract": "tests/solidity/zone_outbox.sol:ZoneOutboxStorage",
-            "label": "forcedSenderTags",
-            "offset": 0,
-            "slot": "6",
-            "type": "t_mapping(t_uint64,t_bytes32)"
           }
         ],
         "types": {
@@ -128,13 +120,6 @@
             "label": "mapping(uint64 => address)",
             "numberOfBytes": "32",
             "value": "t_address"
-          },
-          "t_mapping(t_uint64,t_bytes32)": {
-            "encoding": "mapping",
-            "key": "t_uint64",
-            "label": "mapping(uint64 => bytes32)",
-            "numberOfBytes": "32",
-            "value": "t_bytes32"
           },
           "t_struct(PendingWithdrawal)22_storage": {
             "encoding": "inplace",

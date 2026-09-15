@@ -1249,7 +1249,8 @@ interface IZoneOutbox {
 
     function AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH() external view returns (uint256);
 
-    /// @notice Public commitment for a forced plain withdrawal, without the private account.
+    /// @notice Zone-local reconstruction event carrying the normal sender tag.
+    /// @dev No private hash or account is emitted; L1 uses the ordinary Withdrawal encoding.
     event ForcedWithdrawalRequested(
         uint64 indexed withdrawalIndex,
         address token,

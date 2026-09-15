@@ -46,8 +46,6 @@ pub struct ZoneOutbox {
     pending_withdrawals: Vec<PendingWithdrawal>,
     last_fallback_nonce: u64,
     fallback_recipients: Mapping<u64, Address>,
-    // Keep the existing pending vector's element stride unchanged across upgrades.
-    forced_sender_tags: Mapping<u64, B256>,
 }
 
 impl ZoneOutbox {
@@ -322,27 +320,7 @@ impl ZoneOutbox {
         if count > 0 {
             for (index, encrypted_sender) in call.encryptedSenders.into_iter().enumerate().rev() {
                 let pending = self.pending_withdrawals[index].read()?;
-                // Forced entries reserve this combination; ordinary requests have a sender,
-                // and deposit refund entries have a zero fallback nonce. Keep legacy entries
-                // on their existing storage-read path.
-                let forced = pending.sender.is_zero()
-                    && pending.tx_hash.is_zero()
-                    && pending.fallback_nonce != 0;
-                let mut withdrawal = pending.into_withdrawal(encrypted_sender)?;
-                if forced {
-                    let first_index = self
-                        .next_withdrawal_index
-                        .read()?
-                        .checked_sub(count as u64)
-                        .ok_or_else(TempoPrecompileError::under_overflow)?;
-                    let request_index = first_index + index as u64;
-                    let tag = self.forced_sender_tags[request_index].read()?;
-                    if tag.is_zero() {
-                        return Err(TempoPrecompileError::under_overflow().into());
-                    }
-                    withdrawal.senderTag = tag;
-                    self.forced_sender_tags[request_index].delete()?;
-                }
+                let withdrawal = pending.into_withdrawal(encrypted_sender)?;
                 withdrawal_queue_hash = withdrawal.hash_with_tail(withdrawal_queue_hash);
             }
             self.pending_withdrawals.delete()?;
