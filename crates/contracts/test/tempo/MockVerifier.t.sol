@@ -6,15 +6,14 @@ import {
     DepositQueueTransition,
     TokenEnablementTransition
 } from "../../src/runtime/interfaces/IZone.sol";
-import { Verifier } from "../../src/runtime/tempo/Verifier.sol";
+import { MockVerifier } from "../mocks/MockVerifier.sol";
 import { Test } from "forge-std/Test.sol";
 
-contract VerifierTest is Test {
+contract MockVerifierTest is Test {
 
-    /// @notice Verifies the stub verifier accepts arbitrary transition inputs.
+    /// @notice Verifies the mock verifier accepts arbitrary transition inputs by default.
     function test_verify_returnsTrue() public {
-        // WIP stub: the reference verifier accepts all inputs while proof verification is defined.
-        Verifier verifier = new Verifier();
+        MockVerifier verifier = new MockVerifier();
 
         bool ok = verifier.verify(
             1,
