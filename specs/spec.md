@@ -1482,8 +1482,6 @@ struct NitroBatchAttestation {
 
 When checking the attestation, the Nitro verifier MUST reconstruct `parentChainId` from `block.chainid`, `verifier` from `address(this)`, and MUST require `msg.sender == portalAddress(zoneId)` using the same canonical TIP-1091 derivation as the SPF. Merely checking `zoneId == IZonePortal(msg.sender).zoneId()` is insufficient because an arbitrary contract can report that ID. It reconstructs the remaining digest fields from the arguments supplied by `ZonePortal` to `verify`; it MUST NOT trust domain values copied from the proof or prover witness.
 
-Removing the portal field changes the EIP-712 type hash. Provers and verifiers MUST use this same schema; attestations produced with the previous schema are incompatible.
-
 The prover asks the Nitro Secure Module to place this 32-byte hash in the attestation document's `user_data`. It returns:
 
 ```rust
