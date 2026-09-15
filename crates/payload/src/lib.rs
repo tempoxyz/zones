@@ -9,6 +9,7 @@ pub mod abi {
 
 mod attrs;
 mod builder;
+mod prewarming;
 mod withdrawal_reveal;
 
 pub use attrs::{ZonePayloadAttributes, ZonePayloadTypes};
