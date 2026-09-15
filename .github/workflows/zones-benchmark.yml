@@ -583,7 +583,7 @@ jobs:
 
       - uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Resolve Solidity cache key
         id: solidity-key
