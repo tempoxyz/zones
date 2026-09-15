@@ -1205,6 +1205,16 @@ interface IZoneOutbox {
 
     function AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH() external view returns (uint256);
 
+    /// @notice Public commitment for a forced plain withdrawal, without the private account.
+    event ForcedWithdrawalRequested(
+        uint64 indexed withdrawalIndex,
+        address token,
+        bytes32 senderTag,
+        address to,
+        uint128 amount,
+        uint64 fallbackNonce
+    );
+
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
         address indexed sender,

@@ -82,8 +82,9 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 5] = [
+    const SIGNATURE_HASHES: [B256; 6] = [
         DepositMade::SIGNATURE_HASH,
+        ForcedExitRequested::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerEncryptionKeyUpdated::SIGNATURE_HASH,
@@ -149,6 +150,20 @@ impl L1PortalEvents {
             return Ok(());
         }
         match ZonePortalEvents::decode_log(&log.inner)?.data {
+            ZonePortalEvents::ForcedExitRequested(event) => {
+                eyre::ensure!(
+                    event.entry.requestedAtBlock == block_number,
+                    "forced request admission block does not match its log block"
+                );
+                info!(
+                    l1_block = block_number,
+                    request_id = event.entry.requestId,
+                    deposit_number = event.depositNumber,
+                    "Forced request from L1"
+                );
+                self.deposits
+                    .push(L1Deposit::ForcedExit(ForcedExitRequest::from_event(event)));
+            }
             ZonePortalEvents::DepositMade(event) => {
                 info!(
                     l1_block = block_number,

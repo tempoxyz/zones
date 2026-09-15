@@ -86,7 +86,8 @@ fn zone_outbox_layout_matches_solidity() {
         last_finalized_timestamp,
         pending_withdrawals,
         last_fallback_nonce,
-        fallback_recipients
+        fallback_recipients,
+        forced_sender_tags
     )
     .into_iter()
     .map(|field| match field.name {

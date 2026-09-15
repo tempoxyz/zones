@@ -756,6 +756,21 @@ impl Withdrawal {
         }
     }
 
+    /// Reconstruct a forced plain withdrawal without attributing the private Zone account.
+    pub fn from_forced_requested_event(event: &IZoneOutbox::ForcedWithdrawalRequested) -> Self {
+        Self {
+            token: event.token,
+            senderTag: event.senderTag,
+            to: event.to,
+            amount: event.amount,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackNonce: event.fallbackNonce,
+            callbackData: Bytes::new(),
+            encryptedSender: Bytes::new(),
+        }
+    }
+
     /// Hash this withdrawal as one link in a withdrawal queue.
     pub fn hash_with_tail(&self, tail: B256) -> B256 {
         keccak256((self.clone(), tail).abi_encode_params())
