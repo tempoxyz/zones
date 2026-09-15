@@ -23,13 +23,13 @@ use zone_precompiles::L1StorageReader;
 #[derive(Debug, Clone)]
 pub struct SpfConfig {
     chain_spec: Arc<ZoneChainSpec>,
-    portal: Address,
 }
 
 impl SpfConfig {
-    /// Creates a new [`SpfConfig`] with the given composed chainspec and portal address.
-    pub fn new(chain_spec: Arc<ZoneChainSpec>, portal: Address) -> Self {
-        Self { chain_spec, portal }
+    /// Creates a new [`SpfConfig`] with the given composed chainspec.
+    /// The portal is derived from the zone ID encoded in the chainspec.
+    pub fn new(chain_spec: Arc<ZoneChainSpec>) -> Self {
+        Self { chain_spec }
     }
 
     /// Returns a reference to the [`ZoneChainSpec`].
@@ -37,14 +37,14 @@ impl SpfConfig {
         &self.chain_spec
     }
 
-    /// Returns the portal address.
+    /// Returns the canonical TIP-1091 portal address for this zone.
     pub fn portal(&self) -> Address {
-        self.portal
+        tempo_precompiles::zone_factory::portal_address(self.chain_spec.zone_id())
     }
 
     /// Crates a [`ZoneEvmConfig`] for the given L1 storage reader.
     pub fn evm_config<L1: L1StorageReader>(&self, l1_provider: L1) -> ZoneEvmConfig<L1> {
-        ZoneEvmConfig::new(self.chain_spec.clone(), l1_provider, self.portal)
+        ZoneEvmConfig::new(self.chain_spec.clone(), l1_provider, self.portal())
     }
 }
 
@@ -57,8 +57,6 @@ pub struct PublicInputs {
     pub parent_chain_id: u64,
     /// Zone identifier from which the SPF derives the EVM chain ID.
     pub zone_id: u32,
-    /// Tempo ZonePortal whose state governs L1-backed Zone execution.
-    pub portal: Address,
     /// Tempo block number committed by the submitted batch.
     pub tempo_block_number: u64,
     /// Tempo block number used to anchor this batch.

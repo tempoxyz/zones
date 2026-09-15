@@ -122,7 +122,7 @@ pub fn request_error_response(error: &ProverConnectionError) -> VerifyResponse {
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{Address, B256, Bytes};
+    use alloy_primitives::{B256, Bytes};
     use reth_trie_common::EMPTY_ROOT_HASH;
     use tempo_primitives::TempoHeader;
     use tokio::io::AsyncWriteExt as _;
@@ -233,7 +233,6 @@ mod tests {
             public_inputs: PublicInputs {
                 parent_chain_id: 42_431,
                 zone_id: 1,
-                portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
                 anchor_block_number: 2,
                 anchor_block_hash: B256::ZERO,

@@ -217,7 +217,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .parse::<PrivateKeySigner>()
         .context("parse private Zone RPC key")?;
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = SpfConfig::new(args.chain, discovery.portal);
+    let spf_config = SpfConfig::new(args.chain);
     let private_zone_provider = connect_private_zone(
         &args.zone_private_rpc_url,
         signer,
@@ -325,7 +325,6 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         public_inputs: PublicInputs {
             parent_chain_id: discovery.tempo_chain_id,
             zone_id: discovery.zone_id,
-            portal: discovery.portal,
             tempo_block_number: final_tempo_header.number(),
             anchor_block_number,
             anchor_block_hash,
@@ -1193,7 +1192,7 @@ mod tests {
             path.to_str().unwrap(),
         )
         .unwrap();
-        let config = SpfConfig::new(chain_spec, Address::ZERO);
+        let config = SpfConfig::new(chain_spec);
 
         std::fs::remove_file(path).unwrap();
         assert_eq!(

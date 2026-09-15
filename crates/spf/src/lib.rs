@@ -52,12 +52,6 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             actual: expected_chain_id,
         });
     }
-    if witness.public_inputs.portal != config.portal() {
-        return Err(Error::PortalMismatch {
-            expected: config.portal(),
-            actual: witness.public_inputs.portal,
-        });
-    }
 
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
@@ -524,12 +518,6 @@ pub enum Error {
     /// The witness identifies a Zone other than the verifier-selected chain specification.
     #[error("Zone chain ID mismatch: expected {expected}, got {actual}")]
     ChainIdMismatch { expected: u64, actual: u64 },
-    /// The prover supplied a portal other than the verifier-selected portal.
-    #[error("Zone portal mismatch: expected {expected:?}, got {actual:?}")]
-    PortalMismatch {
-        expected: alloy_primitives::Address,
-        actual: alloy_primitives::Address,
-    },
     /// The initial Tempo witness header is not the checkpoint stored in the
     /// parent Zone state.
     #[error(
@@ -705,7 +693,19 @@ mod tests {
         genesis.config.chain_id = zone_chain_id(tempo_chain_spec.chain().id(), 1).unwrap();
         let zone_chain_spec =
             Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
-        SpfConfig::new(zone_chain_spec, Address::repeat_byte(0x11))
+        SpfConfig::new(zone_chain_spec)
+    }
+
+    #[test]
+    fn derives_portal_from_the_chain_spec_zone_id() {
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        let mut genesis = parent.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(parent.chain().id(), 0x0102_0304).unwrap();
+        let spec = Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
+        assert_eq!(
+            SpfConfig::new(spec).portal(),
+            alloy_primitives::address!("5ad0000000000000000000000000000001020304")
+        );
     }
 
     fn minimal_batch_witness() -> BatchWitness {
@@ -723,7 +723,6 @@ mod tests {
             public_inputs: PublicInputs {
                 parent_chain_id: tempo_chainspec::spec::MODERATO.chain().id(),
                 zone_id: 1,
-                portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
                 anchor_block_number: 2,
                 anchor_block_hash: B256::ZERO,
@@ -891,31 +890,6 @@ mod tests {
         assert_eq!(
             validate_batch_block_shape(&witness.zone_blocks[0], true),
             Err(Error::InvalidBatchShape)
-        );
-    }
-
-    #[test]
-    fn rejects_a_portal_other_than_the_verifier_selected_portal() {
-        let mut witness = minimal_batch_witness();
-        witness.public_inputs.portal = Address::repeat_byte(0x22);
-        witness.zone_blocks.push(ZoneBlock {
-            number: 1,
-            parent_hash: witness.parent_header.hash_slow(),
-            timestamp: 0,
-            timestamp_millis_part: 0,
-            beneficiary: Address::ZERO,
-            tempo_import: checkpoint_import(Vec::new()),
-            finalize_withdrawal_batch_count: None,
-            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
-            transactions: Vec::new(),
-        });
-
-        assert_eq!(
-            prove_zone_batch(&test_config(), witness),
-            Err(Error::PortalMismatch {
-                expected: Address::repeat_byte(0x11),
-                actual: Address::repeat_byte(0x22),
-            })
         );
     }
 

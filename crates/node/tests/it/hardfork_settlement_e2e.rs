@@ -217,7 +217,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     );
 
     let witness = recovery_witness(&l1, &zone, portal_address, 9, end).await?;
-    let config = SpfConfig::new(spec, portal_address);
+    let config = SpfConfig::new(spec);
     let output = prove_zone_batch(&config, witness.clone())?;
     let head = provider.get_block_by_number(end.into()).await?.unwrap();
     assert_eq!(output.block_transition.prevBlockHash, parent.header.hash);
@@ -415,7 +415,6 @@ async fn recovery_witness(
         public_inputs: PublicInputs {
             parent_chain_id: 1_337,
             zone_id,
-            portal,
             tempo_block_number: final_header.number(),
             anchor_block_number: final_header.number(),
             anchor_block_hash: alloy_consensus::Sealable::hash_slow(&final_header),

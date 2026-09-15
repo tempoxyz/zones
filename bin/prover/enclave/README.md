@@ -14,7 +14,7 @@ Requests use this envelope:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "requestId": "caller-selected-id",
   "tempoChainId": 42431,
   "witness": {}
