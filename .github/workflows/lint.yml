@@ -16,7 +16,8 @@ jobs:
   rust:
     permissions:
       contents: read
-    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@2c817029cfeed9e94f8eefa9ef08ba6efbc62f0c
+      id-token: write
+    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@f16ae6f8b0140757d103a99f798105d64bad0a8b
     with:
       rust-toolchain: nightly-2026-02-21
 

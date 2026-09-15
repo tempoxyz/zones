@@ -575,7 +575,7 @@ jobs:
 
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          toolchain: stable
+          toolchain: 1.96.0
       - uses: tempoxyz/gh-actions/actions/setup-mold@ab45d76f6e7420a094281a22aee1973ecc0754f8
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
@@ -598,7 +598,7 @@ jobs:
           echo "ZONES_BENCH_EARN_REVISION=$earn_sha" >> "$GITHUB_ENV"
 
       - name: Restore Solidity artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             earn/cache
@@ -687,13 +687,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
-            --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
+            --locked --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
           nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
             '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
             'jemalloc,asm-keccak,keccak-cache-global,otlp' \
             '$ZONES_BENCH_TEMPO_REF'"
           cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
-            --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
+            --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
             echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-prover-utils"
@@ -769,17 +769,14 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
-      - name: Install Samply profiler
+      - name: Install pinned Samply profiler
         run: |
           set -euo pipefail
-          samply_help="$(samply record --help 2>/dev/null || true)"
-          if ! grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"; then
-            cargo install samply \
-              --git https://github.com/DaniPopes/samply \
-              --branch edge \
-              --locked \
-              --force
-          fi
+          cargo install samply \
+            --git https://github.com/DaniPopes/samply \
+            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --locked \
+            --force
           samply_path="$(command -v samply)"
           "$samply_path" --version
           samply_help="$(samply record --help)"

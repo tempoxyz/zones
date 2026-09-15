@@ -50,6 +50,9 @@ jobs:
       packages: write
       id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@aaedf7a275e398ad81b2913d9a6cbfce791ecbfb
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
