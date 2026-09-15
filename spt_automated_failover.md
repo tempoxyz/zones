@@ -46,14 +46,14 @@ sequenceDiagram
     alt Planned termination
         S->>C: Request drain of A
         C->>A: Read baseline status
-        C->>C: Keep A running; do not deliver SIGTERM yet
+        C->>C: Keep A running and delay SIGTERM
         A-->>C: Report a newer canonical local-production checkpoint
         C->>B: Probe readiness and exact checkpoint
         B-->>C: Report matching identity, authority, and prefix
         C->>A: Invoke one epoch-fenced setLeader(B)
         P-->>C: Finalize B at activation H
         B-->>C: Prove local canonical production at or after H
-        C-->>S: Drain complete; terminate A
+        C-->>S: Drain complete and A may terminate
     else Crash or failed health check
         C->>A: Probe
         A--xC: Unavailable or unable to extend the chain
