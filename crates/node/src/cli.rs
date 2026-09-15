@@ -284,6 +284,8 @@ async fn configure_sequencing(
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
+            #[cfg(feature = "test-utils")]
+            skip_proof_persistence: false,
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
             // scheduled leader, so it never submits an L1 settlement transaction.

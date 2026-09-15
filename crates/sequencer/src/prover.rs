@@ -42,7 +42,10 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics};
+use crate::{
+    BatchAnchorConfig, BatchData, ZoneSequencerProvider, metrics::ProverMetrics,
+    proofs::ProofCollectorHandle,
+};
 
 /// Number of shadow proof candidates allowed to wait behind the active validation.
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
@@ -180,6 +183,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
 
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
+    proofs: ProofCollectorHandle,
     portal: Address,
     anchor_config: BatchAnchorConfig,
     zone_provider: P,
@@ -208,7 +212,7 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
             let started = Instant::now();
-            let result = validate_candidate(&context, &job, &metrics).await;
+            let result = validate_candidate(&context, &job, &proofs, &metrics).await;
             metrics
                 .validation_duration_seconds
                 .record(started.elapsed().as_secs_f64());
@@ -346,6 +350,7 @@ impl ShadowProver {
 async fn validate_candidate<P: ZoneSequencerProvider>(
     context: &ProverContext<P>,
     job: &ProverJob,
+    proofs: &ProofCollectorHandle,
     metrics: &ProverMetrics,
 ) -> Result<ValidationStats> {
     ensure!(
@@ -387,8 +392,13 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     }
 
     let started = Instant::now();
-    let (zone_state_witness, tempo_state_witness) =
-        zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
+    let (zone_state_witness, tempo_state_witness) = zone_witnesses(
+        context.config.debug_api.as_ref(),
+        proofs,
+        &zone_inputs,
+        expected_next_hash,
+    )
+    .await?;
     metrics
         .zone_witness_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -806,29 +816,46 @@ fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
 
 async fn zone_witnesses(
     debug_api: &dyn ZoneDebugApi,
-    from: u64,
-    to: u64,
+    proofs: &ProofCollectorHandle,
+    inputs: &ZoneInputs,
+    tip_hash: B256,
 ) -> Result<(ZoneStateWitness, TempoStateWitness)> {
-    let results = stream::iter(from..=to)
-        .map(|number| async move {
+    let from = inputs
+        .blocks
+        .first()
+        .ok_or_eyre("empty witness range")?
+        .number;
+    // The next block's parent (or the validated batch tip) identifies each block.
+    let blocks = inputs
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let hash = inputs
+                .blocks
+                .get(index + 1)
+                .map_or(tip_hash, |next| next.parent_hash);
+            (block.number, hash)
+        })
+        .collect::<Vec<_>>();
+    let results = stream::iter(blocks)
+        .map(|(number, hash)| async move {
             let started = Instant::now();
             debug!(
                 target: "zone::sequencer::prover",
                 zone_block = number,
                 "Requesting Zone execution witness"
             );
-            let witness = debug_api
-                .zone_execution_witness(BlockNumberOrTag::Number(number))
-                .await
-                .map_err(|error| eyre::eyre!(error.to_string()))
-                .wrap_err_with(|| {
-                    format!("debug_zoneExecutionWitness for Zone block {number}")
-                })?;
-            if witness.execution_witness.headers.len() > 1 {
-                bail!(
-                    "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"
-                );
-            }
+            let witness = match proofs.get(number, hash) {
+                Some(proof) => proof.witness.clone(),
+                None => debug_api
+                    .zone_execution_witness(hash.into())
+                    .await
+                    .map_err(|error| eyre::eyre!(error.to_string()))
+                    .wrap_err_with(|| {
+                        format!("debug_zoneExecutionWitness for Zone block {number}")
+                    })?,
+            };
             debug!(
                 target: "zone::sequencer::prover",
                 zone_block = number,

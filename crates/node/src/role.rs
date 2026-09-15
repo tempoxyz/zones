@@ -112,10 +112,12 @@ pub struct RoleStatus {
 /// Shared handle to the live [`RoleStatus`].
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
-/// Leader-only background task dependencies (batch submission, withdrawal processing).
+/// Dependencies used by leader tasks; the proof collector itself is node-owned.
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
+    /// Node-owned collector shared across all role generations.
+    pub proof_collector: zone_sequencer::ProofCollectorHandle,
     pub prover_config: Option<ShadowProverConfig>,
 }
 
@@ -324,7 +326,7 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
+/// Supervise the long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
 /// generation stop, however, both children retain the graceful shutdown window needed to finish
@@ -985,7 +987,17 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
+            let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
+            let enforce_proof_persistence = true;
+            #[cfg(feature = "test-utils")]
+            let enforce_proof_persistence =
+                enforce_proof_persistence && !sequencer.config.skip_proof_persistence;
+            let engine = if enforce_proof_persistence {
+                engine.with_proof_collector(collector.clone())
+            } else {
+                engine
+            };
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
             tasks.spawn(async move {
@@ -1070,6 +1082,7 @@ where
                     sequencer_config,
                     signer,
                     zone_provider,
+                    Some(collector),
                     prover_config,
                     sequencer_token.clone(),
                 )

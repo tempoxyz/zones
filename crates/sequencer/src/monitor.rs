@@ -136,7 +136,7 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     prev_zone_block_hash: B256,
     /// Most recent canonical zone block observed from the node.
     latest_observed_zone_block: u64,
-    /// Detached, observational SPF worker.
+    /// Optional observational SPF worker backed by the node's retained witnesses.
     shadow_prover: Option<ShadowProver>,
 }
 
