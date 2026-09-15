@@ -45,6 +45,7 @@ rand = { version = "0.8.5", default-features = false }
 # misc
 derive_more.workspace = true
 paste = "1.0.15"
+parking_lot.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

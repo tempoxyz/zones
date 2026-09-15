@@ -14019,6 +14019,7 @@ dependencies = [
  "evm2",
  "eyre",
  "k256 0.13.4",
+ "parking_lot",
  "paste",
  "rand 0.8.7",
  "revm",

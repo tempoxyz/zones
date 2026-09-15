@@ -3,7 +3,7 @@
 use alloy_consensus::transaction::Recovered;
 use alloy_primitives::B256;
 use evm2::{
-    Evm, EvmConfig, ExecutionConfig, OpcodeConfig, SpecId, TxResult, Version,
+    EvmConfig, ExecutionConfig, OpcodeConfig, SpecId, TxResult, Version,
     interpreter::{
         CreateInstruction, InstrStop, Instruction, InterpreterState, Pc, Result, StackMut, op,
     },
@@ -13,7 +13,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::{
     ExecutionContext, TempoEvmTypes, TempoTxEnv, tempo_opcode_config, tempo_tx_registry,
 };
-use zone_precompiles::{L1StorageReader, ZonePrecompiles, tx_context};
+use zone_precompiles::{L1State, L1StorageReader, tx_context};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 /// Zone opcode configuration over Tempo and an inherited Ethereum specification.
@@ -41,6 +41,7 @@ pub(crate) fn zone_execution_config(
 /// Wraps Tempo's handlers with Zone transaction validation and transaction-local L1 context.
 pub(crate) fn zone_tx_registry<L1: L1StorageReader>(
     spec: TempoHardfork,
+    l1: L1State<L1>,
 ) -> TxRegistry<TempoEvmTypes, TxResult<TempoEvmTypes>> {
     let tempo = tempo_tx_registry(spec.into());
     let mut zone = TxRegistry::new();
@@ -49,11 +50,12 @@ pub(crate) fn zone_tx_registry<L1: L1StorageReader>(
         let Some(handler) = tempo.get_by_type(type_id) else {
             continue;
         };
+        let l1 = l1.clone();
         zone.register(
             type_id,
             |tx: &TempoTxEnv| Some(tx),
             move |request: TxRequest<'_, '_, TempoEvmTypes, TempoTxEnv>| {
-                reset_l1_transaction_state::<L1>(request.host);
+                l1.reset_transaction_state();
                 crate::validate_transaction(request.envelope, CONTRACT_DEPLOYER_ALLOWLIST)
                     .map_err(HandlerError::external)?;
 
@@ -69,24 +71,13 @@ pub(crate) fn zone_tx_registry<L1: L1StorageReader>(
                 let transaction =
                     Recovered::new_unchecked(request.envelope.clone(), request.tx.signer());
                 let result = handler.call(&transaction, request.host);
-                reset_l1_transaction_state::<L1>(request.host);
+                l1.reset_transaction_state();
                 result
             },
         );
     }
 
     zone
-}
-
-fn reset_l1_transaction_state<L1: L1StorageReader>(host: &mut Evm<'_, TempoEvmTypes>) {
-    // SAFETY: `ZoneEvmConfig::evm_with_env` always installs this exact provider type before using
-    // the Zone transaction registry. The unchecked form is required because the EVM may borrow its
-    // database even though the precompile provider itself is `'static`.
-    unsafe {
-        host.precompiles_mut()
-            .downcast_mut_unchecked::<ZonePrecompiles<TempoEvmTypes, L1>>()
-    }
-    .reset_transaction_state();
 }
 
 const fn zone_opcode_config<const BASE_SPEC_ID: u32>() -> OpcodeConfig<TempoEvmTypes> {

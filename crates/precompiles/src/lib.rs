@@ -155,11 +155,6 @@ where
             l1,
         }
     }
-
-    /// Clears bookkeeping that is valid only for the current transaction attempt.
-    pub fn reset_transaction_state(&mut self) {
-        self.l1.reset_transaction_state();
-    }
 }
 
 impl<T, P> PrecompileProvider<T> for ZonePrecompiles<T, P>

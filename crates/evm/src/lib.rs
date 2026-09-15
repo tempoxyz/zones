@@ -279,14 +279,14 @@ where
             env.tempo_spec,
             ext.actions.clone(),
             ext.non_creditable_slots.clone(),
-            l1,
+            l1.clone(),
             zone_hardfork,
         );
         evm2::Evm::new_with_execution_config_and_ext(
             zone_execution_config(env.tempo_spec, env.version),
             env.tempo_spec,
             env.block,
-            zone_tx_registry::<L1>(env.tempo_spec),
+            zone_tx_registry(env.tempo_spec, l1),
             db,
             precompiles,
             ext,
