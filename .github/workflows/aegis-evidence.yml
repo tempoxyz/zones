@@ -1,0 +1,47 @@
+name: Aegis negative evidence
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/aegis-evidence.yml"
+      - ".github/aegis-evidence/**"
+
+permissions: {}
+
+jobs:
+  cargo-policy:
+    name: Cargo policy (${{ matrix.runner }})
+    if: github.event.pull_request.number == 1443 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [depot-ubuntu-latest-16, depot-ubuntu-latest-arm-16, depot-macos-15]
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@aaedf7a275e398ad81b2913d9a6cbfce791ecbfb # main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e # main
+        with:
+          toolchain: 1.96.0
+      - name: Prepare isolated cache with installed trust configuration
+        run: node .github/aegis-evidence/cargo-policy.cjs prepare
+      - name: Allowed control download
+        run: cargo fetch --locked --manifest-path .github/aegis-evidence/allow/Cargo.toml
+      - name: Verify fresh allow decision
+        run: node .github/aegis-evidence/cargo-policy.cjs allow
+      - name: Negative download - expected Aegis policy failure
+        id: blocked
+        run: cargo fetch --locked --manifest-path .github/aegis-evidence/block/Cargo.toml
+      - name: Verify and print Aegis block evidence
+        if: always() && steps.blocked.outcome != 'skipped'
+        env:
+          BLOCK_OUTCOME: ${{ steps.blocked.outcome }}
+        run: node .github/aegis-evidence/cargo-policy.cjs block

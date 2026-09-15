@@ -1,0 +1,11 @@
+[package]
+name = "aegis-safe-control"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+itoa = "=1.0.15"
+
