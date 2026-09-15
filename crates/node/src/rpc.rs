@@ -63,14 +63,14 @@ use zone_rpc::{
     auth::AuthContext,
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoundDecryptionKey, BoxEyreFut, BoxFut,
-        DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalSequencerInfo, PeerTipInfo,
-        SequencerInfoResponse, SequencerPeerInfo, SequencerProgress, SequencerReadiness,
-        SetLeaderResponse, ZoneExecutionWitness, ZoneInfoResponse, internal, raw_null, raw_zero,
-        to_raw,
+        DecryptionKeyCandidate, DecryptionKeyStatus, JsonRpcError, LocalProductionInfo,
+        LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
+        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneExecutionWitness,
+        ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
     },
 };
 
-use crate::{follower::PeerTipRegistry, role::SharedRoleStatus};
+use crate::{LocalProductionMarker, follower::PeerTipRegistry, role::SharedRoleStatus};
 
 /// Multi-sequencer handles for the sequencer RPC methods.
 ///
@@ -98,6 +98,8 @@ pub struct SequencerRpcContext {
     pub relayer: Option<DynProvider<TempoNetwork>>,
     /// Publicly reportable view of locally loaded deposit-decryption keys.
     pub encryption_keys: zone_l1::EncryptionKeyRing,
+    /// Last block produced by this process after canonical fork choice succeeded.
+    pub local_production: LocalProductionMarker,
 }
 
 impl SequencerRpcContext {
@@ -112,6 +114,7 @@ impl SequencerRpcContext {
         local_ed25519_public_key: zone_p2p::P2pPeerId,
         relayer: Option<DynProvider<TempoNetwork>>,
         encryption_keys: zone_l1::EncryptionKeyRing,
+        local_production: LocalProductionMarker,
     ) -> Self {
         Self {
             schedule,
@@ -123,6 +126,7 @@ impl SequencerRpcContext {
             local_ed25519_public_key,
             relayer,
             encryption_keys,
+            local_production,
         }
     }
 }
@@ -537,6 +541,7 @@ where
             local: None,
             active_leader: None,
             local_tip: None,
+            last_locally_produced: None,
             peers: Vec::new(),
             progress: None,
             readiness: None,
@@ -581,6 +586,14 @@ where
         .collect();
 
     let local_tip = local_recovery_tip(provider)?;
+    let last_locally_produced = context.local_production.latest().and_then(|marker| {
+        let canonical = provider.sealed_header(marker.zone_height).ok().flatten()?;
+        (canonical.hash() == marker.zone_hash).then_some(LocalProductionInfo {
+            tempo_block_number: U64::from(marker.tempo_block_number),
+            zone_height: U64::from(marker.zone_height),
+            zone_hash: marker.zone_hash,
+        })
+    });
 
     let local_node = context
         .manifest
@@ -628,6 +641,7 @@ where
             tempo_block_number: U64::from(local_tip.tempo_block_number),
             tempo_block_hash: local_tip.tempo_block_hash,
         }),
+        last_locally_produced,
         peers,
         progress: Some(SequencerProgress {
             zone_height: U64::from(local_tip.zone_height),
@@ -1461,6 +1475,7 @@ async fn set_leader(
             requested_leader: target,
         });
     }
+    ensure_finalized_leader_relayer(leader, relayer_address)?;
 
     // Refetch the committed admin-lane nonce for every attempt. The provider's process-local
     // nonce cache advances after a send, even when that transaction never lands, which would
@@ -1507,6 +1522,18 @@ async fn set_leader(
         relayer: relayer_address,
         requested_leader: target,
     })
+}
+
+fn ensure_finalized_leader_relayer(
+    finalized_leader: Address,
+    relayer: Address,
+) -> Result<(), JsonRpcError> {
+    if finalized_leader != relayer {
+        return Err(JsonRpcError::invalid_params(
+            "zone_setLeader must be called through the finalized current leader",
+        ));
+    }
+    Ok(())
 }
 
 /// Clear RPC header fields that reveal private execution state from the header
@@ -1585,6 +1612,15 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leader_change_relayer_must_be_the_finalized_leader() {
+        let leader = Address::with_last_byte(1);
+        assert!(ensure_finalized_leader_relayer(leader, leader).is_ok());
+        let error =
+            ensure_finalized_leader_relayer(leader, Address::with_last_byte(2)).unwrap_err();
+        assert!(error.message.contains("finalized current leader"));
+    }
     use alloy_provider::ProviderBuilder;
 
     #[test]

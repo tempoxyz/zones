@@ -139,10 +139,7 @@ impl<'a> RoutingPolicy<'a> {
 
     /// `None` while leadership is uninitialized; otherwise whether this node may forward.
     pub(crate) fn transaction_forwarding_status(&self) -> Option<bool> {
-        self.authority
-            .next_anchor_record
-            .as_ref()
-            .map(|record| record.leader != *self.local)
+        self.authority.next_anchor_record.as_ref().map(|_| true)
     }
 
     pub(crate) fn transaction_recipients(&self) -> Vec<PublicKey> {

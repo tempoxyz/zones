@@ -11,6 +11,7 @@ use std::{
 use alloy::primitives::{Address, B256};
 use eyre::{Context as _, ensure, eyre};
 use serde::Deserialize;
+use zone_p2p::ZoneManifest;
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
@@ -205,7 +206,7 @@ pub(crate) fn merge_effective_config(
             }
         })
     });
-    let nodes = if operator_rpcs.is_empty() {
+    let mut nodes = if operator_rpcs.is_empty() {
         file.nodes
             .into_iter()
             .map(|node| OperatorEndpoint {
@@ -216,10 +217,25 @@ pub(crate) fn merge_effective_config(
     } else {
         operator_rpcs.to_vec()
     };
+    if nodes.is_empty()
+        && let Some(path) = manifest.as_ref()
+    {
+        nodes = ZoneManifest::read_from_file(path)
+            .wrap_err_with(|| format!("failed loading operator RPCs from {}", path.display()))?
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                node.operator_rpc_url().map(|url| OperatorEndpoint {
+                    name: Some(node.name().to_owned()),
+                    url: url.to_owned(),
+                })
+            })
+            .collect();
+    }
     validate_endpoints(&nodes)?;
     ensure!(
         !nodes.is_empty(),
-        "missing operator RPCs; repeat --operator-rpc or configure [[nodes]]"
+        "missing operator RPCs; add operator_rpc_url to manifest nodes, repeat --operator-rpc, or configure [[nodes]]"
     );
 
     Ok(EffectiveConfig {
@@ -328,6 +344,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use clap::Parser as _;
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::*;
 
@@ -439,6 +456,63 @@ operator_rpc_url = "https://file-a.example"
         };
         let config = args.load().unwrap();
         assert_eq!(config.nodes[0].name.as_deref(), Some("file-a"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn manifest_nodes_supply_operator_rpcs_in_file_order() {
+        let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "tempo-xtask-admin-manifest-nodes-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let manifest_path = directory.join("zone.toml");
+        let keys = [1, 2, 3].map(|seed| {
+            const_hex::encode_prefixed(PrivateKey::from_seed(seed).public_key().as_ref())
+        });
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"leader_ed25519_public_key = "{}"
+
+[[nodes]]
+name = "leader"
+ed25519_public_key = "{}"
+secp256k1_address = "0x0000000000000000000000000000000000000001"
+address = "leader.internal:9200"
+operator_rpc_url = "https://leader.internal"
+
+[[nodes]]
+name = "follower-a"
+ed25519_public_key = "{}"
+secp256k1_address = "0x0000000000000000000000000000000000000002"
+address = "follower-a.internal:9200"
+operator_rpc_url = "https://follower-a.internal"
+
+[[nodes]]
+name = "follower-b"
+ed25519_public_key = "{}"
+secp256k1_address = "0x0000000000000000000000000000000000000003"
+address = "follower-b.internal:9200"
+"#,
+                keys[0], keys[0], keys[1], keys[2]
+            ),
+        )
+        .unwrap();
+
+        let mut args = shared();
+        args.operator_rpcs.clear();
+        args.zone_manifest = Some(manifest_path);
+        let config = args.load().unwrap();
+        assert_eq!(
+            config
+                .nodes
+                .iter()
+                .map(OperatorEndpoint::display_name)
+                .collect::<Vec<_>>(),
+            ["leader", "follower-a"]
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

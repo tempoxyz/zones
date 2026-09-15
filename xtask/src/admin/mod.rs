@@ -3,6 +3,7 @@ use clap::Subcommand;
 mod check;
 mod config;
 mod encryption_key;
+mod failover;
 mod identity;
 mod invariants;
 mod leader;
@@ -12,6 +13,7 @@ mod snapshot;
 
 pub(crate) use check::Check;
 pub(crate) use encryption_key::EncryptionKey;
+pub(crate) use failover::Failover;
 pub(crate) use identity::Identity;
 pub(crate) use leader::Leader;
 pub(crate) use sequencer_set::SequencerSet;
@@ -29,6 +31,8 @@ enum AdminCommand {
     Check(Check),
     /// Prepare or register a shared sequencer encryption key.
     EncryptionKey(EncryptionKey),
+    /// Coordinate sequencer failover outside the Zone process.
+    Failover(Failover),
     /// Prepare independent per-node P2P and sequencer identities.
     Identity(Identity),
     /// Move finalized Zone leadership to a different sequencer.
@@ -42,6 +46,7 @@ impl Admin {
         match self.command {
             AdminCommand::Check(command) => command.run().await,
             AdminCommand::EncryptionKey(command) => command.run().await,
+            AdminCommand::Failover(command) => command.run().await,
             AdminCommand::Identity(command) => command.run(),
             AdminCommand::Leader(command) => command.run().await,
             AdminCommand::SequencerSet(command) => command.run().await,

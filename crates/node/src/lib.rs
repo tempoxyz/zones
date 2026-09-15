@@ -21,7 +21,9 @@ mod shadow_prover;
 mod tx_forwarding;
 pub mod version;
 
-pub use engine::{EngineExit, ProductionPermit, ZoneEngine};
+pub use engine::{
+    EngineExit, LocalProduction, LocalProductionMarker, ProductionPermit, ZoneEngine,
+};
 pub use node::{
     ProverRuntime, ZoneExecutorBuilder, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
     ZoneShadowProverAddOnsConfig,

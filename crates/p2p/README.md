@@ -94,18 +94,21 @@ name = "leader"
 ed25519_public_key = "0xleader..."
 secp256k1_address = "0x1111111111111111111111111111111111111111"
 address = "leader.zone.internal:9200"
+operator_rpc_url = "https://leader-operator.zone.internal"
 
 [[nodes]]
 name = "follower-a"
 ed25519_public_key = "0xfa..."
 secp256k1_address = "0x2222222222222222222222222222222222222222"
 address = "follower-a.zone.internal:9200"
+operator_rpc_url = "https://follower-a-operator.zone.internal"
 
 [[nodes]]
 name = "follower-b"
 ed25519_public_key = "0xfb..."
 secp256k1_address = "0x3333333333333333333333333333333333333333"
 address = "follower-b.zone.internal:9200"
+operator_rpc_url = "https://follower-b-operator.zone.internal"
 
 [[nodes]]
 name = "operator-rpc"
@@ -119,6 +122,11 @@ secp256k1_address = "0x4444444444444444444444444444444444444444"
 ```
 
 `rpc_only` defaults to `false`, so existing manifests keep their current meaning.
+
+`operator_rpc_url` is optional operational metadata for external admin and
+failover tooling. It is excluded from the membership digest and every P2P or
+settlement identity calculation. A quorum node without it remains a member but
+cannot be selected automatically by the external failover controller.
 
 `historical_leaders` maps a retired Portal sequencer address to the Ed25519 identity that authored
 blocks while that address was leader. Keep an entry while any persisted node checkpoint can still

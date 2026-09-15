@@ -515,6 +515,7 @@ pub(crate) fn test_sequencer_info(
         }),
         active_leader: None,
         local_tip: None,
+        last_locally_produced: None,
         peers: vec![zone_rpc::types::SequencerPeerInfo {
             name: "node".to_owned(),
             sequencer_address: (!rpc_only).then_some(Address::ZERO),

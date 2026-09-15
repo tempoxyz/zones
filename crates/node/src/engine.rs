@@ -59,6 +59,39 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, 
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
+/// A block canonicalized by this process while its production permit was active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalProduction {
+    pub tempo_block_number: u64,
+    pub zone_height: u64,
+    pub zone_hash: B256,
+}
+
+/// Process-local publication point used to prove that a successor actually produced canonically.
+#[derive(Debug, Clone)]
+pub struct LocalProductionMarker(tokio::sync::watch::Sender<Option<LocalProduction>>);
+
+impl Default for LocalProductionMarker {
+    fn default() -> Self {
+        let (sender, _) = tokio::sync::watch::channel(None);
+        Self(sender)
+    }
+}
+
+impl LocalProductionMarker {
+    pub fn latest(&self) -> Option<LocalProduction> {
+        *self.0.borrow()
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<LocalProduction>> {
+        self.0.subscribe()
+    }
+
+    pub(crate) fn publish(&self, marker: LocalProduction) {
+        self.0.send_replace(Some(marker));
+    }
+}
+
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
 /// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
@@ -190,6 +223,8 @@ pub struct ZoneEngine {
     portal_address: Address,
     /// Optional per-anchor leadership permit. `None` runs the legacy single-sequencer mode.
     production_permit: Option<ProductionPermit>,
+    /// Published only after the post-payload fork-choice update succeeds.
+    local_production: Option<LocalProductionMarker>,
 }
 
 impl ZoneEngine {
@@ -215,12 +250,19 @@ impl ZoneEngine {
             encryption_keys,
             portal_address,
             production_permit: None,
+            local_production: None,
         }
     }
 
     /// Enforce the per-anchor leadership permit before every advance.
     pub fn with_production_permit(mut self, permit: ProductionPermit) -> Self {
         self.production_permit = Some(permit);
+        self
+    }
+
+    /// Publish canonical blocks produced by this engine instance.
+    pub fn with_local_production_marker(mut self, marker: LocalProductionMarker) -> Self {
+        self.local_production = Some(marker);
         self
     }
 
@@ -412,8 +454,19 @@ impl ZoneEngine {
         // Canonicalize the new head — FCU-with-attrs above only set the
         // *previous* head as canonical; this bare FCU makes the just-built
         // block the EL's canonical head.
-        if let Err(e) = self.update_forkchoice_state().await {
-            error!(target: "zone::engine", "Error sending post-newPayload FCU: {:?}", e);
+        match self.update_forkchoice_state().await {
+            Ok(()) => {
+                if let Some(marker) = &self.local_production {
+                    marker.publish(LocalProduction {
+                        tempo_block_number: l1_num_hash.number,
+                        zone_height: self.last_header.number(),
+                        zone_hash: self.last_header.hash(),
+                    });
+                }
+            }
+            Err(error) => {
+                error!(target: "zone::engine", ?error, "Error sending post-newPayload FCU");
+            }
         }
 
         Ok(())

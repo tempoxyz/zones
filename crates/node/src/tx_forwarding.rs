@@ -31,7 +31,7 @@ enum QueueOutcome {
     Closed,
 }
 
-/// Immediately queue locally originated follower transactions for the quorum, then periodically
+/// Immediately queue locally originated transactions for the quorum, then periodically
 /// reconcile local-origin pool entries to recover from intermittent connection issues / restarts.
 pub(crate) async fn forward_new_transactions<P>(
     pool: P,
@@ -49,7 +49,7 @@ pub(crate) async fn forward_new_transactions<P>(
         tokio::select! {
             event = transactions.recv() => {
                 let Some(event) = event else {
-                    tracing::error!(target: "zone::p2p", "Follower transaction pool listener closed");
+                tracing::error!(target: "zone::p2p", "Transaction pool listener closed");
                     return;
                 };
                 // Transactions admitted from P2P use `External` origin. Retain them for a future
@@ -95,11 +95,11 @@ fn try_queue_transaction(
     }) {
         Ok(()) => {
             metrics::counter!("zone_node_transactions_queued_for_forwarding_total").increment(1);
-            debug!(target: "zone::p2p", ?hash, transaction_size_bytes = encoded_len, "Queued local follower transaction for quorum peers");
+            debug!(target: "zone::p2p", ?hash, transaction_size_bytes = encoded_len, "Queued local transaction for quorum peers");
             QueueOutcome::Queued
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
-            debug!(target: "zone::p2p", ?hash, "P2P command queue full; deferring follower transaction");
+            debug!(target: "zone::p2p", ?hash, "P2P command queue full; deferring local transaction");
             QueueOutcome::Full
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
