@@ -29,5 +29,4 @@ contract ZoneOutboxStorage {
     PendingWithdrawal[] internal _pendingWithdrawals;
     uint64 public lastFallbackNonce;
     mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
-    mapping(uint64 withdrawalIndex => bytes32 senderTag) internal forcedSenderTags;
 }

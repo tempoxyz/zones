@@ -43,7 +43,8 @@ crate::sol! {
             bytes revealTo
         );
 
-        /// A forced plain withdrawal; no private account or authorization fields are exposed.
+        /// Zone-local receipt reconstruction event carrying the normal sender tag.
+        /// No private hash or account is emitted; L1 uses the ordinary Withdrawal encoding.
         event ForcedWithdrawalRequested(
             uint64 indexed withdrawalIndex,
             address token,
