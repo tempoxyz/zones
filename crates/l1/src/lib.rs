@@ -69,8 +69,8 @@ pub(crate) mod rpc {
 use crate::abi::{
     Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
-        WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, ForcedExitRequested, LeaderUpdated, SequencerEncryptionKeyUpdated,
+        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 
@@ -85,7 +85,7 @@ mod subscriber;
 mod tests;
 
 pub use block::{L1BlockDeposits, PreparedL1Block};
-pub use deposit::{Deposit, L1Deposit, WithdrawalBounceBackDeposit};
+pub use deposit::{Deposit, ForcedExitRequest, L1Deposit, WithdrawalBounceBackDeposit};
 pub use encryption_keys::{
     BoundPublicKeyFingerprint, EncryptionKeyPublicStatus, EncryptionKeyRing, PublicKeyFingerprint,
 };

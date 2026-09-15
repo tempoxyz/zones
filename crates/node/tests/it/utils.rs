@@ -5265,6 +5265,8 @@ impl L1Fixture {
                     self.seed_no_receive_policy_at(block_number, deposit.to)
                         .expect("event receive-policy fixture seed must be admitted");
                 }
+                // Forced recipients remain encrypted until inbox execution.
+                L1Deposit::ForcedExit(_) => {}
                 L1Deposit::Deposit(deposit) => {
                     if let Some(decrypted) = zone_precompiles::ecies::decrypt_deposit(
                         &Self::encryption_key(),
