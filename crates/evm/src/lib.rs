@@ -66,8 +66,8 @@ impl<L1> ZoneEvmFactory<L1>
 where
     L1: L1StorageReader,
 {
-    /// Creates a factory with the canonical Zone chain spec, L1 reader, and portal address.
-    pub fn new(_chain_spec: Arc<ZoneChainSpec>, l1_reader: L1, portal_address: Address) -> Self {
+    /// Creates a factory with the L1 reader and portal address.
+    pub fn new(l1_reader: L1, portal_address: Address) -> Self {
         Self {
             l1_reader,
             portal_address,
@@ -163,7 +163,7 @@ where
 {
     /// Creates a Zone EVM config from the node's canonical, composed chain specification.
     pub fn new(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1, portal_address: Address) -> Self {
-        let zone_factory = ZoneEvmFactory::new(chain_spec.clone(), l1_provider, portal_address);
+        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
         let block_assembler = ZoneBlockAssembler::new(chain_spec.clone());

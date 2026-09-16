@@ -7,12 +7,12 @@ use evm2::{
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::{
-    ProtocolFeeManager, TempoEvmTypes, TempoInvalidTransaction, TempoStateAccess, TempoTx,
-    TempoTxEnv,
+    ProtocolFeeContext, ProtocolFeeManager, TempoEvmTypes, TempoInvalidTransaction,
+    TempoStateAccess, TempoTx, TempoTxEnv,
 };
 use tempo_precompiles::{
     error::Result,
-    storage::{ContractStorage, StorageActions, StorageCtx},
+    storage::{ContractStorage, StorageActions},
     tip20::TIP20Token,
 };
 use zone_precompiles::ZoneFeeManager;
@@ -86,28 +86,28 @@ impl ProtocolFeeManager for ZoneProtocolFeeManager {
 
     fn collect_fee_pre_tx(
         &self,
-        host: &mut Evm<'_, TempoEvmTypes>,
+        ctx: ProtocolFeeContext<'_, '_>,
         fee_payer: Address,
         fee_token: Address,
         max_amount: U256,
         beneficiary: Address,
         _skip_liquidity_check: bool,
     ) -> Result<Address> {
-        StorageCtx::enter_evm_without_tip1060_accounting(host, || {
+        ctx.enter(|| {
             ZoneFeeManager::new().collect_fee_pre_tx(fee_payer, fee_token, max_amount, beneficiary)
         })
     }
 
     fn collect_fee_post_tx(
         &self,
-        host: &mut Evm<'_, TempoEvmTypes>,
+        ctx: ProtocolFeeContext<'_, '_>,
         fee_payer: Address,
         actual_spending: U256,
         refund_amount: U256,
         fee_token: Address,
         beneficiary: Address,
     ) -> Result<U256> {
-        StorageCtx::enter_evm_without_tip1060_accounting(host, || {
+        ctx.enter(|| {
             ZoneFeeManager::new().collect_fee_post_tx(
                 fee_payer,
                 actual_spending,
