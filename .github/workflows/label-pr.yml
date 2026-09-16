@@ -9,6 +9,7 @@ permissions: {}
 jobs:
   label:
     permissions:
+      id-token: write
       contents: read
       issues: write
-    uses: tempoxyz/gh-actions/.github/workflows/label-prs.yml@98b1081dcf34361b576aca2ab3041772708582ef
+    uses: tempoxyz/gh-actions/.github/workflows/label-prs.yml@6a4184039b7a7537d35ace0badc96764d5a1d4d0
