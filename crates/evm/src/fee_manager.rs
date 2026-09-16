@@ -123,29 +123,67 @@ impl ProtocolFeeManager for ZoneProtocolFeeManager {
 mod tests {
     use super::*;
     use alloy_primitives::{Bytes, U256, address};
-    use revm::{
-        context::JournalTr,
-        database::{CacheDB, EmptyDB},
-        state::{AccountInfo, Bytecode},
+    use evm2::{
+        bytecode::Bytecode,
+        evm::{AccountInfo, InMemoryDB},
     };
-    use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, zone_fee_manager};
+    use reth_chainspec::EthChainSpec as _;
+    use reth_evm::BlockExecutorFactory;
+    use reth_primitives_traits::Recovered;
+    use tempo_chainspec::spec::DEV;
+    use tempo_evm::TempoEvmEnv;
+    use tempo_primitives::{
+        TempoTxEnvelope,
+        transaction::{TempoSignature, TempoTransaction},
+    };
+    use zone_chainspec::ZoneChainSpec;
+    use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, test_utils::MockL1Reader, zone_fee_manager};
+    use zone_primitives::constants::zone_chain_id;
+
+    use crate::{ZoneEvm, ZoneEvmConfig};
+
+    fn test_evm(db: InMemoryDB) -> ZoneEvm<'static> {
+        let mut genesis = DEV.genesis().clone();
+        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
+        ZoneEvmConfig::new(
+            std::sync::Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap()),
+            MockL1Reader::default(),
+            Address::ZERO,
+        )
+        .evm_with_env(db, TempoEvmEnv::default())
+    }
+
+    fn tx_env(fee_token: Option<Address>) -> TempoTxEnv {
+        Recovered::new_unchecked(
+            TempoTxEnvelope::AA(
+                TempoTransaction {
+                    fee_token,
+                    ..Default::default()
+                }
+                .into_signed(TempoSignature::default()),
+            ),
+            Address::ZERO,
+        )
+        .into()
+    }
 
     #[test]
     fn resolves_explicit_token_or_zone_default() {
         let default_token = address!("0x20c00000000000000000000000000000000000d1");
         let explicit_token = address!("0x20c00000000000000000000000000000000000e1");
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(&ZONE_FEE_MANAGER_ADDRESS, AccountInfo::default());
         db.insert_account_storage(
-            ZONE_FEE_MANAGER_ADDRESS,
-            zone_fee_manager::slots::DEFAULT_FEE_TOKEN,
-            U256::from_be_slice(default_token.as_slice()),
-        )
-        .unwrap();
+            &ZONE_FEE_MANAGER_ADDRESS,
+            &zone_fee_manager::slots::DEFAULT_FEE_TOKEN,
+            &U256::from_be_slice(default_token.as_slice()),
+        );
+        let mut evm = test_evm(db);
 
         assert_eq!(
             resolve_fee_token(
-                &mut db,
-                &TempoTxEnv::default(),
+                &mut evm,
+                &tx_env(None),
                 TempoHardfork::T1,
                 StorageActions::disabled(),
             )
@@ -154,11 +192,8 @@ mod tests {
         );
         assert_eq!(
             resolve_fee_token(
-                &mut db,
-                &TempoTxEnv {
-                    fee_token: Some(explicit_token),
-                    ..Default::default()
-                },
+                &mut evm,
+                &tx_env(Some(explicit_token)),
                 TempoHardfork::T1,
                 StorageActions::disabled(),
             )
@@ -171,33 +206,24 @@ mod tests {
     fn accepts_any_initialized_zone_tip20_as_a_fee_token() {
         let initialized_token = address!("0x20c00000000000000000000000000000000000e1");
         let missing_token = address!("0x20c00000000000000000000000000000000000e2");
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
         db.insert_account_info(
-            initialized_token,
-            AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from_static(&[0xef]))),
+            &initialized_token,
+            AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from_static(&[0xef]))),
         );
-        let mut journal = Journal::new(db);
+        let mut evm = test_evm(db);
         let manager = ZoneProtocolFeeManager::new();
 
         assert!(
             manager
-                .validate_fee_token(
-                    &mut journal,
-                    initialized_token,
-                    TempoHardfork::T9,
-                    StorageActions::disabled(),
-                )
+                .validate_fee_token(&mut evm, initialized_token, TempoHardfork::T9)
                 .is_ok()
         );
         assert!(matches!(
-            manager.validate_fee_token(
-                &mut journal,
-                missing_token,
-                TempoHardfork::T9,
-                StorageActions::disabled(),
-            ),
-            Err(EVMError::Transaction(TempoInvalidTransaction::InvalidFeeToken(address)))
-                if address == missing_token
+            manager.validate_fee_token(&mut evm, missing_token, TempoHardfork::T9),
+            Err(HandlerError::External(error))
+                if error.downcast_ref::<TempoInvalidTransaction>()
+                    == Some(&TempoInvalidTransaction::InvalidFeeToken(missing_token))
         ));
     }
 }

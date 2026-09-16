@@ -16,6 +16,7 @@ use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
+use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, EIP1186AccountProofResponse, FeeHistory,
     Filter, FilterChanges, FilterId, TransactionRequest,
@@ -26,8 +27,8 @@ use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
+use reth_primitives_traits::Account as PrimitiveAccount;
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
-use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
 use reth_rpc_builder::EthHandlers;
@@ -36,8 +37,8 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, StateProviderFactory};
-use reth_trie_common::{ExecutionWitnessMode, HashedPostState};
+use reth_storage_api::{BlockNumReader, StateProofProvider as _, StateProviderFactory};
+use reth_trie_common::{ExecutionWitnessMode, HashedPostState, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
     provider::ext::TempoProviderExt as _,
@@ -295,32 +296,74 @@ where
         let (execution_witness, reads, initial_tempo) = self
             .eth_api
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                let initial_tempo = db.database.0.tempo_num_hash().map_err(EthApiError::from)?;
+                let initial_tempo = db
+                    .db
+                    .inner()
+                    .0
+                    .tempo_num_hash()
+                    .map_err(EthApiError::from)?;
                 let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
                 let block_executor = evm_config.executor(&mut db);
                 let mode = ExecutionWitnessMode::default();
-                let mut witness = None;
-
-                let _ = block_executor
-                    .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        let mut additional_state = HashedPostState::default();
-                        record_block_hash_storage_proofs(&mut additional_state, statedb);
-                        witness = Some(
-                            ExecutionWitnessRecord::new(statedb)
-                                .with_additional_state(additional_state)
-                                .into_execution_witness(
-                                    &statedb.database.database.0,
-                                    eth_api.provider(),
-                                    block_number,
-                                    mode,
-                                ),
-                        );
-                    })
+                let output = block_executor
+                    .execute(&block)
                     .map_err(|error| EthApiError::Internal(error.into()))?;
+                db.commit_source(output.state.inner());
 
-                let witness = witness
-                    .expect("state closure is called after successful execution")
-                    .map_err(EthApiError::from)?;
+                let mut hashed_state = HashedPostState::default();
+                let mut keys = BTreeMap::new();
+                for (address, account) in &db.cache.accounts {
+                    let hashed_address = keccak256(address);
+                    hashed_state.accounts.insert(
+                        hashed_address,
+                        account.as_ref().map(|account| PrimitiveAccount {
+                            nonce: account.nonce,
+                            balance: account.balance,
+                            bytecode_hash: (!account.code_hash.is_zero()
+                                && account.code_hash != alloy_consensus::constants::KECCAK_EMPTY)
+                                .then_some(account.code_hash),
+                        }),
+                    );
+                    if account.is_some() {
+                        keys.insert(hashed_address, address.to_vec().into());
+                    }
+
+                    if let Some(storage) = db.cache.storage.get(address) {
+                        let hashed_storage = hashed_state
+                            .storages
+                            .entry(hashed_address)
+                            .or_insert_with(|| HashedStorage::new(storage.wiped));
+                        for (slot, value) in &storage.slots {
+                            let slot = B256::from(*slot);
+                            keys.insert(keccak256(slot), slot.into());
+                            hashed_storage.storage.insert(keccak256(slot), *value);
+                        }
+                    }
+                }
+                let mut additional_state = HashedPostState::default();
+                record_block_hash_storage_proofs(
+                    &mut additional_state,
+                    &mut keys,
+                    &db.cache.block_hashes,
+                );
+                hashed_state.extend(additional_state);
+                let codes = db
+                    .cache
+                    .contracts
+                    .values()
+                    .map(|code| code.original_bytes())
+                    .collect();
+                let witness = ExecutionWitness {
+                    state: db
+                        .db
+                        .inner()
+                        .0
+                        .witness(Default::default(), hashed_state, mode)
+                        .map_err(EthApiError::from)?,
+                    codes,
+                    keys: keys.into_values().collect(),
+                    ..Default::default()
+                };
                 Ok((witness, recorder.take_reads(), initial_tempo))
             })
             .await
@@ -410,21 +453,30 @@ async fn collect_tempo_witness(
 
 /// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.
 ///
-/// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
+/// Reth records these reads in the EVM block-hash cache and normally proves them with ancestor
 /// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
 /// storage targets lets the SPF authenticate the same values against the parent state root.
-fn record_block_hash_storage_proofs<DB>(additional_state: &mut HashedPostState, state: &State<DB>) {
-    let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
+fn record_block_hash_storage_proofs(
+    additional_state: &mut HashedPostState,
+    keys: &mut BTreeMap<B256, Bytes>,
+    block_hashes: &alloy_primitives::map::U256Map<B256>,
+) {
     if block_hashes.is_empty() {
         return;
     }
 
+    keys.insert(
+        keccak256(HISTORY_STORAGE_ADDRESS),
+        HISTORY_STORAGE_ADDRESS.to_vec().into(),
+    );
     let history_storage = additional_state
         .storages
         .entry(keccak256(HISTORY_STORAGE_ADDRESS))
         .or_default();
     for (number, hash) in block_hashes {
-        let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+        let slot = *number % U256::from(HISTORY_SERVE_WINDOW);
+        let slot_bytes = B256::new(slot.to_be_bytes());
+        keys.insert(keccak256(slot_bytes), slot_bytes.into());
         history_storage.storage.insert(
             keccak256(slot.to_be_bytes::<32>()),
             U256::from_be_bytes(hash.0),
@@ -1279,7 +1331,6 @@ where
     fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
             let provider = self.eth.api.provider().clone();
-            let api = self.eth.api.clone();
             let caller = auth.caller;
 
             let zone_tokens = self.zone_tokens();
@@ -1302,21 +1353,16 @@ where
                     let mut all_logs = Vec::new();
 
                     for (block, receipts, removed) in reverted.chain(committed) {
-                        match logs_utils::matching_block_logs_with_tx_hashes(
-                            api.converter(),
+                        all_logs.extend(logs_utils::matching_block_logs_with_tx_hashes(
                             &filter,
-                            block.sealed_header(),
+                            block.sealed_header().num_hash(),
+                            block.timestamp(),
                             block
                                 .transactions_recovered()
                                 .zip(receipts.iter())
                                 .map(|(tx, receipt)| (*tx.tx_hash(), receipt)),
                             removed,
-                        ) {
-                            Ok(logs) => all_logs.extend(logs),
-                            Err(error) => {
-                                tracing::error!(target: "rpc", %error, "Failed to convert logs");
-                            }
-                        }
+                        ));
                     }
                     futures::stream::iter(all_logs)
                 });
@@ -1591,13 +1637,12 @@ mod tests {
     fn records_block_hashes_as_eip2935_storage_targets() {
         let number = 42;
         let hash = B256::repeat_byte(0x42);
-        let mut state = State::builder()
-            .with_database(revm::database::EmptyDB::default())
-            .build();
-        state.block_hashes.insert(number, hash);
+        let mut block_hashes = alloy_primitives::map::U256Map::default();
+        block_hashes.insert(U256::from(number), hash);
         let mut additional_state = HashedPostState::default();
+        let mut keys = BTreeMap::new();
 
-        record_block_hash_storage_proofs(&mut additional_state, &state);
+        record_block_hash_storage_proofs(&mut additional_state, &mut keys, &block_hashes);
 
         let storage = additional_state
             .storages
@@ -1607,6 +1652,15 @@ mod tests {
         assert_eq!(
             storage.storage.get(&keccak256(slot.to_be_bytes::<32>())),
             Some(&U256::from_be_bytes(hash.0))
+        );
+        assert_eq!(
+            keys.get(&keccak256(HISTORY_STORAGE_ADDRESS)),
+            Some(&Bytes::copy_from_slice(HISTORY_STORAGE_ADDRESS.as_slice()))
+        );
+        let slot = B256::from(slot);
+        assert_eq!(
+            keys.get(&keccak256(slot)),
+            Some(&Bytes::copy_from_slice(slot.as_slice()))
         );
     }
 

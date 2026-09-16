@@ -26,6 +26,7 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
+use evm2::registry::HandlerError;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
@@ -63,7 +64,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_evm::{TempoInvalidTransaction, consensus::TempoConsensus};
+use tempo_evm::consensus::TempoConsensus;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -1884,11 +1885,9 @@ fn validate_has_enabled_token_balance(
 ) -> Result<(), InvalidPoolTransactionError> {
     let state = provider.latest().map_err(|err| {
         warn!(%err, "Failed to read latest state for zone token-balance admission check");
-        InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-            TempoInvalidTransaction::EthInvalidTransaction(
-                "could not verify balance of an enabled zone token".into(),
-            ),
-        ))
+        InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(HandlerError::External(
+            "could not verify balance of an enabled zone token".into(),
+        )))
     })?;
 
     for token in enabled_tokens.read().iter().copied() {
@@ -1896,9 +1895,7 @@ fn validate_has_enabled_token_balance(
         let balance = state.storage(token, slot.into()).map_err(|err| {
             warn!(%err, %sender, "Failed to read zone token balance during pool admission");
             InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-                TempoInvalidTransaction::EthInvalidTransaction(
-                    "could not verify balance of an enabled zone token".into(),
-                ),
+                HandlerError::External("could not verify balance of an enabled zone token".into()),
             ))
         })?;
         if balance.is_some_and(|balance| !balance.is_zero()) {
@@ -1907,7 +1904,7 @@ fn validate_has_enabled_token_balance(
     }
 
     Err(InvalidPoolTransactionError::other(
-        TempoPoolTransactionError::Evm(TempoInvalidTransaction::EthInvalidTransaction(
+        TempoPoolTransactionError::Evm(HandlerError::External(
             "sender must hold a nonzero balance of an enabled zone token".into(),
         )),
     ))
@@ -2187,7 +2184,7 @@ mod tests {
         let err = zone_evm::validate_transaction(transaction.tx_env(), &[]).unwrap_err();
         assert!(matches!(
             err,
-            tempo_revm::TempoInvalidTransaction::CallsValidation(_)
+            tempo_evm::TempoInvalidTransaction::CallsValidation(_)
         ));
         assert!(zone_evm::validate_transaction(transaction.tx_env(), &[sender]).is_ok());
     }

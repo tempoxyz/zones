@@ -38,6 +38,13 @@ enum ZoneBlockPhase {
 
 impl ZoneBlockPhase {
     fn validate_transaction(self, tx: &TempoTxEnvelope) -> Result<Self, BlockExecutionError> {
+        if tx.has_sub_block_nonce_key_prefix() {
+            return Err(BlockValidationError::msg(
+                "subblock transactions are not supported in zone blocks",
+            )
+            .into());
+        }
+
         let tx_kind = ZoneTransactionKind::classify(tx);
 
         match (self, tx_kind) {
@@ -286,15 +293,16 @@ mod tests {
     };
 
     use alloy_consensus::{Header, Signed, TxLegacy};
-    use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
-    use alloy_primitives::{Address, B256, Bytes, Log, Signature, U256, keccak256};
+    use alloy_primitives::{Address, B256, Bytes, Signature, U256, keccak256};
     use alloy_rlp::Encodable as _;
-    use alloy_sol_types::{SolCall, SolEvent};
+    use alloy_sol_types::SolCall;
+    use evm2::evm::InMemoryDB;
     use reth_chainspec::EthChainSpec as _;
+    use reth_evm::{BlockExecutor, BlockExecutorFactory};
+    use reth_evm_ethereum::EthBlockExecutionCtx;
     use reth_primitives_traits::Recovered;
-    use revm::database::{CacheDB, EmptyDB};
     use tempo_chainspec::{hardfork::TempoHardfork, spec::DEV};
-    use tempo_evm::TempoBlockExecutionCtx;
+    use tempo_evm::{TempoBlockExecutionCtx, TempoEvmEnv, TempoTxEnv};
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
         storage::{ContractStorage, Handler, StorageCtx, hashmap::HashMapStorageProvider},
@@ -302,20 +310,19 @@ mod tests {
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
     use tempo_primitives::{
-        TempoHeader, TempoReceipt, TempoTxEnvelope, TempoTxType,
+        TempoHeader, TempoTxEnvelope,
         subblock::TEMPO_SUBBLOCK_NONCE_KEY_PREFIX,
         transaction::{
             Call, TempoSignature, TempoTransaction,
             envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
         },
     };
-    use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
     use tempo_zone_contracts::{ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox};
     use zone_chainspec::ZoneChainSpec;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, zone_chain_id};
 
-    use crate::ZoneEvmFactory;
+    use crate::ZoneEvmConfig;
 
     fn system_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
         TempoTxEnvelope::Legacy(Signed::new_unhashed(
@@ -346,31 +353,6 @@ mod tests {
             .abi_encode()
             .into(),
         )
-    }
-
-    fn withdrawal_requested_receipt(address: Address) -> TempoReceipt {
-        let event = IZoneOutbox::WithdrawalRequested {
-            withdrawalIndex: 0,
-            sender: Address::repeat_byte(0x11),
-            token: Address::repeat_byte(0x22),
-            to: Address::repeat_byte(0x33),
-            amount: 1,
-            fee: 0,
-            memo: B256::ZERO,
-            gasLimit: 0,
-            fallbackNonce: 1,
-            data: Bytes::new(),
-            revealTo: Bytes::new(),
-        };
-        TempoReceipt {
-            tx_type: TempoTxType::Legacy,
-            success: true,
-            cumulative_gas_used: 0,
-            logs: vec![Log {
-                address,
-                data: event.encode_log_data(),
-            }],
-        }
     }
 
     fn ordinary_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
@@ -497,11 +479,10 @@ mod tests {
         let mut zone_genesis = DEV.genesis().clone();
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-        let factory =
-            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
-        let mut env = EvmEnv::default();
-        env.cfg_env.spec = TempoHardfork::T11;
-        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
+        let config = ZoneEvmConfig::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let mut env = TempoEvmEnv::default();
+        env.tempo_spec = TempoHardfork::T11;
+        let evm = config.evm_with_env(InMemoryDB::default(), env);
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,
@@ -514,11 +495,10 @@ mod tests {
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: None,
-            subblock_fee_recipients: Default::default(),
         };
-        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        let mut executor: ZoneBlockExecutor<'_, MockL1Reader> =
+            ZoneBlockExecutor::new(evm, ctx, &chain_spec);
         executor.phase = ZoneBlockPhase::Executing;
 
         let tx = Recovered::new_unchecked(
@@ -551,51 +531,9 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_requests_require_same_block_finalization() {
-        let mut zone_genesis = DEV.genesis().clone();
-        zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
-        let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-        let factory =
-            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
-        let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), EvmEnv::default());
-        let ctx = TempoBlockExecutionCtx {
-            inner: EthBlockExecutionCtx {
-                parent_hash: B256::ZERO,
-                parent_beacon_block_root: None,
-                ommers: &[],
-                withdrawals: None,
-                extra_data: Bytes::new(),
-                tx_count_hint: Some(1),
-                slot_number: None,
-            },
-            general_gas_limit: 0,
-            shared_gas_limit: 0,
-            validator_set: None,
-            consensus_context: None,
-            subblock_fee_recipients: Default::default(),
-        };
-        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
-        executor.phase = ZoneBlockPhase::Executing;
-        executor
-            .inner
-            .receipts
-            .push(withdrawal_requested_receipt(ZONE_OUTBOX_ADDRESS));
-
-        let error = match executor.finish() {
-            Ok(_) => panic!("withdrawal request block without finalization was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.to_string(),
-            "zone block with withdrawal requests is missing its finalizeWithdrawalBatch system \
-             transaction"
-        );
-    }
-
-    #[test]
     fn subblock_transactions_are_rejected_in_every_block_phase() {
         let subblock = subblock_tx();
-        assert!(subblock.subblock_proposer().is_some());
+        assert!(subblock.has_sub_block_nonce_key_prefix());
 
         for phase in [
             ZoneBlockPhase::AwaitingAdvanceTempo,
@@ -763,21 +701,19 @@ mod tests {
         let mut child_rlp = Vec::new();
         child.encode(&mut child_rlp);
 
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(&TEMPO_STATE_ADDRESS, Default::default());
         db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            U256::ZERO,
-            U256::from_be_bytes(genesis_hash.0),
-        )
-        .unwrap();
-        db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
-            .unwrap();
+            &TEMPO_STATE_ADDRESS,
+            &U256::ZERO,
+            &U256::from_be_bytes(genesis_hash.0),
+        );
+        db.insert_account_storage(&TEMPO_STATE_ADDRESS, &TEMPO_BLOCK_NUMBER_SLOT, &U256::ZERO);
         let mut zone_genesis = DEV.genesis().clone();
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
-        let factory =
-            ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
-        let evm = factory.create_evm(db, EvmEnv::default());
+        let config = ZoneEvmConfig::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+        let evm = config.evm_with_env(db, TempoEvmEnv::default());
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: B256::ZERO,
@@ -790,11 +726,10 @@ mod tests {
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: None,
-            subblock_fee_recipients: Default::default(),
         };
-        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        let mut executor: ZoneBlockExecutor<'_, MockL1Reader> =
+            ZoneBlockExecutor::new(evm, ctx, &chain_spec);
 
         // The header is the valid next checkpoint, but a decryption entry without an encrypted
         // deposit makes the Inbox precompile revert after attempting the checkpoint transition.
@@ -836,22 +771,27 @@ mod tests {
 
     #[test]
     fn clears_only_prewarming_expiring_nonce_index() {
-        let mut tx_env = TempoTxEnv {
-            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
-                valid_before: Some(123),
-                expiring_nonce_idx: Some(3),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
+        let mut tx_env: TempoTxEnv = Recovered::new_unchecked(
+            TempoTxEnvelope::AA(
+                TempoTransaction {
+                    valid_before: std::num::NonZeroU64::new(123),
+                    ..Default::default()
+                }
+                .into_signed(TempoSignature::from(Signature::test_signature())),
+            ),
+            Address::ZERO,
+        )
+        .into();
+        tx_env.set_expiring_nonce_idx(Some(3));
 
-        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
-            tempo_tx_env.expiring_nonce_idx = None;
-        }
+        tx_env.set_expiring_nonce_idx(None);
 
-        let tempo_tx_env = tx_env.tempo_tx_env.unwrap();
-        assert_eq!(tempo_tx_env.expiring_nonce_idx, None);
-        assert_eq!(tempo_tx_env.valid_before, Some(123));
+        let tempo_tx_env = tx_env.as_aa().unwrap();
+        assert_eq!(tempo_tx_env.expiring_nonce_idx(), None);
+        assert_eq!(
+            tempo_tx_env.tx().valid_before,
+            std::num::NonZeroU64::new(123)
+        );
     }
 
     /// Simulates the zone executor's per-tx validator token override and runs

@@ -215,7 +215,8 @@ impl<DB: Database, L1: L1StorageReader> Database for L1OverlayDB<DB, L1> {
         }
 
         let anchor = self.anchor()?;
-        // REVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged again.
+        // The EVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged
+        // again.
         self.l1
             .read_l1_storage_unmetered(*address, B256::from(*slot), anchor)
             .map(Into::into)
@@ -273,7 +274,7 @@ mod tests {
         let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
 
         assert_eq!(
-            db.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
+            Database::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
             expected
         );
         assert_eq!(db.l1_state().get_anchor(), Some(anchor));
@@ -286,7 +287,7 @@ mod tests {
         let mut failing =
             L1OverlayDB::new(test_db(anchor), TestL1::failing_storage(), Address::ZERO);
         assert!(matches!(
-            failing.get_storage(&TIP403_REGISTRY_ADDRESS, &slot),
+            Database::get_storage(&mut failing, &TIP403_REGISTRY_ADDRESS, &slot),
             Err(ZoneDbError::L1State(L1StateError::StorageUnavailable {
                 block_number: 42,
                 ..
@@ -298,7 +299,7 @@ mod tests {
         let mut db = L1OverlayDB::new(test_db(anchor), reader.clone(), Address::ZERO);
         let l1 = db.l1_state().clone();
         assert_eq!(
-            db.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
+            Database::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
             U256::ONE
         );
         assert!(l1.advance_anchor(anchor, anchor + 1).is_err());
@@ -314,7 +315,7 @@ mod tests {
         let mut inner = test_db(anchor);
         inner.insert_account_storage(&TIP403_REGISTRY_ADDRESS, &slot, &local);
         let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
-        let observed = db.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap();
+        let observed = Database::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap();
         assert_eq!(observed, l1_value);
 
         let mut state = PendingState::default();
@@ -323,7 +324,7 @@ mod tests {
 
         let mut inner = db.into_inner();
         assert_eq!(
-            inner.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
+            Database::get_storage(&mut inner, &TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
             local
         );
     }
@@ -335,7 +336,7 @@ mod tests {
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::from(7));
         let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
 
-        db.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap();
+        Database::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap();
         assert_eq!(db.l1_state().get_anchor(), Some(anchor));
 
         db.l1_state().reset_transaction_state();
@@ -352,8 +353,14 @@ mod tests {
         inner.insert_account_storage(&address, &slot, &value);
         let mut db = L1OverlayDB::new(inner, TestL1::default(), Address::ZERO);
 
-        assert_eq!(db.get_storage(&address, &slot).unwrap(), value);
+        assert_eq!(
+            Database::get_storage(&mut db, &address, &slot).unwrap(),
+            value
+        );
         let mut inner: InMemoryDB = db.into_inner();
-        assert_eq!(inner.get_storage(&address, &slot).unwrap(), value);
+        assert_eq!(
+            Database::get_storage(&mut inner, &address, &slot).unwrap(),
+            value
+        );
     }
 }

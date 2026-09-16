@@ -448,14 +448,13 @@ pub struct TempoStorageRead {
 mod tests {
     use super::*;
 
+    use alloy_consensus::{Signed, TxLegacy};
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_rlp::Encodable;
     use alloy_sol_types::{SolCall, SolValue};
+    use evm2::evm::InMemoryDB;
     use reth_chainspec::{EthChainSpec, ForkCondition};
-    use revm::{
-        context::result::ExecutionResult,
-        database::{CacheDB, EmptyDB},
-    };
+    use reth_primitives_traits::Recovered;
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{MODERATO, TempoHardforks},
@@ -463,6 +462,9 @@ mod tests {
     use tempo_precompiles::{
         TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
         zone_factory::ZonePortalStorage,
+    };
+    use tempo_primitives::transaction::envelope::{
+        TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE,
     };
     use tempo_zone_contracts::IZoneInbox;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
@@ -528,32 +530,32 @@ mod tests {
         let mut child_rlp = Vec::new();
         child.encode(&mut child_rlp);
 
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(&TEMPO_STATE_ADDRESS, Default::default());
+        db.insert_account_info(&TIP403_REGISTRY_ADDRESS, Default::default());
         db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            U256::ZERO,
-            U256::from_be_bytes(genesis_hash.0),
-        )
-        .unwrap();
+            &TEMPO_STATE_ADDRESS,
+            &U256::ZERO,
+            &U256::from_be_bytes(genesis_hash.0),
+        );
         db.insert_account_storage(
-            TEMPO_STATE_ADDRESS,
-            TEMPO_BLOCK_NUMBER_SLOT,
-            U256::from(PARENT),
-        )
-        .unwrap();
+            &TEMPO_STATE_ADDRESS,
+            &TEMPO_BLOCK_NUMBER_SLOT,
+            &U256::from(PARENT),
+        );
 
         let mut zone_genesis = tempo_chainspec::spec::DEV.genesis().clone();
         zone_genesis.config.chain_id =
             zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1).unwrap();
-        let factory = ZoneEvmFactory::new(
+        let config = ZoneEvmConfig::new(
             Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap()),
             reader.clone(),
             portal,
         );
-        let mut env = EvmEnv::<TempoHardfork, TempoBlockEnv>::default();
-        env.block_env.inner.timestamp = U256::from(child.inner.timestamp);
-        env.block_env.timestamp_millis_part = child.timestamp_millis_part;
-        let mut evm = factory.create_evm(db, env);
+        let mut env = TempoEvmEnv::default();
+        env.block.timestamp = U256::from(child.inner.timestamp);
+        env.block.ext.timestamp_millis_part = child.timestamp_millis_part;
+        let mut evm = BlockExecutorFactory::evm_with_env(&config, db, env);
         let calldata = IZoneInbox::advanceTempoCall {
             header: Bytes::from(child_rlp),
             deposits: Vec::new(),
@@ -567,12 +569,29 @@ mod tests {
         }
         .abi_encode();
 
+        let tx: TempoTxEnv = Recovered::new_unchecked(
+            TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                TxLegacy {
+                    to: ZONE_INBOX_ADDRESS.into(),
+                    input: calldata.into(),
+                    ..Default::default()
+                },
+                TEMPO_SYSTEM_TX_SIGNATURE,
+            )),
+            TEMPO_SYSTEM_TX_SENDER,
+        )
+        .into();
+        let tx = Recovered::new_unchecked(tx, TEMPO_SYSTEM_TX_SENDER);
         let result = evm
-            .transact_system_call(Address::ZERO, ZONE_INBOX_ADDRESS, calldata.into())
-            .expect("advanceTempo execution must not fail");
-        assert!(matches!(result.result, ExecutionResult::Success { .. }));
+            .transact(&tx)
+            .expect("advanceTempo execution must not fail")
+            .commit();
+        assert!(result.status, "advanceTempo reverted: {result:?}");
         assert_eq!(
-            evm.ctx().journaled_state.database.l1_state().get_anchor(),
+            evm.database_as::<L1OverlayDB<InMemoryDB, MockL1Reader>>()
+                .unwrap()
+                .l1_state()
+                .get_anchor(),
             None,
             "transaction completion must clear the shared L1 anchor"
         );
@@ -624,7 +643,7 @@ mod tests {
         let env = config.evm_env(&header).expect("valid EVM environment");
 
         assert_eq!(
-            env.cfg_env.spec,
+            env.tempo_spec,
             MODERATO.tempo_hardfork_at(activation_timestamp)
         );
     }

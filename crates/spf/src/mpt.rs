@@ -9,7 +9,7 @@
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::B256Map};
 use alloy_rlp::Decodable;
 use reth_trie_common::{DecodedMultiProofV2, EMPTY_ROOT_HASH, HashedPostState, TrieAccount};
-use reth_trie_sparse::{LeafUpdate, RevealableSparseTrie, SparseStateTrie, TrieNodeEpoch};
+use reth_trie_sparse::{LeafUpdate, RevealableSparseTrie, SparseStateTrie};
 
 /// Fully revealed, root-bound stateless trie.
 #[derive(Debug)]
@@ -50,7 +50,7 @@ impl StatelessSparseTrie {
                 .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)?;
 
             let actual_root = inner
-                .root(TrieNodeEpoch::UNMODIFIED)
+                .root()
                 .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)?;
             if actual_root != state_root {
                 return Err(StatelessSparseTrieError::StateRootMismatch {
@@ -163,7 +163,7 @@ impl StatelessSparseTrie {
                 }
 
                 let storage_root = storage_trie
-                    .root(TrieNodeEpoch::UNMODIFIED)
+                    .root()
                     .ok_or(StatelessSparseTrieError::InvalidSparseTrie)?;
                 self.inner.insert_storage_trie(hashed_address, storage_trie);
                 storage_roots.insert(hashed_address, storage_root);
@@ -210,7 +210,7 @@ impl StatelessSparseTrie {
             }
 
             self.inner
-                .root(TrieNodeEpoch::UNMODIFIED)
+                .root()
                 .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)
         })
     }
