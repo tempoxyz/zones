@@ -161,8 +161,10 @@ where
         }
     });
     drop(storage);
-    if fixed_gas.is_some() && matches!(result, Ok(_) | Err(PrecompileError::Revert(_))) {
-        gas.spend(fixed_gas.unwrap())
+    if matches!(result, Ok(_) | Err(PrecompileError::Revert(_)))
+        && let Some(fixed_gas) = fixed_gas
+    {
+        gas.spend(fixed_gas)
             .expect("fixed gas availability checked above");
     }
     result
@@ -184,11 +186,7 @@ fn add_input_cost(mut s: StorageCtx, data: &[u8], res: PrecompileResult) -> Prec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{test_context, test_storage_provider};
-    use alloy_evm::{
-        EvmInternals,
-        precompiles::{Precompile as _, PrecompileInput},
-    };
+    use crate::test_utils::{TestContext, TestTypes, test_context, test_storage_provider};
     use alloy_primitives::{Bytes, U256};
     use std::{
         cell::{Cell, RefCell},
@@ -216,24 +214,43 @@ mod tests {
         }
     }
 
-    fn input<'a>(
-        ctx: &'a mut crate::test_utils::TestContext,
-        data: &'a [u8],
+    fn env(spec: TempoHardfork) -> ZonePrecompileEnv {
+        ZonePrecompileEnv::new(
+            spec,
+            zone_hardfork::ZoneHardfork::Z0,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        )
+    }
+
+    fn call(
+        ctx: &mut TestContext,
+        spec: TempoHardfork,
+        data: &[u8],
         caller: Address,
         gas: u64,
-    ) -> PrecompileInput<'a> {
+        rules: impl CallRules,
+        execute: impl FnOnce(&[u8], Address) -> PrecompileResult,
+    ) -> (PrecompileResult, GasTracker) {
         let target = Address::repeat_byte(0x11);
-        PrecompileInput {
-            data,
-            gas,
-            reservoir: 0,
+        let message = Message::<TestTypes> {
+            gas_limit: gas,
             caller,
-            value: U256::ZERO,
-            target_address: target,
-            is_static: false,
-            bytecode_address: target,
-            internals: EvmInternals::from_context(ctx),
-        }
+            input: Bytes::copy_from_slice(data),
+            destination: target,
+            code_address: target,
+            ..Default::default()
+        };
+        let mut gas_tracker = GasTracker::new(gas);
+        let result = execute_precompile(
+            ctx.evm(),
+            &message,
+            &mut gas_tracker,
+            &env(spec),
+            rules,
+            execute,
+        );
+        (result, gas_tracker)
     }
 
     #[test]
@@ -241,22 +258,11 @@ mod tests {
         let recorded_rule = Rc::new(RefCell::new(None));
         let recorded_execute = Rc::new(RefCell::new(None));
         let execute_record = recorded_execute.clone();
-        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let env = ZonePrecompileEnv::new(
-            &cfg,
-            zone_hardfork::ZoneHardfork::Z0,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
-        let precompile = create_precompile(
-            "ForwardingTest",
-            &env,
-            RecordingRules(recorded_rule.clone()),
-            move |data, caller| {
-                *execute_record.borrow_mut() = Some((Bytes::copy_from_slice(data), caller));
-                Ok(StorageCtx::default().success_output(Bytes::new()))
-            },
-        );
+        let rules = RecordingRules(recorded_rule.clone());
+        let execute = move |data: &[u8], caller| {
+            *execute_record.borrow_mut() = Some((Bytes::copy_from_slice(data), caller));
+            Ok(StorageCtx::default().success_output(Bytes::new()))
+        };
 
         let mut outer_ctx = test_context();
         let mut inner_ctx = test_context();
@@ -264,14 +270,20 @@ mod tests {
         let calldata = [0xde, 0xad, 0xbe, 0xef, 0x01];
         let caller = Address::repeat_byte(0x22);
         let output = StorageCtx::enter(&mut outer, || {
-            let output = precompile
-                .call(input(&mut inner_ctx, &calldata, caller, FIXED_GAS))
-                .unwrap();
+            let (output, gas) = call(
+                &mut inner_ctx,
+                TempoHardfork::T8,
+                &calldata,
+                caller,
+                FIXED_GAS,
+                rules,
+                execute,
+            );
             assert_eq!(StorageCtx::default().gas_limit(), 777);
-            output
+            (output.unwrap(), gas)
         });
 
-        assert_eq!(output.gas_used, FIXED_GAS);
+        assert_eq!(output.1.spent(), FIXED_GAS);
         assert_eq!(
             *recorded_rule.borrow(),
             Some((calldata.into(), Some([0xde, 0xad, 0xbe, 0xef]), caller))
@@ -281,45 +293,37 @@ mod tests {
 
     #[test]
     fn fixed_gas_disables_storage_credits_and_discards_refunds() {
-        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        cfg.spec = TempoHardfork::T8;
-        let env = ZonePrecompileEnv::new(
-            &cfg,
-            zone_hardfork::ZoneHardfork::Z0,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
         let storage_owner = Address::repeat_byte(0x33);
         let credit_slot = U256::from_be_slice(storage_owner.as_slice());
         let observed_credit_state = Rc::new(Cell::new(U256::MAX));
         let execute_credit_state = observed_credit_state.clone();
-        let precompile = create_precompile(
-            "FixedGasAccountingTest",
-            &env,
-            RecordingRules(Rc::new(RefCell::new(None))),
-            move |_, _| {
-                let mut storage = StorageCtx::default();
-                storage
-                    .sstore(storage_owner, U256::ZERO, U256::ONE)
-                    .unwrap();
-                execute_credit_state
-                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
+        let rules = RecordingRules(Rc::new(RefCell::new(None)));
+        let execute = move |_: &[u8], _| {
+            let mut storage = StorageCtx::default();
+            storage
+                .sstore(storage_owner, U256::ZERO, U256::ONE)
+                .unwrap();
+            execute_credit_state.set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
 
-                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
-                storage.refund_gas(4_800);
-                let mut output = storage.success_output(Bytes::new());
-                output.gas_refunded = storage.gas_refunded();
-                Ok(output)
-            },
-        );
+            // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
+            storage.refund_gas(4_800);
+            Ok(storage.success_output(Bytes::new()))
+        };
 
         let mut ctx = test_context();
-        let output = precompile
-            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
-            .unwrap();
+        let (output, gas) = call(
+            &mut ctx,
+            TempoHardfork::T8,
+            &[],
+            Address::ZERO,
+            FIXED_GAS,
+            rules,
+            execute,
+        );
+        output.unwrap();
 
-        assert_eq!(output.gas_used, FIXED_GAS);
-        assert_eq!(output.gas_refunded, 0);
+        assert_eq!(gas.spent(), FIXED_GAS);
+        assert_eq!(gas.refunded(), 0);
         assert_eq!(observed_credit_state.get(), U256::ZERO);
     }
 
@@ -327,38 +331,34 @@ mod tests {
     fn protocol_precompile_applies_admission_and_evm_spec() {
         let observed_spec = Rc::new(Cell::new(None));
         let execute_spec = observed_spec.clone();
-        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        cfg.spec = TempoHardfork::T8;
-        let env = ZonePrecompileEnv::new(
-            &cfg,
-            zone_hardfork::ZoneHardfork::Z0,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
         let checked = Rc::new(Cell::new(false));
-        let rejected = create_precompile(
-            "L1AdmissionTest",
-            &env,
+        let mut ctx = test_context();
+        let (rejected, _) = call(
+            &mut ctx,
+            TempoHardfork::T8,
+            &[1, 2, 3, 4],
+            Address::ZERO,
+            FIXED_GAS,
             RejectRules(checked.clone()),
             |_, _| panic!("rejected call must not execute"),
         );
-        let mut ctx = test_context();
-        assert!(
-            rejected
-                .call(input(&mut ctx, &[1, 2, 3, 4], Address::ZERO, FIXED_GAS))
-                .unwrap()
-                .is_revert()
-        );
+        assert!(matches!(rejected, Err(PrecompileError::Revert(_))));
         assert!(checked.get());
 
-        let precompile = create_precompile("ProtocolTest", &env, NoCallRules, move |_, _| {
-            execute_spec.set(Some(StorageCtx::default().spec()));
-            Ok(StorageCtx::default().success_output(Bytes::new()))
-        });
-
-        precompile
-            .call(input(&mut ctx, &[], Address::ZERO, u64::MAX))
-            .unwrap();
+        call(
+            &mut ctx,
+            TempoHardfork::T8,
+            &[],
+            Address::ZERO,
+            u64::MAX,
+            NoCallRules,
+            move |_, _| {
+                execute_spec.set(Some(StorageCtx::default().spec()));
+                Ok(StorageCtx::default().success_output(Bytes::new()))
+            },
+        )
+        .0
+        .unwrap();
 
         assert_eq!(observed_spec.get(), Some(TempoHardfork::T8));
     }
@@ -381,40 +381,44 @@ mod tests {
         let checked = Rc::new(Cell::new(false));
         let executed = Rc::new(Cell::new(false));
         let execute_flag = executed.clone();
-        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let env = ZonePrecompileEnv::new(
-            &cfg,
-            zone_hardfork::ZoneHardfork::Z0,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        let mut ctx = test_context();
+        let calldata = [1, 2, 3, 4];
+
+        let (out_of_gas, _) = call(
+            &mut ctx,
+            TempoHardfork::T8,
+            &calldata,
+            Address::ZERO,
+            FIXED_GAS - 1,
+            RejectRules(checked.clone()),
+            |_, _| panic!("out-of-gas call must not execute"),
         );
-        let precompile = create_precompile(
-            "AdmissionTest",
-            &env,
+        assert!(matches!(
+            out_of_gas,
+            Err(PrecompileError::Halt(PrecompileHalt::OutOfGas))
+        ));
+        assert!(!checked.get());
+        assert!(!executed.get());
+
+        let (rejected, gas) = call(
+            &mut ctx,
+            TempoHardfork::T8,
+            &calldata,
+            Address::ZERO,
+            FIXED_GAS,
             RejectRules(checked.clone()),
             move |_, _| {
                 execute_flag.set(true);
                 Ok(StorageCtx::default().success_output(Bytes::new()))
             },
         );
-        let mut ctx = test_context();
-        let calldata = [1, 2, 3, 4];
-
-        let out_of_gas = precompile
-            .call(input(&mut ctx, &calldata, Address::ZERO, FIXED_GAS - 1))
-            .unwrap();
-        assert!(out_of_gas.is_halt());
-        assert_eq!(out_of_gas.halt_reason(), Some(&PrecompileHalt::OutOfGas));
-        assert!(!checked.get());
-        assert!(!executed.get());
-
-        let rejected = precompile
-            .call(input(&mut ctx, &calldata, Address::ZERO, FIXED_GAS))
-            .unwrap();
         assert!(checked.get());
         assert!(!executed.get());
-        assert_eq!(rejected.gas_used, FIXED_GAS);
-        assert_eq!(rejected.bytes, Bytes::from_static(b"denied"));
+        assert_eq!(gas.spent(), FIXED_GAS);
+        assert!(matches!(
+            rejected,
+            Err(PrecompileError::Revert(bytes)) if bytes == Bytes::from_static(b"denied")
+        ));
     }
 
     #[test]
@@ -422,32 +426,35 @@ mod tests {
         let calldata = [0u8; 32];
 
         for (spec, required_gas) in [(TempoHardfork::T10, 6), (TempoHardfork::T11, 30)] {
-            let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-            cfg.spec = spec;
-            let env = ZonePrecompileEnv::new(
-                &cfg,
-                zone_hardfork::ZoneHardfork::Z0,
-                StorageActions::disabled(),
-                Rc::new(RefCell::new(NonCreditableSlots::empty())),
-            );
-            let precompile = create_precompile("InputGasTest", &env, NoCallRules, |_, _| {
-                Ok(StorageCtx::default().success_output(Bytes::new()))
-            });
             let mut ctx = test_context();
 
-            let insufficient = precompile
-                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas - 1))
-                .unwrap();
-            assert_eq!(
-                insufficient.halt_reason(),
-                Some(&PrecompileHalt::OutOfGas),
+            let (insufficient, _) = call(
+                &mut ctx,
+                spec,
+                &calldata,
+                Address::ZERO,
+                required_gas - 1,
+                NoCallRules,
+                |_, _| Ok(StorageCtx::default().success_output(Bytes::new())),
+            );
+            assert!(
+                matches!(
+                    insufficient,
+                    Err(PrecompileError::Halt(PrecompileHalt::OutOfGas))
+                ),
                 "{spec:?} must require {required_gas} input gas"
             );
 
-            let sufficient = precompile
-                .call(input(&mut ctx, &calldata, Address::ZERO, required_gas))
-                .unwrap();
-            assert!(!sufficient.is_halt(), "{spec:?} must accept its exact cost");
+            let (sufficient, _) = call(
+                &mut ctx,
+                spec,
+                &calldata,
+                Address::ZERO,
+                required_gas,
+                NoCallRules,
+                |_, _| Ok(StorageCtx::default().success_output(Bytes::new())),
+            );
+            assert!(sufficient.is_ok(), "{spec:?} must accept its exact cost");
         }
     }
 
@@ -462,25 +469,20 @@ mod tests {
 
     #[test]
     fn input_cost_does_not_replace_fatal_admission_error() {
-        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let env = ZonePrecompileEnv::new(
-            &cfg,
-            zone_hardfork::ZoneHardfork::Z0,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
-        let precompile = create_precompile("FatalAdmissionTest", &env, FatalRules, |_, _| {
-            panic!("fatal admission must not execute the precompile")
-        });
         let mut ctx = test_context();
         let calldata = [1, 2, 3, 4];
 
-        let error = precompile
-            .call(input(&mut ctx, &calldata, Address::ZERO, 10))
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            revm::precompile::PrecompileError::Fatal(message) if message == "boom"
-        ));
+        let (error, _) = call(
+            &mut ctx,
+            TempoHardfork::T8,
+            &calldata,
+            Address::ZERO,
+            10,
+            FatalRules,
+            |_, _| panic!("fatal admission must not execute the precompile"),
+        );
+        assert!(
+            matches!(error, Err(PrecompileError::Fatal(error)) if error.to_string().contains("boom"))
+        );
     }
 }

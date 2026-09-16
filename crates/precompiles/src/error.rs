@@ -63,7 +63,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, U256};
     use alloy_sol_types::SolError;
-    use revm::precompile::PrecompileHalt;
+    use evm2::precompiles::PrecompileHalt;
     use tempo_zone_contracts::IZoneOutbox;
 
     #[test]
@@ -85,23 +85,19 @@ mod tests {
                 .abi_encode(),
             ),
         ] {
-            let output = ZonePrecompileError::from(error)
-                .into_precompile_result(10, 20)
-                .unwrap();
-            assert!(output.is_revert());
-            assert_eq!(output.gas_used, 10);
-            assert_eq!(output.reservoir, 20);
-            assert_eq!(output.bytes, expected);
+            assert!(matches!(
+                ZonePrecompileError::from(error).into_precompile_result(),
+                Err(PrecompileError::Revert(bytes)) if bytes == expected
+            ));
         }
     }
 
     #[test]
     fn other_zone_and_tempo_errors_preserve_conversion_behavior() {
-        let output = ZonePrecompileError::from(TempoPrecompileError::OutOfGas)
-            .into_precompile_result(10, 20)
-            .unwrap();
-        assert_eq!(output.halt_reason(), Some(&PrecompileHalt::OutOfGas));
-        assert_eq!(output.reservoir, 20);
+        assert!(matches!(
+            ZonePrecompileError::from(TempoPrecompileError::OutOfGas).into_precompile_result(),
+            Err(PrecompileError::Halt(PrecompileHalt::OutOfGas))
+        ));
 
         let l1_error = L1StateError::StorageUnavailable {
             account: Address::ZERO,
@@ -111,7 +107,7 @@ mod tests {
         };
         assert!(
             ZonePrecompileError::from(l1_error)
-                .into_precompile_result(10, 20)
+                .into_precompile_result()
                 .is_err(),
             "L1 state failures must remain fatal"
         );

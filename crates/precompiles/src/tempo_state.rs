@@ -174,19 +174,20 @@ mod tests {
     use super::*;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        MockL1Reader, TestContext, TestPrecompiles, call_precompile, test_context,
+        test_precompiles, test_storage_provider,
     };
     use alloc::{vec, vec::Vec};
-    use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
+    use revm::precompile::PrecompileResult;
     use tempo_precompiles::storage::StorageCtx;
 
     struct TempoStateHarness {
         ctx: TestContext,
         l1: L1State<MockL1Reader>,
-        precompile: DynPrecompile,
+        precompile: TestPrecompiles,
     }
 
     impl TempoStateHarness {
@@ -198,7 +199,7 @@ mod tests {
                 StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             }
             let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
-            let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
+            let precompile = test_precompiles(&ctx, l1.clone());
             Ok(Self {
                 ctx,
                 l1,
@@ -207,8 +208,8 @@ mod tests {
         }
 
         fn set_block_timestamp(&mut self, header: &TempoHeader) {
-            self.ctx.block.inner.timestamp = U256::from(header.timestamp());
-            self.ctx.block.timestamp_millis_part = header.timestamp_millis_part;
+            self.ctx.block.timestamp = U256::from(header.timestamp());
+            self.ctx.block.ext.timestamp_millis_part = header.timestamp_millis_part;
         }
 
         fn call(
@@ -237,7 +238,7 @@ mod tests {
             let calldata = calldata.into();
             call_precompile(
                 &mut self.ctx,
-                &self.precompile,
+                &mut self.precompile,
                 caller,
                 &calldata,
                 u64::MAX,
@@ -351,7 +352,7 @@ mod tests {
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
-        harness.ctx.block.inner.timestamp += U256::ONE;
+        harness.ctx.block.timestamp += U256::ONE;
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
@@ -365,7 +366,7 @@ mod tests {
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
-        harness.ctx.block.inner.timestamp -= U256::ONE;
+        harness.ctx.block.timestamp -= U256::ONE;
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_revert());
@@ -384,7 +385,7 @@ mod tests {
         let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
         harness.set_block_timestamp(&child);
-        harness.ctx.block.timestamp_millis_part -= 1;
+        harness.ctx.block.ext.timestamp_millis_part -= 1;
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_revert());

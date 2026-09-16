@@ -24,6 +24,8 @@ pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
 pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
 /// Follower-to-leader settlement signature channel.
 pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
+/// Per-channel network mailbox capacity.
+pub(crate) const NETWORK_MAILBOX_SIZE: usize = 32;
 /// Maximum raw EIP-2718 transaction frame accepted from another sequencer.
 ///
 /// This is eight times Reth's default 128 KiB transaction input limit, leaving room for operators
@@ -71,7 +73,7 @@ fn setup_commonware_config(
         ed25519_private_key,
         namespace,
         listen,
-        NZUsize!(32),
+        NZUsize!(NETWORK_MAILBOX_SIZE),
         MAX_MESSAGE_SIZE,
     );
 
@@ -197,8 +199,8 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
-        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, NETWORK_NAMESPACE_PREFIX, P2pNetworkId,
-        TRANSACTION_BACKLOG, WIRE_PROTOCOL_VERSION, namespace, peer_sets,
+        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, NETWORK_MAILBOX_SIZE,
+        NETWORK_NAMESPACE_PREFIX, P2pNetworkId, WIRE_PROTOCOL_VERSION, namespace, peer_sets,
     };
     use crate::ZoneManifest;
 
@@ -230,7 +232,7 @@ mod tests {
     fn transaction_channel_bounds_pre_validation_memory() {
         assert!(MAX_TRANSACTION_MESSAGE_SIZE < MAX_MESSAGE_SIZE as usize);
         assert_eq!(
-            TRANSACTION_BACKLOG * MAX_MESSAGE_SIZE as usize,
+            NETWORK_MAILBOX_SIZE * MAX_MESSAGE_SIZE as usize,
             80 * 1024 * 1024,
         );
     }

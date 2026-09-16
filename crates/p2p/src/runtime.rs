@@ -846,6 +846,12 @@ mod tests {
             self.blocked.lock().unwrap().push(peer);
             Feedback::Ok
         }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) =
+                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+            receiver
+        }
     }
 
     fn mock_receiver() -> (

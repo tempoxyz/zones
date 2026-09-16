@@ -11880,6 +11880,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-math",
  "const-hex",
+ "evm2",
  "eyre",
  "futures",
  "k256 0.13.4",

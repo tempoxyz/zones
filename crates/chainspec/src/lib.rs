@@ -300,7 +300,6 @@ pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
 mod tests {
     use super::*;
 
-    use alloy_primitives::Address;
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
     use tempo_chainspec::spec::{DEV, MODERATO};

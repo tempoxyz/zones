@@ -46,6 +46,7 @@ commonware-cryptography.workspace = true
 commonware-math.workspace = true
 const-hex.workspace = true
 eyre.workspace = true
+evm2 = { workspace = true, features = ["std"] }
 futures.workspace = true
 rand = "0.10.2"
 reth-evm.workspace = true
