@@ -5,7 +5,8 @@ use alloy_primitives::B256;
 use evm2::{
     EvmConfig, ExecutionConfig, OpcodeConfig, SpecId, TxResult, Version,
     interpreter::{
-        CreateInstruction, InstrStop, Instruction, InterpreterState, Pc, Result, StackMut, op,
+        InstrStop, InterpreterState, Pc, Result, StackMut,
+        instructions::create as CreateInstruction, op, private::Instruction,
     },
     registry::{HandlerError, TxRegistry, TxRequest},
 };
