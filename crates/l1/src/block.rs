@@ -65,10 +65,7 @@ impl L1BlockDeposits {
                         let decryption = abi::DecryptionData {
                             sharedSecret: dec.proof.shared_secret,
                             sharedSecretYParity: dec.proof.shared_secret_y_parity,
-                            cpProof: abi::ChaumPedersenProof {
-                                s: dec.proof.cp_proof_s,
-                                c: dec.proof.cp_proof_c,
-                            },
+                            cpProof: dec.proof.cp_proof,
                         };
                         queued_deposits.push(queued);
                         decryptions.push(decryption);
@@ -92,10 +89,7 @@ impl L1BlockDeposits {
                         let decryption = abi::DecryptionData {
                             sharedSecret: proof.shared_secret,
                             sharedSecretYParity: proof.shared_secret_y_parity,
-                            cpProof: abi::ChaumPedersenProof {
-                                s: proof.cp_proof_s,
-                                c: proof.cp_proof_c,
-                            },
+                            cpProof: proof.cp_proof,
                         };
                         queued_deposits.push(queued);
                         decryptions.push(decryption);

@@ -67,7 +67,7 @@ scenario:
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }
-        recipient: { var: account.address }
+        recipient: ${ZONES_BENCH_POSITION_RECIPIENT}
         input_token: "${ZONES_BENCH_DLUSD}"
         fee_token: "${ZONES_BENCH_DLUSD}"
         amount: "${ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT}"

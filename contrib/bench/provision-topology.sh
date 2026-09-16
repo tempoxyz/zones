@@ -125,6 +125,26 @@ wait_for_chain_advance() {
     die "timed out waiting for $label chain to advance past block $start_block"
 }
 
+verify_shared_runtimes() {
+    local url="$1" label="$2" block spec contract address expected observed
+    block="$(rpc "$url" eth_blockNumber)" || die "$label failed to read the runtime verification block"
+    (( $(hex_to_dec "$block") > 0 )) || die "$label has not produced a block to verify shared runtimes"
+    for spec in \
+        ZonePortal:0x5AD1000000000000000000000000000000000000 \
+        Verifier:0x5a56000000000000000000000000000000000000 \
+        ZoneMessenger:0x5A4d000000000000000000000000000000000000
+    do
+        contract="${spec%%:*}" address="${spec#*:}"
+        expected="$(jq -er '.deployedBytecode.object | sub("^0x"; "") | select(test("^([0-9a-fA-F]{2})+$"))' \
+            "$ZONES_ROOT/crates/contracts/out/$contract.sol/$contract.json")" \
+            || die "invalid or missing $contract deployed bytecode artifact"
+        observed="$(rpc "$url" eth_getCode "[\"$address\",\"$block\"]")" \
+            || die "$label failed to read $contract runtime at $address"
+        [[ "${observed,,}" == "0x${expected,,}" ]] \
+            || die "$label $contract runtime at $address differs from the local artifact after block $block; refusing to benchmark replaced runtimes"
+    done
+}
+
 verify_history_storage() {
     local url="$1"
     local label="$2"
@@ -554,6 +574,7 @@ provision_up() {
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
     local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
+    local zone_gas_limit="${ZONES_BENCH_ZONE_GAS_LIMIT:-30000000}"
     local l1_max_fee_per_gas="${ZONES_BENCH_L1_MAX_FEE_PER_GAS:-12000000000}"
     local zone_max_fee_per_gas="${ZONES_BENCH_ZONE_MAX_FEE_PER_GAS:-10000000000}"
     local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-1024}"
@@ -566,7 +587,7 @@ provision_up() {
     local count="${ZONES_BENCH_COUNT:-100}"
     local max_concurrent="${ZONES_BENCH_MAX_CONCURRENT:-12}"
     local withdrawal_amount="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
-    local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
+    local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-5000000}"
     local withdrawal_max_batch_gas="${ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS:-20000000}"
     local withdrawal_max_in_flight_batches="${ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES:-12}"
     local zone_batch_interval_blocks="${ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS:-120}"
@@ -587,6 +608,7 @@ provision_up() {
     ZONES_BENCH_L1_CHAIN_ID="$l1_chain_id"
     ZONES_BENCH_L1_GAS_LIMIT="$l1_gas_limit"
     ZONES_BENCH_L1_GENERAL_GAS_LIMIT="$l1_general_gas_limit"
+    ZONES_BENCH_ZONE_GAS_LIMIT="$zone_gas_limit"
     ZONES_BENCH_L1_MAX_FEE_PER_GAS="$l1_max_fee_per_gas"
     ZONES_BENCH_ZONE_MAX_FEE_PER_GAS="$zone_max_fee_per_gas"
     ZONES_BENCH_BLOAT_MIB="$bloat_mib"
@@ -609,7 +631,7 @@ provision_up() {
     for name in \
         ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY \
         ZONES_BENCH_L1_CHAIN_ID \
-        ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
+        ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT ZONES_BENCH_ZONE_GAS_LIMIT \
         ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS \
         ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE \
         ZONES_BENCH_RPC_TIMEOUT_SECS ZONES_BENCH_ZONE_TIMEOUT_SECS \
@@ -627,6 +649,7 @@ provision_up() {
     l1_chain_id=$((10#$l1_chain_id))
     l1_gas_limit=$((10#$l1_gas_limit))
     l1_general_gas_limit=$((10#$l1_general_gas_limit))
+    zone_gas_limit=$((10#$zone_gas_limit))
     l1_max_fee_per_gas=$((10#$l1_max_fee_per_gas))
     zone_max_fee_per_gas=$((10#$zone_max_fee_per_gas))
     bloat_mib=$((10#$bloat_mib))
@@ -651,8 +674,7 @@ provision_up() {
     (( l1_gas_limit > 0 )) || die "ZONES_BENCH_L1_GAS_LIMIT must be greater than zero"
     (( l1_general_gas_limit > 0 )) \
         || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be greater than zero"
-    (( l1_gas_limit <= 30000000 )) \
-        || die "ZONES_BENCH_L1_GAS_LIMIT cannot exceed 30000000"
+    (( zone_gas_limit > 0 )) || die "ZONES_BENCH_ZONE_GAS_LIMIT must be greater than zero"
     (( l1_general_gas_limit <= l1_gas_limit )) \
         || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT cannot exceed ZONES_BENCH_L1_GAS_LIMIT"
     (( l1_max_fee_per_gas > 0 )) \
@@ -702,7 +724,8 @@ provision_up() {
     local planned_singleton_withdrawal_gas=0
     case "$neobank_preset" in
         encrypted-deposit) ;;
-        *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + callback_gas_limit)) ;;
+        # The untimed Earn warmup always uses the 10M protocol maximum.
+        *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10000000)) ;;
     esac
     (( planned_singleton_withdrawal_gas == 0 ||
        planned_singleton_withdrawal_gas <= l1_general_gas_limit )) \
@@ -724,6 +747,7 @@ provision_up() {
 
     export ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY
     export ZONES_BENCH_L1_CHAIN_ID ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT
+    export ZONES_BENCH_ZONE_GAS_LIMIT
     export ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
     export ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE
     export ZONES_BENCH_SWAP_MECHANISM ZONES_BENCH_RECIPIENT_MODE ZONES_BENCH_SWAP_LIQUIDITY
@@ -867,6 +891,8 @@ provision_up() {
     wait_for_peer "$l1_b_rpc" "Tempo validator B" "$rpc_timeout"
     wait_for_chain_advance "$l1_a_rpc" "Tempo validator A" "$rpc_timeout"
     wait_for_chain_advance "$l1_b_rpc" "Tempo validator B" "$rpc_timeout"
+    verify_shared_runtimes "$l1_a_rpc" "Tempo validator A"
+    verify_shared_runtimes "$l1_b_rpc" "Tempo validator B"
     verify_history_storage "$l1_a_rpc" "Tempo validator A"
     verify_history_storage "$l1_b_rpc" "Tempo validator B"
 
@@ -892,6 +918,7 @@ provision_up() {
         --initial-token "$zone_token"
         --admin "$admin_address"
         --sequencer "$sequencer_address"
+        --gas-limit "$zone_gas_limit"
         --access-mode
     )
     # Access starts closed with an empty allowlist; untimed fixture setup applies the map.
@@ -954,6 +981,7 @@ provision_up() {
         --http.api all \
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
         --ws.api all \
+        --rpc.max-connections 10000 \
         --metrics 127.0.0.1:9201 \
         --redacted-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
@@ -973,10 +1001,13 @@ provision_up() {
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_zone_enabled_token "$zone_rpc" "$(jq -er '.earnToken' "$fixture_metadata")" "$zone_timeout"
     neobank_allowed_accounts+=("$(jq -er '.bridgeWallet' "$fixture_metadata")")
-    local queried_zone_chain_id
+    local queried_zone_chain_id queried_zone_gas_limit
     queried_zone_chain_id="$(hex_to_dec "$(rpc "$zone_rpc" eth_chainId)")"
     [[ "$queried_zone_chain_id" == "$zone_chain_id" ]] \
         || die "Zone RPC chain ID $queried_zone_chain_id does not match zone.json chain ID $zone_chain_id"
+    queried_zone_gas_limit="$(hex_to_dec "$(rpc "$zone_rpc" eth_getBlockByNumber '["latest",false]' | jq -er '.gasLimit')")"
+    [[ "$queried_zone_gas_limit" == "$zone_gas_limit" ]] \
+        || die "Zone RPC gas limit $queried_zone_gas_limit does not match configured gas limit $zone_gas_limit"
 
     local target_id="local-consensus-${genesis_a#0x}-zone-$zone_id"
     local -a env_pairs=(
@@ -1011,6 +1042,7 @@ provision_up() {
         ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS 0 \
         ZONES_BENCH_L1_GAS_LIMIT "$l1_gas_limit" \
         ZONES_BENCH_L1_GENERAL_GAS_LIMIT "$l1_general_gas_limit" \
+        ZONES_BENCH_ZONE_GAS_LIMIT "$zone_gas_limit" \
         ZONES_BENCH_SWAP_MECHANISM "$swap_mechanism" \
         ZONES_BENCH_RECIPIENT_MODE "$recipient_mode" \
         ZONES_BENCH_SWAP_LIQUIDITY "$swap_liquidity" \

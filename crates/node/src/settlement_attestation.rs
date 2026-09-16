@@ -1,17 +1,19 @@
 //! Batch-boundary settlement attestation construction and leader-side proposal recovery.
 
-use std::{future::Future, time::Duration};
+use std::{collections::HashMap, future::Future, time::Duration};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{B256, Bytes, Sealable as _, U256};
-use alloy_provider::Provider as _;
+use alloy_provider::{DynProvider, Provider as _};
+use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent as _, SolValue as _};
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::StreamExt as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
+use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
@@ -20,8 +22,48 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 use zone_p2p::P2pCommand;
 
-use crate::replication::AttestationContext;
-use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
+use zone_sequencer::{
+    BatchAnchorConfig,
+    attestation::{
+        AttestationDomain, AttestationStore, SettlementAttestation, SignedSettlementAttestation,
+    },
+};
+
+/// Shared signing and L1-validation context for settlement attestations.
+#[derive(Clone)]
+pub(crate) struct AttestationContext {
+    pub(crate) domain: AttestationDomain,
+    /// Portal sequencer-set version validated against the manifest at startup.
+    pub(crate) pinned_sequencer_set_version: Option<u64>,
+    /// `None` on an rpc-only member: it holds no individual key and never signs.
+    pub(crate) signer: Option<PrivateKeySigner>,
+    pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+    pub(crate) store: AttestationStore,
+    pub(crate) l1_provider: DynProvider<TempoNetwork>,
+    pub(crate) anchor_config: BatchAnchorConfig,
+}
+
+impl AttestationContext {
+    pub(crate) fn new(
+        domain: AttestationDomain,
+        pinned_sequencer_set_version: Option<u64>,
+        signer: Option<PrivateKeySigner>,
+        addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+        store: AttestationStore,
+        l1_provider: DynProvider<TempoNetwork>,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
+        Self {
+            domain,
+            pinned_sequencer_set_version,
+            signer,
+            addresses,
+            store,
+            l1_provider,
+            anchor_config,
+        }
+    }
+}
 
 /// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
 const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -62,21 +104,22 @@ pub(crate) async fn validate_registered_sequencer_set(
     // harmless for a startup sanity check.
     let portal = ZonePortal::new(portal_address, l1_provider);
     let quorum: Vec<_> = manifest.quorum_nodes().collect();
-    let sequencer_set_version = portal
-        .sequencerSetVersion()
-        .call()
+    let (sequencer_set_version, threshold, registered_count) = l1_provider
+        .multicall()
+        .add(portal.sequencerSetVersion())
+        .add(portal.sequencerThreshold())
+        .add(portal.sequencerCount())
+        .aggregate()
         .await
-        .wrap_err("failed reading the ZonePortal sequencer-set version")?;
-    let threshold_call = portal.sequencerThreshold();
-    let count_call = portal.sequencerCount();
-    let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
-        let (name, address) = (node.name(), *address);
-        let call = portal.isSequencer(address);
-        async move { call.call().await.map(|ok| (name, address, ok)) }
-    }));
-    let (threshold, registered_count, registered) =
-        tokio::try_join!(threshold_call.call(), count_call.call(), registered)
-            .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+        .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+    let mut registration_calls = l1_provider.multicall().dynamic();
+    for (_, address) in &quorum {
+        registration_calls = registration_calls.add_dynamic(portal.isSequencer(*address));
+    }
+    let registered = registration_calls
+        .aggregate()
+        .await
+        .wrap_err("failed reading the registered sequencers from ZonePortal")?;
     let validated_version = portal
         .sequencerSetVersion()
         .call()
@@ -87,7 +130,8 @@ pub(crate) async fn validate_registered_sequencer_set(
         "ZonePortal sequencer set changed during startup validation ({sequencer_set_version} -> {validated_version})"
     );
 
-    for (name, address, is_registered) in registered {
+    for ((node, address), is_registered) in quorum.iter().zip(registered) {
+        let name = node.name();
         eyre::ensure!(
             is_registered,
             "manifest quorum node `{name}` ({address}) is not a registered ZonePortal sequencer"
@@ -218,16 +262,15 @@ where
         previous_batch(provider, number)?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
-    let set_version_call = portal.sequencerSetVersion();
-    let portal_batch_index_call = portal.withdrawalBatchIndex();
-    let verifier_call = portal.verifier();
-    let portal_tip_call = portal.blockHash();
-    let (set_version, portal_batch_index, verifier, portal_tip) = tokio::try_join!(
-        set_version_call.call(),
-        portal_batch_index_call.call(),
-        verifier_call.call(),
-        portal_tip_call.call(),
-    )?;
+    let (set_version, portal_batch_index, verifier, portal_tip) = context
+        .l1_provider
+        .multicall()
+        .add(portal.sequencerSetVersion())
+        .add(portal.withdrawalBatchIndex())
+        .add(portal.verifier())
+        .add(portal.blockHash())
+        .aggregate()
+        .await?;
     validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
     eyre::ensure!(
         portal_tip == previous_tip,

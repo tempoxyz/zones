@@ -1,17 +1,16 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
-use alloy_eips::{BlockId, eip2718::Encodable2718 as _};
+use alloy_eips::{BlockHashOrNumber, BlockId, eip2718::Encodable2718 as _};
 use alloy_network::primitives::BlockTransactions;
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{Block, BlockNumberOrTag, EIP1186AccountProofResponse, Transaction};
-use alloy_signer_local::PrivateKeySigner;
+use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
@@ -19,22 +18,19 @@ use futures::{StreamExt, TryStreamExt, stream};
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 use tempo_zone_contracts::{
-    IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
-    ZONE_OUTBOX_ADDRESS, ZonePortal,
+    IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal,
 };
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
-use zone_precompiles::{outbox, tempo_state};
+use zone_precompiles::outbox;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
 };
-use zone_rpc::{
-    ZoneProvider, ZoneProviderConfig,
-    types::{TempoStorageRead, ZoneExecutionWitness},
-};
+use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
@@ -47,7 +43,6 @@ const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const LOG_QUERY_BLOCK_CHUNK: u64 = 1_000;
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
-type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,6 +67,23 @@ struct Cli {
 enum Command {
     /// Generate and locally validate an SPF batch witness.
     GenerateInput(GenerateInputArgs),
+    /// Send a saved witness to a prover and save its output and proof.
+    Prove(ProveArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ProveArgs {
+    /// Batch witness JSON produced by generate-input.
+    #[arg(long, short, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Prover TCP socket, including a TCP-to-vsock proxy for a Nitro enclave.
+    #[arg(long, value_name = "HOST:PORT")]
+    target: String,
+
+    /// Write the complete successful JSON response, including output and proofBundle.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
@@ -84,29 +96,25 @@ struct GenerateInputArgs {
     #[arg(long, value_name = "CHAIN_OR_PATH_OR_URL")]
     chain: String,
 
-    /// Authenticated private Zone HTTP RPC URL validated against Zone discovery.
-    #[arg(long)]
-    zone_private_rpc_url: String,
-
     /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
     #[arg(long)]
-    zone_unrestricted_rpc_url: String,
+    zone_rpc_url: String,
 
-    /// Private key used to authenticate with the private Zone RPC.
-    #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
-    private_key: String,
+    /// Override the first Zone block (inclusive) by number or hash.
+    #[arg(long, value_name = "NUMBER_OR_HASH")]
+    from_block: Option<BlockHashOrNumber>,
 
     /// Select the submitted batch containing this Zone block; fail if not yet submitted.
-    #[arg(long, conflicts_with_all = ["from_block", "to_block", "zone_block_count", "wait_timeout"])]
-    block: Option<u64>,
+    #[arg(long, value_name = "NUMBER_OR_HASH", conflicts_with_all = ["from_block", "to_block", "zone_block_count", "wait_timeout"])]
+    block: Option<BlockHashOrNumber>,
 
-    /// Override the first Zone block in the batch.
-    #[arg(long)]
-    from_block: Option<u64>,
-
-    /// Override the final Zone block. Defaults to the current Zone tip.
-    #[arg(long, conflicts_with = "zone_block_count")]
-    to_block: Option<u64>,
+    /// Override the final Zone block (inclusive) by number or hash. Defaults to the Zone tip.
+    #[arg(
+        long,
+        value_name = "NUMBER_OR_HASH",
+        conflicts_with = "zone_block_count"
+    )]
+    to_block: Option<BlockHashOrNumber>,
 
     /// Execute exactly this many Zone blocks, waiting for the target block if necessary.
     #[arg(long, conflicts_with = "to_block")]
@@ -181,6 +189,7 @@ async fn main() -> Result<()> {
     init_tracing(&cli.log_filter)?;
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
+        Command::Prove(args) => prove(args).await,
     }
 }
 
@@ -214,27 +223,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     if args.zone_block_count == Some(0) {
         bail!("--zone-block-count must be greater than zero");
     }
-    if args.block == Some(0) {
+    if args.block == Some(0.into()) {
         bail!("Zone genesis block 0 does not belong to a submitted batch");
     }
     let chain = load_chain(&args.chain).await?;
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
-    let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
-    let signer = args
-        .private_key
-        .parse::<PrivateKeySigner>()
-        .context("parse private Zone RPC key")?;
-    let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
+    let zone_provider = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
+    let mut discovery = discover(&tempo_provider, &zone_provider).await?;
     let spf_config = SpfConfig::new(chain, discovery.portal);
-    let private_zone_provider = connect_private_zone(
-        &args.zone_private_rpc_url,
-        signer,
-        discovery.zone_id,
-        zone_chain_id,
-    )?;
-    validate_private_zone(&private_zone_provider, &discovery).await?;
     info!(
         zone_id = discovery.zone_id,
         portal = %discovery.portal,
@@ -246,7 +244,12 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("discovery", started, ());
 
     let started = start_phase("batch extraction");
-    let (parent_header, parent_number, extracted) = if let Some(block) = args.block {
+    let (from_override, to_override, target_block) = tokio::try_join!(
+        resolve_block_number(&zone_provider, args.from_block),
+        resolve_block_number(&zone_provider, args.to_block),
+        resolve_block_number(&zone_provider, args.block),
+    )?;
+    let (parent_header, parent_number, extracted) = if let Some(block) = target_block {
         let batch =
             find_submitted_batch(&tempo_provider, &zone_provider, &discovery, block).await?;
         let (parent, parent_number, extracted) =
@@ -256,13 +259,18 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         {
             bail!("selected Zone range does not match the submitted batch hashes");
         }
+        let target = extracted
+            .iter()
+            .find(|extracted| extracted.input.number == block)
+            .expect("selected batch contains the target block");
+        validate_boundary_hash(args.block, block, target.block_hash)?;
         (parent, parent_number, extracted)
     } else if let Some(block_count) = args.zone_block_count {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
             &zone_provider,
             &tempo_provider,
             discovery,
-            args.from_block,
+            from_override,
             block_count,
             args.wait_timeout.map(Duration::from_secs),
         )
@@ -270,15 +278,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         discovery = updated_discovery;
         (parent_header, parent_number, extracted)
     } else {
-        discover_batch(&zone_provider, &discovery, args.from_block, args.to_block).await?
+        discover_batch(&zone_provider, &discovery, from_override, to_override).await?
     };
-    let from_block = extracted
+    let first_extracted = extracted
         .first()
-        .expect("batch discovery returns a non-empty batch")
-        .input
-        .number;
+        .expect("batch discovery returns a non-empty batch");
+    let from_block = first_extracted.input.number;
     let last_extracted = extracted.last().expect("non-empty");
     let to_block = last_extracted.input.number;
+    validate_boundary_hash(args.from_block, from_block, first_extracted.block_hash)?;
+    validate_boundary_hash(args.to_block, to_block, last_extracted.block_hash)?;
     let next_block_hash = last_extracted.block_hash;
     let finalization_count = extracted
         .iter()
@@ -315,25 +324,11 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     );
     timings.record("batch extraction", started, ());
 
-    let started = start_phase("initial checkpoint");
-    let initial_tempo_header =
-        initial_tempo_header(&tempo_provider, &zone_provider, parent_number).await?;
-    timings.record("initial checkpoint", started, ());
-
-    let started = start_phase("Zone state witness");
-    let (zone_state_witness, tempo_reads) =
+    let started = start_phase("Zone and Tempo state witnesses");
+    let (zone_state_witness, tempo_state_witness) =
         zone_witnesses(&zone_provider, from_block, to_block).await?;
-    timings.record("Zone state witness", started, ());
-
-    let started = start_phase("Tempo state witness");
-    let checkpoint_by_zone_block = extracted
-        .iter()
-        .map(|block| (block.input.number, block.checkpoint_number))
-        .collect();
-    let reads = collect_l1_reads(tempo_reads, &checkpoint_by_zone_block)?;
-    let initial_tempo_state_witness =
-        tempo_state_witness(&tempo_provider, &initial_tempo_header, reads).await?;
-    timings.record("Tempo state witness", started, ());
+    let initial_tempo_header = decode_tempo_header(&tempo_state_witness.initial_tempo_header_rlp)?;
+    timings.record("Zone and Tempo state witnesses", started, ());
 
     let final_tempo_header = extracted
         .iter()
@@ -360,7 +355,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         parent_header,
         zone_blocks: extracted.iter().map(|block| block.input.clone()).collect(),
         zone_state_witness,
-        tempo_state_witness: initial_tempo_state_witness,
+        tempo_state_witness,
         tempo_ancestry_headers,
     };
 
@@ -419,11 +414,72 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     Ok(())
 }
 
-async fn send_to_prover(
+async fn prove(args: ProveArgs) -> Result<()> {
+    let input = std::fs::read(&args.input)
+        .wrap_err_with(|| format!("read batch witness from {}", args.input.display()))?;
+    // Forward the witness unchanged: the remote prover selects the STF and witness schema.
+    // In particular, do not drop fields introduced by a newer prover revision.
+    let witness: serde_json::Value =
+        serde_json::from_slice(&input).context("parse batch witness JSON")?;
+    if !witness.is_object() {
+        bail!("batch witness must be a JSON object");
+    }
+    let request_id = format!("prove-{}", keccak256(&input));
+    let request = serde_json::json!({
+        "version": PROTOCOL_VERSION,
+        "requestId": request_id,
+        "witness": witness,
+    });
+    let (_, response) = exchange_with_prover(&args.target, &request).await?;
+    validate_proof_response(&response, &request_id)?;
+    let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
+    std::fs::write(&args.output, &json)
+        .wrap_err_with(|| format!("write prover response to {}", args.output.display()))?;
+    println!("Saved prover output and proof to {}", args.output.display());
+    Ok(())
+}
+
+fn validate_proof_response(response: &serde_json::Value, request_id: &str) -> Result<()> {
+    if response["version"].as_u64() != Some(u64::from(PROTOCOL_VERSION)) {
+        bail!("target prover responded with an invalid or unsupported protocol version");
+    }
+    let response_id = response["requestId"].as_str();
+    if response_id.is_some_and(|id| id != request_id) {
+        bail!("target prover response request ID does not match {request_id:?}");
+    }
+    match response["status"].as_str() {
+        Some("ok") => {
+            if response_id != Some(request_id) {
+                bail!("target prover response is missing requestId");
+            }
+            if !response["output"].is_object() {
+                bail!("target prover response is missing batch output");
+            }
+            for field in ["verifierConfig", "proof"] {
+                let bytes: Bytes =
+                    serde_json::from_value(response["proofBundle"][field].clone())
+                        .wrap_err_with(|| format!("invalid or missing proofBundle.{field}"))?;
+                if bytes.is_empty() {
+                    bail!("target prover returned empty proofBundle.{field}");
+                }
+            }
+        }
+        Some("error") => bail!(
+            "target prover rejected request ({}): {}",
+            response["code"].as_str().unwrap_or("unknown"),
+            response["message"]
+                .as_str()
+                .unwrap_or("no diagnostic message"),
+        ),
+        _ => bail!("target prover returned an invalid response status"),
+    }
+    Ok(())
+}
+
+async fn exchange_with_prover(
     target: &str,
-    request: &VerifyRequest,
-    expected_output: &BatchOutput,
-) -> Result<usize> {
+    request: &impl serde::Serialize,
+) -> Result<(usize, serde_json::Value)> {
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
@@ -432,12 +488,22 @@ async fn send_to_prover(
         .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
-    let response: VerifyResponse = connection
+    let response = connection
         .receive()
         .await
         .wrap_err_with(|| format!("read response from target prover at {target}"))?
         .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
+    Ok((request_bytes, response))
+}
 
+async fn send_to_prover(
+    target: &str,
+    request: &VerifyRequest,
+    expected_output: &BatchOutput,
+) -> Result<usize> {
+    let (request_bytes, response) = exchange_with_prover(target, request).await?;
+    let response: VerifyResponse =
+        serde_json::from_value(response).context("decode target prover response")?;
     match response {
         VerifyResponse::Ok {
             version,
@@ -585,30 +651,10 @@ async fn find_submitted_batch(
     }
 }
 
-fn connect_private_zone(
-    url: &str,
-    signer: PrivateKeySigner,
-    zone_id: u32,
-    chain_id: u64,
-) -> Result<DynProvider<TempoNetwork>> {
-    let rpc_url = url
-        .parse()
-        .wrap_err_with(|| format!("parse private Zone RPC URL {url}"))?;
-    ZoneProvider::new(ZoneProviderConfig {
-        signer,
-        zone_id,
-        chain_id,
-        token_ttl: Duration::from_secs(600),
-        rpc_url,
-    })
-    .wrap_err_with(|| format!("connect to private Zone RPC at {url}"))
-    .map(|provider| provider.provider())
-}
-
 async fn discover(
     tempo: &DynProvider<TempoNetwork>,
     zone: &DynProvider<TempoNetwork>,
-) -> Result<(Discovery, u64)> {
+) -> Result<Discovery> {
     let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.clone());
     let portal_call = inbox.tempoPortal();
     let (tempo_chain_id, actual_zone_chain_id, portal_address) = tokio::try_join!(
@@ -645,17 +691,14 @@ async fn discover(
         );
     }
 
-    Ok((
-        Discovery {
-            zone_id,
-            portal: portal_address,
-            portal_withdrawal_batch_index: portal.withdrawal_batch_index,
-            portal_tempo_block_number: portal.tempo_block_number,
-            tempo_chain_id,
-            portal_block_hash: portal.block_hash,
-        },
-        actual_zone_chain_id,
-    ))
+    Ok(Discovery {
+        zone_id,
+        portal: portal_address,
+        portal_withdrawal_batch_index: portal.withdrawal_batch_index,
+        portal_tempo_block_number: portal.tempo_block_number,
+        tempo_chain_id,
+        portal_block_hash: portal.block_hash,
+    })
 }
 
 async fn read_portal_snapshot(
@@ -683,27 +726,6 @@ fn apply_portal_snapshot(discovery: &mut Discovery, snapshot: PortalSnapshot) {
     discovery.portal_withdrawal_batch_index = snapshot.withdrawal_batch_index;
     discovery.portal_tempo_block_number = snapshot.tempo_block_number;
     discovery.portal_block_hash = snapshot.block_hash;
-}
-
-async fn validate_private_zone(
-    private_zone: &DynProvider<TempoNetwork>,
-    discovery: &Discovery,
-) -> Result<()> {
-    // This first request authenticates with the discovered, fully scoped Zone
-    // and chain IDs before checking that both RPC endpoints expose the same Zone.
-    let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, private_zone.clone());
-    let portal = inbox
-        .tempoPortal()
-        .call()
-        .await
-        .context("read Tempo portal from private Zone RPC")?;
-    if portal != discovery.portal {
-        bail!(
-            "private Zone RPC points to Tempo portal {portal}, but the unrestricted Zone RPC points to {}",
-            discovery.portal,
-        );
-    }
-    Ok(())
 }
 
 async fn discover_counted_batch(
@@ -863,6 +885,40 @@ async fn portal_parent_number(
             );
         }
     }
+}
+
+/// Resolve hashes to heights; extraction below checks that the canonical range still matches them.
+async fn resolve_block_number(
+    zone: &DynProvider<TempoNetwork>,
+    block: Option<BlockHashOrNumber>,
+) -> Result<Option<u64>> {
+    match block {
+        None => Ok(None),
+        Some(BlockHashOrNumber::Number(number)) => Ok(Some(number)),
+        Some(BlockHashOrNumber::Hash(hash)) => {
+            let block = zone
+                .get_block_by_hash(hash)
+                .await
+                .wrap_err_with(|| format!("resolve Zone block hash {hash}"))?
+                .ok_or_else(|| eyre!("Zone block {hash} not found"))?;
+            Ok(Some(block.header.number()))
+        }
+    }
+}
+
+fn validate_boundary_hash(
+    requested: Option<BlockHashOrNumber>,
+    number: u64,
+    actual_hash: B256,
+) -> Result<()> {
+    if let Some(BlockHashOrNumber::Hash(expected_hash)) = requested
+        && expected_hash != actual_hash
+    {
+        bail!(
+            "requested Zone block hash {expected_hash} does not match canonical block {number} ({actual_hash}); the block may have been reorged out"
+        );
+    }
+    Ok(())
 }
 
 async fn discover_batch(
@@ -1034,36 +1090,6 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
     })
 }
 
-async fn initial_tempo_header(
-    tempo: &DynProvider<TempoNetwork>,
-    zone: &DynProvider<TempoNetwork>,
-    parent_number: u64,
-) -> Result<TempoHeader> {
-    let block_id = BlockId::number(parent_number);
-    let (hash_word, number_word) = tokio::try_join!(
-        zone.get_storage_at(
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_HASH)
-        )
-        .block_id(block_id),
-        zone.get_storage_at(
-            TEMPO_STATE_ADDRESS,
-            U256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER)
-        )
-        .block_id(block_id),
-    )?;
-    let expected_hash = B256::from(hash_word.to_be_bytes::<32>());
-    let checkpoint_number = number_word.to::<u64>();
-    let header = tempo_header(tempo, checkpoint_number).await?;
-    if header.hash_slow() != expected_hash {
-        bail!(
-            "parent Zone state commits Tempo block {checkpoint_number} hash {expected_hash}, but RPC returned {}",
-            header.hash_slow()
-        );
-    }
-    Ok(header)
-}
-
 async fn withdrawal_batch_index_at(
     zone: &DynProvider<TempoNetwork>,
     block_number: u64,
@@ -1096,7 +1122,7 @@ async fn zone_witnesses(
     zone: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
-) -> Result<(ZoneStateWitness, Vec<(u64, TempoStorageRead)>)> {
+) -> Result<(ZoneStateWitness, TempoStateWitness)> {
     let results = stream::iter(from..=to)
         .map(|number| async move {
             let started = Instant::now();
@@ -1114,7 +1140,7 @@ async fn zone_witnesses(
                 state_nodes = witness.execution_witness.state.len(),
                 bytecodes = witness.execution_witness.codes.len(),
                 ancestor_headers = witness.execution_witness.headers.len(),
-                tempo_storage_reads = witness.tempo_reads.len(),
+                tempo_state_nodes = witness.tempo_state.len(),
                 elapsed_ms = started.elapsed().as_millis(),
                 "received Zone execution witness"
             );
@@ -1126,15 +1152,23 @@ async fn zone_witnesses(
 
     let mut state = BTreeMap::new();
     let mut codes = BTreeMap::new();
-    let mut tempo_reads = Vec::new();
+    let mut tempo_nodes = BTreeMap::new();
+    let mut initial_tempo_header_rlp = None;
     for (number, witness) in results {
+        if number == from {
+            initial_tempo_header_rlp = Some(Bytes::from(alloy_rlp::encode(
+                &witness.initial_tempo_header,
+            )));
+        }
         for node in witness.execution_witness.state {
             state.entry(keccak256(&node)).or_insert(node);
         }
         for code in witness.execution_witness.codes {
             codes.entry(keccak256(&code)).or_insert(code);
         }
-        tempo_reads.extend(witness.tempo_reads.into_iter().map(|read| (number, read)));
+        for node in witness.tempo_state {
+            tempo_nodes.entry(keccak256(&node)).or_insert(node);
+        }
     }
 
     Ok((
@@ -1142,100 +1176,11 @@ async fn zone_witnesses(
             node_pool: state.into_values().collect(),
             bytecodes: codes.into_values().collect(),
         },
-        tempo_reads,
+        TempoStateWitness {
+            initial_tempo_header_rlp: initial_tempo_header_rlp.ok_or_eyre("empty witness range")?,
+            node_pool: tempo_nodes.into_values().collect(),
+        },
     ))
-}
-
-fn collect_l1_reads(
-    tempo_reads: Vec<(u64, TempoStorageRead)>,
-    checkpoints: &BTreeMap<u64, u64>,
-) -> Result<L1Reads> {
-    let mut reads = L1Reads::new();
-    for (zone_block, read) in tempo_reads {
-        let checkpoint = checkpoints
-            .get(&zone_block)
-            .copied()
-            .ok_or_else(|| eyre!("missing Tempo checkpoint for Zone block {zone_block}"))?;
-        reads
-            .entry(checkpoint)
-            .or_default()
-            .entry(read.account)
-            .or_default()
-            .insert(read.slot);
-    }
-    Ok(reads)
-}
-
-async fn tempo_state_witness(
-    tempo: &DynProvider<TempoNetwork>,
-    initial_header: &TempoHeader,
-    reads: L1Reads,
-) -> Result<TempoStateWitness> {
-    let requests = reads
-        .into_iter()
-        .map(|(block, accounts)| {
-            let targets = accounts
-                .into_iter()
-                .map(|(account, slots)| (account, slots.into_iter().collect::<Vec<_>>()))
-                .collect::<Vec<_>>();
-            (block, targets)
-        })
-        .collect::<Vec<_>>();
-    let proofs = stream::iter(requests)
-        .map(|(block, targets)| async move {
-            let started = Instant::now();
-            debug!(
-                tempo_block = block,
-                accounts = targets.len(),
-                storage_slots = targets.iter().map(|(_, slots)| slots.len()).sum::<usize>(),
-                "requesting Tempo state multiproof"
-            );
-            let proof = tempo
-                .client()
-                .request::<_, Vec<EIP1186AccountProofResponse>>(
-                    "eth_getMultiProof",
-                    (targets, BlockId::number(block)),
-                )
-                .await
-                .wrap_err_with(|| format!("eth_getMultiProof at Tempo block {block}"))?;
-            debug!(
-                tempo_block = block,
-                accounts = proof.len(),
-                account_proof_nodes = proof
-                    .iter()
-                    .map(|proof| proof.account_proof.len())
-                    .sum::<usize>(),
-                storage_proofs = proof
-                    .iter()
-                    .map(|proof| proof.storage_proof.len())
-                    .sum::<usize>(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "received Tempo state multiproof"
-            );
-            Ok::<_, eyre::Report>(proof)
-        })
-        .buffer_unordered(RPC_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-
-    let mut nodes = BTreeMap::new();
-    for block_proofs in proofs {
-        for proof in block_proofs {
-            for node in proof.account_proof {
-                nodes.entry(keccak256(&node)).or_insert(node);
-            }
-            for storage in proof.storage_proof {
-                for node in storage.proof {
-                    nodes.entry(keccak256(&node)).or_insert(node);
-                }
-            }
-        }
-    }
-
-    Ok(TempoStateWitness {
-        initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(initial_header)),
-        node_pool: nodes.into_values().collect(),
-    })
 }
 
 async fn tempo_anchor(
@@ -1380,7 +1325,7 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
+    use alloy_primitives::U256;
     use alloy_sol_types::SolEvent as _;
     use alloy_transport::mock::Asserter;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -1564,16 +1509,19 @@ mod tests {
             "http://localhost:1",
             "--chain",
             "https://example.com/genesis.json",
-            "--zone-private-rpc-url",
-            "http://localhost:2",
-            "--zone-unrestricted-rpc-url",
+            "--zone-rpc-url",
             "http://localhost:3",
-            "--private-key",
-            "00",
             "--block",
             "7",
         ];
         assert!(Cli::try_parse_from(base).is_ok());
+        let hash = B256::repeat_byte(0x42).to_string();
+        let mut hash_args = base;
+        *hash_args.last_mut().unwrap() = &hash;
+        let Command::GenerateInput(args) = Cli::try_parse_from(hash_args).unwrap().command else {
+            panic!("expected generate-input");
+        };
+        assert_eq!(args.block, Some(B256::repeat_byte(0x42).into()));
         for flag in [
             "--from-block",
             "--to-block",
@@ -1635,16 +1583,239 @@ mod tests {
         }
     }
 
+    fn successful_proof_response(request_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "requestId": request_id,
+            "status": "ok",
+            "output": { "withdrawalQueueHash": B256::ZERO },
+            "proofBundle": { "verifierConfig": "0x01", "proof": "0x1234" },
+            "futureField": { "preserved": true },
+        })
+    }
+
     #[test]
-    fn groups_tempo_storage_reads_by_checkpoint() {
-        let account = address!("00000000000000000000000000000000000000aa");
-        let slot = B256::repeat_byte(0x11);
-        let checkpoints = BTreeMap::from([(4_u64, 99_u64)]);
+    fn parses_prove_without_rpc_or_wallet_arguments() {
+        let cli = Cli::try_parse_from([
+            "tempo-zone-prover-utils",
+            "prove",
+            "--input",
+            "witness.json",
+            "--target",
+            "localhost:5000",
+            "--output",
+            "proof.json",
+        ])
+        .unwrap();
+        let Command::Prove(args) = cli.command else {
+            panic!("expected prove")
+        };
+        assert_eq!(args.input, PathBuf::from("witness.json"));
+        assert_eq!(args.target, "localhost:5000");
+        assert_eq!(args.output, PathBuf::from("proof.json"));
+        assert!(
+            Cli::try_parse_from([
+                "tempo-zone-prover-utils",
+                "prove",
+                "--input",
+                "witness.json",
+                "--target",
+                "localhost:5000",
+            ])
+            .is_err()
+        );
+    }
 
-        let reads =
-            collect_l1_reads(vec![(4, TempoStorageRead { account, slot })], &checkpoints).unwrap();
+    #[test]
+    fn rejects_invalid_proof_responses() {
+        let valid = successful_proof_response("test");
+        validate_proof_response(&valid, "test").unwrap();
+        assert!(validate_proof_response(&valid, "different").is_err());
+        for (pointer, value) in [
+            ("/version", serde_json::json!(PROTOCOL_VERSION + 1)),
+            ("/requestId", serde_json::Value::Null),
+            ("/status", serde_json::json!("unknown")),
+            ("/output", serde_json::Value::Null),
+            ("/proofBundle", serde_json::Value::Null),
+            ("/proofBundle/proof", serde_json::json!("0x")),
+            ("/proofBundle/proof", serde_json::json!("not hex")),
+            ("/proofBundle/verifierConfig", serde_json::json!("0x")),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                validate_proof_response(&invalid, "test").is_err(),
+                "{pointer}"
+            );
+        }
+        let error = validate_proof_response(
+            &serde_json::json!({
+                "version": PROTOCOL_VERSION, "status": "error",
+                "code": "attestation_unavailable", "message": "NSM unavailable",
+            }),
+            "test",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("attestation_unavailable"));
+        assert!(error.to_string().contains("NSM unavailable"));
+    }
 
-        assert!(reads[&99][&account].contains(&slot));
+    #[tokio::test]
+    async fn prove_preserves_witness_and_response_and_does_not_save_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("prover-cli-prove-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("witness.json");
+        let output = directory.join("proof.json");
+        let witness = serde_json::json!({
+            "publicInputs": { "zoneId": 2 }, "zoneBlocks": [],
+            "futureWitnessField": "preserved",
+        });
+        std::fs::write(&input, serde_json::to_vec(&witness).unwrap()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let mut success = None;
+            for attempt in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+                let request: serde_json::Value = connection.receive().await.unwrap().unwrap();
+                assert_eq!(request["version"], PROTOCOL_VERSION);
+                assert_eq!(request["witness"], witness);
+                let response = if attempt == 0 {
+                    let response =
+                        successful_proof_response(request["requestId"].as_str().unwrap());
+                    success = Some(response.clone());
+                    response
+                } else {
+                    serde_json::json!({
+                        "version": PROTOCOL_VERSION, "requestId": request["requestId"],
+                        "status": "error", "code": "verification_failed", "message": "bad witness",
+                    })
+                };
+                connection.send(&response).await.unwrap();
+            }
+            success.unwrap()
+        });
+        prove(ProveArgs {
+            input: input.clone(),
+            target: target.clone(),
+            output: output.clone(),
+        })
+        .await
+        .unwrap();
+        let saved = std::fs::read(&output).unwrap();
+        let error = prove(ProveArgs {
+            input,
+            target,
+            output: output.clone(),
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("verification_failed"));
+        assert_eq!(std::fs::read(&output).unwrap(), saved);
+        let response: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(response, server.await.unwrap());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn parse_range_args(range: &[&str]) -> Result<GenerateInputArgs, clap::Error> {
+        let mut genesis = tempo_chainspec::spec::MODERATO.inner.genesis.clone();
+        genesis.config.chain_id = zone_chain_id(42_431, 1).unwrap();
+        let genesis = serde_json::to_string(&genesis).unwrap();
+        let mut args = vec![
+            "tempo-zone-prover-utils",
+            "generate-input",
+            "--tempo-rpc-url",
+            "http://localhost:8545",
+            "--zone-rpc-url",
+            "http://localhost:8546",
+            "--chain",
+            &genesis,
+        ];
+        args.extend_from_slice(range);
+        let Command::GenerateInput(args) = Cli::try_parse_from(args)?.command else {
+            unreachable!("generate-input was requested");
+        };
+        Ok(args)
+    }
+
+    #[test]
+    fn parses_number_and_hash_boundaries() {
+        let hash = B256::repeat_byte(0xab);
+        let hash_arg = hash.to_string();
+        for (from, to, expected_from, expected_to) in [
+            ("100", "120", 100.into(), 120.into()),
+            ("100", hash_arg.as_str(), 100.into(), hash.into()),
+            (hash_arg.as_str(), "120", hash.into(), 120.into()),
+            (
+                hash_arg.as_str(),
+                hash_arg.as_str(),
+                hash.into(),
+                hash.into(),
+            ),
+        ] {
+            let args = parse_range_args(&["--from-block", from, "--to-block", to]).unwrap();
+            assert_eq!(args.from_block, Some(expected_from));
+            assert_eq!(args.to_block, Some(expected_to));
+        }
+        let args =
+            parse_range_args(&["--from-block", &hash_arg, "--zone-block-count", "20"]).unwrap();
+        assert_eq!(args.from_block, Some(hash.into()));
+        assert_eq!(args.zone_block_count, Some(20));
+        assert!(parse_range_args(&["--from-block", "0xinvalid"]).is_err());
+        assert!(parse_range_args(&["--to-block", "latest"]).is_err());
+        assert!(parse_range_args(&["--to-block", &hash_arg, "--zone-block-count", "20"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolves_hashes_and_rejects_missing_blocks() {
+        let asserter = alloy_transport::mock::Asserter::new();
+        let zone = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        assert_eq!(resolve_block_number(&zone, None).await.unwrap(), None);
+        assert_eq!(
+            resolve_block_number(&zone, Some(100.into())).await.unwrap(),
+            Some(100)
+        );
+
+        let mut header = TempoHeader::default();
+        header.inner.number = 120;
+        let hash = header.hash_slow();
+        let block = RpcBlock::new(
+            TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header::new(header),
+                timestamp_millis: 0,
+            },
+            BlockTransactions::Hashes(vec![]),
+        );
+        asserter.push_success(&Some(block));
+        assert_eq!(
+            resolve_block_number(&zone, Some(hash.into()))
+                .await
+                .unwrap(),
+            Some(120)
+        );
+        asserter.push_success(&Option::<RpcBlock>::None);
+        let error = resolve_block_number(&zone, Some(hash.into()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn rejects_a_hash_that_no_longer_matches_the_extracted_boundary() {
+        let hash = B256::repeat_byte(0xab);
+        assert!(validate_boundary_hash(None, 100, hash).is_ok());
+        assert!(validate_boundary_hash(Some(100.into()), 100, hash).is_ok());
+        assert!(validate_boundary_hash(Some(hash.into()), 100, hash).is_ok());
+        let error = validate_boundary_hash(Some(hash.into()), 100, B256::ZERO).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match canonical block 100")
+        );
     }
 
     #[test]

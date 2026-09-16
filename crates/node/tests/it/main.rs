@@ -7,6 +7,8 @@ mod earn_zone_e2e;
 mod enable_token;
 mod handoff_e2e;
 mod l1_e2e;
+mod network_chaos_e2e;
+mod network_chaos_p2p_e2e;
 mod precompiles;
 mod redacted_rpc;
 mod redacted_rpc_e2e;

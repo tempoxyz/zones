@@ -208,6 +208,13 @@ the internet-facing standby would put deposit recipients and memos within reach 
 compromise. Startup rejects that key-file flag on an `rpc_only` node rather than ignoring it.
 This key is independent from the shared `--sequencer-key-file`; reusing that shared key
 would collapse several nodes into one recoverable quorum identity.
+
+Add `--sequencer.enable-prover` to run the detached shadow prover on this follower, and optionally
+`--sequencer.prover-address HOST:PORT` to use a remote prover. The follower scans finalized
+`submitBatch` transactions, decodes the accepted quorum certificate inputs, and proves the exact
+anchor committed by the transaction after the matching Zone range is canonical locally. This is
+observational: proof success or failure never changes settlement or the follower's RPC service.
+
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
 

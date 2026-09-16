@@ -16,7 +16,8 @@ jobs:
   rust:
     permissions:
       contents: read
-    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@98b1081dcf34361b576aca2ab3041772708582ef
+      id-token: write
+    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@6a4184039b7a7537d35ace0badc96764d5a1d4d0
     with:
       rust-toolchain: nightly-2026-02-21
 
@@ -24,12 +25,16 @@ jobs:
     name: lint success
     runs-on: ubuntu-latest
     if: always()
-    permissions: {}
+    permissions:
+      id-token: write
     needs:
       - rust
     timeout-minutes: 30
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        uses: tempoxyz/gh-actions/actions/check-needs@ab45d76f6e7420a094281a22aee1973ecc0754f8
         with:
           jobs: ${{ toJSON(needs) }}
