@@ -32,7 +32,7 @@ use crate::{
 };
 
 type ZoneState = CacheDB<Db<WitnessDatabase>>;
-type WitnessExecutor<'a> = ZoneBlockExecutor<'a, TempoWitnessDatabase>;
+type WitnessExecutor<'a> = ZoneBlockExecutor<'a>;
 
 /// Execution artifacts committed by one Zone block header.
 #[derive(Debug)]

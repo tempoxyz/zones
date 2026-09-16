@@ -16,7 +16,6 @@ use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
-use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, EIP1186AccountProofResponse, FeeHistory,
     Filter, FilterChanges, FilterId, TransactionRequest,
@@ -26,8 +25,7 @@ use alloy_sol_types::SolCall;
 use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
-use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_primitives_traits::Account as PrimitiveAccount;
+use reth_evm::{ConfigureEvm as _, execute::Executor as _, witness::ExecutionWitnessRecord};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -37,8 +35,8 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
-use reth_storage_api::{BlockNumReader, StateProofProvider as _, StateProviderFactory};
-use reth_trie_common::{ExecutionWitnessMode, HashedPostState, HashedStorage};
+use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_trie_common::{ExecutionWitnessMode, HashedPostState};
 use tempo_alloy::{
     TempoNetwork,
     provider::ext::TempoProviderExt as _,
@@ -310,60 +308,23 @@ where
                     .map_err(|error| EthApiError::Internal(error.into()))?;
                 db.commit_source(output.state.inner());
 
-                let mut hashed_state = HashedPostState::default();
                 let mut keys = BTreeMap::new();
-                for (address, account) in &db.cache.accounts {
-                    let hashed_address = keccak256(address);
-                    hashed_state.accounts.insert(
-                        hashed_address,
-                        account.as_ref().map(|account| PrimitiveAccount {
-                            nonce: account.nonce,
-                            balance: account.balance,
-                            bytecode_hash: (!account.code_hash.is_zero()
-                                && account.code_hash != alloy_consensus::constants::KECCAK_EMPTY)
-                                .then_some(account.code_hash),
-                        }),
-                    );
-                    if account.is_some() {
-                        keys.insert(hashed_address, address.to_vec().into());
-                    }
-
-                    if let Some(storage) = db.cache.storage.get(address) {
-                        let hashed_storage = hashed_state
-                            .storages
-                            .entry(hashed_address)
-                            .or_insert_with(|| HashedStorage::new(storage.wiped));
-                        for (slot, value) in &storage.slots {
-                            let slot = B256::from(*slot);
-                            keys.insert(keccak256(slot), slot.into());
-                            hashed_storage.storage.insert(keccak256(slot), *value);
-                        }
-                    }
-                }
                 let mut additional_state = HashedPostState::default();
                 record_block_hash_storage_proofs(
                     &mut additional_state,
                     &mut keys,
                     &db.cache.block_hashes,
                 );
-                hashed_state.extend(additional_state);
-                let codes = db
-                    .cache
-                    .contracts
-                    .values()
-                    .map(|code| code.original_bytes())
-                    .collect();
-                let witness = ExecutionWitness {
-                    state: db
-                        .db
-                        .inner()
-                        .0
-                        .witness(Default::default(), hashed_state, mode)
-                        .map_err(EthApiError::from)?,
-                    codes,
-                    keys: keys.into_values().collect(),
-                    ..Default::default()
-                };
+                let witness = ExecutionWitnessRecord::new(&db)
+                    .with_additional_state(additional_state)
+                    .with_additional_keys(keys.into_values())
+                    .into_execution_witness(
+                        &db.db.inner().0,
+                        eth_api.provider(),
+                        block_number,
+                        mode,
+                    )
+                    .map_err(EthApiError::from)?;
                 Ok((witness, recorder.take_reads(), initial_tempo))
             })
             .await
