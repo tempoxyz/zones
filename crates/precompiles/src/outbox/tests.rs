@@ -954,6 +954,41 @@ impl Harness {
 }
 
 #[test]
+fn forced_withdrawals_bypass_and_preserve_ordinary_block_cap() -> eyre::Result<()> {
+    let mut h = Harness::new()?;
+    assert!(!h.set_max_withdrawals(1)?.is_revert());
+    // Even the maximum currently admitted forced workload leaves the ordinary slot available.
+    for _ in 0..15 {
+        let amount = h.balance_of(ALICE)?.to::<u128>();
+        h.forced(ZONE_INBOX_ADDRESS, amount).unwrap();
+        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            TIP20Token::from_address(h.token)?.mint(
+                ALICE,
+                ITIP20::mintCall {
+                    to: ALICE,
+                    amount: U256::from(100),
+                },
+            )
+        })?;
+    }
+    assert!(!h.request(1, BOB, B256::ZERO)?.is_revert());
+    // An exhausted ordinary cap must not prevent forced execution either.
+    h.forced(ZONE_INBOX_ADDRESS, 99).unwrap();
+    assert_revert(
+        h.request(1, BOB, B256::ZERO),
+        ZoneOutboxError::too_many_withdrawals_this_block(),
+    );
+    assert_eq!(h.pending()?.len(), 17);
+    let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> TempoResult<()> {
+        assert_eq!(ZoneOutbox::new().withdrawals_this_block.read()?, 1);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
 fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() -> eyre::Result<()>
 {
     use tempo_precompiles::account_keychain::AccountKeychain;
@@ -1133,15 +1168,6 @@ fn forced_withdrawal_policy_and_fatal_failures_leave_no_partial_state() -> eyre:
             outbox.last_fallback_nonce.write(0)
         })?;
     }
-    h.set_max_withdrawals(1)?;
-    h.request(1, BOB, B256::ZERO)?;
-    assert!(matches!(
-        h.forced(ZONE_INBOX_ADDRESS, 999_999),
-        Err(ForcedWithdrawalError::Fatal(_))
-    ));
-    assert_eq!(h.balance_of(ALICE)?, U256::from(999_999));
-    assert_eq!(h.last_fallback_nonce()?, 1);
-    assert_eq!(h.pending()?.len(), 1);
     Ok(())
 }
 
