@@ -21,6 +21,7 @@ zone-rpc.workspace = true
 zone-spf.workspace = true
 
 tempo-alloy.workspace = true
+tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
 
 alloy-consensus.workspace = true

@@ -4,7 +4,8 @@ use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, sol};
 use eyre::{Context, Result, bail};
 use serde_json::{Value, json};
-use tempo_zone_contracts::{ZONE_PORTAL_PREFIX, ZONE_VERIFIER_ADDRESS};
+use tempo_precompiles::zone_factory::portal_address;
+use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 
 // Keep the verifier wire ABI independent of the local STF schema, just like `prove`.
 sol! {
@@ -64,10 +65,7 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
     }))
     .context("invalid or missing native verifier arguments")?;
 
-    let mut portal = [0u8; 20];
-    portal[..12].copy_from_slice(ZONE_PORTAL_PREFIX.as_slice());
-    portal[12..].copy_from_slice(&u64::from(call.zoneId).to_be_bytes());
-    let portal = Address::from(portal);
+    let portal = portal_address(call.zoneId);
     // Older witnesses carried an explicit portal. Do not silently change its domain.
     if let Some(value) = inputs.get("portal") {
         let supplied: Address =
