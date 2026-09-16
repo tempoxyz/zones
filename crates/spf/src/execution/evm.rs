@@ -374,9 +374,17 @@ fn decode_advance_tempo_revert(output: &Bytes) -> String {
 }
 
 fn map_block_execution_error(
-    _error: reth_evm::BlockExecutionError,
+    error: reth_evm::BlockExecutionError,
     execution_error: Error,
 ) -> Error {
+    if let Some(error) = error
+        .as_internal()
+        .and_then(|error| error.downcast_other::<evm2::AnyError>())
+        .and_then(|error| error.downcast_ref::<crate::WitnessDatabaseError>())
+    {
+        return (*error).into();
+    }
+
     execution_error
 }
 
