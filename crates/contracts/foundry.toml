@@ -17,6 +17,12 @@ remappings = [
 via-ir = true
 dynamic_test_linking = false
 optimizer = true
+optimizer_runs = 200
+# Favor bytecode size for ZonePortal while retaining the default for other runtimes.
+additional_compiler_profiles = [{ name = "zone-portal", optimizer_runs = 25 }]
+compilation_restrictions = [
+    { paths = "src/runtime/tempo/ZonePortal.sol", optimizer_runs = 25 },
+]
 invariant = { runs = 10, depth = 50, fail_on_revert = true, show_solidity = true }
 
 [profile.fuzz500]
