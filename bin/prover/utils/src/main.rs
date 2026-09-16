@@ -108,9 +108,9 @@ struct GenerateInputArgs {
     #[arg(long)]
     zone_unrestricted_rpc_url: String,
 
-    /// Private key used to authenticate with the private Zone RPC.
+    /// Private key used to authenticate with the private Zone RPC. Generates an ephemeral key if omitted.
     #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
-    private_key: String,
+    private_key: Option<String>,
 
     /// Override the first Zone block (inclusive) by number or hash.
     #[arg(long, value_name = "NUMBER_OR_HASH")]
@@ -234,10 +234,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
     let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
-    let signer = args
-        .private_key
-        .parse::<PrivateKeySigner>()
-        .context("parse private Zone RPC key")?;
+    let signer = private_zone_signer(args.private_key.as_deref())?;
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
     let spf_config = SpfConfig::new(args.chain, discovery.portal);
     let private_zone_provider = connect_private_zone(
@@ -554,6 +551,14 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .await
         .wrap_err_with(|| format!("connect to {label} RPC at {url}"))
         .map(Provider::erased)
+}
+
+fn private_zone_signer(private_key: Option<&str>) -> Result<PrivateKeySigner> {
+    Ok(private_key
+        .map(str::parse::<PrivateKeySigner>)
+        .transpose()
+        .context("parse private Zone RPC key")?
+        .unwrap_or_else(PrivateKeySigner::random))
 }
 
 fn connect_private_zone(
@@ -1424,8 +1429,6 @@ mod tests {
             "http://localhost:8544",
             "--zone-unrestricted-rpc-url",
             "http://localhost:8546",
-            "--private-key",
-            "unused",
             "--chain",
             &genesis,
         ];
@@ -1434,6 +1437,21 @@ mod tests {
             unreachable!("generate-input was requested");
         };
         Ok(args)
+    }
+
+    #[test]
+    fn uses_ephemeral_or_explicit_private_zone_signer() {
+        let first = private_zone_signer(None).unwrap();
+        let second = private_zone_signer(None).unwrap();
+        assert_ne!(first.address(), second.address());
+
+        let key = format!("{:#x}", first.to_bytes());
+        let args = parse_range_args(&["--private-key", &key]).unwrap();
+        let signer = private_zone_signer(args.private_key.as_deref()).unwrap();
+        assert_eq!(signer.address(), first.address());
+
+        assert!(private_zone_signer(Some("invalid")).is_err());
+        assert!(private_zone_signer(Some("")).is_err());
     }
 
     #[test]

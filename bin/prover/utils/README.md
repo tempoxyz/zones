@@ -5,7 +5,6 @@ Both `--from-block` and `--to-block` accept a decimal Zone block number or a `0x
 32-byte block hash. Numbers and hashes can be mixed; both boundaries are inclusive.
 
 ```bash
-# PRIVATE_KEY authenticates the private Zone RPC.
 cargo run --release -p tempo-zone-prover-utils -- generate-input \
   --tempo-rpc-url "$TEMPO_RPC_URL" \
   --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
@@ -15,6 +14,10 @@ cargo run --release -p tempo-zone-prover-utils -- generate-input \
   --to-block "$LAST_ZONE_BLOCK_HASH" \
   --output witness.json
 ```
+
+Private Zone RPC authentication uses a fresh ephemeral key by default. It is not saved and does
+not need funds. To use a specific RPC identity, pass `--private-key` or set `PRIVATE_KEY`;
+the flag takes precedence. Invalid supplied keys are rejected rather than replaced.
 
 Hashes are resolved through the unrestricted Zone RPC. Missing blocks and hashes that do not
 match the extracted canonical range are rejected. `--from-block` also accepts a hash when used
