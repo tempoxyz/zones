@@ -28,6 +28,7 @@ zone-p2p.workspace = true
 zone-payload.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
+zone-prover.workspace = true
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
 zone-checker = { workspace = true, optional = true }

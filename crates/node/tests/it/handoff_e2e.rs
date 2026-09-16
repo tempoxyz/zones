@@ -34,8 +34,9 @@ const LIVE_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A crashes after producing a tip shared by every follower. Three L1 anchors pass with no zone
 /// blocks, then an operator selects B and the shared tip for forced recovery. B optimistically
-/// fills the missing anchor range before the next transition finalizes. That transition selects C,
-/// which takes over at its exact anchor without replacing any block preceding the crash.
+/// fills the missing anchor range with a checkpoint block plus a full import before the next
+/// transition finalizes. That transition selects C, which takes over at its exact anchor without
+/// replacing any block preceding the crash.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -97,10 +98,16 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
         assert!(!node.leadership().forced_recovery().unwrap().is_bounded());
     }
 
-    let optimistic_tip = recovery_start_tempo_block + 2;
-    cluster.wait_all_at(optimistic_tip, HANDOFF_TIMEOUT).await?;
+    let optimistic_zone_tip = recovery_tip_height + 2;
+    for node in &cluster.nodes {
+        node.wait_for_tempo_block_number(recovery_start_tempo_block + 2, HANDOFF_TIMEOUT)
+            .await?;
+    }
+    cluster
+        .wait_all_at(optimistic_zone_tip, HANDOFF_TIMEOUT)
+        .await?;
     let b_producer = cluster.sequencer_signers[replacement_index].address();
-    for height in recovery_start_tempo_block..=optimistic_tip {
+    for height in recovery_tip_height + 1..=optimistic_zone_tip {
         assert_eq!(
             cluster.assert_same_block(height).await?.beneficiary(),
             b_producer,
@@ -120,8 +127,9 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
         portal_activation_tempo_block,
     )?;
     cluster.inject_block(vec![])?;
+    let portal_activation_zone_height = optimistic_zone_tip + 1;
     cluster
-        .wait_all_at(portal_activation_tempo_block, HANDOFF_TIMEOUT)
+        .wait_all_at(portal_activation_zone_height, HANDOFF_TIMEOUT)
         .await?;
 
     // The pre-crash prefix is unchanged on both survivors.
@@ -138,7 +146,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     // recovery state is removed.
     assert_eq!(
         cluster
-            .assert_same_block(portal_activation_tempo_block)
+            .assert_same_block(portal_activation_zone_height)
             .await?
             .beneficiary(),
         c_producer,
@@ -153,7 +161,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
 
     // Production remains live under ordinary portal authority after the recovery window.
     cluster.inject_block(vec![])?;
-    let next_height = portal_activation_tempo_block + 1;
+    let next_height = portal_activation_zone_height + 1;
     cluster.wait_all_at(next_height, HANDOFF_TIMEOUT).await?;
     assert_eq!(
         cluster.assert_same_block(next_height).await?.beneficiary(),
