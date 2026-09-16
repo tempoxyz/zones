@@ -11,7 +11,6 @@ use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
@@ -31,7 +30,7 @@ use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
 };
-use zone_rpc::{ZoneProvider, ZoneProviderConfig, types::ZoneExecutionWitness};
+use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
@@ -100,17 +99,9 @@ struct GenerateInputArgs {
     )]
     chain: Arc<ZoneChainSpec>,
 
-    /// Authenticated private Zone HTTP RPC URL validated against Zone discovery.
-    #[arg(long)]
-    zone_private_rpc_url: String,
-
     /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
     #[arg(long)]
     zone_unrestricted_rpc_url: String,
-
-    /// Private key used to authenticate with the private Zone RPC.
-    #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
-    private_key: String,
 
     /// Override the first Zone block (inclusive) by number or hash.
     #[arg(long, value_name = "NUMBER_OR_HASH")]
@@ -234,19 +225,8 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
     let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
-    let signer = args
-        .private_key
-        .parse::<PrivateKeySigner>()
-        .context("parse private Zone RPC key")?;
-    let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
+    let mut discovery = discover(&tempo_provider, &zone_provider).await?;
     let spf_config = SpfConfig::new(args.chain, discovery.portal);
-    let private_zone_provider = connect_private_zone(
-        &args.zone_private_rpc_url,
-        signer,
-        discovery.zone_id,
-        zone_chain_id,
-    )?;
-    validate_private_zone(&private_zone_provider, &discovery).await?;
     info!(
         zone_id = discovery.zone_id,
         portal = %discovery.portal,
@@ -556,30 +536,10 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .map(Provider::erased)
 }
 
-fn connect_private_zone(
-    url: &str,
-    signer: PrivateKeySigner,
-    zone_id: u32,
-    chain_id: u64,
-) -> Result<DynProvider<TempoNetwork>> {
-    let rpc_url = url
-        .parse()
-        .wrap_err_with(|| format!("parse private Zone RPC URL {url}"))?;
-    ZoneProvider::new(ZoneProviderConfig {
-        signer,
-        zone_id,
-        chain_id,
-        token_ttl: Duration::from_secs(600),
-        rpc_url,
-    })
-    .wrap_err_with(|| format!("connect to private Zone RPC at {url}"))
-    .map(|provider| provider.provider())
-}
-
 async fn discover(
     tempo: &DynProvider<TempoNetwork>,
     zone: &DynProvider<TempoNetwork>,
-) -> Result<(Discovery, u64)> {
+) -> Result<Discovery> {
     let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.clone());
     let portal_call = inbox.tempoPortal();
     let (tempo_chain_id, actual_zone_chain_id, portal_address) = tokio::try_join!(
@@ -616,17 +576,14 @@ async fn discover(
         );
     }
 
-    Ok((
-        Discovery {
-            zone_id,
-            portal: portal_address,
-            portal_withdrawal_batch_index: portal.withdrawal_batch_index,
-            portal_tempo_block_number: portal.tempo_block_number,
-            tempo_chain_id,
-            portal_block_hash: portal.block_hash,
-        },
-        actual_zone_chain_id,
-    ))
+    Ok(Discovery {
+        zone_id,
+        portal: portal_address,
+        portal_withdrawal_batch_index: portal.withdrawal_batch_index,
+        portal_tempo_block_number: portal.tempo_block_number,
+        tempo_chain_id,
+        portal_block_hash: portal.block_hash,
+    })
 }
 
 async fn read_portal_snapshot(
@@ -654,27 +611,6 @@ fn apply_portal_snapshot(discovery: &mut Discovery, snapshot: PortalSnapshot) {
     discovery.portal_withdrawal_batch_index = snapshot.withdrawal_batch_index;
     discovery.portal_tempo_block_number = snapshot.tempo_block_number;
     discovery.portal_block_hash = snapshot.block_hash;
-}
-
-async fn validate_private_zone(
-    private_zone: &DynProvider<TempoNetwork>,
-    discovery: &Discovery,
-) -> Result<()> {
-    // This first request authenticates with the discovered, fully scoped Zone
-    // and chain IDs before checking that both RPC endpoints expose the same Zone.
-    let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, private_zone.clone());
-    let portal = inbox
-        .tempoPortal()
-        .call()
-        .await
-        .context("read Tempo portal from private Zone RPC")?;
-    if portal != discovery.portal {
-        bail!(
-            "private Zone RPC points to Tempo portal {portal}, but the unrestricted Zone RPC points to {}",
-            discovery.portal,
-        );
-    }
-    Ok(())
 }
 
 async fn discover_counted_batch(
@@ -1420,12 +1356,8 @@ mod tests {
             "generate-input",
             "--tempo-rpc-url",
             "http://localhost:8545",
-            "--zone-private-rpc-url",
-            "http://localhost:8544",
             "--zone-unrestricted-rpc-url",
             "http://localhost:8546",
-            "--private-key",
-            "unused",
             "--chain",
             &genesis,
         ];
