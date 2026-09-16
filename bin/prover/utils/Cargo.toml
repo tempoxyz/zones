@@ -38,6 +38,7 @@ clap = { workspace = true, features = ["env"] }
 const-hex.workspace = true
 eyre.workspace = true
 futures.workspace = true
+reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
@@ -45,6 +46,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+alloy-transport.workspace = true
 tempo-chainspec.workspace = true
 
 [features]

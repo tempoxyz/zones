@@ -44,6 +44,7 @@ const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
 const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const LOG_QUERY_BLOCK_CHUNK: u64 = 1_000;
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
@@ -79,13 +80,9 @@ struct GenerateInputArgs {
     #[arg(long)]
     tempo_rpc_url: String,
 
-    /// The Zone chain specification used for SPF execution.
-    #[arg(
-        long,
-        value_name = "CHAIN_OR_PATH",
-        value_parser = <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parser()
-    )]
-    chain: Arc<ZoneChainSpec>,
+    /// The Zone genesis JSON: a local path, inline JSON, or an HTTP(S) URL.
+    #[arg(long, value_name = "CHAIN_OR_PATH_OR_URL")]
+    chain: String,
 
     /// Authenticated private Zone HTTP RPC URL validated against Zone discovery.
     #[arg(long)]
@@ -98,6 +95,10 @@ struct GenerateInputArgs {
     /// Private key used to authenticate with the private Zone RPC.
     #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
     private_key: String,
+
+    /// Select the submitted batch containing this Zone block; fail if not yet submitted.
+    #[arg(long, conflicts_with_all = ["from_block", "to_block", "zone_block_count", "wait_timeout"])]
+    block: Option<u64>,
 
     /// Override the first Zone block in the batch.
     #[arg(long)]
@@ -201,6 +202,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
     info!(
+        block = ?args.block,
         from_block = ?args.from_block,
         to_block = ?args.to_block,
         zone_block_count = ?args.zone_block_count,
@@ -212,6 +214,10 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     if args.zone_block_count == Some(0) {
         bail!("--zone-block-count must be greater than zero");
     }
+    if args.block == Some(0) {
+        bail!("Zone genesis block 0 does not belong to a submitted batch");
+    }
+    let chain = load_chain(&args.chain).await?;
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
@@ -221,7 +227,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .parse::<PrivateKeySigner>()
         .context("parse private Zone RPC key")?;
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = SpfConfig::new(args.chain, discovery.portal);
+    let spf_config = SpfConfig::new(chain, discovery.portal);
     let private_zone_provider = connect_private_zone(
         &args.zone_private_rpc_url,
         signer,
@@ -240,8 +246,18 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("discovery", started, ());
 
     let started = start_phase("batch extraction");
-    let (parent_header, parent_number, extracted) = if let Some(block_count) = args.zone_block_count
-    {
+    let (parent_header, parent_number, extracted) = if let Some(block) = args.block {
+        let batch =
+            find_submitted_batch(&tempo_provider, &zone_provider, &discovery, block).await?;
+        let (parent, parent_number, extracted) =
+            discover_batch(&zone_provider, &discovery, Some(batch.from), Some(batch.to)).await?;
+        if parent.hash_slow() != batch.parent_hash
+            || extracted.last().expect("non-empty batch").block_hash != batch.block_hash
+        {
+            bail!("selected Zone range does not match the submitted batch hashes");
+        }
+        (parent, parent_number, extracted)
+    } else if let Some(block_count) = args.zone_block_count {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
             &zone_provider,
             &tempo_provider,
@@ -272,6 +288,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .await
         .context("read withdrawal batch index from parent Zone state")?;
     if args.from_block.is_none()
+        && args.block.is_none()
         && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
     {
         bail!(
@@ -474,6 +491,98 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .await
         .wrap_err_with(|| format!("connect to {label} RPC at {url}"))
         .map(Provider::erased)
+}
+
+async fn load_chain(source: &str) -> Result<Arc<ZoneChainSpec>> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let genesis = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?
+            .get(source)
+            .send()
+            .await
+            .context("download Zone genesis JSON")?
+            .error_for_status()
+            .context("download Zone genesis JSON")?
+            .json()
+            .await
+            .context("decode Zone genesis JSON")?;
+        Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
+    } else {
+        <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parse(source)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SubmittedBatch {
+    from: u64,
+    to: u64,
+    parent_hash: B256,
+    block_hash: B256,
+}
+
+async fn find_submitted_batch(
+    tempo: &DynProvider<TempoNetwork>,
+    zone: &DynProvider<TempoNetwork>,
+    discovery: &Discovery,
+    target: u64,
+) -> Result<SubmittedBatch> {
+    if target == 0 {
+        bail!("Zone genesis block 0 does not belong to a submitted batch");
+    }
+    let committed = portal_parent_number(zone, discovery).await?;
+    if target > committed {
+        bail!(
+            "batch containing Zone block {target} has not been submitted yet (last submitted block: {committed})"
+        );
+    }
+
+    let portal = ZonePortal::new(discovery.portal, tempo.clone());
+    let mut hi = tempo.get_block_number().await?;
+    let mut end = None;
+    loop {
+        let lo = hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1);
+        let mut events = portal
+            .BatchSubmitted_filter()
+            .from_block(lo)
+            .to_block(hi)
+            .query()
+            .await
+            .wrap_err_with(|| format!("read submitted batches in Tempo blocks {lo}..={hi}"))?;
+        events.sort_by_key(|(_, log)| (log.block_number, log.transaction_index, log.log_index));
+        for (event, _) in events.into_iter().rev() {
+            let hash = event.nextBlockHash;
+            let block = zone.get_block_by_hash(hash).await?.ok_or_else(|| {
+                eyre!("submitted Zone block {hash} not found on unrestricted RPC")
+            })?;
+            let number = block.header.number();
+            if number < target {
+                let (to, block_hash) =
+                    end.ok_or_else(|| eyre!("no submitted batch contains Zone block {target}"))?;
+                return Ok(SubmittedBatch {
+                    from: number + 1,
+                    to,
+                    parent_hash: hash,
+                    block_hash,
+                });
+            }
+            end = Some((number, hash));
+            // The portal starts at index zero and increments before emitting. Recognizing
+            // its first submission avoids scanning all of Tempo history before deployment.
+            if event.withdrawalBatchIndex == 1 {
+                return Ok(SubmittedBatch {
+                    from: 1,
+                    to: number,
+                    parent_hash: zone_header(zone, 0).await?.hash_slow(),
+                    block_hash: hash,
+                });
+            }
+        }
+        if lo == 0 {
+            bail!("could not find complete submitted batch boundaries for Zone block {target}");
+        }
+        hi = lo - 1;
+    }
 }
 
 fn connect_private_zone(
@@ -1272,6 +1381,259 @@ fn format_duration(duration: Duration) -> String {
 mod tests {
     use super::*;
     use alloy_primitives::address;
+    use alloy_sol_types::SolEvent as _;
+    use alloy_transport::mock::Asserter;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter)
+            .erased()
+    }
+
+    fn mock_block(number: u64) -> RpcBlock {
+        let mut header = TempoHeader::default();
+        header.inner.number = number;
+        RpcBlock {
+            header: TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header {
+                    hash: header.hash_slow(),
+                    inner: header,
+                    total_difficulty: None,
+                    size: None,
+                },
+                timestamp_millis: 0,
+            },
+            uncles: Vec::new(),
+            transactions: Default::default(),
+            withdrawals: None,
+        }
+    }
+
+    fn mock_discovery(committed_hash: B256) -> Discovery {
+        Discovery {
+            zone_id: 1,
+            portal: Address::repeat_byte(0x11),
+            portal_withdrawal_batch_index: 0,
+            portal_tempo_block_number: 0,
+            tempo_chain_id: 42_431,
+            portal_block_hash: committed_hash,
+        }
+    }
+
+    fn submitted_log(block: &RpcBlock, l1_number: u64, log_index: u64) -> alloy_rpc_types_eth::Log {
+        // Empty withdrawal batches share the sentinel queue index, not a unique queue entry.
+        let event = ZonePortal::BatchSubmitted {
+            withdrawalBatchIndex: block.header.number() / 5,
+            withdrawalQueueIndex: U256::MAX,
+            nextProcessedDepositQueueHash: B256::ZERO,
+            nextBlockHash: block.header.inner.hash,
+            withdrawalQueueHash: B256::ZERO,
+            lastProcessedDepositNumber: 0,
+        };
+        alloy_rpc_types_eth::Log {
+            inner: alloy_primitives::Log {
+                address: Address::repeat_byte(0x11),
+                data: event.encode_log_data(),
+            },
+            block_number: Some(l1_number),
+            transaction_index: Some(0),
+            log_index: Some(log_index),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn selects_submitted_batch_including_boundary_blocks() {
+        for (target, expected_from, expected_to) in [(1, 1, 5), (5, 1, 5), (6, 6, 10), (10, 6, 10)]
+        {
+            let tempo = Asserter::new();
+            let zone = Asserter::new();
+            let first = mock_block(5);
+            let second = mock_block(10);
+            let discovery = mock_discovery(second.header.inner.hash);
+            zone.push_success(&second); // Latest portal commitment.
+            tempo.push_success(&2_500_u64);
+            // Reverse input order to exercise ordering by log position within an L1 block.
+            tempo.push_success(&vec![
+                submitted_log(&second, 2_400, 1),
+                submitted_log(&first, 2_400, 0),
+            ]);
+            zone.push_success(&second);
+            zone.push_success(&first);
+            if expected_from == 1 {
+                zone.push_success(&mock_block(0));
+            }
+            let batch = find_submitted_batch(
+                &mock_provider(tempo),
+                &mock_provider(zone),
+                &discovery,
+                target,
+            )
+            .await
+            .unwrap();
+            assert_eq!((batch.from, batch.to), (expected_from, expected_to));
+            assert_eq!(
+                batch.parent_hash,
+                mock_block(expected_from - 1).header.inner.hash
+            );
+            assert_eq!(batch.block_hash, mock_block(expected_to).header.inner.hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn finds_previous_boundary_across_log_pages() {
+        let tempo = Asserter::new();
+        let zone = Asserter::new();
+        let first = mock_block(5);
+        let second = mock_block(10);
+        let discovery = mock_discovery(second.header.inner.hash);
+        zone.push_success(&second);
+        tempo.push_success(&2_500_u64);
+        tempo.push_success(&vec![submitted_log(&second, 2_400, 0)]);
+        tempo.push_success(&Vec::<alloy_rpc_types_eth::Log>::new());
+        tempo.push_success(&vec![submitted_log(&first, 100, 0)]);
+        zone.push_success(&second);
+        zone.push_success(&first);
+        let batch =
+            find_submitted_batch(&mock_provider(tempo), &mock_provider(zone), &discovery, 7)
+                .await
+                .unwrap();
+        assert_eq!((batch.from, batch.to), (6, 10));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsubmitted_blocks_and_genesis() {
+        for (target, committed) in [(0, 0), (1, 0), (11, 10)] {
+            let zone = Asserter::new();
+            let hash = if committed == 0 {
+                B256::ZERO
+            } else {
+                let block = mock_block(committed);
+                zone.push_success(&block);
+                block.header.inner.hash
+            };
+            // No Tempo responses: rejection must happen before querying batch logs.
+            let error = find_submitted_batch(
+                &mock_provider(Asserter::new()),
+                &mock_provider(zone),
+                &mock_discovery(hash),
+                target,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains(if target == 0 {
+                "genesis block 0"
+            } else {
+                "has not been submitted yet"
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_batch_history() {
+        let tempo = Asserter::new();
+        let zone = Asserter::new();
+        let committed = mock_block(10);
+        zone.push_success(&committed);
+        zone.push_success(&committed);
+        tempo.push_success(&100_u64);
+        // A later submission alone must not be mistaken for the first batch.
+        tempo.push_success(&vec![submitted_log(&committed, 90, 0)]);
+        let error = find_submitted_batch(
+            &mock_provider(tempo),
+            &mock_provider(zone),
+            &mock_discovery(committed.header.inner.hash),
+            7,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not find complete submitted batch boundaries")
+        );
+    }
+
+    #[test]
+    fn block_selection_conflicts_with_manual_ranges() {
+        let base = [
+            "prover-utils",
+            "generate-input",
+            "--tempo-rpc-url",
+            "http://localhost:1",
+            "--chain",
+            "https://example.com/genesis.json",
+            "--zone-private-rpc-url",
+            "http://localhost:2",
+            "--zone-unrestricted-rpc-url",
+            "http://localhost:3",
+            "--private-key",
+            "00",
+            "--block",
+            "7",
+        ];
+        assert!(Cli::try_parse_from(base).is_ok());
+        for flag in [
+            "--from-block",
+            "--to-block",
+            "--zone-block-count",
+            "--wait-timeout",
+        ] {
+            let error = Cli::try_parse_from(base.into_iter().chain([flag, "10"])).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict
+                    | clap::error::ErrorKind::MissingRequiredArgument
+            ));
+        }
+    }
+
+    async fn serve_genesis(status: &str, body: String) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/genesis.json", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn loads_genesis_from_http_and_reports_download_errors() {
+        let chain_id = zone_chain_id(42_431, 1).unwrap();
+        let mut genesis = tempo_chainspec::spec::MODERATO.inner.genesis.clone();
+        genesis.config.chain_id = chain_id;
+        let json = serde_json::to_string(&genesis).unwrap();
+        let (url, task) = serve_genesis("200 OK", json.clone()).await;
+        let chain = load_chain(&url).await.unwrap();
+        task.await.unwrap();
+        assert_eq!(chain.inner.inner.genesis.config.chain_id, chain_id);
+        assert_eq!(chain, load_chain(&json).await.unwrap());
+
+        for (status, body, expected) in [
+            ("404 Not Found", json.as_str(), "download Zone genesis JSON"),
+            ("200 OK", "not json", "decode Zone genesis JSON"),
+        ] {
+            let (url, task) = serve_genesis(status, body.to_owned()).await;
+            assert!(
+                load_chain(&url)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+            task.await.unwrap();
+        }
+    }
 
     #[test]
     fn groups_tempo_storage_reads_by_checkpoint() {
@@ -1293,8 +1655,8 @@ mod tests {
         assert!(counted_range(u64::MAX, 2).is_err());
     }
 
-    #[test]
-    fn parses_and_uses_a_zone_genesis_from_a_local_path() {
+    #[tokio::test]
+    async fn parses_and_uses_a_zone_genesis_from_a_local_path() {
         let zone_chain_id = zone_chain_id(42_431, 1).unwrap();
         let mut genesis = tempo_chainspec::spec::MODERATO.inner.genesis.clone();
         genesis.config.chain_id = zone_chain_id;
@@ -1304,10 +1666,7 @@ mod tests {
         ));
         std::fs::write(&path, serde_json::to_vec(&genesis).unwrap()).unwrap();
 
-        let chain_spec = <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parse(
-            path.to_str().unwrap(),
-        )
-        .unwrap();
+        let chain_spec = load_chain(path.to_str().unwrap()).await.unwrap();
         let config = SpfConfig::new(chain_spec, Address::ZERO);
 
         std::fs::remove_file(path).unwrap();
