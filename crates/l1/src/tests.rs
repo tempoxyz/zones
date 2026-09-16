@@ -2471,6 +2471,7 @@ async fn forced_requests_survive_logs_restart_and_mixed_preparation() {
             key_index: U256::ZERO,
         },
         &mut k256::elliptic_curve::rand_core::OsRng,
+        Some("forced-exit-v1"),
     )
     .unwrap();
     let mut entry = abi::ForcedExit {
