@@ -19,8 +19,7 @@ use tempo_evm::{TempoBlockExecutionCtx, TempoEvmTypes, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_zone_contracts::IZoneOutbox;
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::state::L1StateProvider;
-use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader};
+use zone_precompiles::ADVANCE_TEMPO_SELECTOR;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{ZoneEvm, database::validate_pending_state};
@@ -131,16 +130,12 @@ impl BlockTransactionResult<TempoEvmTypes> for ZoneTxResult {
 /// finalization of requested withdrawals, then delegates ordinary execution to
 /// [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or end-of-block
 /// metadata requirements.
-pub struct ZoneBlockExecutor<'a, L1: L1StorageReader = L1StateProvider> {
+pub struct ZoneBlockExecutor<'a> {
     inner: EthBlockExecutor<'a, TempoEvmTypes, TempoReceiptBuilder>,
     phase: ZoneBlockPhase,
-    _l1: core::marker::PhantomData<fn() -> L1>,
 }
 
-impl<'a, L1> ZoneBlockExecutor<'a, L1>
-where
-    L1: L1StorageReader,
-{
+impl<'a> ZoneBlockExecutor<'a> {
     /// Create a zone block executor for `evm` and the current block context.
     pub fn new(
         evm: ZoneEvm<'a>,
@@ -155,15 +150,11 @@ where
                 TempoReceiptBuilder::default(),
             ),
             phase: ZoneBlockPhase::AwaitingAdvanceTempo,
-            _l1: core::marker::PhantomData,
         }
     }
 }
 
-impl<'a, L1> BlockExecutor for ZoneBlockExecutor<'a, L1>
-where
-    L1: L1StorageReader + 'static,
-{
+impl<'a> BlockExecutor for ZoneBlockExecutor<'a> {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
     type Evm = ZoneEvm<'a>;
@@ -497,8 +488,7 @@ mod tests {
             shared_gas_limit: 0,
             consensus_context: None,
         };
-        let mut executor: ZoneBlockExecutor<'_, MockL1Reader> =
-            ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
         executor.phase = ZoneBlockPhase::Executing;
 
         let tx = Recovered::new_unchecked(
@@ -728,8 +718,7 @@ mod tests {
             shared_gas_limit: 0,
             consensus_context: None,
         };
-        let mut executor: ZoneBlockExecutor<'_, MockL1Reader> =
-            ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
 
         // The header is the valid next checkpoint, but a decryption entry without an encrypted
         // deposit makes the Inbox precompile revert after attempting the checkpoint transition.

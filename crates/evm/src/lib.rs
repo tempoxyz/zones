@@ -244,7 +244,7 @@ where
     type Evm<'a> = ZoneEvm<'a>;
     type EvmEnv = TempoEvmEnv;
     type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
-    type Executor<'a> = ZoneBlockExecutor<'a, L1>;
+    type Executor<'a> = ZoneBlockExecutor<'a>;
 
     fn create_executor<'a>(
         &'a self,
