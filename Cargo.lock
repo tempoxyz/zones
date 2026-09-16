@@ -3733,6 +3733,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "exithatch"
+version = "0.3.1"
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11926,6 +11930,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "alloy-sol-types",
+ "alloy-transport",
  "clap",
  "const-hex",
  "eyre",

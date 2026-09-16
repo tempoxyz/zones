@@ -14,6 +14,7 @@ members = [
   "crates/chainspec",
   "crates/contracts",
   "crates/evm",
+  "crates/exithatch",
   "crates/hardfork",
   "crates/l1",
   "crates/node",

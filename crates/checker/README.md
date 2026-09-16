@@ -134,27 +134,27 @@ head advances.
 ### Verified activity logs
 
 After a Zone block is durably verified, the checker emits structured
-`zone::checker` logs for authenticated bridge activity. Zero-value Portal
+`zone::checker` INFO logs for authenticated bridge activity. Zero-value Portal
 refund claims are accounting no-ops and are omitted. Within that block,
 `authenticated` denotes canonical protocol evidence, `accounted` denotes a
 ghost-liability change, and `verified` denotes additional reconciliation
 against TIP-20 movements and exact post-block state.
 
-These fields form the stable schema for log-backed dashboards:
+Activity logs contain only the fields needed by log-backed activity dashboards:
 
-- `activity_schema_version`: currently `1`.
 - `activity_event`: the stable event name from the table below.
-- `activity_source`: `tempo` for Portal activity or `zone` for Zone activity.
 - `activity_id`: `v<schema_version>:<zone_hash>:<activity_source>:<activity_index>`,
   which remains stable if recovery replays the same canonical block under the
-  same schema.
-- `activity_index`: the event's canonical order within its source for the Zone
-  block.
-- `zone_block`, `zone_hash`, `tempo_block`, and `tempo_hash`: exact verified
-  coordinates.
-- Event-specific fields such as `token`, `recipient`, `sender`,
-  `deposit_number`, `withdrawal_index`, and `callback_success`. Monetary
-  `amount` and `fee` fields are decimal strings for both Tempo and Zone values.
+  same schema. The ID retains version `1`, the verified Zone block hash, source
+  (`tempo` or `zone`), and zero-based canonical index within that source.
+- `callback_success`: emitted only for `portal_withdrawal_processed`, allowing
+  dashboards to distinguish successful and failed withdrawal callbacks.
+
+The ID components are not repeated as separate fields. Activity logs omit
+descriptive messages, block heights, Tempo hashes, token and account addresses,
+amounts, fees, and deposit/withdrawal numbers. Kubernetes pod and namespace
+metadata supplied by the log collector still identify the verifier and Zone.
+Operational warnings and errors retain their diagnostic fields.
 
 | `activity_event` | Meaning |
 | --- | --- |
