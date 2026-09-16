@@ -14151,6 +14151,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempo-chainspec",
  "tempo-contracts",
+ "tempo-evm",
  "tempo-precompiles",
  "tempo-precompiles-macros",
  "tempo-primitives",

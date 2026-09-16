@@ -1,13 +1,12 @@
 use alloy_primitives::{Address, B256, Bytes, U256};
 use evm2::{
-    BaseEvmConfigSelector, Evm, EvmTypesHost, ExecutionConfig, SpecId,
+    Evm, ExecutionConfig, SpecId,
     evm::{
         InMemoryDB, StateCheckpoint,
         precompile::{NoPrecompiles, PrecompileProvider},
     },
     interpreter::{GasTracker, Message, MessageKind},
     precompiles::{PrecompileError as Evm2PrecompileError, PrecompileHalt as Evm2PrecompileHalt},
-    registry::TxRegistry,
 };
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
@@ -16,11 +15,12 @@ use k256::{
 use revm::precompile::{PrecompileError, PrecompileHalt, PrecompileOutput, PrecompileResult};
 use std::{cell::RefCell, rc::Rc};
 use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_evm::{TempoEvmExt, TempoEvmTypes, tempo_tx_registry};
 use tempo_precompiles::{
     storage::{actions::StorageActions, evm::EvmPrecompileStorageProvider},
     storage_credits::NonCreditableSlots,
 };
-use tempo_primitives::{TempoBlockEnv, TempoBlockExt};
+use tempo_primitives::TempoBlockEnv;
 
 use crate::{
     ZonePrecompiles,
@@ -32,21 +32,6 @@ pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_
 
 use super::MockL1Reader;
 
-pub(crate) struct TestTypes;
-
-impl EvmTypesHost for TestTypes {
-    type ConfigSelector = BaseEvmConfigSelector;
-    type SpecId = SpecId;
-    type Tx = ();
-    type EvmExt = ();
-    type MessageExt = ();
-    type MessageResultExt = ();
-    type TxEnvExt = ();
-    type TxResultExt = ();
-    type BlockEnvExt = TempoBlockExt;
-    type Host<'a> = Evm<'a, Self>;
-}
-
 pub(crate) struct TestCfg {
     pub(crate) spec: TempoHardfork,
 }
@@ -55,11 +40,11 @@ pub(crate) struct TestCfg {
 pub(crate) struct TestContext {
     pub(crate) cfg: TestCfg,
     pub(crate) block: TempoBlockEnv,
-    evm: Evm<'static, TestTypes>,
+    evm: Evm<'static, TempoEvmTypes>,
     gas: GasTracker,
 }
 
-pub(crate) type TestPrecompiles = ZonePrecompiles<TestTypes, MockL1Reader>;
+pub(crate) type TestPrecompiles = ZonePrecompiles<TempoEvmTypes, MockL1Reader>;
 
 /// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
 pub(crate) fn test_context() -> TestContext {
@@ -69,13 +54,14 @@ pub(crate) fn test_context() -> TestContext {
     TestContext {
         cfg: TestCfg { spec },
         block,
-        evm: Evm::new_with_execution_config(
-            ExecutionConfig::for_spec_and_version(SpecId::OSAKA, version),
-            SpecId::OSAKA,
+        evm: Evm::new_with_execution_config_and_ext(
+            ExecutionConfig::for_spec_and_version(spec, version),
+            spec,
             block,
-            TxRegistry::new(),
+            tempo_tx_registry(SpecId::OSAKA),
             InMemoryDB::default(),
             NoPrecompiles::default(),
+            TempoEvmExt::default(),
         ),
         gas: GasTracker::new(u64::MAX),
     }
@@ -86,7 +72,7 @@ pub(crate) fn test_storage_provider(
     ctx: &mut TestContext,
     gas_limit: u64,
     is_static: bool,
-) -> EvmPrecompileStorageProvider<'_, '_, 'static, TestTypes> {
+) -> EvmPrecompileStorageProvider<'_, '_, 'static, TempoEvmTypes> {
     ctx.sync();
     ctx.gas = GasTracker::new(gas_limit);
     EvmPrecompileStorageProvider::new(&mut ctx.evm, &mut ctx.gas, ctx.cfg.spec, is_static)
@@ -110,9 +96,9 @@ impl TestContext {
         let version = tempo_chainspec::gas_params::version(SpecId::OSAKA, self.cfg.spec, false);
         self.evm.set_block_and_execution_config(
             self.block,
-            ExecutionConfig::for_spec_and_version(SpecId::OSAKA, version),
-            SpecId::OSAKA,
-            TxRegistry::new(),
+            ExecutionConfig::for_spec_and_version(self.cfg.spec, version),
+            self.cfg.spec,
+            tempo_tx_registry(SpecId::OSAKA),
             NoPrecompiles::default(),
         );
     }
@@ -126,7 +112,7 @@ impl TestContext {
         self.evm.state_mut().rollback(checkpoint, features);
     }
 
-    pub(crate) fn evm(&mut self) -> &mut Evm<'static, TestTypes> {
+    pub(crate) fn evm(&mut self) -> &mut Evm<'static, TempoEvmTypes> {
         self.sync();
         &mut self.evm
     }
@@ -149,7 +135,7 @@ pub(crate) fn call_precompile(
     } else {
         MessageKind::Call
     };
-    let message = Message::<TestTypes> {
+    let message = Message::<TempoEvmTypes> {
         kind,
         gas_limit: gas,
         caller,

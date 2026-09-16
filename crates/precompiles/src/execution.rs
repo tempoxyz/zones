@@ -186,13 +186,14 @@ fn add_input_cost(mut s: StorageCtx, data: &[u8], res: PrecompileResult) -> Prec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{TestContext, TestTypes, test_context, test_storage_provider};
+    use crate::test_utils::{TestContext, test_context, test_storage_provider};
     use alloy_primitives::{Bytes, U256};
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
     };
     use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
+    use tempo_evm::TempoEvmTypes;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
@@ -233,7 +234,7 @@ mod tests {
         execute: impl FnOnce(&[u8], Address) -> PrecompileResult,
     ) -> (PrecompileResult, GasTracker) {
         let target = Address::repeat_byte(0x11);
-        let message = Message::<TestTypes> {
+        let message = Message::<TempoEvmTypes> {
             gas_limit: gas,
             caller,
             input: Bytes::copy_from_slice(data),
