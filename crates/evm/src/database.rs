@@ -70,10 +70,11 @@ impl<DB: DynDatabase, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         let value = self
             .inner
             .get_storage(&TEMPO_STATE_ADDRESS, &TEMPO_BLOCK_NUMBER_SLOT)?;
-        u64::try_from(value).map_err(|_| {
+        let anchor = u64::try_from(value).map_err(|_| {
             self.error = Some(AnyError::new(ZoneDbError::AnchorOverflow(value)));
             L1_ERROR
-        })
+        })?;
+        Ok(anchor)
     }
 
     fn store_l1_error(&mut self, error: L1StateError) -> ErrorCode {
