@@ -81,7 +81,8 @@ impl ZoneOutbox {
                 ) => ForcedWithdrawalError::PolicyRejected,
                 error => error.into(),
             })?;
-        self.enforce_withdrawal_block_cap()?;
+        // L1 admission bounds this mandatory inbox workload. Do not apply or consume the
+        // ordinary user-withdrawal cap: it could prevent an admitted anchor from executing.
         let mut token = TIP20Token::from_address(token)?;
         if !token.is_initialized()? {
             return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
@@ -107,8 +108,12 @@ impl ZoneOutbox {
         // The destination is our fixed precompile address, not a caller-selected virtual alias.
         // Root authorization replaces allowance/transaction-key spending authorization only.
         // Native transfer and burn still run balance, supply, reward and event hooks.
-        token._transfer(account, &Recipient::direct(self.address), amount256)?;
-        token.burn(self.address, ITIP20::burnCall { amount: amount256 })?;
+        token
+            ._transfer(account, &Recipient::direct(self.address), amount256)
+            .map_err(ForcedWithdrawalError::token_policy)?;
+        token
+            .burn(self.address, ITIP20::burnCall { amount: amount256 })
+            .map_err(ForcedWithdrawalError::token_policy)?;
 
         let nonce = self
             .last_fallback_nonce
