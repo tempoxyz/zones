@@ -656,7 +656,7 @@ async fn find_submitted_batch(
     loop {
         let lo = hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1);
         let mut events = portal
-            .BatchSubmitted_filter()
+            .BatchSubmitted_1_filter()
             .from_block(lo)
             .to_block(hi)
             .query()
