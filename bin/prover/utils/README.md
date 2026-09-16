@@ -68,3 +68,28 @@ without local replay or conversion to this CLI version's witness schema.
 Protocol/version mismatches, missing proofs, and prover errors fail the command without writing
 the output file. A saved response is not independently authenticated by the CLI; submit the proof
 and its public commitments to the on-chain verifier to check the attestation.
+
+`prove` logs reading the witness, connecting and sending to the prover, waiting for its response,
+validating the response, and writing the proof. It prints phase durations and total elapsed time.
+
+## Verify a saved proof
+
+```bash
+cargo run --release -p tempo-zone-prover-utils -- verify \
+  --input witness.json \
+  --proof proof.json \
+  --rpc-url "$L1_RPC_URL"
+```
+
+Use the original witness file passed to `prove` and its complete saved response. The command
+checks the response's request ID against the witness bytes, derives the canonical Zone portal
+caller, and ABI-encodes all native verifier arguments. The RPC chain ID must match the witness's
+parent chain ID. This command supports the native verifier ABI with a token-enablement transition.
+
+Verification uses `eth_call` at `latest` with a 30,000,000 gas limit; it requires no wallet key,
+sends no transaction, and does not settle a batch. It prints `Proof verified: true` only when the
+precompile returns ABI-encoded `true`. A false or malformed result, RPC error, or revert fails
+the command.
+
+Like `generate-input`, `verify` logs each phase and prints phase durations and total elapsed time.
+Set `--log-filter tempo_zone_prover_utils=debug` to inspect all named verifier arguments.

@@ -36,6 +36,9 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
+mod verifier_request;
+mod verify;
+
 const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
@@ -69,6 +72,8 @@ enum Command {
     GenerateInput(GenerateInputArgs),
     /// Send a saved witness to a prover and save its output and proof.
     Prove(ProveArgs),
+    /// Verify a saved proof against the native L1 verifier using eth_call.
+    Verify(verify::VerifyArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -190,6 +195,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
         Command::Prove(args) => prove(args).await,
+        Command::Verify(args) => verify::run(args).await,
     }
 }
 
@@ -423,6 +429,10 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 }
 
 async fn prove(args: ProveArgs) -> Result<()> {
+    let total_started = Instant::now();
+    let mut timings = Timings::default();
+    info!(input = %args.input.display(), target = %args.target, output = %args.output.display(), "proving saved witness");
+    let started = start_phase("read witness");
     let input = std::fs::read(&args.input)
         .wrap_err_with(|| format!("read batch witness from {}", args.input.display()))?;
     // Forward the witness unchanged: the remote prover selects the STF and witness schema.
@@ -432,18 +442,28 @@ async fn prove(args: ProveArgs) -> Result<()> {
     if !witness.is_object() {
         bail!("batch witness must be a JSON object");
     }
+    info!(bytes = input.len(), "loaded batch witness");
+    timings.record("read witness", started, ());
     let request_id = format!("prove-{}", keccak256(&input));
     let request = serde_json::json!({
         "version": PROTOCOL_VERSION,
         "requestId": request_id,
         "witness": witness,
     });
+    let started = start_phase("target prover");
     let (_, response) = exchange_with_prover(&args.target, &request).await?;
+    timings.record("target prover", started, ());
+    let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
+    timings.record("validate response", started, ());
+    let started = start_phase("output");
     let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
     std::fs::write(&args.output, &json)
         .wrap_err_with(|| format!("write prover response to {}", args.output.display()))?;
     println!("Saved prover output and proof to {}", args.output.display());
+    info!(bytes = json.len(), "saved prover response");
+    timings.record("output", started, ());
+    timings.print(total_started.elapsed());
     Ok(())
 }
 
@@ -488,19 +508,37 @@ async fn exchange_with_prover(
     target: &str,
     request: &impl serde::Serialize,
 ) -> Result<(usize, serde_json::Value)> {
+    let started = Instant::now();
+    info!(target, "connecting to prover");
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "connected to prover"
+    );
     let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+    let started = Instant::now();
+    info!("sending witness to prover");
     let request_bytes = connection
         .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
+    info!(
+        bytes = request_bytes,
+        elapsed_ms = started.elapsed().as_millis(),
+        "sent witness; waiting for prover response"
+    );
+    let started = Instant::now();
     let response = connection
         .receive()
         .await
         .wrap_err_with(|| format!("read response from target prover at {target}"))?
         .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "received prover response"
+    );
     Ok((request_bytes, response))
 }
 
