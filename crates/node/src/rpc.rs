@@ -308,16 +308,10 @@ where
                     .map_err(|error| EthApiError::Internal(error.into()))?;
                 db.commit_source(output.state.inner());
 
-                let mut keys = BTreeMap::new();
                 let mut additional_state = HashedPostState::default();
-                record_block_hash_storage_proofs(
-                    &mut additional_state,
-                    &mut keys,
-                    &db.cache.block_hashes,
-                );
+                record_block_hash_storage_proofs(&mut additional_state, &db.cache.block_hashes);
                 let witness = ExecutionWitnessRecord::new(&db)
                     .with_additional_state(additional_state)
-                    .with_additional_keys(keys.into_values())
                     .into_execution_witness(
                         &db.db.inner().0,
                         eth_api.provider(),
@@ -419,25 +413,18 @@ async fn collect_tempo_witness(
 /// storage targets lets the SPF authenticate the same values against the parent state root.
 fn record_block_hash_storage_proofs(
     additional_state: &mut HashedPostState,
-    keys: &mut BTreeMap<B256, Bytes>,
     block_hashes: &alloy_primitives::map::U256Map<B256>,
 ) {
     if block_hashes.is_empty() {
         return;
     }
 
-    keys.insert(
-        keccak256(HISTORY_STORAGE_ADDRESS),
-        HISTORY_STORAGE_ADDRESS.to_vec().into(),
-    );
     let history_storage = additional_state
         .storages
         .entry(keccak256(HISTORY_STORAGE_ADDRESS))
         .or_default();
     for (number, hash) in block_hashes {
         let slot = *number % U256::from(HISTORY_SERVE_WINDOW);
-        let slot_bytes = B256::new(slot.to_be_bytes());
-        keys.insert(keccak256(slot_bytes), slot_bytes.into());
         history_storage.storage.insert(
             keccak256(slot.to_be_bytes::<32>()),
             U256::from_be_bytes(hash.0),
@@ -1601,9 +1588,8 @@ mod tests {
         let mut block_hashes = alloy_primitives::map::U256Map::default();
         block_hashes.insert(U256::from(number), hash);
         let mut additional_state = HashedPostState::default();
-        let mut keys = BTreeMap::new();
 
-        record_block_hash_storage_proofs(&mut additional_state, &mut keys, &block_hashes);
+        record_block_hash_storage_proofs(&mut additional_state, &block_hashes);
 
         let storage = additional_state
             .storages
@@ -1613,15 +1599,6 @@ mod tests {
         assert_eq!(
             storage.storage.get(&keccak256(slot.to_be_bytes::<32>())),
             Some(&U256::from_be_bytes(hash.0))
-        );
-        assert_eq!(
-            keys.get(&keccak256(HISTORY_STORAGE_ADDRESS)),
-            Some(&Bytes::copy_from_slice(HISTORY_STORAGE_ADDRESS.as_slice()))
-        );
-        let slot = B256::from(slot);
-        assert_eq!(
-            keys.get(&keccak256(slot)),
-            Some(&Bytes::copy_from_slice(slot.as_slice()))
         );
     }
 
