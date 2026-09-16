@@ -7,7 +7,7 @@ Both `--from-block` and `--to-block` accept a decimal Zone block number or a `0x
 ```bash
 cargo run --release -p tempo-zone-prover-utils -- generate-input \
   --tempo-rpc-url "$TEMPO_RPC_URL" \
-  --zone-unrestricted-rpc-url "$ZONE_UNRESTRICTED_RPC_URL" \
+  --zone-rpc-url "$ZONE_RPC_URL" \
   --chain "$ZONE_GENESIS" \
   --from-block "$FIRST_ZONE_BLOCK_HASH" \
   --to-block "$LAST_ZONE_BLOCK_HASH" \

@@ -101,7 +101,7 @@ struct GenerateInputArgs {
 
     /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
     #[arg(long)]
-    zone_unrestricted_rpc_url: String,
+    zone_rpc_url: String,
 
     /// Override the first Zone block (inclusive) by number or hash.
     #[arg(long, value_name = "NUMBER_OR_HASH")]
@@ -224,7 +224,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
-    let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
+    let zone_provider = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
     let mut discovery = discover(&tempo_provider, &zone_provider).await?;
     let spf_config = SpfConfig::new(args.chain, discovery.portal);
     info!(
@@ -1356,7 +1356,7 @@ mod tests {
             "generate-input",
             "--tempo-rpc-url",
             "http://localhost:8545",
-            "--zone-unrestricted-rpc-url",
+            "--zone-rpc-url",
             "http://localhost:8546",
             "--chain",
             &genesis,
