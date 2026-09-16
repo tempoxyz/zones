@@ -1,7 +1,7 @@
 //! ABI dispatch for the [`ZoneOutbox`] precompile.
 
 use alloy_primitives::{Address, B256, U256};
-use revm::precompile::PrecompileResult;
+use evm2::precompiles::PrecompileResult;
 use tempo_precompiles::{
     charge_input_cost, dispatch, dispatch::typed::metadata as typed_metadata, storage::Handler,
 };

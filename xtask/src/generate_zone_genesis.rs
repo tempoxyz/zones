@@ -7,16 +7,11 @@ use alloy::{
 use alloy_eips::BlockNumberOrTag;
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::BlockId;
-use eyre::{WrapErr as _, ensure, eyre};
-use reth_evm::{
-    Evm as _, EvmEnv, EvmFactory,
-    revm::{
-        DatabaseCommit,
-        context::JournalTr,
-        database::{CacheDB, EmptyDB},
-        state::{AccountInfo, Bytecode},
-    },
+use evm2::{
+    bytecode::Bytecode,
+    evm::{AccountInfo, InMemoryDB, SystemTx, precompile::NoPrecompiles},
 };
+use eyre::{WrapErr as _, ensure, eyre};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_T0_BASE_FEE};
@@ -25,21 +20,20 @@ use tempo_contracts::{
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
 };
-use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
+use tempo_evm::{TempoBlockEnv, TempoEvm, TempoEvmExt, build_tempo_evm};
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
     stablecoin_dex::StablecoinDEX,
-    storage::{StorageActions, StorageCtx},
+    storage::StorageCtx,
     storage_credits::StorageCredits,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
 };
 use tempo_primitives::TempoHeader;
-use tempo_revm::TempoBlockEnv;
 use tempo_zone_contracts::ZonePortal;
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneInbox as NativeZoneInbox,
@@ -137,8 +131,8 @@ impl GenerateZoneGenesis {
 
         let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
 
-        evm.db_mut().insert_account_info(
-            DEPLOYER,
+        evm.overlay_db_mut().insert_account_info(
+            &DEPLOYER,
             AccountInfo {
                 balance: U256::from(1_000_000_000_000_000_000_000u128),
                 ..Default::default()
@@ -164,21 +158,23 @@ impl GenerateZoneGenesis {
         initialize_zone_inbox(&mut evm)?;
         initialize_zone_outbox(&mut evm)?;
 
-        let native_state = evm.ctx_mut().journaled_state.finalize();
-        evm.db_mut().commit(native_state);
+        evm.state_mut().commit_transaction();
+        evm.state_mut().clear_transaction_state();
 
-        let db = evm.db_mut();
+        let db = evm.overlay_db_mut();
         for (name, addr) in [
             ("TempoState", TEMPO_STATE_ADDRESS),
             ("ZoneInbox", ZONE_INBOX_ADDRESS),
             ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
         ] {
             let account = db
-                .cache
-                .accounts
-                .get(&addr)
+                .account_info(&addr)
                 .ok_or_else(|| eyre!("{name} not found at {addr}"))?;
-            let has_code = account.info.code.as_ref().is_some_and(|c| !c.is_empty());
+            let has_code = db
+                .cache
+                .contracts
+                .get(&account.code_hash)
+                .is_some_and(|code| !code.is_empty());
             if !has_code {
                 return Err(eyre!("{name} has no code at {addr}"));
             }
@@ -192,21 +188,29 @@ impl GenerateZoneGenesis {
             .filter(|(addr, _)| {
                 self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
             })
+            .filter_map(|(address, account)| account.as_ref().map(|account| (address, account)))
             .map(|(address, account)| {
-                let storage: Option<BTreeMap<_, _>> = if !account.storage.is_empty() {
-                    Some(
-                        account
-                            .storage
-                            .iter()
-                            .map(|(key, val)| ((*key).into(), (*val).into()))
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
+                let account_storage = db.cache.storage.get(address);
+                let storage: Option<BTreeMap<_, _>> =
+                    if account_storage.is_some_and(|storage| !storage.slots.is_empty()) {
+                        Some(
+                            account_storage
+                                .unwrap()
+                                .slots
+                                .iter()
+                                .map(|(key, val)| ((*key).into(), (*val).into()))
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    };
                 let genesis_account = GenesisAccount {
-                    nonce: Some(account.info.nonce),
-                    code: account.info.code.as_ref().map(|c| c.original_bytes()),
+                    nonce: Some(account.nonce),
+                    code: db
+                        .cache
+                        .contracts
+                        .get(&account.code_hash)
+                        .map(|code| code.original_bytes()),
                     storage,
                     ..Default::default()
                 };
@@ -454,23 +458,27 @@ pub(crate) async fn wait_for_finalized_pre_creation_anchor<P: Provider<TempoNetw
     ))
 }
 
-fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<CacheDB<EmptyDB>> {
-    let db = CacheDB::default();
-    let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> =
-        EvmEnv::default().with_timestamp(U256::ZERO);
-    env.cfg_env.chain_id = chain_id;
-    env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
-    env.block_env.inner.gas_limit = gas_limit;
-
-    let factory = TempoEvmFactory::default();
-    factory.create_evm(db, env)
+fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<'static> {
+    let block = TempoBlockEnv {
+        timestamp: U256::ZERO,
+        gas_limit: U256::from(gas_limit),
+        ..Default::default()
+    };
+    build_tempo_evm(
+        TempoHardfork::default(),
+        chain_id,
+        block,
+        InMemoryDB::default(),
+        NoPrecompiles::default(),
+        TempoEvmExt::default(),
+    )
 }
 
 /// Deploys the Arachnid CREATE2 factory by directly inserting it into the EVM state.
-fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
+fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<'_>) {
     println!("Deploying Arachnid CREATE2 factory at {ARACHNID_CREATE2_FACTORY_ADDRESS}");
-    evm.db_mut().insert_account_info(
-        ARACHNID_CREATE2_FACTORY_ADDRESS,
+    evm.overlay_db_mut().insert_account_info(
+        &ARACHNID_CREATE2_FACTORY_ADDRESS,
         AccountInfo {
             code: Some(Bytecode::new_raw(ARACHNID_CREATE2_FACTORY_BYTECODE)),
             nonce: 0,
@@ -480,7 +488,7 @@ fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
 }
 
 /// Deploys Permit2 contract via the Arachnid CREATE2 factory.
-fn deploy_permit2(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+fn deploy_permit2(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
     let bytecode = &tempo_contracts::Permit2::BYTECODE;
     let calldata: Bytes = PERMIT2_SALT
         .as_slice()
@@ -490,75 +498,41 @@ fn deploy_permit2(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
         .collect();
 
     println!("Deploying Permit2 via CREATE2 to {PERMIT2_ADDRESS}");
-    let result =
-        evm.transact_system_call(Address::ZERO, ARACHNID_CREATE2_FACTORY_ADDRESS, calldata)?;
-    if !result.result.is_success() {
+    let result = evm.system_call(
+        SystemTx::new(ARACHNID_CREATE2_FACTORY_ADDRESS, calldata).with_caller(Address::ZERO),
+    )?;
+    if !result.result().status {
         return Err(eyre!("Permit2 deployment failed: {:?}", result));
     }
-    evm.db_mut().commit(result.state);
+    let _ = result.commit();
     println!("Permit2 deployed successfully at {PERMIT2_ADDRESS}");
     Ok(())
 }
 
 /// Initialize the native TempoState precompile storage from the L1 genesis header.
-fn initialize_tempo_state(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    header_rlp: &[u8],
-) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NativeTempoState::new().initialize(header_rlp),
-    )?;
+fn initialize_tempo_state(evm: &mut TempoEvm<'_>, header_rlp: &[u8]) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || NativeTempoState::new().initialize(header_rlp))?;
     println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
     Ok(())
 }
 
 /// Initialize the native ZoneInbox account marker and storage.
-fn initialize_zone_inbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NativeZoneInbox::new().initialize(),
-    )?;
+fn initialize_zone_inbox(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || NativeZoneInbox::new().initialize())?;
     println!("Initialized native ZoneInbox at {ZONE_INBOX_ADDRESS}");
     Ok(())
 }
 
 /// Initialize the native ZoneOutbox account marker and storage.
-fn initialize_zone_outbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NativeZoneOutbox::new().initialize(),
-    )?;
+fn initialize_zone_outbox(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || NativeZoneOutbox::new().initialize())?;
     println!("Initialized native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
     Ok(())
 }
 
 /// Initialize the TIP403Registry precompile (required for fee token transfer checks).
-fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || TIP403Registry::new().initialize(),
-    )?;
+fn initialize_tip403_registry(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || TIP403Registry::new().initialize())?;
     println!("Initialized TIP403Registry");
     Ok(())
 }
@@ -569,127 +543,76 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
 /// ZoneInbox is the fixed token admin; the configured zone admin receives no token roles.
-fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || {
-            TIP20Factory::new().create_token_reserved_address(
-                PATH_USD_ADDRESS,
-                "pathUSD",
-                "pathUSD",
-                "USD",
-                Address::ZERO,
-                ZONE_INBOX_ADDRESS,
-            )?;
+fn create_path_usd_token(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || {
+        TIP20Factory::new().create_token_reserved_address(
+            PATH_USD_ADDRESS,
+            "pathUSD",
+            "pathUSD",
+            "USD",
+            Address::ZERO,
+            ZONE_INBOX_ADDRESS,
+        )?;
 
-            let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
-            // Allow address(0) to mint (system transactions use sender=0)
-            token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
-            // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-            token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-            // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+        let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+        // Allow address(0) to mint (system transactions use sender=0)
+        token.grant_role_internal(Address::ZERO, (*ISSUER_ROLE).into())?;
+        // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
+        token.grant_role_internal(ZONE_INBOX_ADDRESS, (*ISSUER_ROLE).into())?;
+        // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
+        token.grant_role_internal(ZONE_OUTBOX_ADDRESS, (*ISSUER_ROLE).into())?;
 
-            // Set a large supply cap
-            token.set_supply_cap(
-                ZONE_INBOX_ADDRESS,
-                ITIP20::setSupplyCapCall {
-                    newSupplyCap: U256::from(u128::MAX),
-                },
-            )?;
+        // Set a large supply cap
+        token.set_supply_cap(
+            ZONE_INBOX_ADDRESS,
+            ITIP20::setSupplyCapCall {
+                newSupplyCap: U256::from(u128::MAX),
+            },
+        )?;
 
-            Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
-        },
-    )?;
+        Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
+    })?;
 
     println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
     Ok(())
 }
 
 /// Initialize the Zone fee manager precompile.
-fn initialize_fee_manager(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    default_fee_token: Address,
-) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || {
-            let mut fee_manager = ZoneFeeManager::new();
-            fee_manager
-                .initialize(default_fee_token)
-                .expect("Could not init fee manager");
-        },
-    );
+fn initialize_fee_manager(evm: &mut TempoEvm<'_>, default_fee_token: Address) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || {
+        let mut fee_manager = ZoneFeeManager::new();
+        fee_manager
+            .initialize(default_fee_token)
+            .expect("Could not init fee manager");
+    });
     println!("Initialized ZoneFeeManager with default fee token {default_fee_token}");
     Ok(())
 }
 
 /// Initialize the StablecoinDEX precompile.
-fn initialize_stablecoin_dex(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || StablecoinDEX::new().initialize(),
-    )?;
+fn initialize_stablecoin_dex(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || StablecoinDEX::new().initialize())?;
     println!("Initialized StablecoinDEX");
     Ok(())
 }
 
 /// Initialize the NonceManager precompile.
-fn initialize_nonce_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || NonceManager::new().initialize(),
-    )?;
+fn initialize_nonce_manager(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || NonceManager::new().initialize())?;
     println!("Initialized NonceManager");
     Ok(())
 }
 
 /// Initialize the AccountKeychain precompile.
-fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || AccountKeychain::new().initialize(),
-    )?;
+fn initialize_account_keychain(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || AccountKeychain::new().initialize())?;
     println!("Initialized AccountKeychain");
     Ok(())
 }
 
 /// Initialize the ReceivePolicyGuard precompile account.
-fn initialize_receive_policy_guard(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || ReceivePolicyGuard::new().initialize(),
-    )?;
+fn initialize_receive_policy_guard(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || ReceivePolicyGuard::new().initialize())?;
     println!("Initialized ReceivePolicyGuard");
     Ok(())
 }
@@ -699,16 +622,8 @@ fn initialize_receive_policy_guard(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre
 /// TIP-1060 bookkeeping writes this account from the EVM handler, even when no transaction calls
 /// the precompile directly. Keeping the account non-empty prevents EIP-161 from dropping the
 /// sequential transition while the sparse-trie state hook still observes its storage updates.
-fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || StorageCredits::new().initialize(),
-    )?;
+fn initialize_storage_credits(evm: &mut TempoEvm<'_>) -> eyre::Result<()> {
+    StorageCtx::enter_evm(evm, || StorageCredits::new().initialize())?;
     println!("Initialized StorageCredits");
     Ok(())
 }

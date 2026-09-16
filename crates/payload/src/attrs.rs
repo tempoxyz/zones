@@ -105,7 +105,6 @@ impl PayloadTypes for ZonePayloadTypes {
         TempoExecutionData {
             block: block.into(),
             block_access_list: bal,
-            validator_set: None,
         }
     }
 }
@@ -120,7 +119,6 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
         let TempoExecutionData {
             block,
             block_access_list: _,
-            validator_set: _,
         } = payload;
         Ok(block.into_sealed_block())
     }

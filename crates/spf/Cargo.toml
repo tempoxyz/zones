@@ -21,22 +21,22 @@ zone-primitives = { workspace = true, features = ["std"] }
 tempo-chainspec.workspace = true
 tempo-evm.workspace = true
 tempo-primitives.workspace = true
-tempo-revm.workspace = true
 
-# Alloy / REVM
+# Alloy / EVM
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-sol-types.workspace = true
+evm2.workspace = true
 reth-chainspec.workspace = true
 reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-execution-types.workspace = true
 reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
 reth-trie-common.workspace = true
 reth-trie-sparse.workspace = true
-revm.workspace = true
 serde = { workspace = true, optional = true }
 thiserror = "2"
 

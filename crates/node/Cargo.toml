@@ -40,7 +40,7 @@ reth-ethereum = { workspace = true, features = [
   "node",
   "cli",
 ], optional = true }
-reth-evm.workspace = true
+reth-evm = { workspace = true, features = ["witness"] }
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-node-core.workspace = true
@@ -48,7 +48,6 @@ reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-revm = { workspace = true, features = ["witness"] }
 reth-rpc.workspace = true
 reth-rpc-api.workspace = true
 reth-rpc-builder.workspace = true
@@ -70,11 +69,13 @@ alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
 alloy-rlp.workspace = true
 alloy-rpc-client.workspace = true
+alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
+evm2.workspace = true
 
 # misc
 clap = { workspace = true, optional = true }
@@ -124,7 +125,6 @@ serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
-tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true

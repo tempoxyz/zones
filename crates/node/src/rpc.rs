@@ -25,9 +25,8 @@ use alloy_sol_types::SolCall;
 use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
-use reth_evm::{ConfigureEvm as _, execute::Executor as _};
+use reth_evm::{ConfigureEvm as _, execute::Executor as _, witness::ExecutionWitnessRecord};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
-use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
 use reth_rpc_builder::EthHandlers;
@@ -295,31 +294,30 @@ where
         let (execution_witness, reads, initial_tempo) = self
             .eth_api
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                let initial_tempo = db.database.0.tempo_num_hash().map_err(EthApiError::from)?;
+                let initial_tempo = db
+                    .db
+                    .inner()
+                    .0
+                    .tempo_num_hash()
+                    .map_err(EthApiError::from)?;
                 let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
                 let block_executor = evm_config.executor(&mut db);
                 let mode = ExecutionWitnessMode::default();
-                let mut witness = None;
-
-                let _ = block_executor
-                    .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        let mut additional_state = HashedPostState::default();
-                        record_block_hash_storage_proofs(&mut additional_state, statedb);
-                        witness = Some(
-                            ExecutionWitnessRecord::new(statedb)
-                                .with_additional_state(additional_state)
-                                .into_execution_witness(
-                                    &statedb.database.database.0,
-                                    eth_api.provider(),
-                                    block_number,
-                                    mode,
-                                ),
-                        );
-                    })
+                let output = block_executor
+                    .execute(&block)
                     .map_err(|error| EthApiError::Internal(error.into()))?;
+                db.commit_source(output.state.inner());
 
-                let witness = witness
-                    .expect("state closure is called after successful execution")
+                let mut additional_state = HashedPostState::default();
+                record_block_hash_storage_proofs(&mut additional_state, &db.cache.block_hashes);
+                let witness = ExecutionWitnessRecord::new(&db)
+                    .with_additional_state(additional_state)
+                    .into_execution_witness(
+                        &db.db.inner().0,
+                        eth_api.provider(),
+                        block_number,
+                        mode,
+                    )
                     .map_err(EthApiError::from)?;
                 Ok((witness, recorder.take_reads(), initial_tempo))
             })
@@ -410,11 +408,13 @@ async fn collect_tempo_witness(
 
 /// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.
 ///
-/// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
+/// Reth records these reads in the EVM block-hash cache and normally proves them with ancestor
 /// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
 /// storage targets lets the SPF authenticate the same values against the parent state root.
-fn record_block_hash_storage_proofs<DB>(additional_state: &mut HashedPostState, state: &State<DB>) {
-    let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
+fn record_block_hash_storage_proofs(
+    additional_state: &mut HashedPostState,
+    block_hashes: &alloy_primitives::map::U256Map<B256>,
+) {
     if block_hashes.is_empty() {
         return;
     }
@@ -424,7 +424,7 @@ fn record_block_hash_storage_proofs<DB>(additional_state: &mut HashedPostState, 
         .entry(keccak256(HISTORY_STORAGE_ADDRESS))
         .or_default();
     for (number, hash) in block_hashes {
-        let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+        let slot = *number % U256::from(HISTORY_SERVE_WINDOW);
         history_storage.storage.insert(
             keccak256(slot.to_be_bytes::<32>()),
             U256::from_be_bytes(hash.0),
@@ -1279,7 +1279,6 @@ where
     fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
             let provider = self.eth.api.provider().clone();
-            let api = self.eth.api.clone();
             let caller = auth.caller;
 
             let zone_tokens = self.zone_tokens();
@@ -1302,21 +1301,16 @@ where
                     let mut all_logs = Vec::new();
 
                     for (block, receipts, removed) in reverted.chain(committed) {
-                        match logs_utils::matching_block_logs_with_tx_hashes(
-                            api.converter(),
+                        all_logs.extend(logs_utils::matching_block_logs_with_tx_hashes(
                             &filter,
-                            block.sealed_header(),
+                            block.sealed_header().num_hash(),
+                            block.timestamp(),
                             block
                                 .transactions_recovered()
                                 .zip(receipts.iter())
                                 .map(|(tx, receipt)| (*tx.tx_hash(), receipt)),
                             removed,
-                        ) {
-                            Ok(logs) => all_logs.extend(logs),
-                            Err(error) => {
-                                tracing::error!(target: "rpc", %error, "Failed to convert logs");
-                            }
-                        }
+                        ));
                     }
                     futures::stream::iter(all_logs)
                 });
@@ -1591,13 +1585,11 @@ mod tests {
     fn records_block_hashes_as_eip2935_storage_targets() {
         let number = 42;
         let hash = B256::repeat_byte(0x42);
-        let mut state = State::builder()
-            .with_database(revm::database::EmptyDB::default())
-            .build();
-        state.block_hashes.insert(number, hash);
+        let mut block_hashes = alloy_primitives::map::U256Map::default();
+        block_hashes.insert(U256::from(number), hash);
         let mut additional_state = HashedPostState::default();
 
-        record_block_hash_storage_proofs(&mut additional_state, &state);
+        record_block_hash_storage_proofs(&mut additional_state, &block_hashes);
 
         let storage = additional_state
             .storages

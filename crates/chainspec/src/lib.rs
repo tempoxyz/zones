@@ -4,9 +4,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use alloy_eips::{eip1559::BaseFeeParams, eip7840::BlobParams};
-use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{B256, U256};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
     ForkFilter, ForkId, Hardfork, Hardforks, Head,
@@ -251,12 +250,6 @@ impl TempoConsensusSpec for ZoneChainSpec {
     }
 }
 
-impl EthExecutorSpec for ZoneChainSpec {
-    fn deposit_contract_address(&self) -> Option<Address> {
-        self.inner.deposit_contract_address()
-    }
-}
-
 /// Zone chain specification parser.
 #[cfg(feature = "cli")]
 #[derive(Debug, Clone, Default)]
@@ -306,6 +299,7 @@ pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
     use tempo_chainspec::spec::{DEV, MODERATO};

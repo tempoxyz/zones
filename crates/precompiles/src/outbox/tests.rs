@@ -1,6 +1,5 @@
 use super::*;
 
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
@@ -13,10 +12,10 @@ use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 use crate::{
-    create_outbox_precompile,
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        MockL1Reader, TestContext, TestPrecompiles, call_precompile, test_context,
+        test_precompiles, test_storage_provider,
     },
     tx_context,
 };
@@ -34,7 +33,7 @@ const GATEWAY: Address = address!("0x00000000000000000000000000000000000000e5");
 
 struct Harness {
     ctx: TestContext,
-    precompile: DynPrecompile,
+    precompile: TestPrecompiles,
     l1: MockL1Reader,
     token: Address,
 }
@@ -85,8 +84,7 @@ impl Harness {
             })?;
         }
 
-        let env = test_env(&ctx);
-        let precompile = create_outbox_precompile(L1State::new(l1.clone(), PORTAL), &env);
+        let precompile = test_precompiles(&ctx, L1State::new(l1.clone(), PORTAL));
 
         Ok(Self {
             ctx,
@@ -100,7 +98,7 @@ impl Harness {
     fn call_inner(&mut self, caller: Address, fee_payer: Address, data: impl AsRef<[u8]>, with_context: bool, is_static: bool) -> PrecompileResult {
         let _guard = with_context.then(|| tx_context::set_current_transaction(TX_HASH, fee_payer));
         call_precompile(
-            &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
+            &mut self.ctx, &mut self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
         )
     }
 
