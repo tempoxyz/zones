@@ -6,7 +6,7 @@ use std::{
 };
 
 use alloy_consensus::{BlockHeader as _, Sealable as _, Transaction as _};
-use alloy_eips::{BlockId, eip2718::Encodable2718 as _};
+use alloy_eips::{BlockHashOrNumber, BlockId, eip2718::Encodable2718 as _};
 use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -95,13 +95,17 @@ struct GenerateInputArgs {
     #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
     private_key: String,
 
-    /// Override the first Zone block in the batch.
-    #[arg(long)]
-    from_block: Option<u64>,
+    /// Override the first Zone block (inclusive) by number or hash.
+    #[arg(long, value_name = "NUMBER_OR_HASH")]
+    from_block: Option<BlockHashOrNumber>,
 
-    /// Override the final Zone block. Defaults to the current Zone tip.
-    #[arg(long, conflicts_with = "zone_block_count")]
-    to_block: Option<u64>,
+    /// Override the final Zone block (inclusive) by number or hash. Defaults to the Zone tip.
+    #[arg(
+        long,
+        value_name = "NUMBER_OR_HASH",
+        conflicts_with = "zone_block_count"
+    )]
+    to_block: Option<BlockHashOrNumber>,
 
     /// Execute exactly this many Zone blocks, waiting for the target block if necessary.
     #[arg(long, conflicts_with = "to_block")]
@@ -236,13 +240,17 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("discovery", started, ());
 
     let started = start_phase("batch extraction");
+    let (from_override, to_override) = tokio::try_join!(
+        resolve_block_number(&zone_provider, args.from_block),
+        resolve_block_number(&zone_provider, args.to_block),
+    )?;
     let (parent_header, parent_number, extracted) = if let Some(block_count) = args.zone_block_count
     {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
             &zone_provider,
             &tempo_provider,
             discovery,
-            args.from_block,
+            from_override,
             block_count,
             args.wait_timeout.map(Duration::from_secs),
         )
@@ -250,15 +258,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         discovery = updated_discovery;
         (parent_header, parent_number, extracted)
     } else {
-        discover_batch(&zone_provider, &discovery, args.from_block, args.to_block).await?
+        discover_batch(&zone_provider, &discovery, from_override, to_override).await?
     };
-    let from_block = extracted
+    let first_extracted = extracted
         .first()
-        .expect("batch discovery returns a non-empty batch")
-        .input
-        .number;
+        .expect("batch discovery returns a non-empty batch");
+    let from_block = first_extracted.input.number;
     let last_extracted = extracted.last().expect("non-empty");
     let to_block = last_extracted.input.number;
+    validate_boundary_hash(args.from_block, from_block, first_extracted.block_hash)?;
+    validate_boundary_hash(args.to_block, to_block, last_extracted.block_hash)?;
     let next_block_hash = last_extracted.block_hash;
     let finalization_count = extracted
         .iter()
@@ -738,6 +747,40 @@ async fn portal_parent_number(
     }
 }
 
+/// Resolve hashes to heights; extraction below checks that the canonical range still matches them.
+async fn resolve_block_number(
+    zone: &DynProvider<TempoNetwork>,
+    block: Option<BlockHashOrNumber>,
+) -> Result<Option<u64>> {
+    match block {
+        None => Ok(None),
+        Some(BlockHashOrNumber::Number(number)) => Ok(Some(number)),
+        Some(BlockHashOrNumber::Hash(hash)) => {
+            let block = zone
+                .get_block_by_hash(hash)
+                .await
+                .wrap_err_with(|| format!("resolve Zone block hash {hash}"))?
+                .ok_or_else(|| eyre!("Zone block {hash} not found"))?;
+            Ok(Some(block.header.number()))
+        }
+    }
+}
+
+fn validate_boundary_hash(
+    requested: Option<BlockHashOrNumber>,
+    number: u64,
+    actual_hash: B256,
+) -> Result<()> {
+    if let Some(BlockHashOrNumber::Hash(expected_hash)) = requested
+        && expected_hash != actual_hash
+    {
+        bail!(
+            "requested Zone block hash {expected_hash} does not match canonical block {number} ({actual_hash}); the block may have been reorged out"
+        );
+    }
+    Ok(())
+}
+
 async fn discover_batch(
     zone: &DynProvider<TempoNetwork>,
     discovery: &Discovery,
@@ -1142,6 +1185,107 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_range_args(range: &[&str]) -> Result<GenerateInputArgs, clap::Error> {
+        let mut genesis = tempo_chainspec::spec::MODERATO.inner.genesis.clone();
+        genesis.config.chain_id = zone_chain_id(42_431, 1).unwrap();
+        let genesis = serde_json::to_string(&genesis).unwrap();
+        let mut args = vec![
+            "tempo-zone-prover-utils",
+            "generate-input",
+            "--tempo-rpc-url",
+            "http://localhost:8545",
+            "--zone-private-rpc-url",
+            "http://localhost:8544",
+            "--zone-unrestricted-rpc-url",
+            "http://localhost:8546",
+            "--private-key",
+            "unused",
+            "--chain",
+            &genesis,
+        ];
+        args.extend_from_slice(range);
+        let Command::GenerateInput(args) = Cli::try_parse_from(args)?.command;
+        Ok(args)
+    }
+
+    #[test]
+    fn parses_number_and_hash_boundaries() {
+        let hash = B256::repeat_byte(0xab);
+        let hash_arg = hash.to_string();
+        for (from, to, expected_from, expected_to) in [
+            ("100", "120", 100.into(), 120.into()),
+            ("100", hash_arg.as_str(), 100.into(), hash.into()),
+            (hash_arg.as_str(), "120", hash.into(), 120.into()),
+            (
+                hash_arg.as_str(),
+                hash_arg.as_str(),
+                hash.into(),
+                hash.into(),
+            ),
+        ] {
+            let args = parse_range_args(&["--from-block", from, "--to-block", to]).unwrap();
+            assert_eq!(args.from_block, Some(expected_from));
+            assert_eq!(args.to_block, Some(expected_to));
+        }
+        let args =
+            parse_range_args(&["--from-block", &hash_arg, "--zone-block-count", "20"]).unwrap();
+        assert_eq!(args.from_block, Some(hash.into()));
+        assert_eq!(args.zone_block_count, Some(20));
+        assert!(parse_range_args(&["--from-block", "0xinvalid"]).is_err());
+        assert!(parse_range_args(&["--to-block", "latest"]).is_err());
+        assert!(parse_range_args(&["--to-block", &hash_arg, "--zone-block-count", "20"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolves_hashes_and_rejects_missing_blocks() {
+        let asserter = alloy_transport::mock::Asserter::new();
+        let zone = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        assert_eq!(resolve_block_number(&zone, None).await.unwrap(), None);
+        assert_eq!(
+            resolve_block_number(&zone, Some(100.into())).await.unwrap(),
+            Some(100)
+        );
+
+        let mut header = TempoHeader::default();
+        header.inner.number = 120;
+        let hash = header.hash_slow();
+        let block = RpcBlock::new(
+            TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header::new(header),
+                timestamp_millis: 0,
+            },
+            BlockTransactions::Hashes(vec![]),
+        );
+        asserter.push_success(&Some(block));
+        assert_eq!(
+            resolve_block_number(&zone, Some(hash.into()))
+                .await
+                .unwrap(),
+            Some(120)
+        );
+        asserter.push_success(&Option::<RpcBlock>::None);
+        let error = resolve_block_number(&zone, Some(hash.into()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn rejects_a_hash_that_no_longer_matches_the_extracted_boundary() {
+        let hash = B256::repeat_byte(0xab);
+        assert!(validate_boundary_hash(None, 100, hash).is_ok());
+        assert!(validate_boundary_hash(Some(100.into()), 100, hash).is_ok());
+        assert!(validate_boundary_hash(Some(hash.into()), 100, hash).is_ok());
+        let error = validate_boundary_hash(Some(hash.into()), 100, B256::ZERO).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match canonical block 100")
+        );
+    }
 
     #[test]
     fn derives_an_exact_counted_zone_range() {
