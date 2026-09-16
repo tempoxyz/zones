@@ -424,6 +424,7 @@ fn recover_encrypted_payload(
         &deposit.keyIndex,
         &deposit.encrypted.ephemeralPubkeyX,
         &deposit.sender,
+        None,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     aes_gcm::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;

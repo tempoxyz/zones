@@ -281,7 +281,13 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
 
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
+    let info = crate::ecies::hkdf_info(
+        &PORTAL,
+        &fixture.key_index,
+        &fixture.eph_pub_x,
+        &ALICE,
+        None,
+    );
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&BOB, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -675,7 +681,13 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
     let portal = PORTAL;
-    let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
+    let info = crate::ecies::hkdf_info(
+        &portal,
+        &fixture.key_index,
+        &fixture.eph_pub_x,
+        &ALICE,
+        None,
+    );
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -748,7 +760,13 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x, &ALICE);
+    let info = crate::ecies::hkdf_info(
+        &PORTAL,
+        &fixture.key_index,
+        &fixture.eph_pub_x,
+        &ALICE,
+        None,
+    );
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
@@ -1114,4 +1132,17 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     assert!(harness.pending_withdrawals()?.is_empty());
     assert_eq!(harness.fallback_recipient(nonce)?, Address::ZERO);
     Ok(())
+}
+
+#[test]
+fn forced_exit_execution_remains_disabled_before_processing_is_implemented() {
+    let queued = QueuedDeposit {
+        depositType: DepositType::ForcedExit,
+        rejected: false,
+        depositData: alloy_primitives::Bytes::new(),
+    };
+    assert!(matches!(
+        DecodedQueuedDeposit::try_from(queued),
+        Err(ZonePrecompileError::MalformedCalldata)
+    ));
 }
