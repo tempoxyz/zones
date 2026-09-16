@@ -67,6 +67,23 @@ struct Cli {
 enum Command {
     /// Generate and locally validate an SPF batch witness.
     GenerateInput(GenerateInputArgs),
+    /// Send a saved witness to a prover and save its output and proof.
+    Prove(ProveArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ProveArgs {
+    /// Batch witness JSON produced by generate-input.
+    #[arg(long, short, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Prover TCP socket, including a TCP-to-vsock proxy for a Nitro enclave.
+    #[arg(long, value_name = "HOST:PORT")]
+    target: String,
+
+    /// Write the complete successful JSON response, including output and proofBundle.
+    #[arg(long, short, value_name = "PATH")]
+    output: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
@@ -180,6 +197,7 @@ async fn main() -> Result<()> {
     init_tracing(&cli.log_filter)?;
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
+        Command::Prove(args) => prove(args).await,
     }
 }
 
@@ -393,11 +411,72 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     Ok(())
 }
 
-async fn send_to_prover(
+async fn prove(args: ProveArgs) -> Result<()> {
+    let input = std::fs::read(&args.input)
+        .wrap_err_with(|| format!("read batch witness from {}", args.input.display()))?;
+    // Forward the witness unchanged: the remote prover selects the STF and witness schema.
+    // In particular, do not drop fields introduced by a newer prover revision.
+    let witness: serde_json::Value =
+        serde_json::from_slice(&input).context("parse batch witness JSON")?;
+    if !witness.is_object() {
+        bail!("batch witness must be a JSON object");
+    }
+    let request_id = format!("prove-{}", keccak256(&input));
+    let request = serde_json::json!({
+        "version": PROTOCOL_VERSION,
+        "requestId": request_id,
+        "witness": witness,
+    });
+    let (_, response) = exchange_with_prover(&args.target, &request).await?;
+    validate_proof_response(&response, &request_id)?;
+    let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
+    std::fs::write(&args.output, &json)
+        .wrap_err_with(|| format!("write prover response to {}", args.output.display()))?;
+    println!("Saved prover output and proof to {}", args.output.display());
+    Ok(())
+}
+
+fn validate_proof_response(response: &serde_json::Value, request_id: &str) -> Result<()> {
+    if response["version"].as_u64() != Some(u64::from(PROTOCOL_VERSION)) {
+        bail!("target prover responded with an invalid or unsupported protocol version");
+    }
+    let response_id = response["requestId"].as_str();
+    if response_id.is_some_and(|id| id != request_id) {
+        bail!("target prover response request ID does not match {request_id:?}");
+    }
+    match response["status"].as_str() {
+        Some("ok") => {
+            if response_id != Some(request_id) {
+                bail!("target prover response is missing requestId");
+            }
+            if !response["output"].is_object() {
+                bail!("target prover response is missing batch output");
+            }
+            for field in ["verifierConfig", "proof"] {
+                let bytes: Bytes =
+                    serde_json::from_value(response["proofBundle"][field].clone())
+                        .wrap_err_with(|| format!("invalid or missing proofBundle.{field}"))?;
+                if bytes.is_empty() {
+                    bail!("target prover returned empty proofBundle.{field}");
+                }
+            }
+        }
+        Some("error") => bail!(
+            "target prover rejected request ({}): {}",
+            response["code"].as_str().unwrap_or("unknown"),
+            response["message"]
+                .as_str()
+                .unwrap_or("no diagnostic message"),
+        ),
+        _ => bail!("target prover returned an invalid response status"),
+    }
+    Ok(())
+}
+
+async fn exchange_with_prover(
     target: &str,
-    request: &VerifyRequest,
-    expected_output: &BatchOutput,
-) -> Result<usize> {
+    request: &impl serde::Serialize,
+) -> Result<(usize, serde_json::Value)> {
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
@@ -406,12 +485,22 @@ async fn send_to_prover(
         .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
-    let response: VerifyResponse = connection
+    let response = connection
         .receive()
         .await
         .wrap_err_with(|| format!("read response from target prover at {target}"))?
         .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
+    Ok((request_bytes, response))
+}
 
+async fn send_to_prover(
+    target: &str,
+    request: &VerifyRequest,
+    expected_output: &BatchOutput,
+) -> Result<usize> {
+    let (request_bytes, response) = exchange_with_prover(target, request).await?;
+    let response: VerifyResponse =
+        serde_json::from_value(response).context("decode target prover response")?;
     match response {
         VerifyResponse::Ok {
             version,
@@ -1186,6 +1275,142 @@ fn format_duration(duration: Duration) -> String {
 mod tests {
     use super::*;
 
+    fn successful_proof_response(request_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "requestId": request_id,
+            "status": "ok",
+            "output": { "withdrawalQueueHash": B256::ZERO },
+            "proofBundle": { "verifierConfig": "0x01", "proof": "0x1234" },
+            "futureField": { "preserved": true },
+        })
+    }
+
+    #[test]
+    fn parses_prove_without_rpc_or_wallet_arguments() {
+        let cli = Cli::try_parse_from([
+            "tempo-zone-prover-utils",
+            "prove",
+            "--input",
+            "witness.json",
+            "--target",
+            "localhost:5000",
+            "--output",
+            "proof.json",
+        ])
+        .unwrap();
+        let Command::Prove(args) = cli.command else {
+            panic!("expected prove")
+        };
+        assert_eq!(args.input, PathBuf::from("witness.json"));
+        assert_eq!(args.target, "localhost:5000");
+        assert_eq!(args.output, PathBuf::from("proof.json"));
+        assert!(
+            Cli::try_parse_from([
+                "tempo-zone-prover-utils",
+                "prove",
+                "--input",
+                "witness.json",
+                "--target",
+                "localhost:5000",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_proof_responses() {
+        let valid = successful_proof_response("test");
+        validate_proof_response(&valid, "test").unwrap();
+        assert!(validate_proof_response(&valid, "different").is_err());
+        for (pointer, value) in [
+            ("/version", serde_json::json!(PROTOCOL_VERSION + 1)),
+            ("/requestId", serde_json::Value::Null),
+            ("/status", serde_json::json!("unknown")),
+            ("/output", serde_json::Value::Null),
+            ("/proofBundle", serde_json::Value::Null),
+            ("/proofBundle/proof", serde_json::json!("0x")),
+            ("/proofBundle/proof", serde_json::json!("not hex")),
+            ("/proofBundle/verifierConfig", serde_json::json!("0x")),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                validate_proof_response(&invalid, "test").is_err(),
+                "{pointer}"
+            );
+        }
+        let error = validate_proof_response(
+            &serde_json::json!({
+                "version": PROTOCOL_VERSION, "status": "error",
+                "code": "attestation_unavailable", "message": "NSM unavailable",
+            }),
+            "test",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("attestation_unavailable"));
+        assert!(error.to_string().contains("NSM unavailable"));
+    }
+
+    #[tokio::test]
+    async fn prove_preserves_witness_and_response_and_does_not_save_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("prover-cli-prove-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("witness.json");
+        let output = directory.join("proof.json");
+        let witness = serde_json::json!({
+            "publicInputs": { "zoneId": 2 }, "zoneBlocks": [],
+            "futureWitnessField": "preserved",
+        });
+        std::fs::write(&input, serde_json::to_vec(&witness).unwrap()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let mut success = None;
+            for attempt in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+                let request: serde_json::Value = connection.receive().await.unwrap().unwrap();
+                assert_eq!(request["version"], PROTOCOL_VERSION);
+                assert_eq!(request["witness"], witness);
+                let response = if attempt == 0 {
+                    let response =
+                        successful_proof_response(request["requestId"].as_str().unwrap());
+                    success = Some(response.clone());
+                    response
+                } else {
+                    serde_json::json!({
+                        "version": PROTOCOL_VERSION, "requestId": request["requestId"],
+                        "status": "error", "code": "verification_failed", "message": "bad witness",
+                    })
+                };
+                connection.send(&response).await.unwrap();
+            }
+            success.unwrap()
+        });
+        prove(ProveArgs {
+            input: input.clone(),
+            target: target.clone(),
+            output: output.clone(),
+        })
+        .await
+        .unwrap();
+        let saved = std::fs::read(&output).unwrap();
+        let error = prove(ProveArgs {
+            input,
+            target,
+            output: output.clone(),
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("verification_failed"));
+        assert_eq!(std::fs::read(&output).unwrap(), saved);
+        let response: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(response, server.await.unwrap());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     fn parse_range_args(range: &[&str]) -> Result<GenerateInputArgs, clap::Error> {
         let mut genesis = tempo_chainspec::spec::MODERATO.inner.genesis.clone();
         genesis.config.chain_id = zone_chain_id(42_431, 1).unwrap();
@@ -1205,7 +1430,9 @@ mod tests {
             &genesis,
         ];
         args.extend_from_slice(range);
-        let Command::GenerateInput(args) = Cli::try_parse_from(args)?.command;
+        let Command::GenerateInput(args) = Cli::try_parse_from(args)?.command else {
+            unreachable!("generate-input was requested");
+        };
         Ok(args)
     }
 
