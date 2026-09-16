@@ -10,6 +10,8 @@ import {
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptionKeyEntry,
+    ForcedExit,
+    ForcedExitMetadata,
     IVerifier,
     IZoneMessenger,
     IZonePortal,
@@ -53,7 +55,15 @@ contract ZonePortal is IZonePortal {
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
-    /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
+    /// @notice Fixed TIP-1012 compensation in six-decimal token base units.
+    uint128 public constant FORCED_EXIT_COMPENSATION = 100_000;
+
+    /// @notice Shared admission units consumed by one forced request (one actual queue entry).
+    /// @dev Conservative execution bound: 210 public units admit at most 15 forced exits.
+    ///      Re-measure the mixed workload before increasing this limit.
+    uint64 public constant FORCED_EXIT_ADMISSION_WEIGHT = 14;
+
+    /// @notice Maximum admission units that may be consumed by this portal in one Tempo block.
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
     ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
     ///      below the buffered 200,000,000 gas ceiling.
@@ -214,6 +224,7 @@ contract ZonePortal is IZonePortal {
 
     /// @dev Per-Tempo-block deposit admission counter. Appended for upgrade-safe storage layout.
     uint64 internal _depositCountBlock;
+    // Ordinary deposits/bounce-backs cost one unit; forced exits cost FORCED_EXIT_ADMISSION_WEIGHT.
     uint64 internal _depositsInCurrentBlock;
 
     /// @dev Retired per-Tempo-block token-enablement counters, retained for storage compatibility.
@@ -237,6 +248,15 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Whether the T13 token cursor has been authenticated by an operational batch.
     bool public tokenEnablementCursorInitialized;
+
+    uint184 private _reservedT13TokenCursorPadding;
+
+    /// @notice Protocol admission version. Zero disables forced exits.
+    /// @dev No public setter: only a coordinated protocol upgrade may activate admission after
+    ///      all nodes support execution and settlement. Existing/new portals remain disabled.
+    uint64 public forcedExitVersion;
+    uint64 public forcedExitCount;
+    mapping(uint64 requestId => ForcedExitMetadata) public forcedExitRequests;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -942,8 +962,27 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
-        if (depositCount - lastProcessedDepositNumber >= maximum) {
+        return _recordDeposit(newCurrentDepositQueueHash, maximum, 1);
+    }
+
+    function _recordDeposit(
+        bytes32 newCurrentDepositQueueHash,
+        uint64 maximum,
+        uint64 weight
+    )
+        internal
+        returns (uint64 thisDeposit)
+    {
+        uint64 currentBlock = uint64(block.number);
+        if (_depositCountBlock != currentBlock) {
+            _depositCountBlock = currentBlock;
+            _depositsInCurrentBlock = 0;
+        }
+        if (_depositsInCurrentBlock + weight > maximum) {
             revert DepositBlockCapacityExceeded(maximum);
+        }
+        unchecked {
+            _depositsInCurrentBlock += weight;
         }
 
         currentDepositQueueHash = newCurrentDepositQueueHash;
@@ -989,6 +1028,73 @@ contract ZonePortal is IZonePortal {
         return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
+    /// @inheritdoc IZonePortal
+    function requestForcedExit(
+        address token,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted
+    )
+        external
+        whenNotPaused
+        returns (uint64 requestId, uint64 depositNumber)
+    {
+        if (forcedExitVersion != 1) revert ForcedExitsNotActive();
+        _requireAllowedDepositor(msg.sender);
+
+        // Enabled tokens have already passed the native TIP-20 factory validation. TIP-20
+        // decimals are fixed at six. depositsActive controls principal deposits only.
+        if (!_tokenConfigs[token].enabled) revert TokenNotEnabled();
+        if (
+            !Secp256k1Lib.isCompressedYParity(encrypted.ephemeralPubkeyYParity)
+                || !Secp256k1Lib.isValidX(encrypted.ephemeralPubkeyX)
+        ) {
+            revert InvalidEphemeralPubkey();
+        }
+        uint256 length = encrypted.ciphertext.length;
+        if (length < 384 || length > 2368 || length % 32 != 0) {
+            revert InvalidForcedExitCiphertextLength(length);
+        }
+        _validateEncryptionKey(keyIndex);
+
+        // Require direct admin delivery; receive-policy diversion must not admit a request.
+        ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION);
+        if (!_tryTransfer(token, admin, FORCED_EXIT_COMPENSATION)) revert CallbackRejected();
+
+        requestId = ++forcedExitCount;
+        ForcedExit memory entry = ForcedExit({
+            requestId: requestId,
+            token: token,
+            keyIndex: keyIndex,
+            encrypted: encrypted,
+            feePayer: msg.sender,
+            requestedAtBlock: uint64(block.number),
+            requestedAtTime: uint64(block.timestamp)
+        });
+
+        // Ordinary deposits, withdrawal bounce-backs, and forced-exit requests all enter
+        // the same ordered inbox queue.
+        depositNumber = _recordDeposit(
+            DepositQueueLib.enqueueForcedExit(currentDepositQueueHash, entry),
+            MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE,
+            FORCED_EXIT_ADMISSION_WEIGHT
+        );
+        forcedExitRequests[requestId] = ForcedExitMetadata(token, depositNumber);
+
+        emit ForcedExitRequested(depositNumber, entry);
+    }
+
+    function _validateEncryptionKey(uint256 keyIndex) internal view {
+        (bool valid,) = isEncryptionKeyValid(keyIndex);
+        if (!valid) {
+            if (keyIndex >= _encryptionKeys.length) {
+                revert InvalidEncryptionKeyIndex(keyIndex);
+            }
+            EncryptionKeyEntry storage key = _encryptionKeys[keyIndex];
+            EncryptionKeyEntry storage nextKey = _encryptionKeys[keyIndex + 1];
+            revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
+        }
+    }
+
     function _deposit(
         address _token,
         uint128 amount,
@@ -1029,16 +1135,7 @@ contract ZonePortal is IZonePortal {
             );
         }
 
-        // Validate encryption key
-        (bool valid,) = isEncryptionKeyValid(keyIndex);
-        if (!valid) {
-            if (keyIndex >= _encryptionKeys.length) {
-                revert InvalidEncryptionKeyIndex(keyIndex);
-            }
-            EncryptionKeyEntry storage key = _encryptionKeys[keyIndex];
-            EncryptionKeyEntry storage nextKey = _encryptionKeys[keyIndex + 1];
-            revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
-        }
+        _validateEncryptionKey(keyIndex);
 
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
