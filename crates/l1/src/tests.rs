@@ -7,7 +7,7 @@ use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
 use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
 use serde::Deserialize;
-use std::{collections::HashSet, time::Duration};
+use std::{collections::BTreeSet, time::Duration};
 use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
 use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_primitives::{TempoReceipt, TempoTxType};
@@ -157,6 +157,7 @@ fn test_subscriber_with_checkpoint(checkpoint: NumHash) -> L1Subscriber<MockEthP
         deposit_queue: DepositQueue::default(),
         enabled_tokens: crate::state::EnabledTokenRegistry::default(),
         l1_state_cache: crate::L1StateCache::new(),
+        verified_l1_state_cache: None,
         block_tracker: L1BlockTracker::default(),
         leadership_sink: None,
         finalized_batch_submissions: None,
@@ -430,7 +431,7 @@ fn subscriber_applies_state_and_records_observation() {
         cache.invalidate_and_set_anchor(9, []);
         cache.set(cached_address, cached_slot, 9, cached_value);
     }
-    subscriber.update_l1_state_anchor(10, &HashSet::new());
+    subscriber.update_l1_state_anchor(10, BTreeSet::new());
     subscriber.block_tracker.record(anchor).unwrap();
 
     assert_eq!(
@@ -703,7 +704,7 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
-fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
+fn update_l1_state_anchor_applies_root_changes_before_publishing_coverage() {
     let subscriber = test_subscriber(0);
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
@@ -723,7 +724,7 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
         .lock()
         .set(stable_account, stable_slot, 10, stable_value);
 
-    subscriber.update_l1_state_anchor(10, &HashSet::new());
+    subscriber.update_l1_state_anchor(10, BTreeSet::new());
     assert_eq!(
         subscriber
             .l1_state_cache
@@ -732,7 +733,7 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
         Some(value)
     );
 
-    subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
+    subscriber.update_l1_state_anchor(11, BTreeSet::from([TIP403_REGISTRY_ADDRESS]));
     let mut cache = subscriber.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
@@ -1870,7 +1871,7 @@ fn extracts_finalized_batch_submission_for_observer() {
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let (_, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
 
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].block, block);
@@ -1905,7 +1906,7 @@ fn extracts_t13_finalized_batch_submission_for_observer() {
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![log]);
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let (_, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
 
     assert_eq!(submissions.len(), 1);
     assert!(!submissions[0].is_legacy);
@@ -1956,7 +1957,7 @@ fn finalized_batch_observer_ignores_rpc_log_metadata() {
     );
 
     let block = NumHash::new(10, B256::with_last_byte(0x10));
-    let (_, _, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let (_, _, submissions) = subscriber.extract_events(block, &[receipt]).unwrap();
 
     assert_eq!(submissions.len(), 1);
     assert_eq!(submissions[0].block, block);
@@ -1993,52 +1994,10 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _, portal_logs, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let (events, portal_logs, _) = subscriber.extract_events(block, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
     assert_eq!(portal_logs.unwrap().len(), 1);
-}
-
-#[test]
-fn pause_events_invalidate_cached_portal_storage() {
-    let subscriber = test_subscriber(9);
-    let portal = subscriber.config.portal_address;
-    let account = address!("0x0000000000000000000000000000000000000123");
-    let pause_slot = B256::with_last_byte(25);
-    {
-        let mut cache = subscriber.l1_state_cache.lock();
-        cache.set(portal, pause_slot, 0, B256::with_last_byte(0x42));
-    }
-    let logs = vec![
-        Log {
-            inner: alloy_primitives::Log {
-                address: portal,
-                data: crate::abi::ZonePortal::PortalPaused { account }.encode_log_data(),
-            },
-            ..Default::default()
-        },
-        Log {
-            inner: alloy_primitives::Log {
-                address: portal,
-                data: crate::abi::ZonePortal::AbdicationScheduled {
-                    capability: crate::abi::ZonePortal::Capability::PausePortal,
-                    effectiveAt: 0,
-                }
-                .encode_log_data(),
-            },
-            ..Default::default()
-        },
-    ];
-    let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
-
-    let block = NumHash::new(1, B256::with_last_byte(0x10));
-    let (_, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
-    assert!(invalidated.contains(&portal));
-    subscriber.update_l1_state_anchor(1, &invalidated);
-    assert_eq!(
-        subscriber.l1_state_cache.lock().get(portal, pause_slot, 1),
-        None
-    );
 }
 
 #[tokio::test]

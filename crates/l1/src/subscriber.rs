@@ -2,15 +2,20 @@ use crate::queue::DeferredPortalWork;
 
 use super::*;
 use crate::{
-    EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
+    EncryptionKeyRing,
+    metrics::L1SubscriberMetrics,
+    state::{
+        EnabledTokenRegistry, L1RpcClient, L1StateCache, VerifiedL1StateCache,
+        verified::{VerifiedAccountState, root_proof_targets, verify_multi_proof},
+    },
 };
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::stream;
-use std::{collections::HashSet, ops::RangeInclusive};
-use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-use tempo_primitives::is_tip20_prefix;
-
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::RangeInclusive,
+};
+use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 
 /// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
 /// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
@@ -477,22 +482,14 @@ const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 
 type L1ProcessedEvents = (
     L1PortalEvents,
-    HashSet<Address>,
     Option<Vec<alloy_primitives::Log>>,
     Vec<FinalizedBatchSubmission>,
 );
-
-fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
-    (address == TIP403_REGISTRY_ADDRESS
-        || (is_tip20_prefix(address) && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH)))
-    .then_some(TIP403_REGISTRY_ADDRESS)
-}
-
-fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Address> {
-    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
-
-    (topic0 == Some(&TokenEnabled::SIGNATURE_HASH)).then_some(TIP403_REGISTRY_ADDRESS)
-}
+type FetchedL1Block = (
+    SealedHeader<TempoHeader>,
+    L1ProcessedEvents,
+    BTreeMap<Address, VerifiedAccountState>,
+);
 
 /// Sink for leadership transitions decoded from verified finalized receipts.
 ///
@@ -535,6 +532,8 @@ pub struct L1Subscriber<P> {
     pub(crate) enabled_tokens: EnabledTokenRegistry,
     /// Shared L1 state cache updated after each finalized block.
     pub(crate) l1_state_cache: L1StateCache,
+    /// Shared authenticated account roots and payload-proved slot values.
+    pub(crate) verified_l1_state_cache: Option<VerifiedL1StateCache>,
     /// Validated and applied L1 anchors shared with follower block import.
     pub(crate) block_tracker: L1BlockTracker,
     /// Optional sink for leadership transitions.
@@ -591,6 +590,7 @@ where
         deposit_queue: DepositQueue,
         enabled_tokens: EnabledTokenRegistry,
         l1_state_cache: L1StateCache,
+        verified_l1_state_cache: Option<VerifiedL1StateCache>,
         block_tracker: L1BlockTracker,
         leadership_sink: Option<Arc<dyn LeadershipSink>>,
         finalized_batch_submissions: Option<tokio::sync::mpsc::Sender<FinalizedBatchSubmission>>,
@@ -602,6 +602,7 @@ where
             deposit_queue,
             enabled_tokens,
             l1_state_cache,
+            verified_l1_state_cache,
             block_tracker,
             leadership_sink,
             finalized_batch_submissions,
@@ -810,18 +811,35 @@ where
         from: u64,
         to: u64,
     ) -> Result<(), L1SubscriberError> {
-        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to);
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to, true);
 
         let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
 
-        while let Some((sealed, processed_events)) = blocks.try_next().await? {
+        while let Some((sealed, processed_events, verified_accounts)) = blocks.try_next().await? {
             let block_number = sealed.number();
-            let (events, invalidated, portal_logs, finalized_batches) = processed_events;
+            let (events, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let anchor = sealed.num_hash();
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
+            let root_changes = if let Some(verified) = &self.verified_l1_state_cache {
+                Some(
+                    verified
+                        .record_verified_roots(
+                            anchor,
+                            verified_accounts
+                                .into_iter()
+                                .map(|(account, state)| (account, state.storage_root)),
+                        )
+                        .map_err(L1SubscriberError::fatal_from_err(
+                            block_number,
+                            "verified storage-root publication",
+                        ))?,
+                )
+            } else {
+                None
+            };
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.leadership_sink {
@@ -888,7 +906,9 @@ where
             // Publish derived L1 state only after the header has been admitted to every
             // configured retention sink and the contiguous observation tracker.
             self.apply_enabled_token_events(&events);
-            self.update_l1_state_anchor(block_number, &invalidated);
+            if let Some(accounts) = root_changes {
+                self.update_l1_state_anchor(block_number, accounts);
+            }
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
             }
@@ -921,24 +941,33 @@ where
 
     /// Fetch, authenticate, and decode an inclusive finalized L1 block range in order.
     ///
-    /// RPC work is pipelined up to the configured concurrency.
+    /// RPC work is pipelined up to the configured concurrency. When `authenticate_roots` is true,
+    /// Portal and TIP-403 account roots are authenticated concurrently with the block receipts.
     fn fetch_l1_blocks<'a>(
         &'a self,
         l1_provider: &'a impl Provider<TempoNetwork>,
         range: RangeInclusive<u64>,
-    ) -> impl Stream<
-        Item = Result<(SealedHeader<TempoHeader>, L1ProcessedEvents), L1SubscriberError>,
-    > + Send
-    + 'a {
+        authenticate_roots: bool,
+    ) -> impl Stream<Item = Result<FetchedL1Block, L1SubscriberError>> + Send + 'a {
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.block_tracker.clone();
+        let should_authenticate_roots =
+            authenticate_roots && self.verified_l1_state_cache.is_some();
+        let portal_address = self.config.portal_address;
+        let rpc_client = should_authenticate_roots.then(|| {
+            L1RpcClient::from_provider(
+                l1_provider.root().clone(),
+                tokio::runtime::Handle::current(),
+            )
+        });
 
         stream::iter(range)
             .map(move |block_number| {
                 let provider = l1_provider;
                 let subscriber_metrics = subscriber_metrics.clone();
                 let block_tracker = block_tracker.clone();
+                let rpc_client = rpc_client.clone();
                 async move {
                     block_tracker.wait_for_capacity(block_number).await?;
                     let start = std::time::Instant::now();
@@ -955,19 +984,33 @@ where
                             fetch_failures.increment(1);
                         })?;
                     let block_hash = header_resp.hash();
+                    let block = NumHash::new(block_number, block_hash);
                     let receipts = fetch_and_verify_receipts_for_header(
                         provider,
-                        NumHash::new(block_number, block_hash),
+                        block,
                         header_resp.receipts_root(),
                         header_resp.logs_bloom(),
-                    )
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
+                    );
+                    let verified_roots = async {
+                        let Some(rpc_client) = rpc_client else {
+                            return Ok::<_, L1SubscriberError>(BTreeMap::new());
+                        };
+                        let targets = root_proof_targets([portal_address, TIP403_REGISTRY_ADDRESS]);
+                        let responses = rpc_client
+                            .get_multi_proof(BlockId::hash(block_hash), &targets)
+                            .await?;
+                        verify_multi_proof(header_resp.state_root(), &targets, responses).map_err(
+                            L1SubscriberError::fatal_from_err(
+                                block_number,
+                                "account storage-root verification",
+                            ),
+                        )
+                    };
+                    let (receipts, verified_roots) = tokio::try_join!(receipts, verified_roots)
+                        .inspect_err(|_| fetch_failures.increment(1))?;
                     // Abort before enqueueing work or advancing caches if a portal log fails to decode.
                     let processed_events = self
-                        .extract_events(NumHash::new(block_number, block_hash), &receipts)
+                        .extract_events(block, &receipts)
                         .inspect_err(|_| {
                             subscriber_metrics.decode_fence_failures.increment(1);
                         })
@@ -984,7 +1027,7 @@ where
                         "Fetched, validated, and decoded L1 block data"
                     );
                     let sealed = SealedHeader::seal_slow(header_resp.inner.inner);
-                    Ok::<_, L1SubscriberError>((sealed, processed_events))
+                    Ok::<_, L1SubscriberError>((sealed, processed_events, verified_roots))
                 }
             })
             .buffered(concurrency)
@@ -1046,9 +1089,9 @@ where
             return Ok(());
         }
 
-        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number);
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number, false);
         let mut deferred: Option<DeferredPortalWork> = None;
-        while let Some((header, (events, _, _, _))) = blocks.try_next().await? {
+        while let Some((header, (events, _, _), _)) = blocks.try_next().await? {
             let block = L1BlockDeposits { header, events };
             if let Some(deferred) = &mut deferred {
                 deferred.push(block);
@@ -1072,7 +1115,7 @@ where
         Ok(())
     }
 
-    /// Extract portal events and raw-cache mutation barriers from fetched receipts.
+    /// Extract portal events and optional evidence from fetched receipts.
     ///
     /// A decode failure of a portal log is an error for the whole block. A silently dropped
     /// event would diverge this node from its peers.
@@ -1084,7 +1127,6 @@ where
         let block_number = block.number;
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
-        let mut invalidated = HashSet::new();
         let mut portal_logs = self.config.retain_portal_evidence.then(Vec::new);
         let finalized_batches = if self.finalized_batch_submissions.is_some() {
             extract_finalized_batch_submissions(block, portal_address, receipts)
@@ -1101,29 +1143,17 @@ where
                     if retain_receipt_logs && let Some(logs) = &mut portal_logs {
                         logs.push(log.inner.clone());
                     }
-                    invalidated.insert(address);
-                    if let Some(address) =
-                        portal_event_cache_invalidation_address(log.topics().first())
-                    {
-                        invalidated.insert(address);
-                    }
                     portal_events
                         .push_log(log, block_number)
                         .wrap_err_with(|| {
                             format!("failed to decode a portal event in L1 block {block_number}")
                         })?;
-                } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
-                    invalidated.extend([address, log.address()]);
                 }
             }
         }
 
-        // Enabling may migrate token-local policy storage into TIP-403.
-        for event in &portal_events.enabled_tokens {
-            invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
-        }
         self.record_portal_event_metrics(&portal_events);
-        Ok((portal_events, invalidated, portal_logs, finalized_batches))
+        Ok((portal_events, portal_logs, finalized_batches))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -1182,11 +1212,11 @@ where
     pub(crate) fn update_l1_state_anchor(
         &self,
         number: u64,
-        invalidated_accounts: &HashSet<Address>,
+        invalidated_accounts: BTreeSet<Address>,
     ) {
         self.l1_state_cache
             .lock()
-            .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
+            .invalidate_and_set_anchor(number, invalidated_accounts);
     }
 }
 
@@ -1249,29 +1279,4 @@ pub fn verify_receipts_against_header(
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy_primitives::address;
-
-    #[test]
-    fn token_policy_updates_invalidate_the_registry() {
-        let token = address!("20C0000000000000000000000000000000000999");
-
-        assert_eq!(
-            cache_invalidation_address(token, Some(&TransferPolicyUpdate::SIGNATURE_HASH)),
-            Some(TIP403_REGISTRY_ADDRESS)
-        );
-    }
-
-    #[test]
-    fn token_enabled_events_invalidate_the_registry() {
-        assert_eq!(
-            portal_event_cache_invalidation_address(Some(&TokenEnabled::SIGNATURE_HASH)),
-            Some(TIP403_REGISTRY_ADDRESS)
-        );
-        assert_eq!(portal_event_cache_invalidation_address(None), None);
-    }
 }
