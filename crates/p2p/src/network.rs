@@ -24,11 +24,6 @@ pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
 pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
 /// Follower-to-leader settlement signature channel.
 pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
-pub(crate) const BLOCK_BACKLOG: usize = 128;
-/// Forwarded transactions are retried from the sender's pool, so a small receive backlog bounds
-/// memory before the transaction-specific wire limit can run without sacrificing eventual relay.
-pub(crate) const TRANSACTION_BACKLOG: usize = 4;
-
 /// Maximum raw EIP-2718 transaction frame accepted from another sequencer.
 ///
 /// This is eight times Reth's default 128 KiB transaction input limit, leaving room for operators

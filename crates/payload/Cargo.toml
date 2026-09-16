@@ -41,11 +41,11 @@ reth-transaction-pool.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
-evm2.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
+evm2.workspace = true
 
 # misc
 eyre.workspace = true

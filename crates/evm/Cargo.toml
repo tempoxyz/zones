@@ -36,10 +36,10 @@ reth-primitives-traits.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-eip7928.workspace = true
-evm2.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["reqwest"] }
 alloy-sol-types.workspace = true
+evm2.workspace = true
 
 # misc
 thiserror.workspace = true

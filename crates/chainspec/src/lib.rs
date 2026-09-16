@@ -5,8 +5,6 @@
 
 use alloy_eips::{eip1559::BaseFeeParams, eip7840::BlobParams};
 use alloy_genesis::Genesis;
-#[cfg(test)]
-use alloy_primitives::Address;
 use alloy_primitives::{B256, U256};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
@@ -301,6 +299,8 @@ pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloy_primitives::Address;
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
     use tempo_chainspec::spec::{DEV, MODERATO};
