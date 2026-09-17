@@ -123,17 +123,17 @@ impl Cli {
 #[derive(Clone, Debug, Args)]
 struct Timeouts {
     /// Deadline for receiving one complete logical request.
-    #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "5", value_parser = positive_seconds)]
+    #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
     request: Duration,
     /// Deadline for processing and proving one request.
-    #[arg(long = "proving-timeout-secs", env = "SPF_PROVING_TIMEOUT_SECS", default_value = "30", value_parser = positive_seconds)]
+    #[arg(long = "proving-timeout-secs", env = "SPF_PROVING_TIMEOUT_SECS", default_value = "30", value_parser = non_zero_secs)]
     proving: Duration,
     /// Deadline for writing one complete logical response.
-    #[arg(long = "response-timeout-secs", env = "SPF_RESPONSE_TIMEOUT_SECS", default_value = "5", value_parser = positive_seconds)]
+    #[arg(long = "response-timeout-secs", env = "SPF_RESPONSE_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
     response: Duration,
 }
 
-fn positive_seconds(value: &str) -> Result<Duration, String> {
+fn non_zero_secs(value: &str) -> Result<Duration, String> {
     let seconds = value
         .parse::<u64>()
         .map_err(|error| format!("invalid duration: {error}"))?;
@@ -269,7 +269,7 @@ async fn handle_connection<T>(
         biased;
         result = &mut worker => match result {
             Ok(response) => response,
-            Err(error) => error_response(
+            Err(error) => err_response(
                 request_id.clone(),
                 ErrorCode::InternalError,
                 format!("proving worker failed: {error}"),
@@ -279,7 +279,7 @@ async fn handle_connection<T>(
             cancellation.cancel();
             let _ = worker.await;
             warn!(elapsed_ms = started.elapsed().as_millis(), limit_secs = timeouts.proving.as_secs(), "SPF proving timed out; cancelled worker joined");
-            error_response(
+            err_response(
                 request_id,
                 ErrorCode::ProvingTimedOut,
                 format!("proving exceeded the configured {} second deadline", timeouts.proving.as_secs()),
@@ -329,7 +329,7 @@ fn process_request(
     cancel: &CancelToken,
 ) -> VerifyResponse {
     if request.version != PROTOCOL_VERSION {
-        return error_response(
+        return err_response(
             request.request_id,
             ErrorCode::UnsupportedVersion,
             format!(
@@ -341,7 +341,7 @@ fn process_request(
 
     let tempo_chain_id = request.witness.public_inputs.parent_chain_id;
     let Some(tempo_spec) = specs.resolve(tempo_chain_id) else {
-        return error_response(
+        return err_response(
             request.request_id,
             ErrorCode::UnsupportedChain,
             format!("unsupported Tempo chain ID {tempo_chain_id}"),
@@ -350,7 +350,7 @@ fn process_request(
     let zone_chain_id = match zone_chain_id(tempo_chain_id, request.witness.public_inputs.zone_id) {
         Ok(chain_id) => chain_id,
         Err(error) => {
-            return error_response(
+            return err_response(
                 request.request_id,
                 ErrorCode::VerificationFailed,
                 error.to_string(),
@@ -362,7 +362,7 @@ fn process_request(
     let zone_spec = match ZoneChainSpec::from_genesis_with_l1(zone_genesis, tempo_spec.as_ref()) {
         Ok(spec) => spec,
         Err(error) => {
-            return error_response(
+            return err_response(
                 request.request_id,
                 ErrorCode::UnsupportedChain,
                 error.to_string(),
@@ -373,7 +373,7 @@ fn process_request(
 
     let public_inputs = request.witness.public_inputs.clone();
     match prove_zone_batch_with_cancel(&config, request.witness, cancel) {
-        Ok(_output) if cancel.is_cancelled() => error_response(
+        Ok(_output) if cancel.is_cancelled() => err_response(
             request.request_id,
             ErrorCode::ProvingTimedOut,
             "proving was cancelled before attestation",
@@ -385,13 +385,13 @@ fn process_request(
                 output: Box::new(output),
                 proof_bundle,
             },
-            Err(message) => error_response(
+            Err(message) => err_response(
                 request.request_id,
                 ErrorCode::AttestationUnavailable,
                 message,
             ),
         },
-        Err(error) => error_response(
+        Err(error) => err_response(
             request.request_id,
             ErrorCode::VerificationFailed,
             error.to_string(),
@@ -399,11 +399,7 @@ fn process_request(
     }
 }
 
-fn error_response(
-    request_id: String,
-    code: ErrorCode,
-    message: impl Into<String>,
-) -> VerifyResponse {
+fn err_response(request_id: String, code: ErrorCode, message: impl Into<String>) -> VerifyResponse {
     VerifyResponse::Error {
         version: PROTOCOL_VERSION,
         request_id: Some(request_id),
