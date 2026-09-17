@@ -31,9 +31,15 @@ env:
 
 jobs:
   conformance:
+    permissions:
+      contents: read
+      id-token: write
     name: ABI and storage conformance
     runs-on: ubuntu-latest
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
@@ -63,9 +69,15 @@ jobs:
         run: cargo test -p zone-precompiles --test storage --features test-utils
 
   build:
+    permissions:
+      contents: read
+      id-token: write
     name: Forge Build
     runs-on: ubuntu-latest
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
@@ -98,9 +110,15 @@ jobs:
         run: forge build --sizes
 
   lint:
+    permissions:
+      contents: read
+      id-token: write
     name: Forge Fmt
     runs-on: ubuntu-latest
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
@@ -116,6 +134,9 @@ jobs:
         run: forge fmt --check src/runtime test
 
   test:
+    permissions:
+      contents: read
+      id-token: write
     name: Forge Test & Coverage
     runs-on: ubuntu-latest
     env:
@@ -123,6 +144,9 @@ jobs:
       MIN_LINES: "88"
       MIN_BRANCHES: "60"
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
@@ -258,6 +282,9 @@ jobs:
           PY
 
   contracts-success:
+    permissions:
+      contents: read
+      id-token: write
     name: contracts success
     runs-on: ubuntu-latest
     if: always()
@@ -268,6 +295,9 @@ jobs:
       - test
     timeout-minutes: 5
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - name: Decide whether the needed jobs succeeded or failed
         uses: tempoxyz/gh-actions/actions/check-needs@ab45d76f6e7420a094281a22aee1973ecc0754f8
         with:

@@ -165,6 +165,9 @@ env:
 
 jobs:
   authorize:
+    permissions:
+      contents: read
+      id-token: write
     name: Resolve benchmark request
     # Scheduled benchmarks use upstream-only infrastructure and credentials.
     # Private copies can still run an explicitly dispatched benchmark.
@@ -202,6 +205,9 @@ jobs:
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -511,6 +517,9 @@ jobs:
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authorize.outputs.sha }}
