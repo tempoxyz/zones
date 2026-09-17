@@ -1482,7 +1482,7 @@ struct NitroBatchAttestation {
 }
 ```
 
-`verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. `nextZoneHeight` is the final executed header number from `BatchOutput.next_zone_height`, widened losslessly from `u64` to `uint256`; it MUST NOT come from an unchecked caller-supplied height. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, and zone prevents cross-domain reuse because the portal is uniquely derived from the zone ID on that parent chain; binding the executed Zone height, both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
+`verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, and zone prevents cross-domain reuse because the portal is uniquely derived from the zone ID on that parent chain; binding the executed Zone height, both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
 
 When checking the attestation, the Nitro verifier MUST reconstruct `parentChainId` from `block.chainid`, `verifier` from `address(this)`, and MUST require `msg.sender == portalAddress(zoneId)` using the same canonical TIP-1091 derivation as the SPF. Merely checking `zoneId == IZonePortal(msg.sender).zoneId()` is insufficient because an arbitrary contract can report that ID. It reconstructs the remaining digest fields from the arguments supplied by `ZonePortal` to `verify`; it MUST NOT trust domain values copied from the proof or prover witness.
 
