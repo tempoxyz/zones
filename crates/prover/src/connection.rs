@@ -48,6 +48,9 @@ where
     }
 
     /// Serializes and sends an owned typed message, returning its encoded size.
+    ///
+    /// If this future is cancelled or returns an error, the logical message may be incomplete and
+    /// the connection must be dropped rather than reused.
     pub async fn send<T: Serialize + Send + 'static>(
         &mut self,
         message: T,
@@ -80,6 +83,9 @@ where
     }
 
     /// Receives and deserializes one chunked logical message.
+    ///
+    /// This operation is not cancellation-safe at logical-message boundaries. If this future is
+    /// cancelled or returns an error, the connection must be dropped rather than reused.
     pub async fn receive<T: DeserializeOwned + Send + 'static>(
         &mut self,
     ) -> Result<Option<T>, ProverConnectionError> {
