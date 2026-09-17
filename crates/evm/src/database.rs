@@ -14,6 +14,7 @@ use revm::{
     primitives::{AddressMap, StorageKey, StorageValue},
     state::{Account, AccountInfo, Bytecode},
 };
+use tempo_precompiles::tip20::{is_tip20_prefix, tip20_slots};
 use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
@@ -87,7 +88,7 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         Ok(anchor)
     }
 
-    /// Rejects writes to the L1-mirrored TIP-403 registry.
+    /// Rejects writes to L1-mirrored TIP-403 and TIP-20 pause state.
     pub fn sanitize_state(
         &mut self,
         state: &mut AddressMap<Account>,
@@ -113,6 +114,24 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             state.remove(&TIP403_REGISTRY_ADDRESS);
         }
 
+        for (address, account) in state.iter_mut() {
+            if !is_tip20_prefix(*address) {
+                continue;
+            }
+
+            if let Some(value) = account.storage.get(&tip20_slots::PAUSED)
+                && value.is_changed()
+            {
+                return Err(ZoneDbError::L1Write {
+                    address: *address,
+                    slot: tip20_slots::PAUSED,
+                });
+            }
+
+            // Do not persist a mirrored L1 value merely because the slot was read by TIP-20.
+            account.storage.remove(&tip20_slots::PAUSED);
+        }
+
         Ok(())
     }
 }
@@ -131,7 +150,10 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
     }
 
     fn storage(&mut self, address: Address, slot: StorageKey) -> Result<StorageValue, Self::Error> {
-        if address != TIP403_REGISTRY_ADDRESS {
+        let mirrors_tip20_pause = is_tip20_prefix(address)
+            && slot == tip20_slots::PAUSED
+            && !self.l1.uses_local_tip20_pause();
+        if address != TIP403_REGISTRY_ADDRESS && !mirrors_tip20_pause {
             return self
                 .inner
                 .storage(address, slot)
@@ -139,7 +161,8 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
         }
 
         let anchor = self.anchor()?;
-        // REVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged again.
+        // REVM already charges this mirrored SLOAD; the host-side L1 fetch must not be charged
+        // again.
         self.l1
             .read_l1_storage_unmetered(address, B256::from(slot), anchor)
             .map(Into::into)
@@ -182,6 +205,7 @@ impl<E: DBErrorMarker> ZoneDbError<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
     use revm::{
         database::{CacheDB, EmptyDB},
         database_interface::DatabaseCommit,
@@ -212,6 +236,50 @@ mod tests {
 
         assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
         assert_eq!(db.l1_state().get_anchor(), Some(anchor));
+    }
+
+    #[test]
+    fn overlays_tip20_pause_but_keeps_other_token_storage_local() {
+        let anchor = 42;
+        let token = address!("20C0000000000000000000000000000000000999");
+        let local_slot = U256::from(7);
+        let local_value = U256::from(99);
+        let l1 = TestL1::default();
+        l1.insert(token, tip20_slots::PAUSED, anchor, U256::ONE);
+        let mut inner = test_db(anchor);
+        inner
+            .insert_account_storage(token, tip20_slots::PAUSED, U256::ZERO)
+            .unwrap();
+        inner
+            .insert_account_storage(token, local_slot, local_value)
+            .unwrap();
+        let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
+
+        assert_eq!(db.storage(token, tip20_slots::PAUSED).unwrap(), U256::ONE);
+        assert_eq!(db.storage(token, local_slot).unwrap(), local_value);
+    }
+
+    #[test]
+    fn inbox_pause_exception_uses_local_tip20_pause() {
+        let anchor = 42;
+        let token = address!("20C0000000000000000000000000000000000999");
+        let l1 = TestL1::default();
+        l1.insert(token, tip20_slots::PAUSED, anchor, U256::ONE);
+        let mut inner = test_db(anchor);
+        inner
+            .insert_account_storage(token, tip20_slots::PAUSED, U256::ZERO)
+            .unwrap();
+        let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
+        let l1_state = db.l1_state().clone();
+
+        assert_eq!(db.storage(token, tip20_slots::PAUSED).unwrap(), U256::ONE);
+        assert_eq!(
+            l1_state
+                .with_local_tip20_pause(|| db.storage(token, tip20_slots::PAUSED))
+                .unwrap(),
+            U256::ZERO
+        );
+        assert_eq!(db.storage(token, tip20_slots::PAUSED).unwrap(), U256::ONE);
     }
 
     #[test]
@@ -272,6 +340,43 @@ mod tests {
         let mut inner = db.into_inner();
         inner.commit(state);
         assert_eq!(inner.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), local);
+    }
+
+    #[test]
+    fn tip20_pause_overlay_cannot_be_persisted_or_changed() {
+        let token = address!("20C0000000000000000000000000000000000999");
+        let mut db = L1OverlayDB::new(test_db(42), TestL1::default(), Address::ZERO);
+        let mut unchanged = Account::default();
+        unchanged.mark_touch();
+        unchanged.storage.insert(
+            tip20_slots::PAUSED,
+            EvmStorageSlot {
+                original_value: U256::ONE,
+                present_value: U256::ONE,
+                ..Default::default()
+            },
+        );
+        let mut state = AddressMap::from_iter([(token, unchanged)]);
+
+        db.sanitize_state(&mut state).unwrap();
+        assert!(!state[&token].storage.contains_key(&tip20_slots::PAUSED));
+
+        let mut changed = Account::default();
+        changed.mark_touch();
+        changed.storage.insert(
+            tip20_slots::PAUSED,
+            EvmStorageSlot {
+                original_value: U256::ZERO,
+                present_value: U256::ONE,
+                ..Default::default()
+            },
+        );
+        let mut state = AddressMap::from_iter([(token, changed)]);
+        assert!(matches!(
+            db.sanitize_state(&mut state),
+            Err(ZoneDbError::L1Write { address, slot })
+                if address == token && slot == tip20_slots::PAUSED
+        ));
     }
 
     #[test]
