@@ -120,6 +120,9 @@ trait AvailableBlockDrain {
     /// Returns the next available block without consuming it.
     fn next_available(&self) -> Option<Self::Block>;
 
+    /// Returns whether portal governance currently forbids producing another block.
+    fn production_paused(&self) -> bool;
+
     /// Checks the leadership permit for one available block.
     ///
     /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
@@ -151,6 +154,11 @@ where
         };
         if let Some(exit) = drain.permit(&block) {
             return Ok(Some(exit));
+        }
+        // The subscriber publishes a pause before enqueueing its anchor. Read the gate after
+        // selecting the candidate so that anchor cannot slip past an earlier pause observation.
+        if drain.production_paused() {
+            return Ok(None);
         }
         drain.advance_one(block).await?;
     }
@@ -427,6 +435,10 @@ impl AvailableBlockDrain for ZoneEngine {
         self.deposit_queue.peek()
     }
 
+    fn production_paused(&self) -> bool {
+        self.l1_block_tracker.portal_paused()
+    }
+
     fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
         // No permit is legacy single-sequencer mode: production is always authorized.
         self.production_permit
@@ -453,7 +465,13 @@ fn zone_timestamp_millis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
     use tokio::sync::oneshot;
 
     #[test]
@@ -471,11 +489,13 @@ mod tests {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
     }
 
+    #[derive(Default)]
     struct PausedDrain {
         pending: VecDeque<u64>,
         advanced: Vec<u64>,
         first_started: Option<oneshot::Sender<()>>,
         release_first: Option<oneshot::Receiver<()>>,
+        paused: Arc<AtomicBool>,
         /// Blocks (by value) the permit rejects, with the exit it produces.
         denied: Vec<(u64, EngineExit)>,
     }
@@ -485,6 +505,10 @@ mod tests {
 
         fn next_available(&self) -> Option<Self::Block> {
             self.pending.front().copied()
+        }
+
+        fn production_paused(&self) -> bool {
+            self.paused.load(Ordering::Relaxed)
         }
 
         fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
@@ -518,10 +542,9 @@ mod tests {
         let (release, release_first) = oneshot::channel();
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2, 3]),
-            advanced: Vec::new(),
             first_started: Some(first_started),
             release_first: Some(release_first),
-            denied: Vec::new(),
+            ..Default::default()
         };
 
         let task = tokio::spawn(async move {
@@ -548,9 +571,6 @@ mod tests {
         let stop = CancellationToken::new();
         let mut drain = PausedDrain {
             pending: VecDeque::from([1, 2, 3]),
-            advanced: Vec::new(),
-            first_started: None,
-            release_first: None,
             denied: vec![(
                 3,
                 EngineExit::Demoted {
@@ -558,6 +578,7 @@ mod tests {
                     epoch: 7,
                 },
             )],
+            ..Default::default()
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -580,10 +601,8 @@ mod tests {
         let stop = CancellationToken::new();
         let mut drain = PausedDrain {
             pending: VecDeque::from([5]),
-            advanced: Vec::new(),
-            first_started: None,
-            release_first: None,
             denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
+            ..Default::default()
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -592,6 +611,55 @@ mod tests {
         assert_eq!(exit, Some(EngineExit::Fenced { tempo_anchor: 5 }));
         assert!(drain.advanced.is_empty());
         assert_eq!(drain.pending, [5]);
+    }
+
+    #[tokio::test]
+    async fn portal_pause_retains_then_drains_the_entire_backlog() {
+        let stop = CancellationToken::new();
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2]),
+            paused: Arc::new(AtomicBool::new(true)),
+            ..Default::default()
+        };
+
+        assert_eq!(drain_all_available(&mut drain, &stop).await.unwrap(), None);
+        assert!(drain.advanced.is_empty());
+        assert_eq!(drain.pending, [1, 2]);
+
+        // Both an explicit resume and automatic expiry clear this same production gate. Once the
+        // independently polled portal snapshot does so, the next engine heartbeat must catch up.
+        drain.paused.store(false, Ordering::Relaxed);
+        assert_eq!(drain_all_available(&mut drain, &stop).await.unwrap(), None);
+        assert_eq!(drain.advanced, [1, 2]);
+        assert!(drain.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn portal_pause_finishes_the_in_flight_block_then_stops() {
+        let stop = CancellationToken::new();
+        let (first_started, started) = oneshot::channel();
+        let (release, release_first) = oneshot::channel();
+        let paused = Arc::new(AtomicBool::new(false));
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2, 3]),
+            first_started: Some(first_started),
+            release_first: Some(release_first),
+            paused: paused.clone(),
+            ..Default::default()
+        };
+
+        let task = tokio::spawn(async move {
+            drain_all_available(&mut drain, &stop).await.unwrap();
+            drain
+        });
+
+        started.await.unwrap();
+        paused.store(true, Ordering::Relaxed);
+        release.send(()).unwrap();
+
+        let drain = task.await.unwrap();
+        assert_eq!(drain.advanced, [1]);
+        assert_eq!(drain.pending, [2, 3]);
     }
 
     #[test]

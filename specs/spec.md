@@ -399,10 +399,20 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
-- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
-  the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
-  extended while active. Proof-verified batch submission continues so settlement remains current
-  and an expired pause does not require recovery across the full pause interval.
+- `pause()`: Pause all new deposits, Zone block production, and L1 withdrawal processing for the
+  public `PAUSE_DURATION` constant of 30 days. Nodes stop production at a block boundary after
+  observing the pause in finalized Tempo state. Followers also retain, but do not import, peer
+  blocks and refuse settlement signatures while the pause is active. Leaders also defer new
+  settlement signatures and broadcasts. The pause expires automatically and cannot be extended
+  while active. Nodes observe `resume()` and automatic expiry by polling finalized Portal state,
+  independently of L1 ingestion; ingestion itself simply stops at its bounded lookahead while
+  nothing is consumed and continues contiguously from there after the pause clears, so no
+  historical replay is needed. Buffered peer blocks are imported after resume. Historical
+  catch-up requires an L1 endpoint that serves the missed finalized headers, receipts, and
+  anchored state. Settlement ancestry is limited to 262,144 headers; a boundary further behind
+  the L1 tip settles only once the Zone has caught up to within that span. Startup retries
+  finalized pause-state RPC failures without a limit; if Portal deployment has not finalized yet,
+  the watcher continues checking after startup. Storage-read retry defaults are unchanged.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one

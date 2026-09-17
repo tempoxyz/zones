@@ -254,6 +254,7 @@ where
         // Always probe on startup to see if we're behind
         let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut l1_changes = self.context.l1_block_tracker.subscribe_changes();
 
         // If we don't get blocks after 30s, probe to get the next block
         let inactivity = tokio::time::sleep(BLOCK_INACTIVITY_TIMEOUT);
@@ -381,6 +382,18 @@ where
                         return;
                     }
                 }
+                changed = l1_changes.changed(), if self.pending.first_number().is_some() => {
+                    if changed.is_err() {
+                        debug!(target: "zone::p2p", "L1 state change channel closed");
+                        return;
+                    }
+                    if self.context.l1_block_tracker.portal_paused() {
+                        continue;
+                    }
+                    if !self.process_pending_blocks().await {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -415,6 +428,13 @@ where
         eyre::ensure!(
             proposal == expected,
             "settlement proposal does not match follower state"
+        );
+
+        // Read the gate after the asynchronous L1 validation above and immediately before using the
+        // quorum key, so a pause that finalizes during validation cannot obtain an honest signature.
+        eyre::ensure!(
+            !self.context.l1_block_tracker.portal_paused(),
+            "portal is paused; refusing to sign a settlement proposal"
         );
 
         // Unreachable on an rpc-only member: the P2P layer never routes a proposal to one.
@@ -458,6 +478,9 @@ where
                 Ok(PeerBlockImportOutcome::TimedOut { .. }) => {
                     tracing::warn!(target: "zone::p2p", "Dropping peer block whose L1 anchor was not observed before the import deadline");
                 }
+                Ok(PeerBlockImportOutcome::Paused) => {
+                    debug!(target: "zone::p2p", "Ignoring already-canonical peer block while the portal is paused");
+                }
                 Ok(PeerBlockImportOutcome::Imported) => {}
                 Err(err) => {
                     tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
@@ -472,8 +495,15 @@ where
         if number > best.saturating_add(1) {
             info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
         }
+        self.process_pending_blocks().await
+    }
+
+    async fn process_pending_blocks(&mut self) -> bool {
         match self.import_pending_blocks().await {
             Ok(PeerBlockImportOutcome::Cancelled) => return false,
+            Ok(PeerBlockImportOutcome::Paused) => {
+                debug!(target: "zone::p2p", "Portal is paused; retaining peer blocks for import after resume");
+            }
             Ok(PeerBlockImportOutcome::TimedOut {
                 block_number,
                 anchor,
@@ -502,16 +532,22 @@ where
 
     async fn import_pending_blocks(&mut self) -> eyre::Result<PeerBlockImportOutcome> {
         loop {
+            if self.context.l1_block_tracker.portal_paused() {
+                return Ok(PeerBlockImportOutcome::Paused);
+            }
             let head = self.context.provider.best_block_number()?;
             let Some(block) = self.pending.take_next_after(head) else {
                 return Ok(PeerBlockImportOutcome::Imported);
             };
-            self.import_peer_block(block).await?;
+            match self.import_peer_block(block).await? {
+                PeerBlockImportOutcome::Imported => {}
+                outcome => return Ok(outcome),
+            }
         }
     }
 
     async fn import_peer_block(
-        &self,
+        &mut self,
         peer_block: PendingPeerBlock,
     ) -> eyre::Result<PeerBlockImportOutcome> {
         let block = SealedBlock::seal_slow(peer_block.block);
@@ -610,6 +646,21 @@ where
             }
             Err(PeerAnchorWaitError::Other(error)) => return Err(error),
         };
+
+        // The anchor observation publishes its finalized pause transition before waking this
+        // import. This is the block-boundary fence that prevents importing the pause block itself.
+        if self.context.l1_block_tracker.portal_paused() {
+            // Put the block back so it is imported after resume; the height was just taken.
+            let dropped = self.pending.insert(
+                block_number,
+                PendingPeerBlock {
+                    block: block.into_block(),
+                    live_sender: peer_block.live_sender,
+                },
+            );
+            debug_assert!(dropped.is_none());
+            return Ok(PeerBlockImportOutcome::Paused);
+        }
 
         // The subscriber normally enqueues immediately after recording this observation. Enqueueing
         // here as well closes that small scheduling window and makes follower import self-contained;
@@ -721,8 +772,13 @@ async fn wait_for_validated_peer_anchor(
 #[derive(Debug)]
 enum PeerBlockImportOutcome {
     Imported,
+    /// Import stopped at the pause boundary, retaining the block in the pending buffer.
+    Paused,
     Cancelled,
-    TimedOut { block_number: u64, anchor: NumHash },
+    TimedOut {
+        block_number: u64,
+        anchor: NumHash,
+    },
 }
 
 #[derive(Debug)]
