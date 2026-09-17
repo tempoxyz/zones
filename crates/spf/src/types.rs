@@ -167,6 +167,8 @@ pub struct TempoStateWitness {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct BatchOutput {
+    /// Number of the final executed Zone header committed by `block_transition.nextBlockHash`.
+    pub next_zone_height: u64,
     /// Hash transition covering every Zone block in the batch.
     pub block_transition: BlockTransition,
     /// Progress of the ZoneInbox deposit queue during the batch.

@@ -397,6 +397,7 @@ mod tests {
     fn binds_the_canonical_digest_into_the_proof_bundle() {
         let public_inputs = empty_witness().public_inputs;
         let output = BatchOutput {
+            next_zone_height: 14,
             block_transition: BlockTransition {
                 prevBlockHash: B256::with_last_byte(1),
                 nextBlockHash: B256::with_last_byte(2),
@@ -427,6 +428,14 @@ mod tests {
 
         assert_eq!(bundle.verifier_config.as_ref(), NITRO_VERIFIER_CONFIG_V1);
         assert_eq!(bundle.proof.as_ref(), document);
+
+        let mut other_height = output;
+        other_height.next_zone_height += 1;
+        build_proof_bundle(&public_inputs, &other_height, |digest| {
+            assert_ne!(digest, expected_digest);
+            Ok(document)
+        })
+        .unwrap();
     }
 
     #[test]
