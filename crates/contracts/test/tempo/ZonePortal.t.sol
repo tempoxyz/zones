@@ -47,31 +47,6 @@ import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/Mock
 import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
-contract MockHeightVerifier is IVerifier {
-
-    function verify(
-        uint32,
-        uint64,
-        uint64,
-        bytes32,
-        uint64,
-        uint256 nextZoneHeight,
-        BlockTransition calldata,
-        DepositQueueTransition calldata,
-        TokenEnablementTransition calldata,
-        bytes32,
-        bytes calldata,
-        bytes calldata proof
-    )
-        external
-        pure
-        returns (bool)
-    {
-        return proof.length == 32 && nextZoneHeight == abi.decode(proof, (uint256));
-    }
-
-}
-
 /// @notice Mock withdrawal receiver that accepts funds
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
 
@@ -595,7 +570,6 @@ contract ZonePortalTest is BaseTest {
         DepositQueueTransition depositQueueTransition;
         bytes32 withdrawalQueueHash;
         bytes verifierConfig;
-        bytes proof;
         uint256 nextZoneHeight;
     }
 
@@ -944,7 +918,6 @@ contract ZonePortalTest is BaseTest {
             }),
             withdrawalQueueHash: bytes32(0),
             verifierConfig: "",
-            proof: "",
             nextZoneHeight: 10
         });
     }
@@ -960,6 +933,18 @@ contract ZonePortalTest is BaseTest {
         SettlementAttestationInput memory attestation = _attestationFor(batch);
         bytes[] memory signatures = _quorumSignatures(
             _attestationDigestFor(portal, block.chainid, attestation), firstSigner, secondSigner
+        );
+        vm.expectCall(
+            ZONE_VERIFIER_ADDRESS,
+            abi.encodeWithSelector(
+                IVerifier.verify.selector,
+                attestation.zoneId,
+                attestation.tempoBlockNumber,
+                attestation.anchorBlockNumber,
+                attestation.anchorBlockHash,
+                attestation.withdrawalBatchIndex,
+                batch.nextZoneHeight
+            )
         );
         _submitQuorumBatch(portal, caller, batch, signatures);
         assertEq(portal.blockHash(), batch.blockTransition.nextBlockHash);
@@ -1006,7 +991,7 @@ contract ZonePortalTest is BaseTest {
             _currentTokenEnablementTransition(target),
             batch.withdrawalQueueHash,
             batch.verifierConfig,
-            batch.proof,
+            "",
             batch.nextZoneHeight,
             signatures
         );
@@ -1484,41 +1469,6 @@ contract ZonePortalTest is BaseTest {
         assertTrue(vm.revertToState(snapshot));
 
         _assertQuorumPairSettles(signers[0], SIGNER_B_KEY, SIGNER_C_KEY);
-    }
-
-    function test_submitBatch_rejectsSignedHeightDifferentFromProof() public {
-        _assertVerifierRejectsHeightDelta(1);
-    }
-
-    function test_submitBatch_rejectsSignedHeightWithSameLow64BitsAsProof() public {
-        _assertVerifierRejectsHeightDelta(uint256(1) << 64);
-    }
-
-    function _assertVerifierRejectsHeightDelta(uint256 heightDelta) internal {
-        address[] memory signers = _activateSequencerSet(2);
-        QuorumBatch memory batch = _quorumBatch();
-        uint256 provenHeight = batch.nextZoneHeight;
-        batch.proof = abi.encode(provenHeight);
-
-        vm.etch(ZONE_VERIFIER_ADDRESS, type(MockHeightVerifier).runtimeCode);
-
-        // The quorum signs the altered height, but the execution proof still commits to H.
-        batch.nextZoneHeight += heightDelta;
-        bytes[] memory signatures =
-            _quorumSignatures(_attestationDigestFor(portal, block.chainid, _attestationFor(batch)));
-        PortalSettlementState memory before = _snapshotSettlementState(portal);
-        vm.expectRevert(IZonePortal.InvalidProof.selector);
-        _submitQuorumBatch(portal, signers[0], batch, signatures);
-        _assertSettlementStateUnchanged(portal, before);
-
-        // Reusing the same proof with its actual height succeeds after the rejected submission.
-        batch.nextZoneHeight = provenHeight;
-        signatures =
-            _quorumSignatures(_attestationDigestFor(portal, block.chainid, _attestationFor(batch)));
-        _submitQuorumBatch(portal, signers[0], batch, signatures);
-        assertEq(portal.blockHash(), batch.blockTransition.nextBlockHash);
-        assertEq(portal.zoneHeight(), provenHeight);
-        assertEq(portal.withdrawalBatchIndex(), before.withdrawalBatchIndex + 1);
     }
 
     function test_submitBatch_rejectsCertificateForDifferentWithdrawalRoot() public {
