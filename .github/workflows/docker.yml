@@ -18,6 +18,18 @@ on:
         description: "Verify a non-production reproducible candidate image"
         type: boolean
         default: false
+      reproducible_eif_verify:
+        description: "Verify prover EIF PCR0/PCR1/PCR2 with independent builds"
+        type: boolean
+        default: false
+      tempo_genesis_sha256:
+        description: "Required for EIF verification: expected SHA-256 of tempo_genesis_url"
+        type: string
+        default: ""
+      eif_builder_image:
+        description: "Optional EIF toolchain image@sha256:digest; empty builds and records one"
+        type: string
+        default: ""
       ref:
         description: "Optional branch, tag, or SHA to verify (defaults to this workflow's commit)"
         type: string
@@ -74,12 +86,107 @@ jobs:
       build-script: scripts/reproducible-build.sh
       rebuild-output: out/tempo-zone
 
+  eif-toolchain:
+    name: Pin EIF toolchain image
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.reproducible_eif_verify == true &&
+      github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
+    runs-on: depot-ubuntu-latest-16
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      image: ${{ steps.toolchain.outputs.image }}
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@e8383309ef9889168bdfb1e678e9b01903b6f51f # main
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate verification inputs
+        env:
+          GENESIS_SHA256: ${{ inputs.tempo_genesis_sha256 }}
+          EIF_BUILDER_IMAGE: ${{ inputs.eif_builder_image }}
+        run: |
+          set -euo pipefail
+          [[ "$GENESIS_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "EIF verification requires tempo_genesis_sha256 (64 lowercase hex characters)" >&2
+            exit 1
+          }
+          if [[ -n "$EIF_BUILDER_IMAGE" ]]; then
+            [[ "$EIF_BUILDER_IMAGE" =~ ^[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || {
+              echo "eif_builder_image must be pinned by sha256 digest" >&2
+              exit 1
+            }
+          fi
+
+      - name: Set up Depot
+        if: inputs.eif_builder_image == ''
+        uses: tempoxyz/gh-actions/vendor/depot/setup-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a # main
+
+      - name: Log in to toolchain registry
+        if: inputs.eif_builder_image == ''
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a # main
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve or publish immutable toolchain
+        id: toolchain
+        env:
+          EIF_BUILDER_IMAGE: ${{ inputs.eif_builder_image }}
+          TOOLCHAIN_REPOSITORY: ghcr.io/tempoxyz/tempo-zone-eif-toolchain
+        run: |
+          set -euo pipefail
+          if [[ -z "$EIF_BUILDER_IMAGE" ]]; then
+            metadata="$RUNNER_TEMP/eif-toolchain.json"
+            depot bake --project 0c6tg19qsp --push \
+              -f docker/docker-bake.hcl --metadata-file "$metadata" \
+              --set "tempo-zone-prover-eif-builder.tags=$TOOLCHAIN_REPOSITORY:run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              tempo-zone-prover-eif-builder
+            digest="$(jq -er '.["tempo-zone-prover-eif-builder"]["containerimage.digest"]' "$metadata")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            EIF_BUILDER_IMAGE="$TOOLCHAIN_REPOSITORY@$digest"
+          fi
+          echo "image=$EIF_BUILDER_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "EIF toolchain: \`$EIF_BUILDER_IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+
+  reproducible-eif-verify:
+    name: Verify reproducible prover EIF
+    needs: eif-toolchain
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-eif-verify.yml@71a96dae1bd969e9d2b015e49e1bd0904be998f9 # main
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+      build-definitions-sha: ${{ github.workflow_sha }}
+      build-definition-paths: |
+        .dockerignore
+        docker/Dockerfile.reproducible
+        scripts/reproducible-eif-build.sh
+      build-script: scripts/reproducible-eif-build.sh
+      eif-builder-image: ${{ needs.eif-toolchain.outputs.image }}
+      build-input-url: ${{ inputs.tempo_genesis_url }}
+      build-input-sha256: ${{ inputs.tempo_genesis_sha256 }}
+      depot-project: 0c6tg19qsp
+      artifact-name: reproducible-prover-eif-verification
+
   build-and-push:
     name: Build and Push Docker Images
     # Private copies retain PR image builds, but must not publish shared images
     # or run the upstream's scheduled refreshes.
     if: >-
-      (github.event_name != 'workflow_dispatch' || inputs.reproducible_verify != true) &&
+      (github.event_name != 'workflow_dispatch' ||
+      (inputs.reproducible_verify != true && inputs.reproducible_eif_verify != true)) &&
       (github.repository == 'tempoxyz/zones' ||
       (github.event_name != 'schedule' && github.event_name != 'push'))
     runs-on: depot-ubuntu-latest-16
