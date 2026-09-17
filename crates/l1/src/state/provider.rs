@@ -526,7 +526,7 @@ mod tests {
             .unwrap(),
             B256::ZERO
         );
-        let unauthenticated_reader = reader.clone();
+        let unauthenticated_reader = reader;
         assert_eq!(
             tokio::task::spawn_blocking(move || {
                 unauthenticated_reader.get_storage(
