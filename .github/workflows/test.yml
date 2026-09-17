@@ -29,6 +29,9 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -113,12 +116,16 @@ jobs:
     needs: build-test-artifacts
     timeout-minutes: 20
     permissions:
+      id-token: write
       contents: read
     strategy:
       fail-fast: false
       matrix:
         partition: [1, 2, 3, 4]
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -152,12 +159,16 @@ jobs:
     if: >-
       always() &&
       (github.repository == 'tempoxyz/zones' || github.event_name != 'push')
-    permissions: {}
+    permissions:
+      id-token: write
     needs:
       - build-test-artifacts
       - test
     timeout-minutes: 30
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - name: Decide whether the needed jobs succeeded or failed
         uses: tempoxyz/gh-actions/actions/check-needs@ab45d76f6e7420a094281a22aee1973ecc0754f8
         with:

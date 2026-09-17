@@ -1,4 +1,7 @@
 **/.git
+# Foundry's lockfile check requires Git metadata. Docker uses the already
+# checked-out submodule sources; contract CI validates their locked revisions.
+crates/contracts/foundry.lock
 contrib/
 docs/
 localnet/

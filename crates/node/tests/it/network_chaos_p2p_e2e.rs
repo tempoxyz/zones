@@ -8,11 +8,11 @@ use std::{collections::HashSet, time::Duration};
 use alloy::{
     consensus::BlockHeader as _,
     eips::{BlockId, BlockNumberOrTag},
-    primitives::U256,
+    primitives::{Address, B256, U256},
     providers::Provider as _,
 };
 use alloy_network::ReceiptResponse as _;
-use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 use crate::utils::{
     P2pChaosNetwork, RealP2pCluster, ZoneAccount, poll_until, start_real_p2p_network_chaos_cluster,
@@ -333,49 +333,214 @@ async fn resume_leadership_case(
     Ok(())
 }
 
+/// A canonical zone block together with the Tempo anchor it embeds.
+///
+/// Zone heights and Tempo anchors are unrelated quantities: the offset between them depends on
+/// how many L1 blocks preceded the zone's genesis anchor. The anchor is therefore read from the
+/// block's own post-state, never derived from its height.
+#[derive(Clone, Copy, Debug)]
+struct AnchoredBlock {
+    height: u64,
+    hash: B256,
+    producer: Address,
+    anchor: u64,
+}
+
+impl std::fmt::Display for AnchoredBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "zone height {} (hash {}, Tempo anchor {}, producer {})",
+            self.height, self.hash, self.anchor, self.producer
+        )
+    }
+}
+
+/// Reads the block at `height` on one node together with the Tempo anchor it applied.
+///
+/// The anchor is read at the block's hash rather than its number. Two independent
+/// number-addressed reads of a moving head can observe different blocks, which would attribute
+/// one block's anchor to another block's hash.
+async fn anchored_block(
+    cluster: &RealP2pCluster,
+    node_index: usize,
+    height: u64,
+) -> eyre::Result<AnchoredBlock> {
+    let provider = cluster.nodes[node_index].provider();
+    let header = provider
+        .get_block_by_number(BlockNumberOrTag::Number(height))
+        .await?
+        .ok_or_else(|| eyre::eyre!("node {node_index} is missing zone block {height}"))?
+        .header;
+    let anchor = TempoState::new(TEMPO_STATE_ADDRESS, provider)
+        .tempoBlockNumber()
+        .block(BlockId::hash(header.hash))
+        .call()
+        .await?;
+    Ok(AnchoredBlock {
+        height,
+        hash: header.hash,
+        producer: header.beneficiary(),
+        anchor,
+    })
+}
+
+/// Reads a node's current canonical tip with the Tempo anchor it applied.
+async fn anchored_tip(cluster: &RealP2pCluster, node_index: usize) -> eyre::Result<AnchoredBlock> {
+    let height = cluster.nodes[node_index]
+        .provider()
+        .get_block_number()
+        .await?;
+    anchored_block(cluster, node_index, height).await
+}
+
+/// Reads the Tempo anchor at which `expected_epoch` takes effect from the Portal.
+///
+/// `leaderEpoch` and `leaderActivationTempoBlock` are separate slots, so both are read at one
+/// pinned L1 block: a rotation landing between the two reads would otherwise pair an epoch with
+/// a boundary that does not belong to it.
+async fn activation_anchor_for_epoch(
+    cluster: &RealP2pCluster,
+    portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
+    expected_epoch: u64,
+) -> eyre::Result<u64> {
+    poll_until(
+        NETWORK_TIMEOUT,
+        POLL_INTERVAL,
+        &format!("the Portal to expose the activation anchor of leadership epoch {expected_epoch}"),
+        || async {
+            let block_id = BlockId::number(cluster.l1.provider().get_block_number().await?);
+            let epoch = portal.leaderEpoch().block(block_id).call().await?;
+            if epoch < expected_epoch {
+                return Ok(None);
+            }
+            eyre::ensure!(
+                epoch == expected_epoch,
+                "Portal leadership epoch {epoch} advanced past the expected epoch {expected_epoch}"
+            );
+            Ok(Some(
+                portal
+                    .leaderActivationTempoBlock()
+                    .block(block_id)
+                    .call()
+                    .await?,
+            ))
+        },
+    )
+    .await
+}
+
+/// Asserts that the connected side of the cluster never crosses the handoff activation boundary
+/// while the incoming leader cannot participate.
+///
+/// Observing the finalized epoch is not the same as having applied the outgoing leader's last
+/// block: `LeadershipSchedule::latest` is status only, while production keys off the leader of
+/// the locally applied anchor plus one. A connected node can therefore hold the new epoch while
+/// still importing canonical blocks that the *outgoing* leader legitimately produced. Only a
+/// block anchored at or after `activation_tempo_block` needs the incoming leader's authority, so
+/// that boundary — not an arbitrary sampled height — is the safety property under test.
+///
+/// `connected_nodes` must exclude every node whose links are cut: a P2P-isolated follower cannot
+/// advance at all, so including it would assert nothing about quorum acceptance.
 async fn assert_handoff_stalls_without_incoming_quorum(
     cluster: &RealP2pCluster,
     portal: &ZonePortal::ZonePortalInstance<alloy::providers::DynProvider>,
+    connected_nodes: &[usize],
+    disconnected_nodes: &[usize],
+    planes: FaultPlanes,
+    expected_epoch: u64,
+    activation_tempo_block: u64,
 ) -> eyre::Result<()> {
-    let a_fenced_height = cluster.nodes[OUTGOING_LEADER]
-        .provider()
-        .get_block_number()
-        .await?;
-    let follower_fenced_height = cluster.nodes[FOLLOWER]
-        .provider()
-        .get_block_number()
-        .await?;
+    eyre::ensure!(
+        connected_nodes.contains(&OUTGOING_LEADER) && !connected_nodes.contains(&INCOMING_LEADER),
+        "a stalled handoff requires a connected outgoing leader A and an isolated incoming \
+         leader B, got connected {connected_nodes:?}"
+    );
+    let outgoing_producer = cluster.attestation_signers[OUTGOING_LEADER].address();
+    let context = format!(
+        "leadership epoch {expected_epoch} activates at Tempo anchor {activation_tempo_block}; \
+         nodes {disconnected_nodes:?} disconnected on {planes:?}"
+    );
+
+    let mut fenced = Vec::with_capacity(connected_nodes.len());
+    for &index in connected_nodes {
+        let tip = anchored_tip(cluster, index).await?;
+        eyre::ensure!(
+            tip.anchor < activation_tempo_block,
+            "connected node {index} had already crossed the handoff boundary at {tip} before the \
+             outage window opened ({context})"
+        );
+        fenced.push(tip);
+    }
+
+    // Keep the observation window: it is what exercises the outage. Old-leader blocks landing
+    // inside it are legitimate catch-up, so the window is measured against the activation
+    // boundary instead of against an unchanged height.
     tokio::time::sleep(Duration::from_secs(2)).await;
-    eyre::ensure!(
-        cluster.nodes[OUTGOING_LEADER]
-            .provider()
-            .get_block_number()
-            .await?
-            == a_fenced_height,
-        "outgoing leader A continued producing after finalized leadership moved to disconnected B"
-    );
 
-    eyre::ensure!(
-        cluster.nodes[FOLLOWER]
-            .provider()
-            .get_block_number()
-            .await?
-            == follower_fenced_height,
-        "healthy follower C advanced without a quorum connection to incoming leader B"
-    );
-
-    // Commonware may let B build local proposals while it is isolated. Those blocks are safe as
-    // long as the connected A/C side does not advance and L1 cannot settle beyond its fenced tip.
+    // Read settlement before the closing tips. Any batch observed here is then covered by the
+    // pre-handoff blocks verified below, rather than by a tip that may since have advanced.
     let settled_height: u64 = portal
         .zoneHeight()
         .call()
         .await?
         .try_into()
         .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
+
+    let mut closing_tips = Vec::with_capacity(connected_nodes.len());
+    for (&index, &before) in connected_nodes.iter().zip(&fenced) {
+        let after = anchored_tip(cluster, index).await?;
+        for height in before.height + 1..=after.height {
+            let block = anchored_block(cluster, index, height).await?;
+            eyre::ensure!(
+                block.anchor < activation_tempo_block,
+                "connected node {index} applied {block} at or beyond the handoff activation \
+                 boundary while incoming leader B could not participate (node started the window \
+                 at {before}, reached {after}; {context})"
+            );
+            eyre::ensure!(
+                block.producer == outgoing_producer,
+                "connected node {index} applied {block}, which outgoing leader A \
+                 ({outgoing_producer}) did not produce, while incoming leader B could not \
+                 participate (node started the window at {before}; {context})"
+            );
+        }
+        closing_tips.push(after);
+    }
+
+    // Every block up to each closing tip is now a verified pre-handoff block, so an A-era batch
+    // still in flight may settle. Anything beyond that bound would be isolated B's private
+    // proposal reaching L1.
+    let verified_pre_handoff_height = closing_tips
+        .iter()
+        .map(|tip| tip.height)
+        .max()
+        .ok_or_else(|| eyre::eyre!("no connected nodes to observe during the outage"))?;
     eyre::ensure!(
-        settled_height <= a_fenced_height.max(follower_fenced_height),
-        "L1 settled isolated B's private proposal at zone height {settled_height}"
+        settled_height <= verified_pre_handoff_height,
+        "L1 settled zone height {settled_height} beyond the verified pre-handoff tip \
+         {verified_pre_handoff_height}, so isolated B's private proposal reached L1 ({context})"
     );
+
+    // Connected nodes must agree on every block they both hold. A shared height is the strongest
+    // common point available without waiting for progress the outage may legitimately prevent.
+    if connected_nodes.len() > 1 {
+        let common_height = closing_tips
+            .iter()
+            .map(|tip| tip.height)
+            .min()
+            .expect("closing_tips holds one entry per connected node");
+        let reference = anchored_block(cluster, connected_nodes[0], common_height).await?;
+        for &index in &connected_nodes[1..] {
+            let block = anchored_block(cluster, index, common_height).await?;
+            eyre::ensure!(
+                block.hash == reference.hash,
+                "connected nodes {} and {index} diverge at shared zone height {common_height}: \
+                 {reference} against {block} ({context})",
+                connected_nodes[0]
+            );
+        }
+    }
     Ok(())
 }
 
@@ -565,7 +730,18 @@ async fn run_leadership_fault_case(case: LeadershipFaultCase) -> eyre::Result<()
 
     let settled_during_outage = match case.expected {
         ExpectedDuringFault::WaitForIncomingLeader => {
-            assert_handoff_stalls_without_incoming_quorum(&cluster, &portal).await?;
+            let activation_tempo_block =
+                activation_anchor_for_epoch(&cluster, &portal, expected_epoch).await?;
+            assert_handoff_stalls_without_incoming_quorum(
+                &cluster,
+                &portal,
+                &healthy_nodes,
+                case.disconnected_nodes,
+                case.planes,
+                expected_epoch,
+                activation_tempo_block,
+            )
+            .await?;
             None
         }
         ExpectedDuringFault::ContinueIfActivated => {
@@ -749,8 +925,6 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
     // The transaction remains private to B while every P2P path involving B is down. Commonware
     // may include it in a local proposal, but that proposal must not reach A/C or settle on L1.
     // Its canonical inclusion under B after reconnection creates the boundary this test follows.
-    let a_fenced_height = cluster.nodes[0].provider().get_block_number().await?;
-    let c_fenced_height = cluster.nodes[2].provider().get_block_number().await?;
     let withdrawal_hash = account.submit_withdrawal(WITHDRAWAL_AMOUNT).await?;
     eyre::ensure!(
         cluster.nodes[0]
@@ -760,15 +934,18 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
             .is_none(),
         "A received B's withdrawal while their P2P links were disconnected"
     );
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    eyre::ensure!(
-        cluster.nodes[0].provider().get_block_number().await? == a_fenced_height,
-        "outgoing leader A produced while incoming leader B was P2P-isolated"
-    );
-    eyre::ensure!(
-        cluster.nodes[2].provider().get_block_number().await? == c_fenced_height,
-        "healthy follower C advanced while incoming leader B was P2P-isolated"
-    );
+    let activation_tempo_block =
+        activation_anchor_for_epoch(&cluster, &portal, expected_epoch).await?;
+    assert_handoff_stalls_without_incoming_quorum(
+        &cluster,
+        &portal,
+        &[OUTGOING_LEADER, FOLLOWER],
+        &[INCOMING_LEADER],
+        FaultPlanes::P2p,
+        expected_epoch,
+        activation_tempo_block,
+    )
+    .await?;
     eyre::ensure!(
         cluster.nodes[2]
             .provider()
@@ -777,16 +954,14 @@ async fn test_handoff_recovers_across_settlement_boundary() -> eyre::Result<()> 
             .is_none(),
         "C observed B's withdrawal while their P2P links were disconnected"
     );
-    let settled_height: u64 = portal
-        .zoneHeight()
-        .call()
-        .await?
-        .try_into()
-        .map_err(|_| eyre::eyre!("settled zone height does not fit in u64"))?;
-    eyre::ensure!(
-        settled_height <= a_fenced_height.max(c_fenced_height),
-        "L1 settled isolated B's private proposal at zone height {settled_height}"
-    );
+
+    // Reconnect B only once A has consumed every anchor it may still lead. While A can produce
+    // below the activation boundary, B legitimately forwards its pooled withdrawal to A, and the
+    // boundary block this test follows would be an A-era block. A keeps its quorum with C, so it
+    // does reach the boundary here — unlike the cases where A itself is isolated.
+    cluster.nodes[OUTGOING_LEADER]
+        .wait_for_tempo_block_number(activation_tempo_block - 1, NETWORK_TIMEOUT)
+        .await?;
     let batches_at_fence = batch_count(&portal).await?;
 
     network.resume_nodes(&[1]);
