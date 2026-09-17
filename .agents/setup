@@ -80,4 +80,7 @@ cargo fetch --locked
 step "Build Solidity artifacts"
 forge build --root crates/contracts --skip test --no-lint
 
+step "Warm Rust build artifacts"
+cargo build --workspace --locked
+
 step "Orb setup complete"
