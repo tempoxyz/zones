@@ -599,7 +599,7 @@ where
         let chain_spec = ctx.node.provider().chain_spec();
         let chain_id = chain_spec.genesis().config.chain_id;
         let genesis_zone_id = chain_spec.zone_id();
-        // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
+        // The CLI derives a nonzero portal address. Programmatic test/dev nodes use zero as an
         // explicit sentinel because they have no on-chain portal to bind against.
         if self.portal_address.is_zero() {
             warn!(
