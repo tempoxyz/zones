@@ -429,7 +429,11 @@ mod tests {
         );
 
         let err = tokio::task::spawn_blocking(move || {
-            reader.get_storage(Address::ZERO, B256::ZERO, TempoAnchor::dummy(7))
+            reader.get_storage(
+                Address::ZERO,
+                B256::ZERO,
+                TempoAnchor::new(7, EMPTY_ROOT_HASH),
+            )
         })
         .await
         .expect("storage task must not panic")
@@ -515,7 +519,8 @@ mod tests {
         let proof_reader = reader.clone().proved();
         assert_eq!(
             tokio::task::spawn_blocking(move || {
-                proof_reader.get_storage(address, slot, TempoAnchor::dummy(7))
+                proof_reader.get_storage(address, slot, TempoAnchor::new(7, EMPTY_ROOT_HASH))
+            })
             .await
             .unwrap()
             .unwrap(),
@@ -524,7 +529,11 @@ mod tests {
         let unauthenticated_reader = reader.clone();
         assert_eq!(
             tokio::task::spawn_blocking(move || {
-                unauthenticated_reader.get_storage(address, slot, TempoAnchor::dummy(7))
+                unauthenticated_reader.get_storage(
+                    address,
+                    slot,
+                    TempoAnchor::new(7, EMPTY_ROOT_HASH),
+                )
             })
             .await
             .unwrap()
@@ -553,7 +562,7 @@ mod tests {
 
         assert_eq!(
             reader
-                .get_storage_async(address, slot, TempoAnchor::dummy(7))
+                .get_storage_async(address, slot, TempoAnchor::new(7, EMPTY_ROOT_HASH))
                 .await
                 .unwrap(),
             B256::from(expected.to_be_bytes())
