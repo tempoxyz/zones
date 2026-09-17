@@ -7,7 +7,10 @@ use crate::{
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::stream;
 use std::{collections::HashSet, ops::RangeInclusive};
-use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
+use tempo_contracts::precompiles::{
+    ITIP20::{PauseStateUpdate, TransferPolicyUpdate},
+    TIP403_REGISTRY_ADDRESS,
+};
 use tempo_primitives::is_tip20_prefix;
 
 use std::collections::BTreeMap;
@@ -535,6 +538,9 @@ type L1ProcessedEvents = (
 );
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
+    if is_tip20_prefix(address) && topic0 == Some(&PauseStateUpdate::SIGNATURE_HASH) {
+        return Some(address);
+    }
     (address == TIP403_REGISTRY_ADDRESS
         || (is_tip20_prefix(address) && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH)))
     .then_some(TIP403_REGISTRY_ADDRESS)

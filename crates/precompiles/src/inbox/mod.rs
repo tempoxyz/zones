@@ -170,9 +170,8 @@ impl ZoneInbox {
 
             match queued {
                 DecodedQueuedDeposit::ForcedExit(entry) => {
-                    if !crate::forced_exit_storage::active(l1)? {
-                        return Err(ZonePrecompileError::MalformedCalldata);
-                    }
+                    // Admission currently accepts only v1 forced exits. If there's ever a new version
+                    // add a check here to make sure it is processed with the correct logic.
                     let decryption = decryptions
                         .next()
                         .ok_or_else(ZoneInboxError::missing_decryption_data)?;
