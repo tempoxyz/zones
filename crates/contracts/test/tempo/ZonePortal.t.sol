@@ -43,10 +43,34 @@ import { ZoneMessenger } from "../../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockRevertingReceiver } from "../mocks/MockCallbackReceivers.sol";
-import { MockVerifier } from "../mocks/MockVerifier.sol";
 import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
 import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
+
+contract MockHeightVerifier is IVerifier {
+
+    function verify(
+        uint32,
+        uint64,
+        uint64,
+        bytes32,
+        uint64,
+        uint256 nextZoneHeight,
+        BlockTransition calldata,
+        DepositQueueTransition calldata,
+        TokenEnablementTransition calldata,
+        bytes32,
+        bytes calldata,
+        bytes calldata proof
+    )
+        external
+        pure
+        returns (bool)
+    {
+        return proof.length == 32 && nextZoneHeight == abi.decode(proof, (uint256));
+    }
+
+}
 
 /// @notice Mock withdrawal receiver that accepts funds
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
@@ -1476,10 +1500,7 @@ contract ZonePortalTest is BaseTest {
         uint256 provenHeight = batch.nextZoneHeight;
         batch.proof = abi.encode(provenHeight);
 
-        vm.etch(ZONE_VERIFIER_ADDRESS, type(MockVerifier).runtimeCode);
-        MockVerifier heightVerifier = MockVerifier(ZONE_VERIFIER_ADDRESS);
-        heightVerifier.setShouldAccept(true);
-        heightVerifier.setCheckProofHeight(true);
+        vm.etch(ZONE_VERIFIER_ADDRESS, type(MockHeightVerifier).runtimeCode);
 
         // The quorum signs the altered height, but the execution proof still commits to H.
         batch.nextZoneHeight += heightDelta;
