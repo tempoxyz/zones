@@ -60,7 +60,7 @@ jobs:
 
       - name: Build Solidity artifacts
         working-directory: crates/contracts
-        run: forge build --sizes
+        run: forge build --sizes --skip test
 
       - name: Check Solidity and Rust ABIs
         run: cargo run -p tempo-xtask -- check-abi
@@ -107,7 +107,7 @@ jobs:
 
       - name: Run Forge build
         working-directory: crates/contracts
-        run: forge build --sizes
+        run: forge build --sizes --skip test
 
   lint:
     permissions:

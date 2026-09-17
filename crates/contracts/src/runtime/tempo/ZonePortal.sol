@@ -1499,7 +1499,7 @@ contract ZonePortal is IZonePortal {
         DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
-        bytes[] calldata signatures
+        bytes[] memory signatures
     )
         internal
         view
@@ -1534,7 +1534,7 @@ contract ZonePortal is IZonePortal {
         address[] memory recovered = new address[](signatures.length);
 
         for (uint256 i = 0; i < signatures.length; ++i) {
-            bytes calldata signature = signatures[i];
+            bytes memory signature = signatures[i];
             address signer;
             // The shared TIP-1020 verifier owns signature-format and canonicality checks.
             // Convert its reverts into `false` so the public verifier remains non-reverting.
