@@ -21,6 +21,7 @@ sol! {
         uint64 anchorBlockNumber;
         bytes32 anchorBlockHash;
         uint64 expectedWithdrawalBatchIndex;
+        uint256 nextZoneHeight;
         bytes32 prevBlockHash;
         bytes32 nextBlockHash;
         bytes32 prevProcessedHash;
@@ -127,6 +128,7 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
         anchorBlockNumber: public_inputs.anchor_block_number,
         anchorBlockHash: public_inputs.anchor_block_hash,
         expectedWithdrawalBatchIndex: public_inputs.expected_withdrawal_batch_index,
+        nextZoneHeight: alloy_primitives::U256::from(output.next_zone_height),
         prevBlockHash: output.block_transition.prevBlockHash,
         nextBlockHash: output.block_transition.nextBlockHash,
         prevProcessedHash: output.deposit_queue_transition.prevProcessedHash,
@@ -175,6 +177,7 @@ mod tests {
     #[test]
     fn batch_attestation_hash_matches_solidity_golden_vector() {
         let output = BatchOutput {
+            next_zone_height: 14,
             block_transition: BlockTransition {
                 prevBlockHash: B256::with_last_byte(1),
                 nextBlockHash: B256::with_last_byte(2),
@@ -210,6 +213,12 @@ mod tests {
                 .is_none()
         );
         let digest = nitro_batch_attestation_hash(&public_inputs, &output);
+        let mut other_height = output.clone();
+        other_height.next_zone_height += 1;
+        assert_ne!(
+            nitro_batch_attestation_hash(&public_inputs, &other_height),
+            digest
+        );
         let mut other_zone = public_inputs.clone();
         other_zone.zone_id += 1;
         assert_ne!(nitro_batch_attestation_hash(&other_zone, &output), digest);
@@ -219,7 +228,7 @@ mod tests {
         assert_eq!(
             nitro_batch_attestation_hash(&public_inputs, &output),
             alloy_primitives::b256!(
-                "0xc01ffd959ca368959c0724a9de479a8fc678f36ff608cc0565f6cfd86e98202e"
+                "0x1a703e80dd395e4720d1c88c877ed9f7d77c03052a985133b25cbf3e2b745b9d"
             ),
         );
     }
@@ -227,6 +236,7 @@ mod tests {
     #[test]
     fn batch_attestation_hash_binds_token_enablement_progress() {
         let mut output = BatchOutput {
+            next_zone_height: 1,
             block_transition: BlockTransition {
                 prevBlockHash: B256::ZERO,
                 nextBlockHash: B256::ZERO,

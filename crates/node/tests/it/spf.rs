@@ -168,6 +168,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
 
     assert_eq!(output.block_transition.prevBlockHash, B256::ZERO);
     assert_eq!(output.block_transition.nextBlockHash, expected_hash);
+    assert_eq!(output.next_zone_height, second_built_block.header.number());
     assert_eq!(
         output.deposit_queue_transition.prevProcessedHash,
         B256::ZERO
@@ -196,6 +197,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
 
     let output = prove_zone_batch(&config, witness)?;
 
+    assert_eq!(output.next_zone_height, 1);
     assert_eq!(
         output.block_transition.nextBlockHash, built.zone_hash,
         "SPF state, transaction, or receipt roots diverged from the production builder"
@@ -251,6 +253,7 @@ async fn spf_replays_migrated_policy_transaction_with_parent_forks() -> eyre::Re
 
     let output = prove_zone_batch(&config, witness)?;
 
+    assert_eq!(output.next_zone_height, 1);
     assert_eq!(
         output.block_transition.nextBlockHash, built.zone_hash,
         "SPF state, transaction, or receipt roots diverged from the production builder"
