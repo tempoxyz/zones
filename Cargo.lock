@@ -11934,6 +11934,7 @@ dependencies = [
  "const-hex",
  "eyre",
  "futures",
+ "reqwest",
  "reth-cli",
  "serde",
  "serde_json",

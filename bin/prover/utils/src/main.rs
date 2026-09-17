@@ -43,6 +43,7 @@ const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
 const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const LOG_QUERY_BLOCK_CHUNK: u64 = 1_000;
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 
@@ -96,13 +97,9 @@ struct GenerateInputArgs {
     #[arg(long)]
     tempo_rpc_url: String,
 
-    /// The Zone chain specification used for SPF execution.
-    #[arg(
-        long,
-        value_name = "CHAIN_OR_PATH",
-        value_parser = <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parser()
-    )]
-    chain: Arc<ZoneChainSpec>,
+    /// The Zone genesis JSON: a local path, inline JSON, or an HTTP(S) URL.
+    #[arg(long, value_name = "CHAIN_OR_PATH_OR_URL")]
+    chain: String,
 
     /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
     #[arg(long)]
@@ -111,6 +108,10 @@ struct GenerateInputArgs {
     /// Override the first Zone block (inclusive) by number or hash.
     #[arg(long, value_name = "NUMBER_OR_HASH")]
     from_block: Option<BlockHashOrNumber>,
+
+    /// Select the submitted batch containing this Zone block; fail if not yet submitted.
+    #[arg(long, value_name = "NUMBER_OR_HASH", conflicts_with_all = ["from_block", "to_block", "zone_block_count", "wait_timeout"])]
+    block: Option<BlockHashOrNumber>,
 
     /// Override the final Zone block (inclusive) by number or hash. Defaults to the Zone tip.
     #[arg(
@@ -216,6 +217,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
     info!(
+        block = ?args.block,
         from_block = ?args.from_block,
         to_block = ?args.to_block,
         zone_block_count = ?args.zone_block_count,
@@ -227,12 +229,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     if args.zone_block_count == Some(0) {
         bail!("--zone-block-count must be greater than zero");
     }
+    if args.block == Some(0.into()) {
+        bail!("Zone genesis block 0 does not belong to a submitted batch");
+    }
+    let chain = load_chain(&args.chain).await?;
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
     let zone_provider = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
     let mut discovery = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = SpfConfig::new(args.chain);
+    let spf_config = SpfConfig::new(chain);
     info!(
         zone_id = discovery.zone_id,
         portal = %discovery.portal,
@@ -244,12 +250,28 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("discovery", started, ());
 
     let started = start_phase("batch extraction");
-    let (from_override, to_override) = tokio::try_join!(
+    let (from_override, to_override, target_block) = tokio::try_join!(
         resolve_block_number(&zone_provider, args.from_block),
         resolve_block_number(&zone_provider, args.to_block),
+        resolve_block_number(&zone_provider, args.block),
     )?;
-    let (parent_header, parent_number, extracted) = if let Some(block_count) = args.zone_block_count
-    {
+    let (parent_header, parent_number, extracted) = if let Some(block) = target_block {
+        let batch =
+            find_submitted_batch(&tempo_provider, &zone_provider, &discovery, block).await?;
+        let (parent, parent_number, extracted) =
+            discover_batch(&zone_provider, &discovery, Some(batch.from), Some(batch.to)).await?;
+        if parent.hash_slow() != batch.parent_hash
+            || extracted.last().expect("non-empty batch").block_hash != batch.block_hash
+        {
+            bail!("selected Zone range does not match the submitted batch hashes");
+        }
+        let target = extracted
+            .iter()
+            .find(|extracted| extracted.input.number == block)
+            .expect("selected batch contains the target block");
+        validate_boundary_hash(args.block, block, target.block_hash)?;
+        (parent, parent_number, extracted)
+    } else if let Some(block_count) = args.zone_block_count {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
             &zone_provider,
             &tempo_provider,
@@ -281,6 +303,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .await
         .context("read withdrawal batch index from parent Zone state")?;
     if args.from_block.is_none()
+        && args.block.is_none()
         && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
     {
         bail!(
@@ -581,6 +604,98 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .await
         .wrap_err_with(|| format!("connect to {label} RPC at {url}"))
         .map(Provider::erased)
+}
+
+async fn load_chain(source: &str) -> Result<Arc<ZoneChainSpec>> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let genesis = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?
+            .get(source)
+            .send()
+            .await
+            .context("download Zone genesis JSON")?
+            .error_for_status()
+            .context("download Zone genesis JSON")?
+            .json()
+            .await
+            .context("decode Zone genesis JSON")?;
+        Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
+    } else {
+        <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parse(source)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SubmittedBatch {
+    from: u64,
+    to: u64,
+    parent_hash: B256,
+    block_hash: B256,
+}
+
+async fn find_submitted_batch(
+    tempo: &DynProvider<TempoNetwork>,
+    zone: &DynProvider<TempoNetwork>,
+    discovery: &Discovery,
+    target: u64,
+) -> Result<SubmittedBatch> {
+    if target == 0 {
+        bail!("Zone genesis block 0 does not belong to a submitted batch");
+    }
+    let committed = portal_parent_number(zone, discovery).await?;
+    if target > committed {
+        bail!(
+            "batch containing Zone block {target} has not been submitted yet (last submitted block: {committed})"
+        );
+    }
+
+    let portal = ZonePortal::new(discovery.portal, tempo.clone());
+    let mut hi = tempo.get_block_number().await?;
+    let mut end = None;
+    loop {
+        let lo = hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1);
+        let mut events = portal
+            .BatchSubmitted_filter()
+            .from_block(lo)
+            .to_block(hi)
+            .query()
+            .await
+            .wrap_err_with(|| format!("read submitted batches in Tempo blocks {lo}..={hi}"))?;
+        events.sort_by_key(|(_, log)| (log.block_number, log.transaction_index, log.log_index));
+        for (event, _) in events.into_iter().rev() {
+            let hash = event.nextBlockHash;
+            let block = zone.get_block_by_hash(hash).await?.ok_or_else(|| {
+                eyre!("submitted Zone block {hash} not found on unrestricted RPC")
+            })?;
+            let number = block.header.number();
+            if number < target {
+                let (to, block_hash) =
+                    end.ok_or_else(|| eyre!("no submitted batch contains Zone block {target}"))?;
+                return Ok(SubmittedBatch {
+                    from: number + 1,
+                    to,
+                    parent_hash: hash,
+                    block_hash,
+                });
+            }
+            end = Some((number, hash));
+            // The portal starts at index zero and increments before emitting. Recognizing
+            // its first submission avoids scanning all of Tempo history before deployment.
+            if event.withdrawalBatchIndex == 1 {
+                return Ok(SubmittedBatch {
+                    from: 1,
+                    to: number,
+                    parent_hash: zone_header(zone, 0).await?.hash_slow(),
+                    block_hash: hash,
+                });
+            }
+        }
+        if lo == 0 {
+            bail!("could not find complete submitted batch boundaries for Zone block {target}");
+        }
+        hi = lo - 1;
+    }
 }
 
 async fn discover(
