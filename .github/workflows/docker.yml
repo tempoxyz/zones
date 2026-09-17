@@ -52,7 +52,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.reproducible_verify == true &&
       github.repository == 'tempoxyz/zones' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/dan/reproducible-verify-smoke'
     uses: tempoxyz/gh-actions/.github/workflows/reproducible-image-verify.yml@5e789f13f8434b76ac105b49e15f696569e23734 # main
     permissions:
       contents: read
