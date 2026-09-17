@@ -127,6 +127,41 @@ fn consumed(h: &mut Harness, nonce: u64) -> eyre::Result<bool> {
 }
 
 #[test]
+fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Result<()> {
+    for paused in [true, false] {
+        let mut h = Harness::new()?;
+        fund(&mut h, U256::from(42))?;
+        let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+        let second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
+        // Admission occurred while unpaused; model the final state after a same-block
+        // pause (or pause followed by unpause). The Zone-local token remains unpaused.
+        let mut pause_slot = tempo_precompiles::storage::Slot::<bool>::new(
+            tempo_precompiles::tip20::slots::PAUSED,
+            PATH_USD_ADDRESS,
+        );
+        h.l1.with_storage(0, || pause_slot.write(!paused))?;
+        h.l1.with_storage(1, || pause_slot.write(paused))?;
+
+        // execute checks that both entries advance the inbox cursor.
+        assert!(execute(&mut h, vec![first, second])?.is_success());
+        assert!(h.l1.requested(1, &pause_slot));
+        assert!(!h.l1.requested(0, &pause_slot));
+        assert!(consumed(&mut h, 1)? && consumed(&mut h, 2)?);
+        assert_eq!(
+            h.balance(PATH_USD_ADDRESS, ROOT)?,
+            if paused { U256::from(42) } else { U256::ZERO }
+        );
+        let pending = h.pending_withdrawals()?;
+        assert_eq!(pending.len(), usize::from(!paused));
+        if !paused {
+            assert_eq!(pending[0].amount, 42);
+            assert_eq!(pending[0].to, BOB);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn forced_full_balance_replay_and_empty_finalize_with_exact_commitment() -> eyre::Result<()> {
     let mut h = Harness::new()?;
     fund(&mut h, U256::from(42))?;
