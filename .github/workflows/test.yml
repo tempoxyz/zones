@@ -38,14 +38,15 @@ jobs:
           ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
           persist-credentials: false
           submodules: true
-      - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b61457a6d6d06485b118a3c0e9637c94186c8c5a
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a
+      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a
         with:
           tool: nextest@0.9.124
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        uses: tempoxyz/gh-actions/actions/setup-foundry@b61457a6d6d06485b118a3c0e9637c94186c8c5a
         with:
           version: nightly
 
@@ -114,7 +115,7 @@ jobs:
       - name: Prepare nextest install directory
         run: mkdir -p "$HOME/.cargo/bin"
 
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@b61457a6d6d06485b118a3c0e9637c94186c8c5a
         with:
           tool: nextest@0.9.124
 
@@ -143,6 +144,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        uses: tempoxyz/gh-actions/actions/check-needs@b61457a6d6d06485b118a3c0e9637c94186c8c5a
         with:
           jobs: ${{ toJSON(needs) }}
