@@ -262,7 +262,6 @@ impl Default for EarnLimits {
 
 #[derive(Clone, Copy)]
 struct EarnAccessPolicy {
-    compound_id: u64,
     whitelist_id: u64,
 }
 
@@ -373,6 +372,14 @@ impl EarnZoneFixture {
                 excessFeeRateBps: Default::default(),
             },
         };
+        // EarnFactory fixes the share policy at deployment and relinquishes admin rights.
+        let access_policy = if protected {
+            Some(EarnAccessPolicy {
+                whitelist_id: l1.create_whitelist_policy().await?,
+            })
+        } else {
+            None
+        };
         let params = EarnDeployParams {
             deploymentId: keccak256("zones-earn-e2e-v1"),
             engine,
@@ -388,7 +395,7 @@ impl EarnZoneFixture {
                 updateDelay: Default::default(),
             },
             fees,
-            transferPolicyId: 0,
+            transferPolicyId: access_policy.map_or(0, |policy| policy.whitelist_id),
         };
 
         let provider = l1.dev_provider();
@@ -516,8 +523,7 @@ impl EarnZoneFixture {
         )
         .await?;
 
-        let access_policy = if protected {
-            let whitelist_id = l1.create_whitelist_policy().await?;
+        if let Some(policy) = access_policy {
             let outsider = l1.signer_at(3).address();
             for account in [
                 earn_vault,
@@ -529,20 +535,9 @@ impl EarnZoneFixture {
                 user_address,
                 outsider,
             ] {
-                l1.whitelist_address(whitelist_id, account).await?;
+                l1.whitelist_address(policy.whitelist_id, account).await?;
             }
-            let compound_id = l1
-                .create_compound_policy(1, whitelist_id, whitelist_id)
-                .await?;
-            l1.change_transfer_policy_id(earn_share, compound_id)
-                .await?;
-            Some(EarnAccessPolicy {
-                compound_id,
-                whitelist_id,
-            })
-        } else {
-            None
-        };
+        }
 
         l1.enable_token_on_portal(portal, vault_asset).await?;
         l1.enable_token_on_portal(portal, alternate_asset).await?;
@@ -600,17 +595,23 @@ impl EarnZoneFixture {
             .wait_for_l2_tempo_finalized(policy_block, E2E_TIMEOUT)
             .await?;
         let zone_registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, self.zone.provider());
+        let sender_authorized = zone_registry
+            .isAuthorizedSender(policy.whitelist_id, account)
+            .call()
+            .await?;
         let recipient_authorized = zone_registry
-            .isAuthorizedRecipient(policy.compound_id, account)
+            .isAuthorizedRecipient(policy.whitelist_id, account)
             .call()
             .await?;
         let mint_authorized = zone_registry
-            .isAuthorizedMintRecipient(policy.compound_id, account)
+            .isAuthorizedMintRecipient(policy.whitelist_id, account)
             .call()
             .await?;
         eyre::ensure!(
-            recipient_authorized == eligible && mint_authorized == eligible,
-            "Zone did not mirror Earn eligibility for {account}: recipient={recipient_authorized}, mint={mint_authorized}, expected={eligible}"
+            sender_authorized == eligible
+                && recipient_authorized == eligible
+                && mint_authorized == eligible,
+            "Zone did not mirror Earn eligibility for {account}: sender={sender_authorized}, recipient={recipient_authorized}, mint={mint_authorized}, expected={eligible}"
         );
         Ok(())
     }
@@ -1649,7 +1650,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
+async fn zone_removed_private_holder_can_exit_after_reauthorization() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start_protected().await?;
     let outsider_signer = fixture.l1.signer_at(3);
     let outsider = outsider_signer.address();
@@ -1669,6 +1670,26 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         "eligible private outsider received no EarnShare"
     );
     fixture.set_access_eligibility(outsider, false).await?;
+    outsider_account.approve_outbox(fixture.earn_share).await?;
+    let withdrawal_error = outsider_account
+        .withdraw_token(fixture.earn_share, outsider_shares)
+        .await
+        .expect_err("removed private holder must not withdraw EarnShare");
+    assert!(
+        withdrawal_error
+            .to_string()
+            .contains("L2 withdrawal request failed"),
+        "unexpected withdrawal error: {withdrawal_error}"
+    );
+    assert_eq!(
+        fixture
+            .zone
+            .balance_of(fixture.earn_share, outsider)
+            .await?,
+        U256::from(outsider_shares),
+        "rejected withdrawal changed the removed holder's EarnShare balance"
+    );
+    fixture.set_access_eligibility(outsider, true).await?;
     let outsider_output = fixture
         .zone_redeem_as(
             &mut outsider_account,
@@ -1679,7 +1700,7 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         .await?;
     assert_eq!(
         outsider_output, AMOUNT,
-        "removed private holder did not exit 1:1"
+        "reauthorized private holder did not exit 1:1"
     );
     assert_eq!(
         fixture
@@ -1687,7 +1708,7 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
             .balance_of(fixture.earn_share, outsider)
             .await?,
         U256::ZERO,
-        "removed private holder retained EarnShare after exit"
+        "reauthorized private holder retained EarnShare after exit"
     );
     Ok(())
 }
