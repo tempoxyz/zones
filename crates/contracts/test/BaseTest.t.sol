@@ -16,9 +16,9 @@ import {
     ZoneInfo
 } from "../src/runtime/interfaces/IZone.sol";
 import { EIP2935 } from "../src/runtime/libraries/BlockHashHistory.sol";
-import { Verifier } from "../src/runtime/tempo/Verifier.sol";
 import { ZoneMessenger } from "../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../src/runtime/tempo/ZonePortal.sol";
+import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
@@ -178,7 +178,9 @@ contract BaseTest is Test {
 
     /// @notice Installs the shared runtimes managed by the native TIP-1091 factory.
     function _installSharedZoneRuntimes() internal {
-        vm.etch(ZONE_VERIFIER_ADDRESS, type(Verifier).runtimeCode);
+        vm.etch(ZONE_VERIFIER_ADDRESS, type(MockVerifier).runtimeCode);
+        // Etching runtime code does not execute the mock's storage initializer.
+        MockVerifier(ZONE_VERIFIER_ADDRESS).setShouldAccept(true);
         vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
     }
 

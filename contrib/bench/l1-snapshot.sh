@@ -145,7 +145,6 @@ l1_snapshot_inputs_hash() {
             crates/contracts/src/lib.rs \
             crates/contracts/src/precompiles/zone_factory.rs \
             crates/contracts/out/ZonePortal.sol/ZonePortal.json \
-            crates/contracts/out/Verifier.sol/Verifier.json \
             crates/contracts/out/ZoneMessenger.sol/ZoneMessenger.json
         do
             path="$L1_SNAPSHOT_ZONES_ROOT/$relative"
@@ -281,10 +280,9 @@ l1_snapshot_prepare_expectations() {
     echo "building native ZoneFactory shared runtime artifacts"
     forge build --root "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts" --skip test --no-lint >/dev/null
 
-    local factory_hash portal_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash
+    local factory_hash portal_hash messenger_hash genesis_inputs_hash tempo_patch_hash
     factory_hash="$(l1_snapshot_sha256 "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/src/precompiles/zone_factory.rs")"
     portal_hash="$(l1_snapshot_artifact_hash ZonePortal)"
-    verifier_hash="$(l1_snapshot_artifact_hash Verifier)"
     messenger_hash="$(l1_snapshot_artifact_hash ZoneMessenger)"
     genesis_inputs_hash="$(l1_snapshot_inputs_hash)"
     local tempo_patch="$L1_SNAPSHOT_ZONES_ROOT/contrib/bench/patches/tempo-xtask-mnemonic-file.patch"
@@ -314,7 +312,6 @@ l1_snapshot_prepare_expectations() {
         --arg genesisInputsSha256 "$genesis_inputs_hash" \
         --arg factoryArtifactSha256 "$factory_hash" \
         --arg portalArtifactSha256 "$portal_hash" \
-        --arg verifierArtifactSha256 "$verifier_hash" \
         --arg messengerArtifactSha256 "$messenger_hash" \
         --arg owner "$owner" --arg validatorA "$validator_a" --arg validatorB "$validator_b" \
         --arg admin "$admin" --arg sequencer "$sequencer" --arg first "$first" --arg last "$last" \
@@ -339,7 +336,6 @@ l1_snapshot_prepare_expectations() {
             inputsSha256: $genesisInputsSha256,
             factoryArtifactSha256: $factoryArtifactSha256,
             portalArtifactSha256: $portalArtifactSha256,
-            verifierArtifactSha256: $verifierArtifactSha256,
             messengerArtifactSha256: $messengerArtifactSha256
           },
           l1: {

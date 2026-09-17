@@ -1,7 +1,7 @@
 # Zone runtime contracts
 
 This directory contains the Solidity contracts that remain deployed: the shared Tempo Zone
-runtimes (`ZonePortal`, `ZoneMessenger`, and `Verifier`) and the `SwapAndDepositRouter` utility.
+runtimes (`ZonePortal` and `ZoneMessenger`) and the `SwapAndDepositRouter` utility.
 The shared runtime bytecode is synchronized into the Tempo repository by the
 `sync-tempo-zone-runtimes` workflow.
 
