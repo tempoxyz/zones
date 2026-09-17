@@ -246,7 +246,6 @@ zone-up name reset="false" profile="dev" args="":
         echo "Error: $GENESIS_JSON not found. Run 'just create-zone {{name}}' first." >&2
         exit 1
     fi
-    PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
     SEQ_KEY_FILE="${SEQUENCER_KEY_FILE:-}"
@@ -271,7 +270,6 @@ zone-up name reset="false" profile="dev" args="":
                       node \
                       --chain "$GENESIS_JSON" \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
-                      --l1.portal-address "$PORTAL" \
                       --zone.id "$ZONE_ID" \
                       --http \
                       --http.addr 0.0.0.0 \
@@ -959,7 +957,6 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
                       node \
                       --chain "$OUTPUT/genesis.json" \
                       --l1.rpc-url "$L1_RPC" \
-                      --l1.portal-address "$PORTAL" \
                       --zone.id "$ZONE_ID" \
                       --http \
                       --http.addr 0.0.0.0 \
