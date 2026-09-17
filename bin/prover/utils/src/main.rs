@@ -11,7 +11,6 @@ use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
@@ -31,11 +30,14 @@ use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
 };
-use zone_rpc::{ZoneProvider, ZoneProviderConfig, types::ZoneExecutionWitness};
+use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoImport, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
 };
+
+mod verifier_request;
+mod verify;
 
 const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
@@ -69,6 +71,8 @@ enum Command {
     GenerateInput(GenerateInputArgs),
     /// Send a saved witness to a prover and save its output and proof.
     Prove(ProveArgs),
+    /// Verify a saved proof against the native L1 verifier using eth_call.
+    Verify(verify::VerifyArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -100,17 +104,9 @@ struct GenerateInputArgs {
     )]
     chain: Arc<ZoneChainSpec>,
 
-    /// Authenticated private Zone HTTP RPC URL validated against Zone discovery.
-    #[arg(long)]
-    zone_private_rpc_url: String,
-
     /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
     #[arg(long)]
-    zone_unrestricted_rpc_url: String,
-
-    /// Private key used to authenticate with the private Zone RPC.
-    #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
-    private_key: String,
+    zone_rpc_url: String,
 
     /// Override the first Zone block (inclusive) by number or hash.
     #[arg(long, value_name = "NUMBER_OR_HASH")]
@@ -198,6 +194,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
         Command::Prove(args) => prove(args).await,
+        Command::Verify(args) => verify::run(args).await,
     }
 }
 
@@ -233,20 +230,9 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
-    let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
-    let signer = args
-        .private_key
-        .parse::<PrivateKeySigner>()
-        .context("parse private Zone RPC key")?;
-    let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
+    let zone_provider = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
+    let mut discovery = discover(&tempo_provider, &zone_provider).await?;
     let spf_config = SpfConfig::new(args.chain);
-    let private_zone_provider = connect_private_zone(
-        &args.zone_private_rpc_url,
-        signer,
-        discovery.zone_id,
-        zone_chain_id,
-    )?;
-    validate_private_zone(&private_zone_provider, &discovery).await?;
     info!(
         zone_id = discovery.zone_id,
         portal = %discovery.portal,
@@ -420,6 +406,10 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 }
 
 async fn prove(args: ProveArgs) -> Result<()> {
+    let total_started = Instant::now();
+    let mut timings = Timings::default();
+    info!(input = %args.input.display(), target = %args.target, output = %args.output.display(), "proving saved witness");
+    let started = start_phase("read witness");
     let input = std::fs::read(&args.input)
         .wrap_err_with(|| format!("read batch witness from {}", args.input.display()))?;
     // Forward the witness unchanged: the remote prover selects the STF and witness schema.
@@ -429,18 +419,28 @@ async fn prove(args: ProveArgs) -> Result<()> {
     if !witness.is_object() {
         bail!("batch witness must be a JSON object");
     }
+    info!(bytes = input.len(), "loaded batch witness");
+    timings.record("read witness", started, ());
     let request_id = format!("prove-{}", keccak256(&input));
     let request = serde_json::json!({
         "version": PROTOCOL_VERSION,
         "requestId": request_id,
         "witness": witness,
     });
+    let started = start_phase("target prover");
     let (_, response) = exchange_with_prover(&args.target, &request).await?;
+    timings.record("target prover", started, ());
+    let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
+    timings.record("validate response", started, ());
+    let started = start_phase("output");
     let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
     std::fs::write(&args.output, &json)
         .wrap_err_with(|| format!("write prover response to {}", args.output.display()))?;
     println!("Saved prover output and proof to {}", args.output.display());
+    info!(bytes = json.len(), "saved prover response");
+    timings.record("output", started, ());
+    timings.print(total_started.elapsed());
     Ok(())
 }
 
@@ -485,19 +485,37 @@ async fn exchange_with_prover(
     target: &str,
     request: &impl serde::Serialize,
 ) -> Result<(usize, serde_json::Value)> {
+    let started = Instant::now();
+    info!(target, "connecting to prover");
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "connected to prover"
+    );
     let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+    let started = Instant::now();
+    info!("sending witness to prover");
     let request_bytes = connection
         .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
+    info!(
+        bytes = request_bytes,
+        elapsed_ms = started.elapsed().as_millis(),
+        "sent witness; waiting for prover response"
+    );
+    let started = Instant::now();
     let response = connection
         .receive()
         .await
         .wrap_err_with(|| format!("read response from target prover at {target}"))?
         .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "received prover response"
+    );
     Ok((request_bytes, response))
 }
 
@@ -565,30 +583,10 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .map(Provider::erased)
 }
 
-fn connect_private_zone(
-    url: &str,
-    signer: PrivateKeySigner,
-    zone_id: u32,
-    chain_id: u64,
-) -> Result<DynProvider<TempoNetwork>> {
-    let rpc_url = url
-        .parse()
-        .wrap_err_with(|| format!("parse private Zone RPC URL {url}"))?;
-    ZoneProvider::new(ZoneProviderConfig {
-        signer,
-        zone_id,
-        chain_id,
-        token_ttl: Duration::from_secs(600),
-        rpc_url,
-    })
-    .wrap_err_with(|| format!("connect to private Zone RPC at {url}"))
-    .map(|provider| provider.provider())
-}
-
 async fn discover(
     tempo: &DynProvider<TempoNetwork>,
     zone: &DynProvider<TempoNetwork>,
-) -> Result<(Discovery, u64)> {
+) -> Result<Discovery> {
     let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.clone());
     let portal_call = inbox.tempoPortal();
     let (tempo_chain_id, actual_zone_chain_id, portal_address) = tokio::try_join!(
@@ -625,17 +623,14 @@ async fn discover(
         );
     }
 
-    Ok((
-        Discovery {
-            zone_id,
-            portal: portal_address,
-            portal_withdrawal_batch_index: portal.withdrawal_batch_index,
-            portal_tempo_block_number: portal.tempo_block_number,
-            tempo_chain_id,
-            portal_block_hash: portal.block_hash,
-        },
-        actual_zone_chain_id,
-    ))
+    Ok(Discovery {
+        zone_id,
+        portal: portal_address,
+        portal_withdrawal_batch_index: portal.withdrawal_batch_index,
+        portal_tempo_block_number: portal.tempo_block_number,
+        tempo_chain_id,
+        portal_block_hash: portal.block_hash,
+    })
 }
 
 async fn read_portal_snapshot(
@@ -663,27 +658,6 @@ fn apply_portal_snapshot(discovery: &mut Discovery, snapshot: PortalSnapshot) {
     discovery.portal_withdrawal_batch_index = snapshot.withdrawal_batch_index;
     discovery.portal_tempo_block_number = snapshot.tempo_block_number;
     discovery.portal_block_hash = snapshot.block_hash;
-}
-
-async fn validate_private_zone(
-    private_zone: &DynProvider<TempoNetwork>,
-    discovery: &Discovery,
-) -> Result<()> {
-    // This first request authenticates with the discovered, fully scoped Zone
-    // and chain IDs before checking that both RPC endpoints expose the same Zone.
-    let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, private_zone.clone());
-    let portal = inbox
-        .tempoPortal()
-        .call()
-        .await
-        .context("read Tempo portal from private Zone RPC")?;
-    if portal != discovery.portal {
-        bail!(
-            "private Zone RPC points to Tempo portal {portal}, but the unrestricted Zone RPC points to {}",
-            discovery.portal,
-        );
-    }
-    Ok(())
 }
 
 async fn discover_counted_batch(
@@ -1446,12 +1420,8 @@ mod tests {
             "generate-input",
             "--tempo-rpc-url",
             "http://localhost:8545",
-            "--zone-private-rpc-url",
-            "http://localhost:8544",
-            "--zone-unrestricted-rpc-url",
+            "--zone-rpc-url",
             "http://localhost:8546",
-            "--private-key",
-            "unused",
             "--chain",
             &genesis,
         ];
