@@ -40,3 +40,5 @@ _
 
 # Amp orb portal metadata
 .amp/portals/*
+.amp/deps/
+.amp/state/

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This repository has no persistent services or per-thread authentication to repair.
+# Amp supervises .amp/services.yaml; no per-thread authentication needs repair.
 exit 0
