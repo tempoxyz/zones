@@ -6,6 +6,18 @@ variable "VERGEN_GIT_SHA_SHORT" {
   default = ""
 }
 
+variable "SOURCE_DATE_EPOCH" {
+  default = ""
+}
+
+variable "GIT_SHA" {
+  default = ""
+}
+
+variable "VERSION" {
+  default = "dev"
+}
+
 variable "PROVER_EIF_CONTEXT" {
   default = "./target/tempo-zone-prover-eif"
 }
@@ -55,6 +67,25 @@ target "_common" {
 target "tempo-zone" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo-zone"
+}
+
+# Non-production candidate image for the manual reproducible-image
+# verification workflow. This uses Dockerfile.reproducible's dedicated build
+# profile and flags, rather than the normal Dockerfile with a profile override.
+target "tempo-zone-reproducible" {
+  dockerfile = "docker/Dockerfile.reproducible"
+  context = "."
+  target = "tempo-zone-reproducible"
+  args = {
+    SOURCE_DATE_EPOCH = "${SOURCE_DATE_EPOCH}"
+    GIT_SHA = "${GIT_SHA}"
+    VERSION = "${VERSION}"
+  }
+  labels = {
+    "org.opencontainers.image.description" = "Non-production reproducible candidate image; verification covers /usr/local/bin/tempo-zone only."
+    "org.tempoxyz.reproducible.verification-scope" = "tempo-zone-binary"
+  }
+  platforms = ["linux/amd64"]
 }
 
 target "tempo-zone-prover-enclave" {
