@@ -80,9 +80,10 @@ a run-specific image under `ghcr.io/tempoxyz/tempo-zone-eif-toolchain`. It recor
 the resulting digest and uses that exact image for both EIF builds and measurement.
 This fixes Nitro CLI, Linux 6.6.79, NSM and bootstrap binaries as toolchain inputs;
 the comparison does not independently rebuild or verify the toolchain itself.
-To repeat a previous run exactly, pass its `eif_builder_image` digest as the
-`eif_builder_image` dispatch input, together with the same source, recipe revision
-and genesis checksum. Keep the toolchain image available for later reproduction.
+To reuse a previous run's toolchain, pass its `eif_builder_image` digest as the
+`eif_builder_image` dispatch input. Use the same source and genesis checksum;
+if the recipes have changed, reproduce locally with the recorded recipe revision
+as described below. Keep the toolchain image available for later reproduction.
 
 Inspect the result after all jobs finish:
 

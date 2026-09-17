@@ -161,7 +161,7 @@ jobs:
   reproducible-eif-verify:
     name: Verify reproducible prover EIF
     needs: eif-toolchain
-    uses: tempoxyz/gh-actions/.github/workflows/reproducible-eif-verify.yml@71a96dae1bd969e9d2b015e49e1bd0904be998f9 # main
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-eif-verify.yml@1b0b42c4dac07119c575280ea910a538b97ff010 # main
     permissions:
       contents: read
       packages: read
