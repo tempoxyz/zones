@@ -1037,6 +1037,98 @@ mod tests {
     }
 
     #[test]
+    fn resets_the_tempo_trie_for_an_imported_checkpoint() {
+        let account = Address::repeat_byte(0x35);
+        let slot = U256::from(7);
+        let first_value = U256::from(11);
+        let second_value = U256::from(12);
+        let (first_root, first_witness) = witnessed_account_state(
+            account,
+            0,
+            U256::ZERO,
+            keccak256([]),
+            Vec::new(),
+            Some((slot, first_value)),
+        );
+        let (second_root, second_witness) = witnessed_account_state(
+            account,
+            0,
+            U256::ZERO,
+            keccak256([]),
+            Vec::new(),
+            Some((slot, second_value)),
+        );
+        let header = |number, state_root| TempoHeader {
+            inner: Header {
+                number,
+                state_root,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let initial_header = Bytes::from(alloy_rlp::encode(header(9, first_root)));
+        let imported_header = Bytes::from(alloy_rlp::encode(header(10, second_root)));
+        let node_pool = first_witness
+            .node_pool
+            .into_iter()
+            .chain(second_witness.node_pool)
+            .collect();
+        let database = TempoWitnessDatabase::from_tempo_state_witness(TempoStateWitness {
+            initial_tempo_header_rlp: initial_header,
+            node_pool,
+        })
+        .unwrap();
+        let slot = B256::from(slot.to_be_bytes::<32>());
+
+        assert_eq!(
+            database.read_l1_storage(account, slot, 9).unwrap(),
+            B256::from(first_value.to_be_bytes::<32>())
+        );
+
+        let database = database.with_imported_checkpoint(&imported_header).unwrap();
+        assert_eq!(
+            database.read_l1_storage(account, slot, 10).unwrap(),
+            B256::from(second_value.to_be_bytes::<32>())
+        );
+        assert!(database.read_l1_storage(account, slot, 9).is_err());
+    }
+
+    #[test]
+    fn permits_an_unwitnessed_imported_tempo_checkpoint_until_read() {
+        let account = Address::repeat_byte(0x36);
+        let slot = B256::repeat_byte(0x07);
+        let initial_header = TempoHeader {
+            inner: Header {
+                number: 9,
+                state_root: EMPTY_ROOT_HASH,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let imported_header = TempoHeader {
+            inner: Header {
+                number: 10,
+                state_root: B256::repeat_byte(0x44),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let database = TempoWitnessDatabase::from_tempo_state_witness(TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(initial_header)),
+            node_pool: Vec::new(),
+        })
+        .unwrap()
+        .with_imported_checkpoint(&Bytes::from(alloy_rlp::encode(imported_header)))
+        .unwrap();
+
+        assert!(database.read_l1_storage(account, slot, 10).is_err());
+        let missing = database.missing_read().unwrap();
+        assert_eq!(missing.account, account);
+        assert_eq!(missing.slot, slot);
+        assert_eq!(missing.block_number, 10);
+    }
+
+    #[test]
     fn prepares_zone_next_block_environment() {
         let witness = minimal_batch_witness();
         let block = ZoneBlock {
