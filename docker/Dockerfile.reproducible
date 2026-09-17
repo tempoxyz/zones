@@ -64,9 +64,15 @@ RUN cargo build --locked --bin tempo-zone-prover-enclave \
 FROM scratch AS tempo-genesis
 
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS tempo-zone-prover-enclave-reproducible
+ARG SOURCE_DATE_EPOCH
 COPY --from=tempo-genesis / /etc/tempo/genesis/
 WORKDIR /data
 COPY --from=prover-builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone-prover-enclave /usr/local/bin/tempo-zone-prover-enclave
+# COPY cache keys ignore mtimes, and rewrite-timestamp only clamps newer files.
+# Normalize added paths explicitly so cached genesis layers cannot retain older
+# timestamps than a clean build. The rest of the rootfs comes from the pinned base.
+RUN find /etc/tempo /data /usr/local/bin/tempo-zone-prover-enclave \
+        -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave", "--tempo-genesis", "/etc/tempo/genesis"]
 

@@ -32,6 +32,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir "$scratch_dir/genesis"
+chmod 0755 "$scratch_dir/genesis"
 cp "$BUILD_INPUT_FILE" "$scratch_dir/genesis/genesis.json"
 chmod 0644 "$scratch_dir/genesis/genesis.json"
 
