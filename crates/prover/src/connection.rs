@@ -15,7 +15,7 @@ use crate::{ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, VerifyResponse};
 
 const CHANNEL_CAPACITY: usize = 2;
 
-/// A typed connection using the prover's chunked, length-delimited JSON protocol.
+/// A typed connection using the prover's length-delimited JSON protocol.
 pub struct ProverConnection<T> {
     inner: Framed<T, LengthDelimitedCodec>,
     maximum: usize,
@@ -32,12 +32,12 @@ where
     }
 
     /// Wraps an I/O stream with the prover protocol and its maximum message and chunk size.
-    fn with_limits(io: IO, frame_maximum: usize, maximum: usize) -> Self {
+    fn with_limits(io: IO, frame_maximum: usize, msg_maximum: usize) -> Self {
         Self {
             inner: LengthDelimitedCodec::builder()
                 .max_frame_length(frame_maximum)
                 .new_framed(io),
-            maximum,
+            maximum: msg_maximum,
             last_received_bytes: None,
         }
     }
@@ -47,11 +47,11 @@ where
         self.last_received_bytes
     }
 
-    /// Serializes and sends an owned typed message, returning its encoded JSON size.
-    pub async fn send<T>(&mut self, message: T) -> Result<usize, ProverConnectionError>
-    where
-        T: Serialize + Send + 'static,
-    {
+    /// Serializes and sends an owned typed message, returning its encoded size.
+    pub async fn send<T: Serialize + Send + 'static>(
+        &mut self,
+        message: T,
+    ) -> Result<usize, ProverConnectionError> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let frame_maximum = self.inner.codec().max_frame_length();
         let maximum = self.maximum;
@@ -80,10 +80,9 @@ where
     }
 
     /// Receives and deserializes one chunked logical message.
-    pub async fn receive<T>(&mut self) -> Result<Option<T>, ProverConnectionError>
-    where
-        T: DeserializeOwned + Send + 'static,
-    {
+    pub async fn receive<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+    ) -> Result<Option<T>, ProverConnectionError> {
         self.last_received_bytes = None;
         let Some(first) = self.inner.next().await else {
             return Ok(None);
@@ -140,6 +139,7 @@ where
     }
 }
 
+/// Streams serialized JSON into bounded physical protocol frames.
 struct ChunkWriter {
     tx: mpsc::Sender<Bytes>,
     buffer: Vec<u8>,
@@ -207,6 +207,7 @@ impl Write for ChunkWriter {
     }
 }
 
+/// Exposes asynchronously received JSON fragments as a synchronous byte stream.
 struct ChunkReader {
     rx: mpsc::Receiver<Bytes>,
     current: Bytes,

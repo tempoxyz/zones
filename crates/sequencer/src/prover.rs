@@ -629,7 +629,7 @@ async fn verify_remotely(
     let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
 
     let started = Instant::now();
-    let expected_request_id = request.request_id.clone();
+    let expected_id = request.request_id.clone();
     let send_result = connection.send(request).await;
     metrics
         .spf_remote_request_send_duration_seconds
@@ -673,9 +673,8 @@ async fn verify_remotely(
                 "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
             );
             ensure!(
-                request_id == expected_request_id,
-                "remote prover response request ID {request_id:?} does not match {:?}",
-                expected_request_id
+                request_id == expected_id,
+                "remote prover response request ID {request_id} does not match {expected_id}"
             );
             validate_proof_bundle(&proof_bundle)?;
             Ok((*output, proof_bundle))
@@ -692,9 +691,8 @@ async fn verify_remotely(
             );
             if let Some(response_id) = request_id {
                 ensure!(
-                    response_id == expected_request_id,
-                    "remote prover error request ID {response_id:?} does not match {:?}",
-                    expected_request_id
+                    response_id == expected_id,
+                    "remote prover error request ID {response_id} does not match {expected_id}",
                 );
             }
             let error = eyre::eyre!("remote prover rejected request ({code:?}): {message}");
