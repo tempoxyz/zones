@@ -34,12 +34,17 @@ where
         self.last_received_bytes
     }
 
-    /// Serializes and sends a typed message, returning its encoded size.
-    pub async fn send<T: Serialize>(
+    /// Serializes and sends an owned typed message, returning its encoded size.
+    pub async fn send<T: Serialize + Send + 'static>(
         &mut self,
-        message: &T,
+        message: T,
     ) -> Result<usize, ProverConnectionError> {
-        let payload = minicbor_serde::to_vec(message).map_err(ProverConnectionError::CborEncode)?;
+        let payload = join_worker(
+            tokio::task::spawn_blocking(move || {
+                minicbor_serde::to_vec(message).map_err(ProverConnectionError::CborEncode)
+            })
+            .await,
+        )??;
         let bytes = payload.len();
         self.inner
             .send(payload.into())
@@ -49,7 +54,7 @@ where
     }
 
     /// Receives and deserializes a typed message.
-    pub async fn receive<T: DeserializeOwned>(
+    pub async fn receive<T: DeserializeOwned + Send + 'static>(
         &mut self,
     ) -> Result<Option<T>, ProverConnectionError> {
         self.last_received_bytes = None;
@@ -58,7 +63,7 @@ where
         };
         let payload = payload.map_err(|error| classify_io_error(error, self.maximum))?;
         self.last_received_bytes = Some(payload.len());
-        decode_exact(&payload).map(Some)
+        join_worker(tokio::task::spawn_blocking(move || decode_exact(&payload)).await)?.map(Some)
     }
 }
 
@@ -76,6 +81,12 @@ pub enum ProverConnectionError {
     TrailingCborData,
     #[error("connection I/O failed: {0}")]
     Io(#[source] io::Error),
+    #[error("CBOR worker panicked")]
+    WorkerPanic,
+}
+
+fn join_worker<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, ProverConnectionError> {
+    result.map_err(|_| ProverConnectionError::WorkerPanic)
 }
 
 /// Decodes one schema-driven CBOR value and requires it to consume the complete frame.
@@ -131,6 +142,9 @@ pub fn request_error_response(error: &ProverConnectionError) -> VerifyResponse {
             ErrorCode::InternalError,
             format!("frame I/O failed: {error}"),
         ),
+        ProverConnectionError::WorkerPanic => {
+            (ErrorCode::InternalError, "CBOR worker panicked".into())
+        }
     };
     VerifyResponse::Error {
         version: PROTOCOL_VERSION,
@@ -165,7 +179,7 @@ mod tests {
             request_id: "round-trip".into(),
             witness: empty_witness(),
         };
-        let sent_bytes = client.send(&request).await.unwrap();
+        let sent_bytes = client.send(request).await.unwrap();
         let received: VerifyRequest = server.receive().await.unwrap().unwrap();
 
         assert_eq!(received.version, PROTOCOL_VERSION);
@@ -178,7 +192,7 @@ mod tests {
             code: ErrorCode::VerificationFailed,
             message: "round-trip".into(),
         };
-        let sent_bytes = server.send(&response).await.unwrap();
+        let sent_bytes = server.send(response).await.unwrap();
         let received: VerifyResponse = client.receive().await.unwrap().unwrap();
         assert!(matches!(
             received,

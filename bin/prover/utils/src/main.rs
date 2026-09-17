@@ -418,7 +418,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     if let Some(target) = &args.target {
         let started = start_phase("target prover");
-        let bytes = send_to_prover(target, &request, &output).await?;
+        let bytes = send_to_prover(target, request, &output).await?;
         timings.record("target prover", started, ());
         println!("  Target prover:         {target} ({bytes} request bytes, verified)");
     } else {
@@ -446,7 +446,7 @@ async fn prove(args: ProveArgs) -> Result<()> {
         witness,
     };
     let started = start_phase("target prover");
-    let (_, response) = exchange_with_prover(&args.target, &request).await?;
+    let (_, response) = exchange_with_prover(&args.target, request).await?;
     timings.record("target prover", started, ());
     let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
@@ -509,7 +509,7 @@ fn validate_proof_response<'a>(
 
 async fn exchange_with_prover(
     target: &str,
-    request: &VerifyRequest,
+    request: VerifyRequest,
 ) -> Result<(usize, VerifyResponse)> {
     let started = Instant::now();
     info!(target, "connecting to prover");
@@ -547,11 +547,12 @@ async fn exchange_with_prover(
 
 async fn send_to_prover(
     target: &str,
-    request: &VerifyRequest,
+    request: VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
+    let expected_id = request.request_id.clone();
     let (request_bytes, response) = exchange_with_prover(target, request).await?;
-    validate_proof_response(&response, &request.request_id)?;
+    validate_proof_response(&response, &expected_id)?;
     let VerifyResponse::Ok { output, .. } = response else {
         unreachable!("successful validation requires an ok response")
     };
@@ -1517,7 +1518,7 @@ mod tests {
                         message: "bad witness".into(),
                     }
                 };
-                connection.send(&response).await.unwrap();
+                connection.send(response).await.unwrap();
             }
             success.unwrap()
         });
