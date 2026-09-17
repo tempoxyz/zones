@@ -17,8 +17,10 @@ use alloy_sol_types::{ContractError, SolCall as _, SolInterface as _};
 use reth_chainspec::EthereumHardforks as _;
 use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
 use revm::{
+    Inspector,
     database::{State, states::bundle_state::BundleRetention},
     database_interface::bal::EvmDatabaseError,
+    interpreter::Interpreter,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::{TempoBlockEnv, TempoBlockExecutionCtx, TempoNextBlockEnvAttributes};
@@ -32,7 +34,7 @@ use tempo_zone_contracts::{
 use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
 
 use crate::{
-    Error, TempoImport, ZoneBlock,
+    CancelToken, Error, TempoImport, ZoneBlock,
     execution::database::{TempoWitnessDatabase, WitnessDatabase},
 };
 
@@ -55,6 +57,26 @@ pub(crate) struct BlockReplayContext<'a> {
     pub(crate) block_index: usize,
 }
 
+const CANCELLATION_CHECK_INTERVAL: u16 = 1024;
+
+#[derive(Debug)]
+struct CancellationInspector {
+    token: CancelToken,
+    remaining: u16,
+}
+
+impl<Context> Inspector<Context> for CancellationInspector {
+    fn step(&mut self, interpreter: &mut Interpreter, _context: &mut Context) {
+        self.remaining = self.remaining.saturating_sub(1);
+        if self.remaining == 0 {
+            self.remaining = CANCELLATION_CHECK_INTERVAL;
+            if self.token.is_cancelled() {
+                interpreter.halt_fatal();
+            }
+        }
+    }
+}
+
 /// Execute a complete Zone block in system-then-user order.
 ///
 /// When a Tempo header is present, `ZoneInbox.advanceTempo` executes first.
@@ -65,7 +87,9 @@ pub(crate) fn execute_zone_block(
     evm_config: ZoneEvmConfig<TempoWitnessDatabase>,
     replay: BlockReplayContext<'_>,
     block: &ZoneBlock,
+    cancellation: &CancelToken,
 ) -> Result<ExecutedZoneBlock, Error> {
+    cancellation.check()?;
     let BlockReplayContext {
         parent,
         block_index: zone_block_index,
@@ -101,7 +125,14 @@ pub(crate) fn execute_zone_block(
     let chain_id = env.cfg_env.chain_id;
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;
-    let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm(&mut *zone_state, env);
+    let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm_with_inspector(
+        &mut *zone_state,
+        env,
+        CancellationInspector {
+            token: cancellation.clone(),
+            remaining: CANCELLATION_CHECK_INTERVAL,
+        },
+    );
     let mut executor = BlockExecutorFactory::create_executor(
         &evm_config,
         evm,
@@ -160,6 +191,7 @@ pub(crate) fn execute_zone_block(
             },
         )
     })?;
+    cancellation.check()?;
     zone_state.merge_transitions(BundleRetention::Reverts);
 
     Ok(ExecutedZoneBlock {

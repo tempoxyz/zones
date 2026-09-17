@@ -20,10 +20,12 @@ use zone_primitives::constants::{
     ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
+mod cancellation;
 mod execution;
 mod mpt;
 mod types;
 
+pub use cancellation::CancelToken;
 pub use execution::database::{TempoWitnessDatabase, WitnessDatabase, WitnessDatabaseError};
 pub use mpt::StatelessSparseTrieError;
 pub use types::*;
@@ -35,6 +37,16 @@ pub use types::*;
 /// execution. The prover launches with TIP-1096, so every batch must end at a full
 /// block's withdrawal finalization boundary.
 pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
+    prove_zone_batch_with_cancel(config, witness, &CancelToken::default())
+}
+
+/// Execute a Zone batch while cooperatively observing `cancellation`.
+pub fn prove_zone_batch_with_cancel(
+    config: &SpfConfig,
+    witness: BatchWitness,
+    cancel: &CancelToken,
+) -> Result<BatchOutput, Error> {
+    cancel.check()?;
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
     // state root selects the initial Zone state.
@@ -134,6 +146,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     };
     let mut previous_header = witness.parent_header.clone();
     for (block_index, block) in witness.zone_blocks.iter().enumerate() {
+        cancel.check()?;
         let expected_parent_hash = previous_header.hash_slow();
         if block.parent_hash != expected_parent_hash {
             return Err(Error::BlockParentHashMismatch {
@@ -182,6 +195,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
                 block_index,
             },
             block,
+            cancel,
         );
         let executed_block = match executed_block {
             Ok(executed_block) => executed_block,
@@ -483,6 +497,9 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> 
 /// Errors emitted by the stateless state transition function.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    /// Execution was cooperatively cancelled.
+    #[error("SPF execution cancelled")]
+    Cancelled,
     /// The verifier-bound parent and Zone IDs cannot produce a valid chain ID.
     #[error(transparent)]
     ZoneChainId(#[from] zone_primitives::constants::ZoneChainIdError),
@@ -828,6 +845,17 @@ mod tests {
         assert_eq!(
             prove_zone_batch(&test_config(), witness),
             Err(Error::EmptyZoneBatch)
+        );
+    }
+
+    #[test]
+    fn pre_cancelled_execution_stops_before_validation() {
+        let cancel = CancelToken::default();
+        cancel.cancel();
+
+        assert_eq!(
+            prove_zone_batch_with_cancel(&test_config(), minimal_batch_witness(), &cancel,),
+            Err(Error::Cancelled)
         );
     }
 
