@@ -233,6 +233,9 @@ fn install_native_zone_factory(
             [TEMPO_ZONE_MESSENGER_RUNTIME, T12_ZONE_MESSENGER_RUNTIME],
         ),
     ] {
+        // A benchmark Tempo build embeds these artifacts in every fork's runtime
+        // set. Its generated genesis has the same code without our nonce of one.
+        let benchmark_genesis = GenesisAccount::default().with_code(Some(code.clone()));
         let expected = GenesisAccount::default()
             .with_nonce(Some(1))
             .with_code(Some(code));
@@ -243,6 +246,9 @@ fn install_native_zone_factory(
                 genesis.alloc.insert(address, expected);
             }
             Some(existing) if existing == &expected => {}
+            Some(existing) if existing == &benchmark_genesis => {
+                genesis.alloc.insert(address, expected);
+            }
             Some(existing) if known_tempo_runtimes.contains(existing) => {
                 genesis.alloc.insert(address, expected);
             }
@@ -307,6 +313,46 @@ mod tests {
             T12_ZONE_VERIFIER_RUNTIME,
             T12_ZONE_MESSENGER_RUNTIME,
         ]);
+    }
+
+    #[test]
+    fn accepts_benchmark_runtimes_from_any_fork() {
+        let owner = address!("0x0000000000000000000000000000000000000001");
+        let artifacts = || NativeArtifacts {
+            portal: Bytes::from_static(&[1]),
+            verifier: Bytes::from_static(&[2]),
+            messenger: Bytes::from_static(&[3]),
+        };
+        let mut genesis = Genesis::default();
+        for (address, code) in [
+            (ZONE_PORTAL_IMPL_ADDRESS, artifacts().portal),
+            (ZONE_VERIFIER_ADDRESS, artifacts().verifier),
+            (ZONE_MESSENGER_ADDRESS, artifacts().messenger),
+        ] {
+            let account = GenesisAccount::default().with_code(Some(code));
+            genesis.alloc.insert(address, account.clone());
+            for conflicting in [
+                account.clone().with_nonce(Some(2)),
+                account.clone().with_balance(U256::ONE),
+                account.with_storage(Some(BTreeMap::from([(
+                    B256::ZERO,
+                    B256::with_last_byte(1),
+                )]))),
+            ] {
+                assert_rejects_shared_runtime(address, conflicting);
+            }
+        }
+
+        let mut expected = genesis.alloc.clone();
+        for account in expected.values_mut() {
+            account.nonce = Some(1);
+        }
+        expected.insert(ZONE_FACTORY_ADDRESS, native_factory_account(owner));
+        install_native_zone_factory(&mut genesis, owner, artifacts()).unwrap();
+        assert_eq!(genesis.alloc, expected);
+        // Reapplying the same benchmark allocations is harmless.
+        install_native_zone_factory(&mut genesis, owner, artifacts()).unwrap();
+        assert_eq!(genesis.alloc, expected);
     }
 
     fn assert_validates_shared_runtimes([portal, verifier, messenger]: [Bytes; 3]) {
