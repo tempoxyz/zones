@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
 # Reproducible build of the `tempo-zone` binary for x86_64-unknown-linux-gnu.
 # This is verification-only for now; release.yml and docker.yml still publish
 # through the existing release paths.
 
 ARG RUST_TOOLCHAIN=1.96.0
-FROM rust:${RUST_TOOLCHAIN}-bookworm@sha256:64d9b7f60e3abb08d477cad983d0a3743acc53a19369ba4482510184c9c807e5 AS builder
+FROM rust:${RUST_TOOLCHAIN}-bookworm@sha256:64d9b7f60e3abb08d477cad983d0a3743acc53a19369ba4482510184c9c807e5 AS reproducible-builder-base
 
 ARG SOURCE_DATE_EPOCH
 ARG GIT_SHA
@@ -46,6 +46,7 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
     JEMALLOC_OVERRIDE=/usr/lib/x86_64-linux-gnu/libjemalloc.a \
     RUSTFLAGS="-C symbol-mangling-version=v0 -C strip=none -C link-arg=-Wl,--build-id=none -C link-arg=-fuse-ld=mold -C metadata= --remap-path-prefix /app=. --remap-path-prefix /usr/local/cargo/registry=/registry --remap-path-prefix /usr/local/rustup=/rustup"
 
+FROM reproducible-builder-base AS builder
 RUN cargo build --locked --bin tempo-zone \
         --features jemalloc \
         --profile reproducible \
@@ -53,6 +54,27 @@ RUN cargo build --locked --bin tempo-zone \
 
 FROM scratch AS artifacts
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone /tempo-zone
+
+FROM reproducible-builder-base AS prover-builder
+RUN cargo build --locked --bin tempo-zone-prover-enclave \
+        --profile reproducible \
+        --target x86_64-unknown-linux-gnu
+
+# The caller supplies a directory containing the checksum-verified genesis.json.
+FROM scratch AS tempo-genesis
+
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS tempo-zone-prover-enclave-reproducible
+ARG SOURCE_DATE_EPOCH
+COPY --from=tempo-genesis / /etc/tempo/genesis/
+WORKDIR /data
+COPY --from=prover-builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone-prover-enclave /usr/local/bin/tempo-zone-prover-enclave
+# COPY cache keys ignore mtimes, and rewrite-timestamp only clamps newer files.
+# Normalize added paths explicitly so cached genesis layers cannot retain older
+# timestamps than a clean build. The rest of the rootfs comes from the pinned base.
+RUN find /etc/tempo /data /usr/local/bin/tempo-zone-prover-enclave \
+        -exec touch --no-dereference --date="@${SOURCE_DATE_EPOCH}" {} +
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/tempo-zone-prover-enclave", "--tempo-genesis", "/etc/tempo/genesis"]
 
 # Runtime image used only by the reproducible-image verification pilot. The
 # binary is intentionally copied from the reproducible builder above rather
