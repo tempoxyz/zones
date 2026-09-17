@@ -317,6 +317,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         });
     }
     Ok(BatchOutput {
+        next_zone_height: previous_header.number(),
         block_transition: BlockTransition {
             prevBlockHash: output_parent_hash,
             nextBlockHash: previous_header.hash_slow(),
