@@ -397,15 +397,6 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     };
     timings.record("output", started, ());
 
-    let target_bytes = if let Some(target) = &args.target {
-        let started = start_phase("target prover");
-        let bytes = send_to_prover(target, &request, &output).await?;
-        timings.record("target prover", started, ());
-        Some(bytes)
-    } else {
-        None
-    };
-
     print_summary(
         &discovery,
         &request.witness,
@@ -413,8 +404,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         &output,
         anchor_mode,
         args.output.as_ref().zip(output_bytes),
-        args.target.as_deref().zip(target_bytes),
     );
+
+    if let Some(target) = &args.target {
+        let started = start_phase("target prover");
+        let bytes = send_to_prover(target, request, &output).await?;
+        timings.record("target prover", started, ());
+        println!("  Target prover:         {target} ({bytes} request bytes, verified)");
+    } else {
+        println!("  Target prover:         not sent (pass --target <HOST:PORT>)");
+    }
     timings.print(total_started.elapsed());
     Ok(())
 }
@@ -435,7 +434,7 @@ async fn prove(args: ProveArgs) -> Result<()> {
         "requestId": request_id,
         "witness": witness,
     });
-    let (_, response) = exchange_with_prover(&args.target, &request).await?;
+    let (_, response) = exchange_with_prover(&args.target, request).await?;
     validate_proof_response(&response, &request_id)?;
     let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
     std::fs::write(&args.output, &json)
@@ -483,7 +482,7 @@ fn validate_proof_response(response: &serde_json::Value, request_id: &str) -> Re
 
 async fn exchange_with_prover(
     target: &str,
-    request: &impl serde::Serialize,
+    request: impl serde::Serialize + Send + 'static,
 ) -> Result<(usize, serde_json::Value)> {
     let stream = TcpStream::connect(target)
         .await
@@ -503,9 +502,10 @@ async fn exchange_with_prover(
 
 async fn send_to_prover(
     target: &str,
-    request: &VerifyRequest,
+    request: VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
+    let expected_id = request.request_id.clone();
     let (request_bytes, response) = exchange_with_prover(target, request).await?;
     let response: VerifyResponse =
         serde_json::from_value(response).context("decode target prover response")?;
@@ -521,11 +521,8 @@ async fn send_to_prover(
                     "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
                 );
             }
-            if request_id != request.request_id {
-                bail!(
-                    "target prover response request ID {request_id:?} does not match {:?}",
-                    request.request_id
-                );
+            if request_id != expected_id {
+                bail!("target prover response request ID {request_id} doesn't match {expected_id}");
             }
             if *output != *expected_output {
                 bail!("target prover output does not match local SPF output");
@@ -543,12 +540,9 @@ async fn send_to_prover(
                 );
             }
             if let Some(response_id) = request_id
-                && response_id != request.request_id
+                && response_id != expected_id
             {
-                bail!(
-                    "target prover error request ID {response_id:?} does not match {:?}",
-                    request.request_id
-                );
+                bail!("target prover error request ID {response_id} doesn't match {expected_id}",);
             }
             bail!("target prover rejected request ({code:?}): {message}");
         }
@@ -1209,7 +1203,6 @@ fn print_summary(
     output: &BatchOutput,
     anchor_mode: &str,
     written_output: Option<(&PathBuf, usize)>,
-    verified_target: Option<(&str, usize)>,
 ) {
     let first = witness.zone_blocks.first().expect("non-empty batch");
     let last = witness.zone_blocks.last().expect("non-empty batch");
@@ -1280,12 +1273,6 @@ fn print_summary(
             path.display()
         ),
         _ => println!("  Output:                not written (pass --output <PATH>)"),
-    }
-    match verified_target {
-        Some((target, bytes)) => {
-            println!("  Target prover:         {target} ({bytes} request bytes, verified)")
-        }
-        _ => println!("  Target prover:         not sent (pass --target <HOST:PORT>)"),
     }
 }
 
@@ -1411,7 +1398,7 @@ mod tests {
                         "status": "error", "code": "verification_failed", "message": "bad witness",
                     })
                 };
-                connection.send(&response).await.unwrap();
+                connection.send(response).await.unwrap();
             }
             success.unwrap()
         });

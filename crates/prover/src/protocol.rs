@@ -105,7 +105,7 @@ pub enum ErrorCode {
     VerificationFailed,
     /// The prover could not obtain an attestation from the Nitro Secure Module.
     AttestationUnavailable,
-    /// The framed request exceeds the configured size limit.
+    /// A physical frame or logical request exceeds its size limit.
     RequestTooLarge,
     /// The connection ended before the complete frame was received.
     TruncatedFrame,

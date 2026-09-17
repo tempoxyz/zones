@@ -193,7 +193,7 @@ where
         Ok(Some(request)) => request,
         Err(error) => {
             warn!(%error, "rejected SPF request frame");
-            if let Err(error) = connection.send(&request_error_response(&error)).await {
+            if let Err(error) = connection.send(request_error_response(&error)).await {
                 warn!(%error, "failed to write frame error response");
             }
             return;
@@ -205,7 +205,7 @@ where
     };
     let request_bytes = connection.last_received_bytes().unwrap_or_default();
     let response = process_request(request, specs);
-    match connection.send(&response).await {
+    match connection.send(response).await {
         Ok(response_bytes) => {
             info!(
                 request_bytes,

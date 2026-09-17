@@ -36,7 +36,8 @@ the NSM request fails.
 Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
 operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
 pass `--port` to change the selected transport's port. The maximum request payload defaults to 512
-MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`.
+MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. Logical JSON messages
+are streamed as fragments followed by an empty terminator frame. Each frame is limited to 1 MiB.
 
 TCP mode is intended for development of framing, chain validation, and SPF error handling. The
 binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
