@@ -23,8 +23,12 @@ jobs:
     runs-on: depot-ubuntu-latest-16
     timeout-minutes: 30
     permissions:
+      id-token: write
       contents: read
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -100,12 +104,16 @@ jobs:
     needs: build-test-artifacts
     timeout-minutes: 20
     permissions:
+      id-token: write
       contents: read
     strategy:
       fail-fast: false
       matrix:
         partition: [1, 2]
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -137,12 +145,16 @@ jobs:
     name: test success
     runs-on: ubuntu-latest
     if: always()
-    permissions: {}
+    permissions:
+      id-token: write
     needs:
       - build-test-artifacts
       - test
     timeout-minutes: 30
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - name: Decide whether the needed jobs succeeded or failed
         uses: tempoxyz/gh-actions/actions/check-needs@b61457a6d6d06485b118a3c0e9637c94186c8c5a
         with:

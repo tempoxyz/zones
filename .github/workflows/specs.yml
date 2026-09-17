@@ -33,7 +33,13 @@ jobs:
   build:
     name: Forge Build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
@@ -68,7 +74,13 @@ jobs:
   lint:
     name: Forge Fmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
@@ -90,7 +102,13 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       MIN_LINES: "88"
       MIN_BRANCHES: "60"
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
@@ -226,7 +244,13 @@ jobs:
       - lint
       - test
     timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:

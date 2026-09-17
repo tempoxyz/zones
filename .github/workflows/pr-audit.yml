@@ -41,10 +41,14 @@ jobs:
       )
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
       issues: write
       pull-requests: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@c1eeb5fcba4838f20d6920e3901272cf3a14749d
+
       - uses: tempoxyz/gh-actions/actions/pr-audit-comment@5829d6b46418710f752eb8b25218af9812b78428
         with:
           command-regex: '^(?:@decofe\s+)?(?:cyclops\s+audit|derek\s+audit)\b'
