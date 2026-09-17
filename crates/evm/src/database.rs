@@ -16,9 +16,7 @@ use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
     storage::{L1State, L1StateError, L1StorageReader},
-    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
 };
-use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 /// Resolves mirrored L1 reads at the active Tempo anchor and forwards all other database
 /// operations to the caller-provided Zone database.
@@ -67,9 +65,10 @@ impl<DB: DynDatabase, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             return Ok(anchor);
         }
 
-        let value = self
-            .inner
-            .get_storage(&TEMPO_STATE_ADDRESS, &TEMPO_BLOCK_NUMBER_SLOT)?;
+        let value = self.l1.initial_anchor().ok_or_else(|| {
+            self.error = Some(AnyError::new(ZoneDbError::MissingAnchor));
+            L1_ERROR
+        })?;
         let anchor = u64::try_from(value).map_err(|_| {
             self.error = Some(AnyError::new(ZoneDbError::AnchorOverflow(value)));
             L1_ERROR
@@ -172,6 +171,9 @@ impl StateChangeSink for L1WriteGuard {
 /// Database error produced by [`L1OverlayDB`].
 #[derive(Debug, Error)]
 pub enum ZoneDbError {
+    /// Mirrored storage was accessed without an initialized transaction context.
+    #[error("Tempo anchor was not initialized for this transaction")]
+    MissingAnchor,
     /// The selected Zone state contains an invalid Tempo anchor.
     #[error("invalid Tempo anchor (does not fit in u64): {0}")]
     AnchorOverflow(U256),
@@ -184,7 +186,10 @@ pub enum ZoneDbError {
 mod tests {
     use super::*;
     use evm2::evm::InMemoryDB;
-    use zone_precompiles::test_utils::MockL1Reader as TestL1;
+    use zone_precompiles::{
+        tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader as TestL1,
+    };
+    use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
     fn test_db(anchor: u64) -> InMemoryDB {
         let mut db = InMemoryDB::default();
@@ -196,6 +201,13 @@ mod tests {
         db
     }
 
+    fn test_overlay(anchor: u64, reader: TestL1) -> L1OverlayDB<InMemoryDB, TestL1> {
+        // The backing database can lag the checkpoint already committed in the EVM overlay.
+        let db = L1OverlayDB::new(test_db(anchor.saturating_sub(1)), reader, Address::ZERO);
+        db.l1_state().begin_transaction(U256::from(anchor));
+        db
+    }
+
     #[test]
     fn overlays_registry_at_selected_state_anchor() {
         let anchor = 42;
@@ -204,7 +216,7 @@ mod tests {
         let l1 = TestL1::default();
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor - 1, U256::from(98));
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
-        let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
+        let mut db = test_overlay(anchor, l1);
 
         assert_eq!(
             DynDatabase::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
@@ -217,8 +229,7 @@ mod tests {
     fn l1_failures_and_read_before_advance_fail_closed() {
         let anchor = 42;
         let slot = U256::from(7);
-        let mut failing =
-            L1OverlayDB::new(test_db(anchor), TestL1::failing_storage(), Address::ZERO);
+        let mut failing = test_overlay(anchor, TestL1::failing_storage());
         let code =
             DynDatabase::get_storage(&mut failing, &TIP403_REGISTRY_ADDRESS, &slot).unwrap_err();
         assert!(matches!(
@@ -231,7 +242,7 @@ mod tests {
 
         let reader = TestL1::default();
         reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
-        let mut db = L1OverlayDB::new(test_db(anchor), reader.clone(), Address::ZERO);
+        let mut db = test_overlay(anchor, reader.clone());
         let l1 = db.l1_state().clone();
         assert_eq!(
             DynDatabase::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
@@ -250,6 +261,7 @@ mod tests {
         let mut inner = test_db(anchor);
         inner.insert_account_storage(&TIP403_REGISTRY_ADDRESS, &slot, &local);
         let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
+        db.l1_state().begin_transaction(U256::from(anchor));
         let observed = DynDatabase::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap();
         assert_eq!(observed, l1_value);
 
@@ -269,7 +281,7 @@ mod tests {
         let (anchor, slot) = (42, U256::from(7));
         let l1 = TestL1::default();
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::from(7));
-        let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
+        let mut db = test_overlay(anchor, l1);
 
         DynDatabase::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap();
         assert_eq!(db.l1_state().get_anchor(), Some(anchor));
@@ -277,6 +289,12 @@ mod tests {
         db.l1_state().reset_transaction_state();
 
         assert_eq!(db.l1_state().get_anchor(), None);
+        assert_eq!(db.l1_state().initial_anchor(), None);
+        let code = db.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap_err();
+        assert!(matches!(
+            db.error(code).downcast_ref::<ZoneDbError>(),
+            Some(ZoneDbError::MissingAnchor)
+        ));
     }
 
     #[test]

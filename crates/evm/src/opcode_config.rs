@@ -14,8 +14,10 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::{
     ExecutionContext, TempoEvmTypes, TempoTxEnv, tempo_opcode_config, tempo_tx_registry,
 };
-use zone_precompiles::{L1State, L1StorageReader, tx_context};
-use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
+use zone_precompiles::{
+    L1State, L1StorageReader, tempo_state::TEMPO_BLOCK_NUMBER_SLOT, tx_context,
+};
+use zone_primitives::constants::{CONTRACT_DEPLOYER_ALLOWLIST, TEMPO_STATE_ADDRESS};
 
 /// Zone opcode configuration over Tempo and an inherited Ethereum specification.
 pub(crate) struct ZoneConfig<const BASE_SPEC_ID: u32>(());
@@ -59,6 +61,15 @@ pub(crate) fn zone_tx_registry<L1: L1StorageReader>(
                 l1.reset_transaction_state();
                 crate::validate_transaction(request.envelope, CONTRACT_DEPLOYER_ALLOWLIST)
                     .map_err(HandlerError::external)?;
+
+                // The accepted EVM overlay sits above L1OverlayDB. Snapshot its checkpoint
+                // here so mirrored reads cannot fall back to the backing database's old value.
+                let initial_anchor = request
+                    .host
+                    .state_mut()
+                    .storage_slot_untracked(&TEMPO_STATE_ADDRESS, &TEMPO_BLOCK_NUMBER_SLOT)
+                    .map_err(HandlerError::Fatal)?;
+                l1.begin_transaction(initial_anchor);
 
                 let tx_hash = match request.envelope.execution_context() {
                     ExecutionContext::Transaction { tx_hash } => tx_hash,

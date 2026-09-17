@@ -452,7 +452,10 @@ mod tests {
     use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_rlp::Encodable;
     use alloy_sol_types::{SolCall, SolValue};
-    use evm2::evm::InMemoryDB;
+    use evm2::{
+        bytecode::Bytecode,
+        evm::{AccountInfo, InMemoryDB},
+    };
     use reth_chainspec::{EthChainSpec, ForkCondition};
     use reth_primitives_traits::Recovered;
     use tempo_chainspec::{
@@ -460,7 +463,9 @@ mod tests {
         spec::{MODERATO, TempoHardforks},
     };
     use tempo_precompiles::{
-        TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
+        TIP403_REGISTRY_ADDRESS,
+        storage::StorageKey,
+        tip403_registry::{ITIP403Registry, tip403_registry_slots},
         zone_factory::ZonePortalStorage,
     };
     use tempo_primitives::transaction::envelope::{
@@ -489,8 +494,32 @@ mod tests {
         assert!(failing.take_reads().is_empty());
     }
 
+    fn system_tx_env(to: Address, input: Bytes) -> Recovered<TempoTxEnv> {
+        let tx = Recovered::new_unchecked(
+            TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                TxLegacy {
+                    to: to.into(),
+                    input,
+                    ..Default::default()
+                },
+                TEMPO_SYSTEM_TX_SIGNATURE,
+            )),
+            TEMPO_SYSTEM_TX_SENDER,
+        );
+        Recovered::new_unchecked(tx.into(), TEMPO_SYSTEM_TX_SENDER)
+    }
+
     #[test]
     fn advance_tempo_keeps_overlay_reads_on_child_anchor() {
+        check_registry_reads_after_advance(true);
+    }
+
+    #[test]
+    fn discarded_advance_tempo_preserves_parent_registry_anchor() {
+        check_registry_reads_after_advance(false);
+    }
+
+    fn check_registry_reads_after_advance(commit_advance: bool) {
         const PARENT: u64 = 0;
         const CHILD: u64 = 1;
         let portal = Address::repeat_byte(0x42);
@@ -515,6 +544,20 @@ mod tests {
         reader.insert(TIP403_REGISTRY_ADDRESS, policy_slot, PARENT, parent_policy);
         reader.insert(TIP403_REGISTRY_ADDRESS, policy_slot, CHILD, child_policy);
 
+        let counter_slot = tip403_registry_slots::POLICY_ID_COUNTER;
+        reader.insert(
+            TIP403_REGISTRY_ADDRESS,
+            counter_slot,
+            PARENT,
+            U256::from(100),
+        );
+        reader.insert(
+            TIP403_REGISTRY_ADDRESS,
+            counter_slot,
+            CHILD,
+            U256::from(200),
+        );
+
         let genesis = TempoHeader::default();
         let mut genesis_rlp = Vec::new();
         genesis.encode(&mut genesis_rlp);
@@ -532,7 +575,10 @@ mod tests {
 
         let mut db = InMemoryDB::default();
         db.insert_account_info(&TEMPO_STATE_ADDRESS, Default::default());
-        db.insert_account_info(&TIP403_REGISTRY_ADDRESS, Default::default());
+        db.insert_account_info(
+            &TIP403_REGISTRY_ADDRESS,
+            AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from_static(&[0xef]))),
+        );
         db.insert_account_storage(
             &TEMPO_STATE_ADDRESS,
             &U256::ZERO,
@@ -556,6 +602,10 @@ mod tests {
         env.block.timestamp = U256::from(child.inner.timestamp);
         env.block.ext.timestamp_millis_part = child.timestamp_millis_part;
         let mut evm = BlockExecutorFactory::evm_with_env(&config, db, env);
+        let counter_tx = system_tx_env(
+            TIP403_REGISTRY_ADDRESS,
+            ITIP403Registry::policyIdCounterCall {}.abi_encode().into(),
+        );
         let calldata = IZoneInbox::advanceTempoCall {
             header: Bytes::from(child_rlp),
             deposits: Vec::new(),
@@ -569,23 +619,15 @@ mod tests {
         }
         .abi_encode();
 
-        let tx: TempoTxEnv = Recovered::new_unchecked(
-            TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                TxLegacy {
-                    to: ZONE_INBOX_ADDRESS.into(),
-                    input: calldata.into(),
-                    ..Default::default()
-                },
-                TEMPO_SYSTEM_TX_SIGNATURE,
-            )),
-            TEMPO_SYSTEM_TX_SENDER,
-        )
-        .into();
-        let tx = Recovered::new_unchecked(tx, TEMPO_SYSTEM_TX_SENDER);
-        let result = evm
+        let tx = system_tx_env(ZONE_INBOX_ADDRESS, calldata.into());
+        let executed = evm
             .transact(&tx)
-            .expect("advanceTempo execution must not fail")
-            .commit();
+            .expect("advanceTempo execution must not fail");
+        let result = if commit_advance {
+            executed.commit()
+        } else {
+            executed.discard()
+        };
         assert!(result.status, "advanceTempo reverted: {result:?}");
         assert_eq!(
             evm.database_as::<L1OverlayDB<InMemoryDB, MockL1Reader>>()
@@ -613,6 +655,28 @@ mod tests {
         assert!(requests.contains(&child_policy_request));
         assert!(!requests.contains(&parent_policy_request));
         assert!(reader.requested(CHILD, &portal.current_deposit_queue_hash));
+
+        // A second transaction must read the checkpoint accepted by EVM2, not the backing DB.
+        // The counter is not read by advanceTempo, so this also exercises an uncached L1 slot.
+        let expected_anchor = if commit_advance { CHILD } else { PARENT };
+        assert_eq!(
+            evm.state_mut()
+                .storage_slot_untracked(&TEMPO_STATE_ADDRESS, &TEMPO_BLOCK_NUMBER_SLOT)
+                .unwrap(),
+            U256::from(expected_anchor),
+        );
+        let reads_before = reader.storage_requests().len();
+        let result = evm.transact(&counter_tx).unwrap().discard();
+        assert!(result.status, "registry read reverted: {result:?}");
+        assert_eq!(
+            ITIP403Registry::policyIdCounterCall::abi_decode_returns(&result.output).unwrap(),
+            if commit_advance { 200 } else { 100 },
+        );
+        assert!(reader.storage_requests()[reads_before..].contains(&(
+            TIP403_REGISTRY_ADDRESS,
+            B256::from(counter_slot),
+            expected_anchor,
+        )));
     }
 
     #[test]

@@ -57,6 +57,9 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// for each EVM execution context; it must not be shared across independent EVMs.
 #[derive(Clone)]
 pub struct L1State<P> {
+    /// Committed Zone checkpoint captured from the EVM overlay at transaction entry.
+    /// This is a fallback for database reads, not a selected L1 view.
+    initial_anchor: Arc<Mutex<Option<U256>>>,
     /// Tempo block number selected for the current transaction attempt.
     anchor: Arc<Mutex<Option<u64>>>,
     /// `(account, slot)` keys successfully accessed during the current transaction attempt.
@@ -75,6 +78,7 @@ impl<P> L1State<P> {
     /// Creates execution-local L1 state backed by `provider` for `portal_address`.
     pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
+            initial_anchor: Arc::new(Mutex::new(None)),
             anchor: Arc::new(Mutex::new(None)),
             access_set: Arc::new(Mutex::new(HashSet::default())),
             provider,
@@ -82,10 +86,23 @@ impl<P> L1State<P> {
         }
     }
 
+    /// Starts a transaction at the checkpoint visible through the EVM's accepted overlay.
+    /// The first L1 read or a validated advancement still selects the transaction's L1 view.
+    pub fn begin_transaction(&self, initial_anchor: U256) {
+        self.reset_transaction_state();
+        *self.initial_anchor.lock() = Some(initial_anchor);
+    }
+
     /// Clears bookkeeping after the current transaction attempt completes.
     pub fn reset_transaction_state(&self) {
+        *self.initial_anchor.lock() = None;
         *self.anchor.lock() = None;
         self.access_set.lock().clear();
+    }
+
+    /// Returns the committed checkpoint captured at transaction entry, if any.
+    pub fn initial_anchor(&self) -> Option<U256> {
+        *self.initial_anchor.lock()
     }
 
     /// Returns the anchor selected for the current transaction, if any.
