@@ -11837,6 +11837,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-math",
  "const-hex",
+ "exithatch",
  "eyre",
  "futures",
  "k256",
