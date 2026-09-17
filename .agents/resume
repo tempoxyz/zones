@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This repository has no persistent services or per-thread authentication to repair.
+exit 0
