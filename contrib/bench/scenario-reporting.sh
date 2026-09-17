@@ -29,6 +29,7 @@ build_scenario_report_args() {
         "drain-timeout-secs:ZONES_BENCH_DRAIN_TIMEOUT"
         "seed:ZONES_BENCH_SEED"
         "force-bloat:ZONES_BENCH_FORCE_BLOAT"
+        "tempo-hardfork:ZONES_BENCH_TEMPO_HARDFORK"
         "tempo-revision:ZONES_BENCH_TEMPO_REF"
         "txgen-revision:ZONES_BENCH_TXGEN_REF"
         "earn-revision:ZONES_BENCH_EARN_REVISION"

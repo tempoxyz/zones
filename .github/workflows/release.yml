@@ -34,11 +34,17 @@ env:
 
 jobs:
   get-version:
+    permissions:
+      contents: read
+      id-token: write
     name: Get Version
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - name: Get version from tag
         id: get_version
         env:
@@ -50,19 +56,23 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
   check-version:
+    permissions:
+      contents: read
+      id-token: write
     name: check version
     runs-on: ubuntu-latest
     needs: get-version
     if: ${{ github.event.inputs.dry_run != 'true' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           toolchain: stable
-          mold: "false"
-          sccache: "false"
       - name: Verify crate version matches tag
         # Check that the Cargo version starts with the tag,
         # so that Cargo version 1.4.8 can be matched against both v1.4.8 and v1.4.8-rc.1
@@ -75,6 +85,9 @@ jobs:
           [[ "$tag" == "$cargo_ver"* ]] || { echo "Tag $tag doesn’t match the Cargo version $cargo_ver"; exit 1; }
 
   build-release:
+    permissions:
+      contents: read
+      id-token: write
     name: Build Release Binaries
     needs: get-version
     runs-on: ${{ matrix.platform.os }}
@@ -93,17 +106,23 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           toolchain: stable
           targets: ${{ matrix.platform.target }}
-          sccache: "false"
+
+      - name: Setup mold linker
+        if: runner.os == 'Linux'
+        uses: tempoxyz/gh-actions/actions/setup-mold@ab45d76f6e7420a094281a22aee1973ecc0754f8
 
       - name: Get build profile
         id: profile
@@ -176,12 +195,16 @@ jobs:
     if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) }}
     runs-on: depot-ubuntu-latest
     permissions:
+      id-token: write
       contents: write
     steps:
       # This is necessary for generating the changelog.
       # It has to come before "Download Artifacts" or else it deletes the artifacts.
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false

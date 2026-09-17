@@ -58,11 +58,6 @@ on:
         type: string
         required: true
         default: "2000000"
-      activity-amount:
-        description: Amount for each ordinary Zone TIP-20 transfer.
-        type: string
-        required: true
-        default: "1"
       withdrawal-amount:
         description: Net amount for each Zone withdrawal request.
         type: string
@@ -141,6 +136,11 @@ on:
         type: string
         required: false
         default: ""
+      tempo-hardfork:
+        description: Latest Tempo hardfork active during the benchmark, or `latest`.
+        type: string
+        required: false
+        default: latest
       txgen-ref:
         description: Exact txgen commit SHA; empty resolves the current txgen HEAD.
         type: string
@@ -165,6 +165,9 @@ env:
 
 jobs:
   authorize:
+    permissions:
+      contents: read
+      id-token: write
     name: Resolve benchmark request
     # Scheduled benchmarks use upstream-only infrastructure and credentials.
     # Private copies can still run an explicitly dispatched benchmark.
@@ -198,10 +201,14 @@ jobs:
       setup-settlement-timeout-secs: ${{ steps.config.outputs.setup-settlement-timeout-secs }}
       drain-timeout: ${{ steps.config.outputs.drain-timeout }}
       seed: ${{ steps.config.outputs.seed }}
+      tempo-hardfork: ${{ steps.config.outputs.tempo-hardfork }}
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -218,7 +225,7 @@ jobs:
           INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
           INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
-          INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
+          INPUT_ACTIVITY_AMOUNT: "1"
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_SWAP_MECHANISM: direct-swap
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
@@ -234,6 +241,7 @@ jobs:
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
+          INPUT_TEMPO_HARDFORK: ${{ inputs.tempo-hardfork || 'latest' }}
           INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '' }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -241,6 +249,11 @@ jobs:
           set -euo pipefail
 
           INPUT_TEMPO_REF="$(sed -nE 's/^tempo-alloy.*rev = "([0-9a-f]{40})".*/\1/p' Cargo.toml)"
+          INPUT_TEMPO_HARDFORK="${INPUT_TEMPO_HARDFORK,,}"
+          if [[ "$INPUT_TEMPO_HARDFORK" != latest && ! "$INPUT_TEMPO_HARDFORK" =~ ^t[0-9]+[a-z]*$ ]]; then
+            echo "::error::tempo-hardfork must be latest or a hardfork such as t11"
+            exit 1
+          fi
 
           if [ -z "$INPUT_TXGEN_REF" ]; then
             INPUT_TXGEN_REF="$(git ls-remote https://github.com/tempoxyz/txgen HEAD | awk '{print $1}')"
@@ -437,6 +450,7 @@ jobs:
             echo "setup-settlement-timeout-secs=$INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS"
             echo "drain-timeout=$INPUT_DRAIN_TIMEOUT"
             echo "seed=$INPUT_SEED"
+            echo "tempo-hardfork=$INPUT_TEMPO_HARDFORK"
             echo "tempo-ref=$INPUT_TEMPO_REF"
             echo "txgen-ref=$INPUT_TXGEN_REF"
           } >> "$GITHUB_OUTPUT"
@@ -477,6 +491,7 @@ jobs:
       ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ needs.authorize.outputs.setup-settlement-timeout-secs }}
       ZONES_BENCH_DRAIN_TIMEOUT: ${{ needs.authorize.outputs.drain-timeout }}
       ZONES_BENCH_SEED: ${{ needs.authorize.outputs.seed }}
+      ZONES_BENCH_TEMPO_HARDFORK: ${{ needs.authorize.outputs.tempo-hardfork }}
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
       ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
       ZONES_BENCH_ZONES_REF: ${{ needs.authorize.outputs.sha }}
@@ -502,7 +517,10 @@ jobs:
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6a4184039b7a7537d35ace0badc96764d5a1d4d0
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
@@ -510,12 +528,12 @@ jobs:
 
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@92f7d8fd211faca8a38e892ebe84225d0ea2a0b3 # main
+        uses: tempoxyz/gh-actions/actions/github-sts@c0292122e255def866c64c55e5844d1e7d5fe7ad # main
         with:
           scope: tempoxyz/earn
           policy: zones-read
       - name: Check out Earn contracts
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/earn
           ref: main
@@ -556,7 +574,7 @@ jobs:
           echo "::add-mask::$CLICKHOUSE_PASSWORD"
 
       - name: Check out pinned Tempo L1
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tempoxyz/tempo
           ref: ${{ needs.authorize.outputs.tempo-ref }}
@@ -564,11 +582,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           toolchain: stable
+      - uses: tempoxyz/gh-actions/actions/setup-mold@ab45d76f6e7420a094281a22aee1973ecc0754f8
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        with:
+          version: v0.15.0
 
-      - uses: tempoxyz/gh-actions/actions/setup-foundry@84404f82f267db9b96abab32a50bf835a524d8c7
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
         with:
           version: nightly
 
@@ -732,6 +754,7 @@ jobs:
           fi
           {
             echo "ZONES_BENCH_L1_CACHE_REBUILT=$ZONES_BENCH_L1_CACHE_REBUILT"
+            echo "ZONES_BENCH_TEMPO_HARDFORK=$ZONES_BENCH_TEMPO_HARDFORK"
             echo "ZONES_BENCH_L1_CACHE_KEY=$ZONES_BENCH_L1_CACHE_KEY"
             echo "ZONES_BENCH_L1_CACHE_GENERATION=$ZONES_BENCH_L1_CACHE_GENERATION"
           } >> "$GITHUB_ENV"
@@ -934,6 +957,7 @@ jobs:
             echo "- Target: \`${ZONES_BENCH_TARGET_ID:-unavailable}\`"
             echo "- Zones revision: \`$ZONES_BENCH_ZONES_REF\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
+            echo "- Tempo hardfork: \`${ZONES_BENCH_TEMPO_HARDFORK:-unavailable}\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
             echo "- Earn revision: \`${ZONES_BENCH_EARN_REVISION:-unavailable}\`"
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
@@ -961,6 +985,7 @@ jobs:
           jq -n \
             --arg zonesRevision "$ZONES_BENCH_ZONES_REF" \
             --arg tempoRevision "$ZONES_BENCH_TEMPO_REF" \
+            --arg tempoHardfork "${ZONES_BENCH_TEMPO_HARDFORK:-}" \
             --arg txgenRevision "$ZONES_BENCH_TXGEN_REF" \
             --arg earnRevision "${ZONES_BENCH_EARN_REVISION:-}" \
             --arg buildProfile "$ZONES_BENCH_BUILD_PROFILE" \
@@ -1006,6 +1031,7 @@ jobs:
             '{
               zonesRevision: $zonesRevision,
               tempoRevision: $tempoRevision,
+              tempoHardfork: $tempoHardfork,
               txgenRevision: $txgenRevision,
               earnRevision: $earnRevision,
               buildProfile: $buildProfile,

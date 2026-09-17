@@ -4,12 +4,11 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address, keccak256},
+    primitives::{Address, address},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
-use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::BlockId;
 use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
@@ -22,7 +21,10 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only};
+use crate::{
+    generate_zone_genesis::wait_for_finalized_pre_creation_anchor,
+    zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only},
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -202,19 +204,6 @@ impl CreateZone {
             ));
         }
 
-        // Anchor before createZone so the zone replays the creation block and its
-        // initial TokenEnabled event during L1 backfill.
-        let anchor_block_number = provider.get_block_number().await?;
-        let anchor_header = provider
-            .get_header_by_number(anchor_block_number.into())
-            .await?
-            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
-            .inner
-            .inner;
-        let mut genesis_header_rlp = Vec::new();
-        anchor_header.encode(&mut genesis_header_rlp);
-        let anchor_hash = keccak256(&genesis_header_rlp);
-
         println!("Admin: {}", self.admin);
         println!("Sequencers: {:?}", self.sequencers);
         println!("Threshold: {}", self.threshold);
@@ -294,18 +283,23 @@ impl CreateZone {
         );
         println!("Sequencer set version: {sequencer_set_version}");
 
+        println!("Waiting for creation block {creation_block} to finalize...");
+        let anchor =
+            wait_for_finalized_pre_creation_anchor(&provider, portal, creation_block).await?;
         println!(
-            "Using pre-creation block {} (hash: {anchor_hash}) as genesis anchor",
-            anchor_header.inner.number
+            "Using pre-creation block {} (hash: {}) as genesis anchor",
+            anchor.block_number, anchor.hash
         );
 
-        let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
+        let header_rlp_hex = const_hex::encode(&anchor.rlp);
 
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
+            tempo_portal: None,
+            l1_rpc_url: None,
             default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
@@ -332,7 +326,7 @@ impl CreateZone {
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "sequencerThreshold": self.threshold,
             "sequencerSetVersion": sequencer_set_version,
-            "tempoAnchorBlock": anchor_header.inner.number,
+            "tempoAnchorBlock": anchor.block_number,
             "zoneFactory": format!("{}", self.zone_factory),
             "rpcUrl": self.rpc_url,
         });
@@ -359,7 +353,7 @@ impl CreateZone {
         if !self.rpc_url.is_empty() {
             println!("  RPC URL: {}", self.rpc_url);
         }
-        println!("  Tempo anchor block: {}", anchor_header.inner.number);
+        println!("  Tempo anchor block: {}", anchor.block_number);
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()

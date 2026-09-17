@@ -315,10 +315,7 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
     let decryption = DecryptionData {
         sharedSecret: decrypted.proof.shared_secret,
         sharedSecretYParity: decrypted.proof.shared_secret_y_parity,
-        cpProof: tempo_zone_contracts::ChaumPedersenProof {
-            s: decrypted.proof.cp_proof_s,
-            c: decrypted.proof.cp_proof_c,
-        },
+        cpProof: decrypted.proof.cp_proof,
     };
 
     let mut queued_deposits = Vec::with_capacity(deposits);
@@ -726,10 +723,7 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
                 vec![DecryptionData {
                     sharedSecret: decrypted.proof.shared_secret,
                     sharedSecretYParity: decrypted.proof.shared_secret_y_parity,
-                    cpProof: tempo_zone_contracts::ChaumPedersenProof {
-                        s: decrypted.proof.cp_proof_s,
-                        c: decrypted.proof.cp_proof_c,
-                    },
+                    cpProof: decrypted.proof.cp_proof,
                 }],
             )
             .abi_encode(),
@@ -815,10 +809,7 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
                 vec![DecryptionData {
                     sharedSecret: decrypted.proof.shared_secret,
                     sharedSecretYParity: decrypted.proof.shared_secret_y_parity,
-                    cpProof: tempo_zone_contracts::ChaumPedersenProof {
-                        s: decrypted.proof.cp_proof_s,
-                        c: decrypted.proof.cp_proof_c,
-                    },
+                    cpProof: decrypted.proof.cp_proof,
                 }],
             )
             .abi_encode(),

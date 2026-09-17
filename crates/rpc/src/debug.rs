@@ -8,7 +8,8 @@ use crate::types::ZoneExecutionWitness;
 /// In-process Zone debug API contract.
 #[jsonrpsee::core::async_trait]
 pub trait ZoneDebugApi: Send + Sync {
-    /// Replays a Zone block and returns its execution witness and Tempo L1 storage reads.
+    /// Replays a Zone block and returns its Zone and Tempo L1 state witnesses.
+    /// Fails if the node's L1 provider cannot supply the required historical proofs.
     async fn zone_execution_witness(
         &self,
         block: BlockNumberOrTag,
@@ -18,7 +19,8 @@ pub trait ZoneDebugApi: Send + Sync {
 /// JSON-RPC transport adapter for [`ZoneDebugApi`].
 #[rpc(server, namespace = "debug")]
 pub trait ZoneDebugApiRpc {
-    /// Replays a Zone block and returns its execution witness and Tempo L1 storage reads.
+    /// Replays a Zone block and returns its Zone and Tempo L1 state witnesses.
+    /// Fails if the node's L1 provider cannot supply the required historical proofs.
     #[method(name = "zoneExecutionWitness")]
     async fn zone_execution_witness(
         &self,

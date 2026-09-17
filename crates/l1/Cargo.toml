@@ -25,7 +25,6 @@ reth-metrics.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-storage-api.workspace = true
-reth-tasks.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -46,8 +45,10 @@ futures.workspace = true
 k256.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
+rayon.workspace = true
 schnellru.workspace = true
 serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url = "2"
@@ -55,4 +56,5 @@ url = "2"
 [dev-dependencies]
 alloy-rlp.workspace = true
 const-hex.workspace = true
+reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true

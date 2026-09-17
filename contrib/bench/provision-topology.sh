@@ -125,6 +125,26 @@ wait_for_chain_advance() {
     die "timed out waiting for $label chain to advance past block $start_block"
 }
 
+verify_shared_runtimes() {
+    local url="$1" label="$2" block spec contract address expected observed
+    block="$(rpc "$url" eth_blockNumber)" || die "$label failed to read the runtime verification block"
+    (( $(hex_to_dec "$block") > 0 )) || die "$label has not produced a block to verify shared runtimes"
+    for spec in \
+        ZonePortal:0x5AD1000000000000000000000000000000000000 \
+        Verifier:0x5a56000000000000000000000000000000000000 \
+        ZoneMessenger:0x5A4d000000000000000000000000000000000000
+    do
+        contract="${spec%%:*}" address="${spec#*:}"
+        expected="$(jq -er '.deployedBytecode.object | sub("^0x"; "") | select(test("^([0-9a-fA-F]{2})+$"))' \
+            "$ZONES_ROOT/crates/contracts/out/$contract.sol/$contract.json")" \
+            || die "invalid or missing $contract deployed bytecode artifact"
+        observed="$(rpc "$url" eth_getCode "[\"$address\",\"$block\"]")" \
+            || die "$label failed to read $contract runtime at $address"
+        [[ "${observed,,}" == "0x${expected,,}" ]] \
+            || die "$label $contract runtime at $address differs from the local artifact after block $block; refusing to benchmark replaced runtimes"
+    done
+}
+
 verify_history_storage() {
     local url="$1"
     local label="$2"
@@ -871,6 +891,8 @@ provision_up() {
     wait_for_peer "$l1_b_rpc" "Tempo validator B" "$rpc_timeout"
     wait_for_chain_advance "$l1_a_rpc" "Tempo validator A" "$rpc_timeout"
     wait_for_chain_advance "$l1_b_rpc" "Tempo validator B" "$rpc_timeout"
+    verify_shared_runtimes "$l1_a_rpc" "Tempo validator A"
+    verify_shared_runtimes "$l1_b_rpc" "Tempo validator B"
     verify_history_storage "$l1_a_rpc" "Tempo validator A"
     verify_history_storage "$l1_b_rpc" "Tempo validator B"
 

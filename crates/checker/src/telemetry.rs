@@ -59,16 +59,14 @@ impl ActivitySource {
 /// Coordinates shared by one structured activity log.
 struct ActivityContext {
     zone: BlockRef,
-    tempo: BlockRef,
     source: ActivitySource,
     index: u64,
 }
 
 impl ActivityContext {
-    const fn new(zone: BlockRef, tempo: BlockRef, source: ActivitySource, index: u64) -> Self {
+    const fn new(zone: BlockRef, source: ActivitySource, index: u64) -> Self {
         Self {
             zone,
-            tempo,
             source,
             index,
         }
@@ -107,15 +105,8 @@ macro_rules! activity_log {
         let context = $context;
         tracing::info!(
             target: "zone::checker",
-            activity_schema_version = ACTIVITY_SCHEMA_VERSION,
             activity_event = $event,
-            activity_source = context.source.as_str(),
             activity_id = %context.id(),
-            activity_index = context.index,
-            zone_block = context.zone.number,
-            zone_hash = %context.zone.hash,
-            tempo_block = context.tempo.number,
-            tempo_hash = %context.tempo.hash,
             $($fields)*
         )
     }};
@@ -167,190 +158,79 @@ impl CheckerMetrics {
 
 /// Log authenticated protocol activity after a Zone block is verified.
 pub(crate) fn log_verified_activity(tempo: &L1BlockEvidence, l2: &L2BlockEvidence, zone: BlockRef) {
-    let tempo_ref = BlockRef::from(tempo.block());
     for (index, event) in (0u64..).zip(tempo.portal_events()) {
         log_tempo_event(
             event,
-            &ActivityContext::new(zone, tempo_ref, ActivitySource::Tempo, index),
+            &ActivityContext::new(zone, ActivitySource::Tempo, index),
         );
     }
     for (index, action) in (0u64..).zip(l2.bridge_actions()) {
         log_zone_action(
             action,
-            &ActivityContext::new(zone, tempo_ref, ActivitySource::Zone, index),
+            &ActivityContext::new(zone, ActivitySource::Zone, index),
         );
     }
 }
 
 fn log_tempo_event(event: &L1PortalEvent, context: &ActivityContext) {
     match event {
-        L1PortalEvent::DepositMade {
-            token,
-            net_amount,
-            deposit_number,
-        } => activity_log!(
-            context,
-            activity_event::PORTAL_DEPOSIT_ACCOUNTED,
-            %token,
-            amount = %net_amount,
-            deposit_number,
-            "accounted authenticated Portal deposit"
-        ),
-        L1PortalEvent::TokenEnabled { token } => activity_log!(
-            context,
-            activity_event::PORTAL_TOKEN_ENABLED,
-            %token,
-            "added Portal token to accounting coverage"
-        ),
+        L1PortalEvent::DepositMade { .. } => {
+            activity_log!(context, activity_event::PORTAL_DEPOSIT_ACCOUNTED,)
+        }
+        L1PortalEvent::TokenEnabled { .. } => {
+            activity_log!(context, activity_event::PORTAL_TOKEN_ENABLED,)
+        }
         L1PortalEvent::WithdrawalProcessed {
-            to,
-            token,
-            amount,
-            callback_success,
+            callback_success, ..
         } => activity_log!(
             context,
             activity_event::PORTAL_WITHDRAWAL_PROCESSED,
-            %token,
-            recipient = %to,
-            %amount,
             callback_success,
-            "authenticated Portal withdrawal result"
         ),
-        L1PortalEvent::WithdrawalBounceBack { token, amount } => activity_log!(
-            context,
-            activity_event::PORTAL_WITHDRAWAL_BOUNCE_BACK,
-            %token,
-            %amount,
-            "accounted authenticated Portal withdrawal bounce-back"
-        ),
-        L1PortalEvent::DepositBounceBack {
-            token,
-            amount,
-            bounceback_fee,
-        } => activity_log!(
-            context,
-            activity_event::PORTAL_DEPOSIT_BOUNCE_BACK,
-            %token,
-            %amount,
-            fee = %bounceback_fee,
-            "accounted authenticated Portal deposit bounce-back"
-        ),
-        L1PortalEvent::DepositBounceBackPending {
-            token,
-            amount,
-            bounceback_fee,
-        } => activity_log!(
-            context,
-            activity_event::PORTAL_DEPOSIT_BOUNCE_BACK_PENDING,
-            %token,
-            %amount,
-            fee = %bounceback_fee,
-            "accounted authenticated pending Portal deposit bounce-back"
-        ),
+        L1PortalEvent::WithdrawalBounceBack { .. } => {
+            activity_log!(context, activity_event::PORTAL_WITHDRAWAL_BOUNCE_BACK,)
+        }
+        L1PortalEvent::DepositBounceBack { .. } => {
+            activity_log!(context, activity_event::PORTAL_DEPOSIT_BOUNCE_BACK,)
+        }
+        L1PortalEvent::DepositBounceBackPending { .. } => {
+            activity_log!(context, activity_event::PORTAL_DEPOSIT_BOUNCE_BACK_PENDING,)
+        }
         L1PortalEvent::RefundClaimed { amount: 0, .. } => {}
-        L1PortalEvent::RefundClaimed {
-            recipient,
-            token,
-            amount,
-        } => activity_log!(
-            context,
-            activity_event::PORTAL_REFUND_ACCOUNTED,
-            %token,
-            %recipient,
-            %amount,
-            "accounted authenticated Portal refund"
-        ),
+        L1PortalEvent::RefundClaimed { .. } => {
+            activity_log!(context, activity_event::PORTAL_REFUND_ACCOUNTED,)
+        }
     }
 }
 
 fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
     match action {
         L2BridgeAction::Deposit {
-            token,
-            amount,
-            result: DepositResult::Processed { recipient },
-        } => activity_log!(
-            context,
-            activity_event::ZONE_DEPOSIT_MINTED,
-            %token,
-            %recipient,
-            amount = %amount,
-            "verified Zone deposit mint"
-        ),
+            result: DepositResult::Processed { .. },
+            ..
+        } => activity_log!(context, activity_event::ZONE_DEPOSIT_MINTED,),
         L2BridgeAction::Deposit {
-            token,
-            amount,
             result: DepositResult::Failed,
-        } => activity_log!(
-            context,
-            activity_event::ZONE_DEPOSIT_FAILED,
-            %token,
-            amount = %amount,
-            "authenticated Zone deposit failure"
-        ),
-        L2BridgeAction::WithdrawalRequested {
-            withdrawal_index,
-            origin,
-            token,
-            principal,
-            fee,
-        } => match origin {
-            WithdrawalOrigin::DepositBounceBack => activity_log!(
-                context,
-                activity_event::ZONE_DEPOSIT_BOUNCE_BACK_REQUESTED,
-                %token,
-                amount = %principal,
-                withdrawal_index,
-                "authenticated Zone deposit bounce-back request"
-            ),
-            WithdrawalOrigin::User { sender } => activity_log!(
-                context,
-                activity_event::ZONE_WITHDRAWAL_BURNED,
-                %token,
-                %sender,
-                amount = %principal,
-                %fee,
-                withdrawal_index,
-                "verified Zone withdrawal debit and burn"
-            ),
+            ..
+        } => activity_log!(context, activity_event::ZONE_DEPOSIT_FAILED,),
+        L2BridgeAction::WithdrawalRequested { origin, .. } => match origin {
+            WithdrawalOrigin::DepositBounceBack => {
+                activity_log!(context, activity_event::ZONE_DEPOSIT_BOUNCE_BACK_REQUESTED,)
+            }
+            WithdrawalOrigin::User { .. } => {
+                activity_log!(context, activity_event::ZONE_WITHDRAWAL_BURNED,)
+            }
         },
         L2BridgeAction::WithdrawalBounceBack {
-            recipient,
-            token,
-            amount,
             status: WithdrawalBounceBackStatus::Processed,
-        } => activity_log!(
-            context,
-            activity_event::ZONE_WITHDRAWAL_BOUNCE_BACK_MINTED,
-            %token,
-            %recipient,
-            amount = %amount,
-            "verified Zone withdrawal bounce-back mint"
-        ),
+            ..
+        } => activity_log!(context, activity_event::ZONE_WITHDRAWAL_BOUNCE_BACK_MINTED,),
         L2BridgeAction::WithdrawalBounceBack {
-            recipient,
-            token,
-            amount,
             status: WithdrawalBounceBackStatus::Pending,
-        } => activity_log!(
-            context,
-            activity_event::ZONE_WITHDRAWAL_BOUNCE_BACK_PENDING,
-            %token,
-            %recipient,
-            amount = %amount,
-            "authenticated pending Zone withdrawal bounce-back"
-        ),
-        L2BridgeAction::RefundClaimed {
-            recipient,
-            token,
-            amount,
-        } => activity_log!(
-            context,
-            activity_event::ZONE_REFUND_MINTED,
-            %token,
-            %recipient,
-            amount = %amount,
-            "verified Zone refund mint"
-        ),
+            ..
+        } => activity_log!(context, activity_event::ZONE_WITHDRAWAL_BOUNCE_BACK_PENDING,),
+        L2BridgeAction::RefundClaimed { .. } => {
+            activity_log!(context, activity_event::ZONE_REFUND_MINTED,)
+        }
     }
 }
