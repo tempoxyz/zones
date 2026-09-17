@@ -3,158 +3,140 @@
 ```mermaid
 sequenceDiagram
     participant A as Current leader
-    participant Q as Surviving sequencers
-    participant B as Successor
+    participant Q as Sequencer quorum
+    participant B as Deterministic successor
     participant P as ZonePortal
-    alt Planned handoff
-        A->>Q: Request a new recovery view
-    else Production stops
-        Q->>Q: Detect missing committed progress
+    alt Planned shutdown
+        A->>Q: Request recovery before shutdown deadline
+    else Leader stops committing
+        Q->>Q: Committed-progress timers expire
     end
-    Q->>Q: Agree on checkpoint and successor
-    Q->>P: Submit recovery certificate
-    P-->>Q: Finalize new epoch
-    B->>Q: Produce from the next Tempo anchor
+    Q->>Q: Lock a view and preserve the highest certificate
+    Q->>B: Transfer the certified checkpoint
+    Q->>P: Submit a quorum-signed recovery certificate
+    P-->>Q: Finalize successor, epoch, and next anchor
+    B->>Q: Certify the next block
 ```
 
 ## Motivation
 
-The Zone assigns each Tempo anchor to one leader, but the current leader can disappear before another node is authorized to consume the next anchor. Ordinary `setLeader` cannot repair this because it activates at the L1 block containing the transaction, leaving earlier anchors assigned to the unavailable leader. Automated failover therefore needs a surviving recovery owner, a quorum-agreed checkpoint, and a transition that resumes at the checkpoint's next anchor. All three belong in Zone code and `ZonePortal`.
+Zones currently have one scheduled leader per Tempo anchor. Followers independently execute and persist that leader's blocks, but there is no automatic election: recovery requires `setLeader` or an operator-supplied forced-recovery checkpoint.
 
-## Recovery Protocol
+That is not sufficient when the leader dies. `setLeader` activates at the Tempo block containing the transaction, so anchors before that point remain assigned to the unavailable leader. The current leader also canonicalizes a block before broadcasting it; an abrupt crash can therefore expose a block that no survivor durably holds.
 
-Every voting sequencer runs the recovery supervisor. A planned handoff asks the local supervisor to start recovery before the process receives a termination signal. An abrupt failure needs no callback from the old process: any survivor starts the same protocol after the committed chain stops advancing for the configured election timeout. Exit codes, signals, panic reasons, and health-probe classifications never affect the authority decision.
+Automated failover needs two protocol changes:
 
-The first implementation supports one active leader and a fixed voting set. Sequencers use the existing authenticated P2P identities and manifest order. No external controller, operator RPC URL, or shutdown hook participates in recovery safety.
+1. A client-visible Zone block has a quorum-backed durability certificate.
+2. A quorum can close the failed epoch at that certificate and authorize a successor from the next Tempo anchor.
 
-### Committed Blocks
+The design uses the same recovery protocol for planned shutdown, panic, SIGKILL, OOM, host loss, and network isolation. A planned shutdown starts it earlier, but the outgoing process is never required for safety or completion.
 
-The existing engine sends the post-payload fork-choice update immediately and reports head, safe, and finalized as the same locally produced block. That is insufficient for automatic crash recovery because a block can become client-visible before another machine has durably stored it.
+## Proposed Behavior
 
-The Zone engine must insert a quorum-commit step before the post-payload fork-choice update:
+### Certified block commitment
+
+The current engine builds and executes a payload, applies the post-payload fork-choice update, and then broadcasts the persisted canonical block. Failover cannot promise no block loss across machines with that ordering.
+
+Insert a quorum barrier before canonicalization:
 
 ```text
-build and execute proposal
-    -> replicate block to voters
-    -> voters validate and persist block plus vote
-    -> collect quorum certificate
-    -> persist certificate
-    -> send fork-choice update
-    -> expose block as head, safe, and finalized
+build and execute candidate
+    -> voters validate and durably persist block + vote
+    -> leader assembles a quorum certificate
+    -> a voter quorum durably persists the complete certificate
+    -> nodes apply fork choice and expose the canonical block
+    -> the Tempo anchor is consumed
 ```
-
-A voter signs at most one block hash for each `(membershipVersion, epoch, height)` and persists the block, vote, and current lock before replying. A quorum certificate binds the Zone ID, portal address, membership version, leader epoch, Zone height and hash, parent hash, Tempo anchor number and hash, and view. The leader persists the certificate before canonicalizing the block. If the leader dies earlier, the proposal remains speculative and recovery may discard it; transactions from a discarded proposal return to the pool.
 
 ```mermaid
 flowchart TD
-    builder["Leader block builder"]
-    leaderEngine["Leader Zone engine"]
-    voterEngine["Voter Zone engine"]
-    voterStore[("Voter block and vote store")]
-    certificateStore[("Leader certificate store")]
-    forkChoice["Existing fork-choice API"]
-    rpc["Zone RPC clients"]
+    build["Build and execute candidate"]
+    voters["Voters validate and persist"]
+    stores[("Independent durable stores")]
+    cert["Assemble quorum certificate"]
+    durable["Quorum durability acknowledgements"]
+    fcu["Fork-choice update"]
+    clients["Canonical RPC state"]
 
-    builder -->|"build payload"| leaderEngine
-    leaderEngine -->|"send proposal"| voterEngine
-    voterEngine -->|"persist block and vote"| voterStore
-    voterEngine -->|"return signed vote"| leaderEngine
-    leaderEngine -->|"persist quorum certificate"| certificateStore
-    certificateStore -->|"release certified block"| forkChoice
-    forkChoice -->|"publish canonical head"| rpc
+    build -->|proposal| voters
+    voters -->|block + signed vote| stores
+    voters -->|votes| cert
+    cert -->|complete certificate| stores
+    stores -->|acknowledge certificate| durable
+    durable --> fcu
+    fcu --> clients
 ```
 
-This changes ordering inside `ZoneEngine` while continuing to execute payloads and apply fork choice through the existing interfaces.
-
-### Failure Detection
-
-Each voter tracks the last quorum-certified block and resets one monotonic election timer only when that committed checkpoint advances. A timeout starts a new recovery view but grants no production authority. A delayed node, a failed health endpoint, or a process exit cannot independently select a leader.
-
-A planned handoff calls an authenticated Zone operator method:
+A block vote binds:
 
 ```text
-zone_requestHandoff(expectedEpoch)
+zoneId, portal, sequencerSetVersion, leaderEpoch, zoneHeight,
+zoneHash, parentHash, tempoAnchorNumber, tempoAnchorHash
 ```
 
-The method records a handoff request and wakes the same recovery supervisor. The caller polls `zone_getHandoffStatus` and signals the process only after the successor has finalized authority and committed its first block, or after the caller's own shutdown deadline. The process does not intercept SIGTERM.
+A voter persists the block and its vote before replying and signs at most one hash for a `(sequencerSetVersion, leaderEpoch, zoneHeight)` tuple. After assembly, a voting quorum persists the complete certificate and acknowledges it before any node applies fork choice. A proposal without those durability acknowledgements is speculative: it is not returned as canonical RPC state, does not consume its anchor, and may be discarded after failover.
 
-```mermaid
-sequenceDiagram
-    participant S as Process supervisor
-    participant A as Current leader
-    participant Q as Surviving voter quorum
-    participant B as Selected successor
-    participant P as ZonePortal
+This is the exact no-loss boundary. Transactions in discarded speculative blocks return to the pool; transactions in certified blocks remain in the preserved prefix.
 
-    alt Planned maintenance
-        S->>A: Request handoff for the current epoch
-        A->>Q: Start a recovery view
-    else Leader stops committing
-        Q->>Q: Election timer expires
-        Q->>Q: Start a recovery view
-    end
-    Q->>Q: Persist view and exchange highest certificates
-    Q->>B: Select by manifest order and transfer checkpoint
-    B-->>Q: Prove complete checkpoint data
-    Q->>Q: Persist locks and sign recovery
-    Q->>P: Relay quorum recovery certificate
-    P-->>Q: Finalize successor and next anchor
-    B->>Q: Propose and certify the next block
-    Q-->>S: Report handoff complete when a caller is waiting
+### Starting recovery
+
+Every voting sequencer runs a recovery supervisor. It tracks the last certified height and resets a monotonic timer only when that height advances. Timer expiry opens a recovery view; it does not itself grant authority.
+
+For planned maintenance, Reth's graceful-shutdown path asks the same supervisor to open a view immediately. A shared shutdown coordinator keeps the Zone engine and P2P runtime alive while handoff is attempted. The existing engine and P2P shutdown hooks wait behind that coordinator instead of racing one another.
+
+The outgoing leader may keep proposing until a quorum durably enters the recovery view. Once locked, voters reject further old-epoch block votes, so the old leader cannot commit another block. It must not hand production directly to the successor before finalized Portal authority: doing so would permit two leaders to produce or attest settlement concurrently.
+
+The local handoff deadline must fit inside the configured process grace period:
+
+```text
+handoff deadline + role teardown budget + shutdown reserve
+    <= process grace period
+    <= deployment termination grace period
 ```
 
-### View Change and Checkpoint Selection
+Startup rejects an invalid relationship. At the deadline, the old process exits; survivors continue from their persisted view. A critical panic, SIGKILL, OOM, or host loss uses the missing-progress path and never depends on shutdown code running.
 
-A recovery view is identified by `(membershipVersion, expectedEpoch, viewNumber)`. On entry, each voter persists the new view and broadcasts its highest block certificate and any recovery lock. Messages from older views may transfer data but cannot create new votes.
+### Choosing a successor and checkpoint
 
-The candidate for view zero is the next voting node after the current leader in manifest order. Each later view advances one position. RPC-only nodes and the old leader are excluded. Candidate selection never depends on probe completion order, local latency, or an operator-supplied list. If the selected candidate is unavailable or cannot obtain the required checkpoint, a quorum advances to the next view.
+A recovery view is `(sequencerSetVersion, expectedEpoch, viewNumber)`. On entry, each voter atomically persists the view and its highest block or recovery certificate before sending a view-change message.
 
-The candidate collects a view-change quorum, chooses the highest certified checkpoint carried by those messages, downloads and verifies the complete block data, and broadcasts a recovery proposal. Voters accept only a proposal that extends the highest certificate required by the view-change set. They persist a recovery lock before signing, so a restart or partition cannot make them sign a conflicting successor or checkpoint for the same view.
-
-The initial version keeps membership fixed while recovery is active. Membership changes require a later joint-consensus design because merely attaching a version number does not transfer locks between two voting sets.
+The candidate is derived from protocol state, not local configuration order: sort the active on-chain voting sequencer settlement addresses, exclude the current leader for this recovery, start after it, and rotate once per view. The existing manifest maps each settlement address to its authenticated Ed25519 peer identity. RPC-only peers are excluded. Message arrival order, probe latency, and manifest file order have no effect.
 
 ```mermaid
 sequenceDiagram
     participant Q as Voter quorum
-    participant B as First manifest candidate
-    participant C as Next manifest candidate
+    participant B as Candidate for view V
+    participant C as Candidate for view V plus 1
 
-    Q->>Q: Enter view V and persist highest lock
-    Q->>B: Request checkpoint proof for view V
-    B--xQ: Candidate unavailable or missing data
-    Q->>Q: Collect quorum messages for view V plus 1
-    Q->>C: Request the same locked checkpoint
-    C-->>Q: Verify and persist checkpoint data
-    Q->>Q: Certify C without changing the checkpoint
+    Q->>Q: Persist view V and highest certificate
+    Q->>B: Send view-change state
+    B--xQ: Unavailable or missing checkpoint data
+    Q->>Q: Persist view V plus 1
+    Q->>C: Send the same locked checkpoint
+    C-->>Q: Prove complete checkpoint data
+    Q->>Q: Sign recovery without changing checkpoint
 ```
 
-### Recovery Certificate
+The candidate collects a view-change quorum and selects the highest valid certified checkpoint in that set. It downloads and verifies the complete block data before asking for recovery votes. Voters reject a proposal below that checkpoint or one inconsistent with their persisted lock.
 
-A recovery certificate contains quorum signatures over:
+Quorum intersection gives the important closure property: after a quorum locks recovery, the old epoch cannot form another block certificate. Any canonical block certificate was durably stored by a quorum, so a view-change quorum intersects at an honest certificate holder and carries that complete certificate forward.
+
+Any finalized sequencer-set change invalidates the in-progress view and restarts recovery under the new version. Certificates never combine signatures from different set versions.
+
+### Authorizing recovery on L1
+
+Recovery voters sign this payload:
 
 ```text
-zoneId
-portal
-membershipVersion
-expectedEpoch
-viewNumber
-successor
-checkpointZoneHeight
-checkpointZoneHash
-checkpointTempoAnchor
-checkpointTempoHash
-nextTempoAnchor
-settledZoneHeight
-settledZoneHash
+zoneId, portal, sequencerSetVersion, expectedEpoch, viewNumber,
+successor, checkpointZoneHeight, checkpointZoneHash,
+checkpointTempoAnchor, checkpointTempoHash, nextTempoAnchor,
+settledZoneHeight, settledZoneHash
 ```
 
-`nextTempoAnchor` must equal `checkpointTempoAnchor + 1`. The checkpoint must be at or above the finalized Portal settlement checkpoint and must descend from it. The successor must be an active voting sequencer in the certified membership version and must prove it holds the checkpoint data before voters sign.
+`nextTempoAnchor` is exactly `checkpointTempoAnchor + 1`. The checkpoint must descend from and not precede the Portal's finalized settlement checkpoint. Any account may relay the signed certificate; the relayer has no authority of its own.
 
-Any sequencer may relay the certificate. Relaying does not grant authority and the relayer does not need the old leader's key.
-
-### ZonePortal Transition
-
-Add a versioned transition:
+Add a versioned Portal entry point:
 
 ```solidity
 function recoverLeader(
@@ -162,195 +144,179 @@ function recoverLeader(
     uint64 viewNumber,
     address successor,
     uint64 sequencerSetVersion,
-    uint256 checkpointZoneHeight,
-    bytes32 checkpointZoneHash,
-    uint64 checkpointTempoAnchor,
-    bytes32 checkpointTempoHash,
-    uint256 settledZoneHeight,
-    bytes32 settledZoneHash,
+    RecoveryCheckpoint calldata checkpoint,
     bytes calldata certificate
 ) external;
 ```
 
-`ZonePortal` verifies the domain, distinct active signers, configured recovery quorum, membership version, current epoch, successor membership, exact checkpoint fields, and settled-state binding. It rejects stale settlement bases and conflicting or repeated transitions. A successful call increments the leader epoch and records a recovery entry whose first authorized anchor is `checkpointTempoAnchor + 1`; the L1 block containing the transaction is observation metadata, not the activation anchor.
+`ZonePortal` verifies the EIP-712 domain, distinct active signers, recovery quorum, set version, expected epoch, a distinct active successor, checkpoint, and settled-state binding. It then increments `leaderEpoch` and records `checkpointTempoAnchor + 1` as the first authorized anchor. The Tempo block containing `recoverLeader` is observation metadata, not the activation anchor.
 
-The recovery operation is permissionless to relay because the certificate carries authority. The existing `setLeader` method remains available before activation so old nodes keep their current behavior. The hardfork disables `setLeader`; every later leader change, including planned maintenance, must use a certified recovery transition so an admin or sequencer cannot bypass epoch closure and checkpoint selection.
+`expectedEpoch` makes duplicate relays idempotent. Conflicting or stale certificates fail. Nodes install authority only from the finalized Portal event, using the existing L1-before-block delivery ordering, then discard speculative descendants and reject old-epoch production and settlement signatures.
 
-```mermaid
-sequenceDiagram
-    participant B as Successor
-    participant Q as Voter quorum
-    participant R as Any relayer
-    participant P as ZonePortal
-    participant L as Finalized L1 readers
+After protocol activation, ordinary `setLeader` is disabled. Planned maintenance also uses `recoverLeader`; otherwise one admin or sequencer could bypass quorum closure and choose a different checkpoint.
 
-    B->>Q: Propose successor and exact checkpoint
-    Q-->>R: Return quorum certificate
-    R->>P: Submit recoverLeader
-    P->>P: Verify epoch, membership, quorum, and settlement
-    P-->>L: Emit checkpoint-based recovery entry
-    L->>Q: Install finalized epoch and next anchor
-    Q->>B: Authorize proposal after the checkpoint
+### Availability and fault model
+
+Local clocks only decide when to try another view. Recovery makes progress when a recovery quorum can communicate, at least one member has the highest certified block data, and Tempo L1 accepts and finalizes the transaction. If any condition is absent, the Zone stops committing instead of choosing an unsafe history.
+
+For `n` voters and up to `f` Byzantine voters, recovery quorum `q` must satisfy:
+
+```text
+2q > n + f
+q <= n - f
 ```
 
-### Finality and Resumed Production
-
-Sequencers continue serving the old committed checkpoint while the recovery transaction waits for L1 finality. They do not commit blocks in the closed epoch. After observing the finalized event, every node installs the recovery entry, discards only speculative blocks after the checkpoint, and rejects old-epoch proposals and settlement signatures.
-
-The successor proposes the block for `checkpointTempoAnchor + 1` only after it has the checkpoint data and finalized recovery authority. Recovery is complete when that block receives a quorum certificate and becomes canonical. A planned-handoff caller may then terminate the old process. Crash recovery completes without the old process.
-
-If the recovery transaction is delayed or its response is ambiguous, any relayer resubmits the same certificate. `expectedEpoch` makes replay idempotent. If another certificate already finalized for that epoch, nodes follow the finalized winner and abandon conflicting local work.
-
-### Transaction Continuity
-
-Every leader and follower forwards locally originated live transactions to the voting set through the existing bounded transaction channel. P2P-origin transactions are not flooded again. Pool validity, replacement, eviction, pricing, and inclusion rules remain unchanged.
-
-Transactions included only in a speculative block may return to the pool after recovery. Transactions included in a quorum-certified block remain in the preserved prefix. This is the exact durability boundary exposed to clients.
-
-## Timing and Availability
-
-Failure detection and view changes use monotonic local timers. Timer expiry starts a view and never proves that the old leader is dead. Safety does not depend on synchronized clocks.
-
-Recovery has no fixed wall-clock guarantee. It makes progress when a recovery quorum can communicate, at least one candidate holds the highest certified checkpoint, and Tempo L1 accepts and finalizes the recovery transaction. With insufficient voters, missing certified data, or stalled L1 finality, nodes stop committing instead of selecting an unsafe checkpoint.
-
-The process supervisor may retain its own finite termination grace period. Expiring that grace period can kill the outgoing process, but it does not cancel the recovery operation because the other voters own the same persisted view and certificate state.
-
-## Fault Model and Quorum
-
-For `n` voting sequencers and up to `f` Byzantine voters, choose recovery quorum `q` such that `2q > n + f` and `q <= n - f`. The standard configuration is `n = 3f + 1` and `q = 2f + 1`. A crash-only deployment may use a majority quorum, but the manifest and Portal must declare that weaker fault model explicitly.
-
-The recovery quorum is a protocol parameter and cannot silently reuse an arbitrary settlement threshold. Activation validates the configured node count and threshold. Nodes refuse automated recovery when the deployed values do not satisfy the selected fault model.
+The standard Byzantine configuration is `n = 3f + 1`, `q = 2f + 1`. The existing common `2-of-3` settlement threshold is not a Byzantine failover quorum: two conflicting groups of two may intersect only in the Byzantine voter. A deployment may explicitly select a crash-only majority model, but activation must record and validate that weaker assumption. Recovery does not silently inherit an arbitrary settlement threshold.
 
 ## Implementation Plan
 
 | ID | Change |
 | --- | --- |
-| C1 | Add a persistent recovery store for block votes, quorum certificates, current view, and recovery locks. Persist each record before sending the corresponding vote or acknowledgement. |
-| C2 | Change leader production to replicate and certify a block before the post-payload fork-choice update. Canonical RPC state advances only after the certificate is durable. |
-| C3 | Add authenticated P2P messages for block votes, certificates, view changes, recovery proposals, recovery votes, and checkpoint transfer. Bound message sizes, queues, retained views, and retry work. |
-| C4 | Run one recovery supervisor on every voting sequencer. Start it from a handoff request or missing committed progress without inspecting process exit reasons. |
-| C5 | Select candidates by rotating through manifest voting nodes after the current leader. Advance views through quorum messages rather than independent health decisions. |
-| C6 | Reconcile the highest certified checkpoint carried by a view-change quorum and require the selected candidate to verify its complete data before certification. |
-| C7 | Add `recoverLeader` and recovery records to `ZonePortal`, binding successor, epoch, membership, checkpoint, next anchor, and settled state to a quorum certificate. Disable `setLeader` at activation. |
-| C8 | Decode finalized recovery events independently of Zone execution and install them in the leadership schedule even while the Zone is stalled on earlier anchors. |
-| C9 | Fence block import, production, and settlement by membership version and leader epoch. Reject old-epoch commitment after a recovery lock or finalized transition. |
-| C10 | Add authenticated `zone_requestHandoff` and read-only `zone_getHandoffStatus`. The caller controls process termination while survivors own protocol completion. |
-| C11 | Run local-origin transaction forwarding in leader and follower generations without changing transaction validation or the existing wire message. |
-| C12 | Activate the Portal, node, settlement, and new P2P protocol together at one hardfork after all voters have upgraded and agreed on an initial certified checkpoint. |
+| C1 | Add a durable recovery store for block votes, block certificates, views, and locks. Restore it before a node can vote. |
+| C2 | Insert the certificate barrier into `ZoneEngine`: proposals remain speculative until a voting quorum acknowledges durable storage of the complete certificate, then the existing fork-choice path canonicalizes them. |
+| C3 | Version the authenticated P2P protocol with bounded messages for proposals, block votes, certificates, view changes, recovery votes, and checkpoint transfer. |
+| C4 | Add one recovery supervisor per voting sequencer. Trigger it from certified-progress timeout or planned shutdown; never from an asserted failure reason. |
+| C5 | Derive candidate rotation from sorted active on-chain settlement addresses and the persisted view. Resolve candidates to authenticated peers through the manifest mapping. |
+| C6 | Reconcile the highest certificate in a view-change quorum and require complete verified checkpoint data before a voter signs recovery. |
+| C7 | Add `recoverLeader` and append-only recovery state to `ZonePortal`; bind quorum signatures to the epoch, membership, checkpoint, successor, and settled prefix. |
+| C8 | Decode finalized recovery events independently of Zone execution and install them in the leadership schedule before delivering the corresponding anchor. |
+| C9 | Fence block production, import, voting, and settlement by set version and leader epoch. Stop old-epoch voting when the recovery lock is persisted. |
+| C10 | Coordinate Reth shutdown so engine and P2P stay available through bounded handoff. Configure and validate process and deployment grace periods; survivor recovery continues after timeout. |
+| C11 | Preserve live transactions across role changes using the existing replicated quorum pools. Reinsert transactions from discarded speculative blocks. |
+| C12 | Upgrade voters in compatibility mode, establish the activation checkpoint, then activate Portal rules, certificate commitment, and the new P2P version at one hardfork. |
 
 ## Invariants
 
 | ID | Property |
 | --- | --- |
-| I1 | Two conflicting blocks cannot both obtain quorum certificates for the same membership version, epoch, and height within the configured fault bound. |
-| I2 | A voter never signs after restart unless it has restored its latest block vote, view, and recovery lock from durable storage. |
-| I3 | A recovery certificate preserves the highest certified checkpoint required by its view-change quorum and never moves behind finalized Portal settlement. |
-| I4 | Only finalized Portal authority permits the successor to propose, and only a block quorum certificate permits fork-choice canonicalization. |
-| I5 | The old epoch cannot commit another block after a quorum has locked a recovery view. |
-| I6 | Candidate order depends only on the finalized current leader, manifest order, and view number. Message arrival order cannot change it. |
-| I7 | A missing or unhealthy node can delay progress but cannot grant authority or choose a checkpoint. |
-| I8 | A planned handoff and an abrupt process loss enter the same recovery state machine and differ only in how the first view is triggered. |
-| I9 | Replaying or concurrently relaying one recovery certificate cannot create another epoch or change its successor. |
-| I10 | Recovery does not alter dependency pins, signal handling, task shutdown, or existing storage and API formats. |
+| I1 | Two conflicting blocks cannot both obtain valid certificates for one set version, epoch, and height within the configured fault bound. |
+| I2 | A voter cannot sign after restart until its latest vote, view, and lock are restored from durable storage. |
+| I3 | Canonical RPC head, safe, and finalized state never advance beyond the highest block certificate durably stored by a voting quorum. |
+| I4 | Recovery preserves the highest certificate represented in its view-change quorum and never moves behind finalized Portal settlement. |
+| I5 | A quorum locked in recovery prevents any later block certificate in the closing epoch. |
+| I6 | Only a finalized Portal recovery event authorizes successor production from the checkpoint's next anchor. |
+| I7 | Candidate choice is a pure function of finalized membership, current leader, and view; local ordering and timing cannot change it. |
+| I8 | Planned shutdown and abrupt loss use the same persisted protocol and differ only in how the first view begins. |
+| I9 | Replaying one recovery certificate cannot increment the epoch twice or change its successor or checkpoint. |
+| I10 | Insufficient quorum, unavailable certified data, or stalled L1 causes unavailability, never uncertified commitment. |
 
 ## Implementation Map
 
 | Area | Responsibility |
 | --- | --- |
-| `crates/node/src/engine.rs` | Hold proposals speculative until a block quorum certificate is durable, then issue the existing post-payload fork-choice update. |
-| `crates/node/src/role.rs` | Start the recovery supervisor for voting roles, stop old-epoch production, install finalized recovery, and run transaction forwarding in every role generation. |
-| `crates/node/src/recovery.rs` | Own persistent views, locks, candidate rotation, checkpoint reconciliation, certificate assembly, retries, and handoff status. |
-| `crates/node/src/rpc.rs` | Expose authenticated handoff requests and read-only recovery status without handling Unix signals. |
-| `crates/p2p/src/manifest.rs` | Preserve ordered voting identities and validate the recovery quorum and fault model. No operator RPC endpoint is added. |
-| `crates/p2p/src/runtime.rs` | Route bounded recovery messages and checkpoint transfers over authenticated peer identities. |
-| `crates/l1` | Decode and finalize recovery events independently of Zone execution progress. |
-| `crates/contracts/src/runtime/tempo/ZonePortal.sol` | Verify recovery certificates and record checkpoint-based leader epochs. |
-| Settlement attestation and submission | Bind certificates to leader epoch and reject endpoints outside the certified committed prefix. |
+| `crates/node/src/engine.rs` | Keep a built payload speculative, obtain quorum durability acknowledgements for its certificate, then apply the existing post-payload fork-choice update and consume the anchor. |
+| `crates/node/src/role.rs` | Run recovery for voting roles, fence closed epochs, preserve transaction pools, and coordinate generation teardown. |
+| `crates/node/src/recovery.rs` | Own durable votes, certificates, views, locks, candidate rotation, checkpoint transfer, retries, and status. |
+| `crates/node/src/node.rs` | Gate the existing engine and P2P graceful-shutdown hooks behind the bounded handoff coordinator. |
+| `crates/node/src/rpc.rs` | Expose read-only recovery status and an authenticated request to start planned handoff; do not interpret Unix signals. |
+| `crates/p2p/src/protocol.rs` | Add the versioned, size-bounded recovery wire messages. |
+| `crates/p2p/src/manifest.rs` | Validate settlement-address-to-peer mappings and recovery quorum configuration without assigning meaning to file order. |
+| `crates/l1` | Decode, verify, and deliver finalized recovery transitions before the newly authorized Zone anchor. |
+| `crates/contracts/src/runtime/tempo/ZonePortal.sol` | Verify recovery certificates and store checkpoint-based leader epochs without reordering existing storage. |
+| Settlement path | Bind attestations to set version and leader epoch, and reject settlement past the certified prefix. |
 
 ## Complete System View
 
 ```mermaid
 flowchart TD
-    operator["Process supervisor"]
+    signal["SIGTERM or missing certified progress"]
+    coordinator["Shutdown coordinator"]
+    supervisor["Recovery supervisor"]
+    store[("Votes, certificates, views, locks")]
+    peers["Authenticated sequencer quorum"]
+    engine["Zone engine"]
+    pool["Replicated transaction pools"]
     portal[("ZonePortal")]
-    l1["Finalized L1 reader"]
-    subgraph sequencers["Voting sequencer processes"]
-        recovery["Recovery supervisor"]
-        store[("Votes, certificates, and locks")]
-        p2p["Authenticated P2P runtime"]
-        engine["Zone execution engine"]
-        schedule["Leadership and recovery schedule"]
-        settlement["Settlement attestor"]
-    end
-    operator -->|"request handoff"| recovery
-    recovery -->|"persist view and lock"| store
-    recovery -->|"exchange votes and checkpoints"| p2p
-    p2p -->|"deliver certified proposal"| engine
-    engine -->|"persist block vote"| store
-    recovery -->|"relay recovery certificate"| portal
-    portal -->|"publish recovery event"| l1
-    l1 -->|"install finalized epoch"| schedule
-    schedule -->|"authorize next anchor"| engine
-    engine -->|"publish committed block"| settlement
-    recovery -->|"report handoff complete"| operator
+    reader["Finalized L1 reader"]
+    schedule["Leadership schedule"]
+    settlement["Settlement attestor"]
+    rpc["Canonical RPC"]
+
+    signal --> coordinator
+    signal --> supervisor
+    coordinator -->|keep engine and P2P alive| supervisor
+    supervisor <-->|persist before send| store
+    supervisor <-->|views, votes, checkpoint data| peers
+    pool --> engine
+    engine -->|speculative proposal| peers
+    peers -->|durable block votes| supervisor
+    supervisor -->|certificate releases fork choice| engine
+    engine --> rpc
+    supervisor -->|permissionless relay| portal
+    portal -->|finalized recovery event| reader
+    reader --> schedule
+    schedule -->|authorize next anchor| engine
+    engine --> settlement
 ```
+
+## Compatibility and Rollout
+
+Upgrade all voters first in compatibility mode. Before activation they preserve current leader scheduling, forced recovery, settlement signatures, transaction validation, deposits, withdrawals, and RPC formats. Single-sequencer Zones retain current behavior.
+
+At activation, initialize the last pre-activation canonical block as the first certificate checkpoint, require a supported P2P protocol version and valid recovery quorum, and enable certificate-gated commitment plus `recoverLeader` together. Disable `setLeader` only after that boundary. Portal storage is append-only, and older historical leader events remain readable.
+
+The deployment must configure its termination grace period to cover the node's validated process grace period. This improves planned handoff latency but is not a safety assumption: abrupt termination remains a supported trigger.
 
 ## Test Coverage
 
-### Unit and Model Tests
+### Unit, contract, and model tests
 
-| ID | Covers | Test and oracle |
+| ID | Covers | Test and success criterion |
 | --- | --- | --- |
-| T1 | C1, I1, I2 | Generate conflicting proposals, crashes between persistence and send, and restarts from every write boundary. A voter signs at most one block per epoch and height and never forgets a view or lock. |
-| T2 | C2, I4 | Interrupt production before replication, during vote collection, after quorum, after certificate persistence, and after fork choice. RPC canonical state advances only in the last two valid states and always has a durable certificate. |
-| T3 | C5, I6 | Randomize message order, timeouts, unavailable candidates, and manifest layouts. An independent function of leader, manifest, and view always predicts the selected candidate. |
-| T4 | C6, I3 | Generate view-change sets containing different tips, partial certificates, and locked proposals. Recovery selects the highest valid certified checkpoint and rejects height-only or conflicting choices. |
-| T5 | C7, I3, I9 | Fuzz certificate signers, duplicates, domains, epochs, membership versions, checkpoints, settled bases, successors, and replay. The Portal accepts exactly one well-formed quorum transition for the current epoch. |
-| T6 | C8, C9, I5 | Deliver recovery finality before, during, and after local replay with delayed old proposals and settlements. No old-epoch block or batch commits past the checkpoint. |
-| T7 | C10, I8 | Trigger identical recovery states through handoff requests, process disappearance, and missing progress. Only the initial wakeup source differs. |
-| T8 | C11 | Fill the forwarding queue, delay reconciliation, replace transactions, and inject P2P-origin duplicates. Local transactions retry within existing bounds and remote transactions are not re-flooded. |
+| T1 | C1, I1, I2 | Crash at every persist/send boundary and restart. No recovered voter signs a second block, view, or successor forbidden by its durable state. |
+| T2 | C2, I3 | Interrupt before votes, during certificate replication, at the durability quorum, and around fork choice. Canonical RPC state advances only after a voting quorum has persisted its complete certificate. |
+| T3 | C5, I7 | Randomize manifest order, peer latency, message order, membership, and views. An independent sorted-address oracle always predicts the candidate. |
+| T4 | C6, I4, I5 | Generate conflicting tips, partial vote sets, locks, and view changes. The model finds no pair of conflicting block or recovery certificates. |
+| T5 | C7, I6, I9 | Fuzz EIP-712 domains, duplicate signers, thresholds, epochs, set versions, successors, checkpoints, settlement bases, and replay. The Portal accepts exactly one valid current-epoch transition. |
+| T6 | C8, C9 | Reorder finalized L1 events, anchors, old proposals, and settlement signatures. The successor never starts early and the old epoch never commits late. |
+| T7 | C4, C10, I8 | Exercise timeout, SIGTERM, handoff deadline, concurrent shutdown hooks, and process-grace expiry. Both triggers enter the same recovery state; engine and P2P remain live for handoff and teardown completes within the configured bound. |
+| T8 | C11 | Discard speculative blocks during recovery under replacement, eviction, and queue pressure. Certified transactions stay committed and eligible speculative transactions return to the pool. |
+| T9 | C3 | Round-trip every recovery message across supported protocol versions; reject oversized, malformed, cross-domain, and unsupported messages while keeping queues and retained views bounded. |
+| T10 | C12 | Run immediately before, at, and after activation with mixed peer versions. Pre-activation behavior remains unchanged; incompatible voters cannot cross the activation boundary. |
 
-### E2E Tests
+### End-to-end scenarios
 
-Run a real Tempo dev L1 and at least four independent Zone processes with durable volumes.
+Run a real Tempo dev L1 with enough independent Zone processes and durable volumes to satisfy the selected fault model.
 
-| Scenario | Required result |
+| Scenario | Success criterion |
 | --- | --- |
-| Planned handoff from the leader | The successor commits from the certified checkpoint, the handoff reports success, and the old process may then exit without a missing or duplicate Zone height. |
-| Leader SIGKILL | Survivors elect and finalize a successor without code running in the old process. Every previously certified block remains byte-identical. |
-| Leader OOM during proposal | The proposal commits only if its certificate can be reconstructed from durable voter records; otherwise recovery discards it and preserves the preceding certificate. |
-| First candidate unavailable | The quorum advances views and selects the next manifest candidate without conflicting Portal submissions. |
-| Relayer crashes after submission | Another relayer submits the identical certificate and the Portal creates one epoch. |
-| Successor crashes after certification | Nodes finish the certified transition, then use a later view and epoch to replace it without returning to the old epoch. |
-| Node restarts with lost recovery state | The node cannot vote until restored from a valid snapshot containing the current lock and certificate. |
-| L1 finality stalls | No successor produces early; recovery resumes after finality without changing the certified target. |
-| Transactions pending during failover | Transactions outside discarded speculative blocks remain available and are eventually included exactly once. |
+| Planned SIGTERM | A recovery view closes the old epoch, the successor commits the next anchor, and the old process exits within its grace period without a missing or duplicate certified height. |
+| Leader SIGKILL or host loss | Survivors recover without any code running on the old host; every previously certified block remains byte-identical. |
+| OOM or panic during block production | The block survives only if its quorum state is durable and reconstructable; otherwise the preceding certificate is preserved and its transactions are eligible again. |
+| First candidate unavailable | A quorum advances the view and deterministically selects the next active address without conflicting Portal transitions. |
+| Relayer dies or L1 response is lost | Another relayer submits the same certificate and the Portal creates exactly one new epoch. |
+| Successor dies before its first block | The finalized transition remains authoritative; a later recovery replaces that successor without returning to the closed epoch. |
+| Sequencer set changes during recovery | Old-version votes cannot combine with the new set; nodes restart recovery from finalized membership. |
+| L1 finality stalls | No successor produces early. Recovery resumes from the same certificate when finality returns. |
+| Transactions remain pending | Transactions outside discarded speculative blocks remain available and are eventually included under existing pool rules. |
 
-### Chaos Tests
+### Failure-schedule tests
 
-Unit tests cannot explore the timing combinations among durable writes, P2P delivery, process loss, and L1 finality.
+Run deterministic schedules with recorded seeds and minimize every failing trace. Reduce election timeouts in the test environment; do not wait on production durations.
 
-| Scenario | Failure introduced | Expected result |
-| --- | --- | --- |
-| Competing views | Delay view-change messages across overlapping majorities | At most one checkpoint and successor can become certified for an epoch. |
-| Old leader partition | Isolate the leader from a recovery quorum while leaving its L1 view stale | The isolated leader may execute speculatively but cannot obtain a block certificate or extend settlement. |
-| Certificate withholding | Form a block quorum and deliver the aggregate certificate to only one process before killing it | View change reconstructs the highest prepared block from persisted votes or safely retains the preceding committed checkpoint. |
-| Storage faults | Drop or corrupt selected vote, block, or lock writes | The affected node stops voting; remaining nodes either recover within the fault bound or stop safely. |
-| Candidate churn | Kill each selected candidate after checkpoint transfer at different protocol steps | Later views preserve locks and eventually choose a live candidate without conflicting recovery certificates. |
-| Duplicate delivery | Replay blocks, votes, view changes, certificates, and finalized events | State transitions remain idempotent and bounded. |
-| Clock skew | Advance and pause individual monotonic timers | Timers affect view changes only and never allow conflicting commitment. |
+| Failure introduced | Required property |
+| --- | --- |
+| Partition the old leader from a recovery quorum | It may execute locally but cannot certify a block or extend settlement. |
+| Kill the assembler before and after certificate durability acknowledgements | Before the acknowledgement quorum, the proposal stays speculative; afterward, view change recovers the complete certificate from an honest holder. |
+| Delay, duplicate, and reorder proposals, votes, view changes, Portal submissions, and finalized events | Handlers remain idempotent and stores and queues stay within configured bounds. |
+| Kill successive candidates after each protocol step | Later views retain the highest lock and eventually choose a live candidate without conflicting certificates. |
+| Pause and skew individual monotonic clocks | Timers change view timing only; they never create authority. |
+| Corrupt or drop a selected block, vote, or lock write | The affected node stops voting. The remaining system recovers within the fault bound or stops safely. |
+| Fill P2P, checkpoint-transfer, and transaction queues | Backpressure remains bounded and cannot bypass persistence or certificate checks. |
 
-### Regression Tests
+The external oracle records each node's canonical `(height, hash, epoch, producer)`, every Portal epoch and checkpoint, and every durable vote. It asserts I1-I10 continuously, including that no old-epoch certificate appears after a recovery quorum locks.
 
-Run existing shutdown and panic tests unchanged, Portal contract tests, P2P wire golden tests, settlement tests, forced-recovery migration tests, single-sequencer tests, restart tests, and the complete multi-sequencer E2E suite. Nodes below the activation boundary retain the current production and replay rules.
+### Regression checks
+
+Keep the existing forced-recovery E2E as a pre-activation compatibility test. Run Portal contract tests, P2P wire tests, settlement tests, shutdown and panic tests, restart tests, single-sequencer tests, and the complete multi-sequencer E2E suite. No test may treat process exit, a health probe, or timer expiry as production authority.
 
 ### Metrics
 
 | Metric | Type | Bounded labels | Purpose |
 | --- | --- | --- | --- |
-| `zone_block_vote_total` | Counter | `result` | Detect rejected, duplicate, and persisted votes. |
-| `zone_block_commit_seconds` | Histogram | none | Measure proposal-to-certificate latency. |
-| `zone_recovery_view_total` | Counter | `trigger` | Count handoff and missing-progress view changes. |
+| `zone_block_certificate_seconds` | Histogram | none | Measure proposal-to-durable-certificate latency. |
+| `zone_block_vote_total` | Counter | `result` | Detect persisted, duplicate, and rejected votes. |
+| `zone_recovery_view_total` | Counter | `trigger` | Count planned and timeout-triggered views. |
 | `zone_recovery_transition_total` | Counter | `result` | Track certified, finalized, rejected, and superseded transitions. |
-| `zone_recovery_seconds` | Histogram | `result` | Measure checkpoint-to-first-committed-block recovery time. |
-| `zone_recovery_view` | Gauge | none | Expose the current persisted recovery view. |
+| `zone_recovery_seconds` | Histogram | `result` | Measure last certificate to successor's first certificate. |
+| `zone_recovery_view` | Gauge | none | Expose the current durable view without peer-address labels. |
