@@ -437,10 +437,10 @@ where
         provider,
         height,
         attestation,
-        Some((
+        (
             signed.attestation.anchorBlockNumber,
             signed.attestation.anchorBlockHash,
-        )),
+        ),
     )
     .await?
     .ok_or_eyre("signed block is not a batch boundary")?;

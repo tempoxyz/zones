@@ -1,10 +1,12 @@
+use crate::queue::DeferredPortalWork;
+
 use super::*;
 use crate::{
-    EncryptionKeyRing, L1StateCache, abi::ZonePortal, metrics::L1SubscriberMetrics,
-    state::EnabledTokenRegistry,
+    EncryptionKeyRing, L1StateCache, metrics::L1SubscriberMetrics, state::EnabledTokenRegistry,
 };
 use eyre::{OptionExt as _, WrapErr as _};
-use std::collections::HashSet;
+use futures::stream;
+use std::{collections::HashSet, ops::RangeInclusive};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
@@ -20,6 +22,15 @@ struct L1BlockTrackerState {
     recent_portal_evidence: BTreeMap<u64, AuthenticatedPortalLogs>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
+    finalized_target: Option<FinalizedTarget>,
+}
+
+/// Highest finalized L1 height announced by the subscriber and whether catch-up has verified that
+/// no newer finalized block remains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizedTarget {
+    pub number: u64,
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +61,9 @@ pub struct FinalizedBatchSubmission {
     /// Receipt-local log position used to distinguish multiple submissions in one transaction.
     pub log_index: u64,
     /// Event emitted after the Portal accepted the submission.
-    pub event: ZonePortal::BatchSubmitted,
+    pub event: crate::abi::BatchSubmitted,
+    /// Whether the accepted submission uses the pre-T13 ABI without a token cursor.
+    pub is_legacy: bool,
 }
 
 /// Extract `BatchSubmitted` events using receipt ordering rather than RPC metadata.
@@ -64,17 +77,41 @@ pub fn extract_finalized_batch_submissions(
     let mut submissions = Vec::new();
     for (transaction_index, receipt) in receipts.iter().enumerate() {
         for (log_index, log) in receipt.logs().iter().enumerate() {
-            if log.address() != portal_address
-                || log.topic0() != Some(&ZonePortal::BatchSubmitted::SIGNATURE_HASH)
-            {
+            if log.address() != portal_address {
                 continue;
             }
-            match ZonePortal::BatchSubmitted::decode_log(&log.inner) {
+            let (event, is_legacy) =
+                if log.topic0() == Some(&crate::abi::BatchSubmitted::SIGNATURE_HASH) {
+                    (
+                        crate::abi::BatchSubmitted::decode_log(&log.inner).map(|event| event.data),
+                        false,
+                    )
+                } else if log.topic0() == Some(&crate::abi::LegacyBatchSubmitted::SIGNATURE_HASH) {
+                    (
+                        crate::abi::LegacyBatchSubmitted::decode_log(&log.inner).map(|event| {
+                            let event = event.data;
+                            crate::abi::BatchSubmitted {
+                                withdrawalBatchIndex: event.withdrawalBatchIndex,
+                                withdrawalQueueIndex: event.withdrawalQueueIndex,
+                                nextProcessedDepositQueueHash: event.nextProcessedDepositQueueHash,
+                                nextBlockHash: event.nextBlockHash,
+                                withdrawalQueueHash: event.withdrawalQueueHash,
+                                lastProcessedDepositNumber: event.lastProcessedDepositNumber,
+                                lastProcessedEnabledTokenCount: 0,
+                            }
+                        }),
+                        true,
+                    )
+                } else {
+                    continue;
+                };
+            match event {
                 Ok(event) => submissions.push(FinalizedBatchSubmission {
                     block,
                     transaction_index: transaction_index as u64,
                     log_index: log_index as u64,
-                    event: event.data,
+                    event,
+                    is_legacy,
                 }),
                 Err(err) => warn!(
                     target: "zone::l1::subscriber",
@@ -120,6 +157,52 @@ impl Default for L1BlockTracker {
 }
 
 impl L1BlockTracker {
+    /// Record the highest finalized L1 height the subscriber has been asked to ingest.
+    ///
+    /// This is published before backfill starts so the Zone engine does not mistake a partially
+    /// filled queue for the end of the finalized range.
+    pub fn record_finalized_target(&self, number: u64) {
+        let mut state = self.state.write();
+        let advanced = state
+            .finalized_target
+            .is_none_or(|target| number > target.number);
+        if !advanced {
+            return;
+        }
+        state.finalized_target = Some(FinalizedTarget {
+            number,
+            ready: false,
+        });
+        drop(state);
+        self.changed.send_replace(());
+    }
+
+    /// Mark an announced target ready after a second finalized read observes no remaining delta.
+    pub fn mark_finalized_target_ready(&self, number: u64) -> eyre::Result<()> {
+        let mut state = self.state.write();
+        let target = state
+            .finalized_target
+            .as_mut()
+            .ok_or_else(|| eyre::eyre!("cannot mark an unannounced finalized target ready"))?;
+        eyre::ensure!(
+            target.number == number,
+            "cannot mark finalized target {number} ready; latest announced target is {}",
+            target.number
+        );
+        if target.ready {
+            return Ok(());
+        }
+        target.ready = true;
+        drop(state);
+        self.changed.send_replace(());
+        Ok(())
+    }
+
+    /// Return the highest finalized L1 height announced by the subscriber and its sync status.
+    pub fn finalized_target(&self) -> Option<FinalizedTarget> {
+        self.state.read().finalized_target
+    }
+
     /// Initialize the last L1 height already represented by canonical local zone state.
     pub fn initialize_consumed_through(&self, number: u64) {
         let mut state = self.state.write();
@@ -176,19 +259,31 @@ impl L1BlockTracker {
     }
 
     /// Wait until the exact L1 block has been validated and applied locally.
+    ///
+    /// Queue-backed subscribers enqueue each block before publishing its observation, so success
+    /// also guarantees that the deposit queue is caught up through `block`.
     pub async fn wait_for(&self, block: NumHash) -> eyre::Result<()> {
-        self.wait_for_portal_events(block).await.map(|_| ())
+        self.wait_for_observation(block, |_| ()).await
     }
 
     /// Wait for an exact L1 block and return its receipt-authenticated portal events.
     pub async fn wait_for_portal_events(&self, block: NumHash) -> eyre::Result<L1PortalEvents> {
+        self.wait_for_observation(block, |observation| observation.portal_events.clone())
+            .await
+    }
+
+    async fn wait_for_observation<T>(
+        &self,
+        block: NumHash,
+        project: impl Fn(&L1BlockObservation) -> T,
+    ) -> eyre::Result<T> {
         let mut changed = self.changed.subscribe();
         loop {
             {
                 let state = self.state.read();
                 match state.observed.get(&block.number) {
                     Some(observation) if observation.hash == block.hash => {
-                        return Ok(observation.portal_events.clone());
+                        return Ok(project(observation));
                     }
                     Some(observation) => {
                         eyre::bail!(
@@ -424,6 +519,9 @@ pub struct L1SubscriberConfig {
     pub retry_connection_interval: std::time::Duration,
     /// Whether to retain authenticated Portal logs for external observers.
     pub retain_portal_evidence: bool,
+    /// First L1 block whose portal work was crossed by canonical checkpoint-only Zone blocks.
+    /// Startup reconstructs this suffix before following new finalized blocks.
+    pub deferred_work_start: Option<u64>,
 }
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
@@ -626,41 +724,61 @@ where
 
     /// Synchronize all missing blocks through the current finalized L1 head.
     ///
+    /// The finalized L1 head is continuously updated on every iteration,
+    /// so the loop will terminate when `next_block` reaches or exceeds the finalized height.
+    ///
     /// Callers provide the next block number and receive the next cursor after
     /// a successful sync.
-    pub(crate) async fn sync_finalized_once(
+    pub(crate) async fn sync_to_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        next_block: u64,
+        mut next_block: u64,
     ) -> Result<u64, L1SubscriberError> {
-        let finalized = self.finalized_block_number(l1_provider).await?;
-        if next_block > finalized {
-            self.record_seen_block(finalized, 0);
-            return Ok(next_block);
+        let mut finalized = self.finalized_block_number(l1_provider).await?;
+        loop {
+            self.block_tracker.record_finalized_target(finalized);
+            if next_block <= finalized {
+                let blocks = finalized - next_block + 1;
+                self.record_seen_block(finalized, blocks);
+                info!(
+                    from = next_block,
+                    to = finalized,
+                    blocks,
+                    "Synchronizing finalized L1 blocks"
+                );
+
+                let start = std::time::Instant::now();
+                self.backfill(l1_provider, next_block, finalized).await?;
+                self.subscriber_metrics
+                    .backfill_duration_seconds
+                    .record(start.elapsed().as_secs_f64());
+                next_block = finalized.saturating_add(1);
+            } else {
+                self.record_seen_block(finalized, 0);
+            }
+
+            let refreshed = self.finalized_block_number(l1_provider).await?;
+            if refreshed < finalized {
+                return Err(eyre::eyre!(
+                    "finalized L1 target regressed from {finalized} to {refreshed}"
+                )
+                .into());
+            }
+            self.block_tracker.record_finalized_target(refreshed);
+            if refreshed == finalized {
+                self.block_tracker.mark_finalized_target_ready(refreshed)?;
+                self.deposit_queue.notify_consumer();
+                self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
+                return Ok(next_block);
+            }
+            finalized = refreshed;
         }
-
-        let blocks = finalized - next_block + 1;
-        self.record_seen_block(finalized, blocks);
-        info!(
-            from = next_block,
-            to = finalized,
-            blocks,
-            "Synchronizing finalized L1 blocks"
-        );
-
-        let start = std::time::Instant::now();
-        self.backfill(l1_provider, next_block, finalized).await?;
-        self.subscriber_metrics
-            .backfill_duration_seconds
-            .record(start.elapsed().as_secs_f64());
-        self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
-        Ok(finalized.saturating_add(1))
     }
 
     /// Follow finalized L1 using transport-specific head notifications as wakeups.
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
-    /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
+    /// always based on the `finalized` tag read by [`Self::sync_to_finalized`].
     pub(crate) async fn follow_finalized(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
@@ -670,10 +788,10 @@ where
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued in the stream.
-        next_block = self.sync_finalized_once(l1_provider, next_block).await?;
+        next_block = self.sync_to_finalized(l1_provider, next_block).await?;
 
         while stream.next().await.is_some() {
-            next_block = self.sync_finalized_once(l1_provider, next_block).await?;
+            next_block = self.sync_to_finalized(l1_provider, next_block).await?;
         }
 
         Err(eyre::eyre!("L1 head notification stream ended").into())
@@ -692,81 +810,16 @@ where
         from: u64,
         to: u64,
     ) -> Result<(), L1SubscriberError> {
-        use futures::stream;
-
-        let concurrency = self.config.l1_fetch_concurrency.max(1);
-        let subscriber_metrics = self.subscriber_metrics.clone();
-        let block_tracker = self.block_tracker.clone();
-
-        let mut fetched = stream::iter(from..=to)
-            .map(move |block_number| {
-                let provider = l1_provider;
-                let subscriber_metrics = subscriber_metrics.clone();
-                let block_tracker = block_tracker.clone();
-                async move {
-                    block_tracker.wait_for_capacity(block_number).await?;
-                    let start = std::time::Instant::now();
-                    let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let header_resp =
-                        async {
-                            let header = provider.get_header_by_number(block_number.into()).await?;
-                            Ok::<_, L1SubscriberError>(header.ok_or_eyre(format!(
-                                "L1 header not found for block {block_number}"
-                            ))?)
-                        }
-                        .await
-                        .inspect_err(|_| {
-                            fetch_failures.increment(1);
-                        })?;
-                    let block_hash = header_resp.hash();
-                    let block = NumHash::new(block_number, block_hash);
-                    let expected_receipts_root = header_resp.receipts_root();
-                    let expected_logs_bloom = header_resp.logs_bloom();
-                    let receipts = fetch_and_verify_receipts_for_header(
-                        provider,
-                        block,
-                        expected_receipts_root,
-                        expected_logs_bloom,
-                    )
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
-                    let elapsed = start.elapsed();
-                    debug!(
-                        block_number,
-                        %block_hash,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        receipts = receipts.len(),
-                        "Fetched and validated L1 block data"
-                    );
-                    let header = header_resp.inner.inner;
-                    Ok::<_, L1SubscriberError>((header, receipts))
-                }
-            })
-            .buffered(concurrency);
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=to);
 
         let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
 
-        while let Some((header, receipts)) = fetched.try_next().await? {
-            let block_number = header.number();
-            let block_hash = header.hash_slow();
-            // Decoding fails closed: a decode failure of a recognized portal log aborts this
-            // block before anything is enqueued or any cache advances.
-            let processed_events = self
-                .extract_events(NumHash::new(block_number, block_hash), &receipts)
-                .inspect_err(|_| {
-                    self.subscriber_metrics.decode_fence_failures.increment(1);
-                })
-                .map_err(L1SubscriberError::fatal_from_err(
-                    block_number,
-                    "portal event decoding",
-                ))?;
+        while let Some((sealed, processed_events)) = blocks.try_next().await? {
+            let block_number = sealed.number();
             let (events, invalidated, portal_logs, finalized_batches) = processed_events;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
             let portal_evidence = portal_logs.map(|logs| (sealed.parent_hash(), logs));
             // Publish the leadership transition _before_ the activation block becomes
@@ -866,6 +919,77 @@ where
         Ok(())
     }
 
+    /// Fetch, authenticate, and decode an inclusive finalized L1 block range in order.
+    ///
+    /// RPC work is pipelined up to the configured concurrency.
+    fn fetch_l1_blocks<'a>(
+        &'a self,
+        l1_provider: &'a impl Provider<TempoNetwork>,
+        range: RangeInclusive<u64>,
+    ) -> impl Stream<
+        Item = Result<(SealedHeader<TempoHeader>, L1ProcessedEvents), L1SubscriberError>,
+    > + Send
+    + 'a {
+        let concurrency = self.config.l1_fetch_concurrency.max(1);
+        let subscriber_metrics = self.subscriber_metrics.clone();
+        let block_tracker = self.block_tracker.clone();
+
+        stream::iter(range)
+            .map(move |block_number| {
+                let provider = l1_provider;
+                let subscriber_metrics = subscriber_metrics.clone();
+                let block_tracker = block_tracker.clone();
+                async move {
+                    block_tracker.wait_for_capacity(block_number).await?;
+                    let start = std::time::Instant::now();
+                    let fetch_failures = &subscriber_metrics.fetch_failures;
+                    let header_resp =
+                        async {
+                            let header = provider.get_header_by_number(block_number.into()).await?;
+                            Ok::<_, L1SubscriberError>(header.ok_or_eyre(format!(
+                                "L1 header not found for block {block_number}"
+                            ))?)
+                        }
+                        .await
+                        .inspect_err(|_| {
+                            fetch_failures.increment(1);
+                        })?;
+                    let block_hash = header_resp.hash();
+                    let receipts = fetch_and_verify_receipts_for_header(
+                        provider,
+                        NumHash::new(block_number, block_hash),
+                        header_resp.receipts_root(),
+                        header_resp.logs_bloom(),
+                    )
+                    .await
+                    .inspect_err(|_| {
+                        fetch_failures.increment(1);
+                    })?;
+                    // Abort before enqueueing work or advancing caches if a portal log fails to decode.
+                    let processed_events = self
+                        .extract_events(NumHash::new(block_number, block_hash), &receipts)
+                        .inspect_err(|_| {
+                            subscriber_metrics.decode_fence_failures.increment(1);
+                        })
+                        .map_err(L1SubscriberError::fatal_from_err(
+                            block_number,
+                            "portal event decoding",
+                        ))?;
+                    let elapsed = start.elapsed();
+                    debug!(
+                        block_number,
+                        %block_hash,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        receipts = receipts.len(),
+                        "Fetched, validated, and decoded L1 block data"
+                    );
+                    let sealed = SealedHeader::seal_slow(header_resp.inner.inner);
+                    Ok::<_, L1SubscriberError>((sealed, processed_events))
+                }
+            })
+            .buffered(concurrency)
+    }
+
     /// Run the L1 subscriber, reconnecting after transient RPC failures.
     ///
     /// The subscriber follows only the L1 `finalized` tag. WebSocket
@@ -878,6 +1002,7 @@ where
         loop {
             let result = async {
                 let provider = self.connect().await?;
+                self.recover_deferred_work(&provider).await?;
                 let header_stream = self.subscribe_block_headers(&provider).await?;
                 info!(
                     portal = %self.config.portal_address,
@@ -903,6 +1028,48 @@ where
                 }
             }
         }
+    }
+
+    async fn recover_deferred_work(
+        &self,
+        l1_provider: &impl Provider<TempoNetwork>,
+    ) -> Result<(), L1SubscriberError> {
+        let Some(from) = self.config.deferred_work_start else {
+            return Ok(());
+        };
+        if self.deposit_queue.last_enqueued().is_some() {
+            return Ok(());
+        }
+        let state = self.zone_provider.latest().map_err(eyre::Report::from)?;
+        let checkpoint = state.tempo_num_hash().map_err(eyre::Report::from)?;
+        if from > checkpoint.number {
+            return Ok(());
+        }
+
+        let mut blocks = self.fetch_l1_blocks(l1_provider, from..=checkpoint.number);
+        let mut deferred: Option<DeferredPortalWork> = None;
+        while let Some((header, (events, _, _, _))) = blocks.try_next().await? {
+            let block = L1BlockDeposits { header, events };
+            if let Some(deferred) = &mut deferred {
+                deferred.push(block);
+            } else {
+                deferred = Some(DeferredPortalWork::new(block));
+            }
+        }
+        let deferred = deferred.expect("the recovered deferred range is nonempty");
+        if deferred.last_num_hash() != checkpoint {
+            return Err(eyre::eyre!(
+                "recovered deferred L1 range ends at {:?}, but the local checkpoint is {checkpoint:?}",
+                deferred.last_num_hash()
+            ).into());
+        }
+        self.deposit_queue.restore_deferred(deferred)?;
+        info!(
+            from,
+            to = checkpoint.number,
+            "Recovered portal work crossed by checkpoint-only Zone blocks"
+        );
+        Ok(())
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.

@@ -36,6 +36,7 @@ sol! {
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
+        uint256 nextZoneHeight,
         BlockTransition blockTransition,
         DepositQueueTransition depositQueueTransition,
         TokenEnablementTransition tokenEnablementTransition,
@@ -56,6 +57,7 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
         "anchorBlockNumber": inputs["anchorBlockNumber"],
         "anchorBlockHash": inputs["anchorBlockHash"],
         "expectedWithdrawalBatchIndex": inputs["expectedWithdrawalBatchIndex"],
+        "nextZoneHeight": output["nextZoneHeight"],
         "blockTransition": output["blockTransition"],
         "depositQueueTransition": output["depositQueueTransition"],
         "tokenEnablementTransition": output["tokenEnablementTransition"],
@@ -95,7 +97,7 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{B256, address};
+    use alloy_primitives::{B256, U256, address};
 
     fn fixture() -> (Value, Value) {
         (
@@ -106,6 +108,7 @@ mod tests {
             }}),
             json!({
                 "output": {
+                    "nextZoneHeight": 927,
                     "blockTransition": { "prevBlockHash": B256::repeat_byte(7), "nextBlockHash": B256::repeat_byte(8) },
                     "depositQueueTransition": {
                         "prevProcessedHash": B256::repeat_byte(9), "nextProcessedHash": B256::repeat_byte(10),
@@ -124,7 +127,7 @@ mod tests {
         let (witness, response) = fixture();
         let request = build(&witness, &response).unwrap();
         assert_eq!(request["chainId"], 31319);
-        assert_eq!(request["arguments"].as_object().unwrap().len(), 11);
+        assert_eq!(request["arguments"].as_object().unwrap().len(), 12);
         let tx = &request["rpc"]["params"][0];
         assert_eq!(
             tx["from"],
@@ -134,7 +137,8 @@ mod tests {
         assert_eq!(request["rpc"]["method"], "eth_call");
         assert_eq!(request["rpc"]["params"][1], "latest");
         let data: Bytes = serde_json::from_value(tx["data"].clone()).unwrap();
-        assert_eq!(&data[..4], &[0xe5, 0x7a, 0x63, 0x66]);
+        // IZoneVerifier.verify includes nextZoneHeight after expectedWithdrawalBatchIndex.
+        assert_eq!(&data[..4], &[0xeb, 0xb2, 0xdd, 0xc9]);
         let decoded = verifyCall::abi_decode(&data).unwrap();
         assert_eq!(
             serde_json::to_value(&decoded).unwrap(),
@@ -145,6 +149,7 @@ mod tests {
         assert_eq!(decoded.anchorBlockNumber, 4);
         assert_eq!(decoded.anchorBlockHash, B256::repeat_byte(5));
         assert_eq!(decoded.expectedWithdrawalBatchIndex, 6);
+        assert_eq!(decoded.nextZoneHeight, U256::from(927));
         assert_eq!(decoded.blockTransition.nextBlockHash, B256::repeat_byte(8));
         assert_eq!(decoded.depositQueueTransition.nextDepositNumber, 12);
         assert_eq!(
@@ -153,6 +158,16 @@ mod tests {
         );
         assert_eq!(decoded.withdrawalQueueHash, B256::repeat_byte(15));
         assert_eq!(decoded.proof, Bytes::from_static(&[0x12, 0x34]));
+    }
+
+    #[test]
+    fn rejects_missing_next_zone_height() {
+        let (witness, mut response) = fixture();
+        response["output"]
+            .as_object_mut()
+            .unwrap()
+            .remove("nextZoneHeight");
+        assert!(build(&witness, &response).is_err());
     }
 
     #[test]

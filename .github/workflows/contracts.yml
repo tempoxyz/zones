@@ -56,7 +56,7 @@ jobs:
       - name: Install Foundry
         uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Build Solidity artifacts
         working-directory: crates/contracts
@@ -86,7 +86,7 @@ jobs:
       - name: Install Foundry
         uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Show Forge version
         run: forge --version
@@ -127,7 +127,7 @@ jobs:
       - name: Install Foundry
         uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Run Forge fmt check
         working-directory: crates/contracts
@@ -240,6 +240,7 @@ jobs:
       - name: Forge coverage (zone specs)
         working-directory: crates/contracts
         run: |
+          set -o pipefail
           "$GITHUB_WORKSPACE/foundry/target/release/forge" coverage \
             --ir-minimum --match-path "test/**" --exclude-tests --report summary | tee coverage.txt
           {

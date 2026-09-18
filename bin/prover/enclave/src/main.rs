@@ -8,10 +8,11 @@ use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, ErrorCode, PROTOCOL_VERSION, ProverConnection, TrustedChainSpecs,
-    VerifyRequest, VerifyResponse, request_error_response,
+    DEFAULT_MAX_REQUEST_BYTES, ErrorCode, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
+    ProverConnection, TrustedChainSpecs, VerifyRequest, VerifyResponse,
+    nitro_batch_attestation_hash, request_error_response,
 };
-use zone_spf::{SpfConfig, prove_zone_batch};
+use zone_spf::{BatchOutput, PublicInputs, SpfConfig, prove_zone_batch};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -250,8 +251,6 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
             };
         }
     };
-    // TODO: Configure the Nitro prover with the actual trusted Zone chain spec and select it by
-    // the full Zone chain ID instead of synthesizing one from the parent Tempo genesis.
     let mut zone_genesis = tempo_spec.inner.genesis.clone();
     zone_genesis.config.chain_id = zone_chain_id;
     let zone_spec = match ZoneChainSpec::from_genesis_with_l1(zone_genesis, tempo_spec.as_ref()) {
@@ -265,13 +264,23 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
             };
         }
     };
-    let config = SpfConfig::new(Arc::new(zone_spec), request.witness.public_inputs.portal);
+    let config = SpfConfig::new(Arc::new(zone_spec));
 
+    let public_inputs = request.witness.public_inputs.clone();
     match prove_zone_batch(&config, request.witness) {
-        Ok(output) => VerifyResponse::Ok {
-            version: PROTOCOL_VERSION,
-            request_id: request.request_id,
-            output,
+        Ok(output) => match build_proof_bundle(&public_inputs, &output, nitro_attestation) {
+            Ok(proof_bundle) => VerifyResponse::Ok {
+                version: PROTOCOL_VERSION,
+                request_id: request.request_id,
+                output: Box::new(output),
+                proof_bundle,
+            },
+            Err(message) => VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::AttestationUnavailable,
+                message,
+            },
         },
         Err(error) => VerifyResponse::Error {
             version: PROTOCOL_VERSION,
@@ -282,20 +291,72 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
     }
 }
 
+fn build_proof_bundle<F>(
+    public_inputs: &PublicInputs,
+    output: &BatchOutput,
+    attestor: F,
+) -> Result<ProofBundle, String>
+where
+    F: FnOnce(alloy_primitives::B256) -> Result<Vec<u8>, String>,
+{
+    let digest = nitro_batch_attestation_hash(public_inputs, output);
+    let document = attestor(digest)?;
+    Ok(ProofBundle {
+        verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
+        proof: document.into(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
+    use aws_nitro_enclaves_nsm_api::{
+        api::{Request, Response},
+        driver::{nsm_exit, nsm_init, nsm_process_request},
+    };
+    use serde_bytes::ByteBuf;
+
+    let descriptor = nsm_init();
+    if descriptor < 0 {
+        return Err("Nitro Secure Module device is unavailable".into());
+    }
+    let response = nsm_process_request(
+        descriptor,
+        Request::Attestation {
+            user_data: Some(ByteBuf::from(digest.to_vec())),
+            nonce: None,
+            public_key: None,
+        },
+    );
+    nsm_exit(descriptor);
+    match response {
+        Response::Attestation { document } => Ok(document),
+        Response::Error(code) => Err(format!("Nitro attestation request failed: {code:?}")),
+        _ => Err("Nitro Secure Module returned an unexpected response".into()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn nitro_attestation(_digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
+    Err("Nitro attestation is supported only on Linux".into())
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{Address, B256, Bytes};
+    use alloy_primitives::{B256, Bytes};
     use reth_trie_common::EMPTY_ROOT_HASH;
     use tempo_primitives::TempoHeader;
-    use zone_spf::{BatchWitness, PublicInputs, TempoStateWitness, ZoneStateWitness};
+    use zone_spf::{
+        BatchWitness, BlockTransition, DepositQueueTransition, LastBatchCommitment, PublicInputs,
+        TempoStateWitness, TokenEnablementTransition, ZoneStateWitness,
+    };
 
     use super::*;
 
     #[test]
     fn rejects_unsupported_protocol_version() {
         let request = VerifyRequest {
-            version: 2,
+            version: PROTOCOL_VERSION + 1,
             request_id: "version-test".into(),
             witness: empty_witness(),
         };
@@ -309,6 +370,72 @@ mod tests {
                 ..
             } if id == "version-test"
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_chain_before_execution() {
+        let mut witness = empty_witness();
+        witness.public_inputs.parent_chain_id = 99;
+        let request = VerifyRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "chain-test".into(),
+            witness,
+        };
+        let response = process_request(request, &TrustedChainSpecs::default());
+
+        assert!(matches!(
+            response,
+            VerifyResponse::Error {
+                request_id: Some(id),
+                code: ErrorCode::UnsupportedChain,
+                ..
+            } if id == "chain-test"
+        ));
+    }
+
+    #[test]
+    fn binds_the_canonical_digest_into_the_proof_bundle() {
+        let public_inputs = empty_witness().public_inputs;
+        let output = BatchOutput {
+            next_zone_height: 14,
+            block_transition: BlockTransition {
+                prevBlockHash: B256::with_last_byte(1),
+                nextBlockHash: B256::with_last_byte(2),
+            },
+            deposit_queue_transition: DepositQueueTransition {
+                prevProcessedHash: B256::with_last_byte(3),
+                nextProcessedHash: B256::with_last_byte(4),
+                prevDepositNumber: 5,
+                nextDepositNumber: 6,
+            },
+            token_enablement_transition: TokenEnablementTransition {
+                prevProcessedTokenCount: 7,
+                nextProcessedTokenCount: 8,
+            },
+            withdrawal_queue_hash: B256::with_last_byte(9),
+            last_batch_commitment: LastBatchCommitment {
+                withdrawal_batch_index: 10,
+            },
+        };
+        let expected_digest = nitro_batch_attestation_hash(&public_inputs, &output);
+        let document = vec![0xd2, 0x84, 0x43];
+
+        let bundle = build_proof_bundle(&public_inputs, &output, |digest| {
+            assert_eq!(digest, expected_digest);
+            Ok(document.clone())
+        })
+        .unwrap();
+
+        assert_eq!(bundle.verifier_config.as_ref(), NITRO_VERIFIER_CONFIG_V1);
+        assert_eq!(bundle.proof.as_ref(), document);
+
+        let mut other_height = output;
+        other_height.next_zone_height += 1;
+        build_proof_bundle(&public_inputs, &other_height, |digest| {
+            assert_ne!(digest, expected_digest);
+            Ok(document)
+        })
+        .unwrap();
     }
 
     #[test]
@@ -370,7 +497,6 @@ mod tests {
             public_inputs: PublicInputs {
                 parent_chain_id: 42_431,
                 zone_id: 1,
-                portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
                 anchor_block_number: 2,
                 anchor_block_hash: B256::ZERO,
