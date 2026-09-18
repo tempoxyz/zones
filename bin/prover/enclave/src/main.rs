@@ -14,9 +14,6 @@ use zone_prover::{
 };
 use zone_spf::{BatchOutput, PublicInputs, SpfConfig, prove_zone_batch};
 
-#[cfg(target_os = "linux")]
-mod nsm;
-
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -312,7 +309,30 @@ where
 
 #[cfg(target_os = "linux")]
 fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
-    nsm::attestation(digest.as_ref())
+    use aws_nitro_enclaves_nsm_api::{
+        api::{Request, Response},
+        driver::{nsm_exit, nsm_init, nsm_process_request},
+    };
+    use serde_bytes::ByteBuf;
+
+    let descriptor = nsm_init();
+    if descriptor < 0 {
+        return Err("Nitro Secure Module device is unavailable".into());
+    }
+    let response = nsm_process_request(
+        descriptor,
+        Request::Attestation {
+            user_data: Some(ByteBuf::from(digest.to_vec())),
+            nonce: None,
+            public_key: None,
+        },
+    );
+    nsm_exit(descriptor);
+    match response {
+        Response::Attestation { document } => Ok(document),
+        Response::Error(code) => Err(format!("Nitro attestation request failed: {code:?}")),
+        _ => Err("Nitro Secure Module returned an unexpected response".into()),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

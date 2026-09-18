@@ -140,8 +140,8 @@ zone-sequencer = { path = "crates/sequencer" }
 zone-spf = { path = "crates/spf" }
 zone-checker = { path = "crates/checker" }
 
-# CBOR encoding for the Nitro Secure Module protocol
-ciborium = "0.2.2"
+# AWS Nitro Enclaves
+aws-nitro-enclaves-nsm-api = "0.5.2"
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "5f02aa3" }
