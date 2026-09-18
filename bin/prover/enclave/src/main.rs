@@ -263,26 +263,28 @@ async fn handle_connection<T>(
     let worker_cancellation = cancellation.clone();
     let mut worker =
         tokio::task::spawn_blocking(move || process_request(request, &specs, &worker_cancellation));
-    let deadline = tokio::time::sleep(timeouts.proving);
-    tokio::pin!(deadline);
-    let response = tokio::select! {
-        biased;
-        result = &mut worker => match result {
-            Ok(response) => response,
-            Err(error) => err_response(
-                request_id.clone(),
-                ErrorCode::InternalError,
-                format!("proving worker failed: {error}"),
-            ),
-        },
-        () = &mut deadline => {
+    let response = match tokio::time::timeout(timeouts.proving, &mut worker).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => err_response(
+            request_id.clone(),
+            ErrorCode::InternalError,
+            format!("proving worker failed: {error}"),
+        ),
+        Err(_) => {
             cancellation.cancel();
             let _ = worker.await;
-            warn!(elapsed_ms = started.elapsed().as_millis(), limit_secs = timeouts.proving.as_secs(), "SPF proving timed out; cancelled worker joined");
+            warn!(
+                elapsed_ms = started.elapsed().as_millis(),
+                limit_secs = timeouts.proving.as_secs(),
+                "SPF proving timed out; cancelled worker joined"
+            );
             err_response(
                 request_id,
                 ErrorCode::ProvingTimedOut,
-                format!("proving exceeded the configured {} second deadline", timeouts.proving.as_secs()),
+                format!(
+                    "proving exceeded the configured {} second deadline",
+                    timeouts.proving.as_secs()
+                ),
             )
         }
     };
