@@ -7,4 +7,5 @@ contract ZoneInboxStorage {
     uint64 public processedDepositNumber;
     mapping(address token => mapping(address owner => uint128 amount)) private _refunds;
     bytes32 public processedTokenEnablementHash;
+    mapping(address => mapping(uint256 => bool)) private forcedExitNonces;
 }

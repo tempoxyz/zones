@@ -130,6 +130,9 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         ZonePortal::BatchSubmitted::SIGNATURE_HASH => {
             ignored!(ZonePortal::BatchSubmitted, "BatchSubmitted")
         }
+        ZonePortal::ForcedExitRequested::SIGNATURE_HASH => {
+            ignored!(ZonePortal::ForcedExitRequested, "ForcedExitRequested")
+        }
         ZonePortal::WithdrawalProcessed::SIGNATURE_HASH => {
             let e =
                 decode_event::<ZonePortal::WithdrawalProcessed>(log, "WithdrawalProcessed", block)?;

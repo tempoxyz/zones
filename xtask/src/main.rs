@@ -10,6 +10,7 @@ use crate::{
     deploy_neobank_fixtures::DeployNeobankFixtures,
     deploy_router::DeployRouter,
     deposit::Deposit,
+    forced_withdraw::ForcedWithdraw,
     generate_p2p_key::GenerateP2pKey,
     generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory,
@@ -34,6 +35,7 @@ mod demo_swap_and_deposit;
 mod deploy_neobank_fixtures;
 mod deploy_router;
 mod deposit;
+mod forced_withdraw;
 mod generate_p2p_key;
 mod generate_zone_genesis;
 mod install_reference_zone_factory;
@@ -73,6 +75,7 @@ async fn main() -> eyre::Result<()> {
             .wrap_err("failed to deploy private-Zone benchmark fixtures"),
         Action::DeployRouter(args) => args.run().await.wrap_err("failed to deploy router"),
         Action::Deposit(args) => args.run().await.wrap_err("failed to send deposit"),
+        Action::ForcedWithdraw(args) => args.run().await.wrap_err("forced withdrawal failed"),
         Action::GenerateZoneGenesis(args) => {
             args.run().await.wrap_err("failed to generate zone genesis")
         }
@@ -122,6 +125,7 @@ enum Action {
     DeployNeobankFixtures(DeployNeobankFixtures),
     DeployRouter(DeployRouter),
     Deposit(Deposit),
+    ForcedWithdraw(ForcedWithdraw),
     GenerateP2pKey(GenerateP2pKey),
     GenerateZoneGenesis(GenerateZoneGenesis),
     InstallReferenceZoneFactory(InstallReferenceZoneFactory),

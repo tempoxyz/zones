@@ -37,6 +37,11 @@
     - [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)
     - [Authenticated Withdrawals](#authenticated-withdrawals)
     - [Zone-to-Zone Transfers](#zone-to-zone-transfers)
+  - [Forced Withdrawals (Exit Hatch)](#forced-withdrawals-exit-hatch)
+    - [Forced-Exit Authorization and Encryption](#forced-exit-authorization-and-encryption)
+    - [Forced-Exit Admission](#forced-exit-admission)
+    - [Forced-Exit Execution](#forced-exit-execution)
+    - [Forced-Exit Settlement and Recovery](#forced-exit-settlement-and-recovery)
   - [Zone Execution](#zone-execution)
     - [Fee Accounting](#fee-accounting)
     - [Block Structure](#block-structure)
@@ -512,7 +517,7 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Deposit, deposit, cur
 
 The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` and `processedDepositNumber` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo L1 at the zone's finalized checkpoint.
 
-Each portal accepts at most `MAX_DEPOSITS_PER_TEMPO_BLOCK` deposits in one Tempo block. The cap applies to encrypted deposits and internal withdrawal bounce-backs because both append to the same queue. Twenty slots are reserved for withdrawal bounce-backs, enough for one maximum-size sequencer withdrawal batch, so user deposits stop at `MAX_DEPOSITS_PER_TEMPO_BLOCK - 20`. This both bounds the complete per-block deposit vector below the Zone's `advanceTempo()` system gas budget and guarantees FIFO withdrawal progress under sustained public deposit load.
+Each portal has `MAX_DEPOSITS_PER_TEMPO_BLOCK = 230` shared admission units per Tempo block. An encrypted deposit or internal withdrawal bounce-back costs one unit; a [forced-exit request](#forced-withdrawals-exit-hatch) costs `FORCED_EXIT_ADMISSION_WEIGHT = 14` units but creates only one queue entry and increments `depositCount` once. Twenty units are reserved for withdrawal bounce-backs, enough for one maximum-size sequencer withdrawal batch, so public deposits and forced requests may only consume capacity up to 210 units. This admits at most 15 forced requests in a block with no ordinary deposits and preserves FIFO withdrawal progress under sustained public load. The complete mixed workload must fit the `advanceTempo()` system gas budget; execution must not skip an admitted suffix.
 
 `advanceTempo()` reads the portal's `currentDepositQueueHash` from Tempo L1 at the zone's finalized checkpoint. The call must process deposits through the current queue head: after rebuilding the hash chain, the resulting `processedDepositQueueHash` must equal the portal's `currentDepositQueueHash`.
 
@@ -533,11 +538,12 @@ Before queue insertion, the portal also validates encrypted-payload shape. `depo
 
 The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `DepositMade`, including `tempoRefundRecipient`. The sequencer provides the ECDH shared secret and proof when processing the deposit on the zone via `advanceTempo()`; the zone decrypts `(to, memo)` from the ciphertext onchain.
 
-Encrypted user deposits and internal withdrawal bounce-backs share a single ordered queue with a type discriminator in the hash:
+Encrypted user deposits, internal withdrawal bounce-backs, and forced-exit requests share a single ordered queue with a type discriminator in the hash:
 
 ```
 keccak256(abi.encode(DepositType.WithdrawalBounceBack, deposit, prevHash))
 keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
+keccak256(abi.encode(DepositType.ForcedExit, forcedExit, prevHash))
 ```
 
 `DepositType.WithdrawalBounceBack` is reserved for portal-created withdrawal bounce-backs; it is not a user deposit API. Entries are processed in their exact queue order.
@@ -563,7 +569,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 If any step fails (invalid proof, GCM tag mismatch, or invalid decrypted plaintext length), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `tempoRefundRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `deposit` requires a non-zero `tempoRefundRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
-Every encrypted deposit must be processed with exactly one `DecryptionData` entry, consumed in deposit order. The inbox always performs the Chaum-Pedersen and AES-GCM verification; missing or extra decryption entries make `advanceTempo()` revert. There is no sequencer-supplied accept/reject decision.
+Every encrypted deposit and forced-exit request must be processed with exactly one `DecryptionData` entry, consumed in mixed queue order. Internal withdrawal bounce-backs consume none. Forced-exit proof and payload failures follow the distinct rules in [Forced-Exit Execution](#forced-exit-execution). The inbox always performs the Chaum-Pedersen and AES-GCM verification; missing or extra decryption entries make `advanceTempo()` revert. There is no sequencer-supplied accept/reject decision.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
@@ -846,6 +852,78 @@ For callback withdrawals, `IWithdrawalReceiver.onWithdrawalReceived` receives th
 ### Zone-to-Zone Transfers
 
 Closed access mode requires source queue advancement but cannot prove that the callback value itself returned. Open access mode permits direct callback-based routing without source queue advancement, whether into another zone or outside the zone system. Gateway registration remains independently enforced unless the admin also selects open gateway mode.
+
+<br>
+
+## Forced Withdrawals (Exit Hatch)
+
+A forced withdrawal lets a Zone account request withdrawal of its full liquid balance of one token by submitting an encrypted root authorization on Tempo L1. It requires neither a user Zone transaction nor an outbox allowance. It still requires live Zone execution, decryption keys, quorum settlement, and ordinary L1 withdrawal processing; it cannot recover funds if operators stop running the Zone.
+
+### Forced-Exit Authorization and Encryption
+
+The account signs `ForcedExitAuthorization(address account,uint256 zoneChainId,address token,address recipient,uint256 nonce,uint64 admitBefore)` using EIP-712 with domain name `TempoZoneForcedExit`, version `1`, the **Tempo L1 chain ID**, and the portal as `verifyingContract`. The signed `zoneChainId` identifies the destination Zone. `account` and `recipient` must be nonzero, and the signed token must match the public request token.
+
+Only TIP-0001 primitive root signatures (secp256k1, P256, and WebAuthn) are accepted, with a maximum encoded signature size of 2,049 bytes. Keychain/access-key envelopes, ERC-1271 callbacks, and counterfactual account authorization are unsupported. P256's `pre_hash` byte must be a canonical boolean. The recovered root identity must equal `account`.
+
+The plaintext is exactly `abi.encode(uint8(1), authorization, signature)`, with no additional dynamic tuple wrapper. Decoding must reproduce the exact bytes on re-encoding, rejecting alternate offsets, padding, trailing data, or unsupported versions. Ciphertext length must be 384–2,368 bytes inclusive and divisible by 32.
+
+The request reuses `DepositPayload`, secp256k1 ECDH, HKDF-SHA256 with salt `ecies-aes-key`, and AES-256-GCM with empty AAD. Its HKDF info is the following 118-byte concatenation:
+
+```
+ASCII("forced-exit-v1") || portal[20] || keyIndex[32, big-endian]
+    || ephemeralPubkeyX[32] || feePayer[20]
+```
+
+`feePayer` is the actual L1 caller, which may differ from the authorized Zone account. Ordinary deposits retain their existing 104-byte HKDF context without this prefix. Forced exits do not accept the legacy unprefixed context.
+
+### Forced-Exit Admission
+
+`requestForcedExit(token, keyIndex, encrypted)` requires version 1 activation, an unpaused portal, an eligible fee payer under the ordinary depositor access rules, an enabled token, a valid current or unexpired encryption key, a valid compressed ephemeral point, a bounded ciphertext, and shared public inbox capacity. Token `depositsActive` controls principal deposits and does not prevent forced-exit admission.
+
+The portal transfers `FORCED_EXIT_COMPENSATION = 100_000` base units (0.1 of a six-decimal TIP-20 token) from the fee payer and immediately pays the current admin in that token. The fee payer needs L1 balance and approval for this compensation. Either transfer failure, including failure to deliver directly to the admin, reverts the entire admission. No withdrawal principal is deposited, and compensation is not refunded for rejection, an empty balance, or failed delivery.
+
+Admission allocates a monotonically increasing `requestId` and global `depositNumber`, records the L1 block number and timestamp, and appends the complete `ForcedExit` entry to the shared queue. `forcedExitRequests(requestId)` stores only `(token, depositNumber)` as admission identity. `ForcedExitRequested(depositNumber, entry)` exposes the token, fee payer, key index, encrypted envelope, and admission block/time. The authorization account, recipient, nonce, and deadline remain encrypted.
+
+### Forced-Exit Execution
+
+The shared inbox state transition processes forced requests in their exact position among deposits and bounce-backs. Preparation retains historical keys and supplies one decryption witness even when the ciphertext will fail authentication or canonical decoding. A host-provided rejection flag cannot decide the result.
+
+Execution authenticates the outer queue entry and its admission metadata, including the global deposit position and admission block, and verifies the Chaum-Pedersen proof against the indexed historical key. Missing keys or witnesses, an invalid proof, or inconsistent admission metadata abort the transition; they cannot become terminal rejection. With a valid proof, processing follows this precedence:
+
+| Condition | Internal result | Consume fresh authorization nonce? |
+|---|---|---|
+| GCM authentication or canonical payload decoding fails | `Rejected(InvalidPayload)` | No |
+| Signed fields, root signature, or admission deadline invalid | `Rejected(InvalidAuthorization)` | No |
+| `(account, nonce)` already consumed | `Rejected(NonceAlreadyConsumed)` | Already consumed |
+| Full liquid balance exceeds `uint128` | `Rejected(BalanceOverflow)` | Yes |
+| Full liquid balance is zero | `Empty` | Yes |
+| Enumerated token or recipient policy failure | `Rejected(PolicyRejected)` | Yes |
+| Atomic debit and enqueue succeed | `Exited` | Yes |
+
+The deadline is strictly `requestedAtTime < admitBefore`, using the authenticated L1 admission timestamp, not the execution clock. Nonces are private Zone state, independent of transaction and GCM nonces, need not be sequential, and are shared across tokens for each account. A fresh valid authorization consumes its nonce before inspecting balance or policy. Balance is read at processing time, including credits from earlier inbox entries; later credits require a new authorization. Overflow is rejected without truncation, and an empty balance is handled before policy evaluation.
+
+For a nonzero representable balance, the inbox-only outbox helper checks token enablement, ordinary plain-withdrawal recipient membership/gateway policy, L1 and Zone token pauses, and native transfer/receive policies. A portal pause after admission does not reject execution. Receive-policy diversion is rejected. Root authorization replaces allowance and transaction-key spending authorization while retaining native balance, supply, rewards, and token hooks. Only enumerated policy failures are terminal; unclassified errors remain fatal.
+
+The helper atomically transfers and burns the full balance, allocates a nonzero fallback nonce mapped privately to the debited account, and enqueues an ordinary withdrawal with zero fee, memo, and gas limit, and empty callback and encrypted-sender fields. Debit-attempt effects roll back on failure. Forced requests bypass and do not consume the ordinary `maxWithdrawalsPerBlock` counter: their mandatory workload is bounded at L1 admission.
+
+The withdrawal uses the ordinary sender-tag formula with a private per-request input:
+
+```
+privateRequestHash = keccak256(abi.encode(uint8(1), authorization, signature))
+senderTag = keccak256(abi.encodePacked(account, privateRequestHash, fallbackNonce))
+```
+
+Neither the private request hash nor a public request-ID-derived tag is published on L1. The shared inbox transaction hash is not substituted for `privateRequestHash`. The Zone emits `ForcedWithdrawalRequested` with the withdrawal index, token, sender tag, recipient, amount, and fallback nonce; it omits the debited account, authorization nonce, and signature.
+
+Every terminal result advances the processed queue hash and number. Rejected and empty entries create no withdrawal, principal refund, or bounce-back. Fatal errors, including resource exhaustion and state/witness failures, roll back the enclosing transition, including earlier entries, nonce consumption, and cursor progress. L1 compensation already paid at admission is unaffected.
+
+### Forced-Exit Settlement and Recovery
+
+Forced exits use the existing `submitBatch` selector, signed settlement statement, quorum domain/digest, verifier interface, and state and withdrawal queue commitments. There is no public outcome array, rejection event, processing-status mapping, or separate principal liability. The internal result categories and reasons above are not persisted as public settlement outcomes.
+
+Once `lastProcessedDepositNumber >= depositNumber`, the request has been consumed in a settled batch. This proves processing, not successful debit or payout, since empty and rejected requests advance the same cursor. The `tempo-xtask forced-withdraw` command submits through L1 RPC; its optional `--wait-for-processing` has exactly this cursor-based meaning.
+
+A successful debit creates an ordinary withdrawal delivered by `processWithdrawals`. Failed delivery follows ordinary bounce-back handling to the debited Zone account through its private fallback mapping, including the inbox refund registry if policy blocks the recovery mint. Delivery or recovery does not undo nonce consumption; a further attempt requires a new authorization.
 
 <br>
 
@@ -1307,12 +1385,13 @@ pub struct ZoneBlock {
 /// Mirrors the Solidity `QueuedDeposit` struct from IZone.sol
 pub struct QueuedDeposit {
     pub deposit_type: DepositType,
-    pub deposit_data: Vec<u8>, // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
+    pub deposit_data: Vec<u8>, // abi.encode(WithdrawalBounceBackDeposit), abi.encode(Deposit), or abi.encode(ForcedExit)
 }
 
 pub enum DepositType {
-    WithdrawalBounceBack,
-    Deposit,
+    WithdrawalBounceBack, // 0
+    Deposit, // 1
+    ForcedExit, // 2
 }
 
 /// Mirrors the Solidity `EnabledToken` struct from IZone.sol
@@ -1324,7 +1403,7 @@ pub struct EnabledToken {
 }
 
 /// Mirrors the Solidity `DecryptionData` struct from IZone.sol
-/// Provided by the sequencer for each encrypted deposit
+/// Provided by the sequencer for each encrypted deposit or forced-exit request
 pub struct DecryptionData {
     pub shared_secret: B256,        // ECDH shared secret (x-coordinate)
     pub shared_secret_y_parity: u8, // Y coordinate parity of the shared secret point
@@ -1403,8 +1482,8 @@ The stateless execution function must reject the witness on any failed check, mi
 6. **Authenticate token enablements inside `advanceTempo`.**
    Using the now-bound Tempo root for this block, verify the portal's `tokenEnablementHash`. Execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order. Starting from the pre-state `ZoneInbox.processedTokenEnablementHash`, apply the [token enablement commitment](#token-enablement-commitment) transition to each entry and require the result to equal the portal's `tokenEnablementHash` proven against the imported Tempo root. Reject omitted, extra, reordered, or modified entries. After equality is established, initialize each enabled token and its bridge roles, then update `processedTokenEnablementHash`. Token activation must complete before processing any deposit in the call.
 
-7. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
-   Continuing the same `advanceTempo` call, verify the portal's current deposit queue hash and process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). Require exactly one `DecryptionData` entry for every encrypted deposit and consume those entries in deposit order. For each encrypted deposit, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification). The enabled-token, deposit, and decryption arrays are part of the system transaction calldata and therefore affect the transaction root, receipts/logs root, and resulting state transition.
+7. **Process the mixed inbox and encrypted payloads inside `advanceTempo`.**
+   Continuing the same `advanceTempo` call, verify the portal's current deposit queue hash and process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). Require exactly one `DecryptionData` entry for every encrypted deposit or forced-exit request and consume those entries in mixed queue order. Process forced-exit entries using [Forced-Exit Execution](#forced-exit-execution), including its fatal-proof-failure and atomic rollback rules. For each encrypted deposit, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification). The enabled-token, deposit, and decryption arrays are part of the system transaction calldata and therefore affect the transaction root, receipts/logs root, and resulting state transition.
 
 8. **Execute user transactions in order.**
    Run each user transaction against the materialized zone state using the current block environment.
@@ -1617,6 +1696,42 @@ struct Deposit {
     DepositPayload encrypted;
 }
 
+struct ForcedExitAuthorization {
+    address account;
+    uint256 zoneChainId;
+    address token;
+    address recipient;
+    uint256 nonce;
+    uint64 admitBefore;
+}
+
+/// @notice Complete public entry committed to the mixed inbox queue.
+struct ForcedExit {
+    uint64 requestId;
+    address token;
+    uint256 keyIndex;
+    DepositPayload encrypted;
+    address feePayer;
+    uint64 requestedAtBlock;
+    uint64 requestedAtTime;
+}
+
+/// @notice TIP-1012 internal execution reason assignments; never published in L1 settlement.
+enum ForcedExitReason {
+    None,
+    InvalidPayload,
+    InvalidAuthorization,
+    NonceAlreadyConsumed,
+    BalanceOverflow,
+    PolicyRejected
+}
+
+/// @notice Admission identity authenticated by Zone inbox execution.
+struct ForcedExitMetadata {
+    address token;
+    uint64 depositNumber;
+}
+
 struct DepositPayload {
     bytes32 ephemeralPubkeyX;
     uint8 ephemeralPubkeyYParity;
@@ -1626,13 +1741,14 @@ struct DepositPayload {
 }
 
 enum DepositType {
-    WithdrawalBounceBack,
-    Deposit
+    WithdrawalBounceBack, // 0
+    Deposit, // 1
+    ForcedExit // 2
 }
 
 struct QueuedDeposit {
     DepositType depositType;
-    bytes depositData;  // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
+    bytes depositData;  // abi.encode(WithdrawalBounceBackDeposit), abi.encode(Deposit), or abi.encode(ForcedExit)
 }
 
 struct EnabledToken {
@@ -1743,6 +1859,29 @@ interface IZoneFactory {
 
 ```solidity
 interface IZonePortal {
+
+    event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
+
+    function forcedExitVersion() external view returns (uint64);
+    function forcedExitCount() external view returns (uint64);
+    function forcedExitRequests(uint64 requestId)
+        external
+        view
+        returns (address token, uint64 depositNumber);
+    function FORCED_EXIT_COMPENSATION() external view returns (uint128);
+
+    /// @notice Queue an encrypted root authorization; processing is performed by the Zone.
+    /// @dev Requires protocol activation, an unpaused portal, an eligible fee payer, an enabled
+    ///      token, a valid bounded envelope/key, and shared public inbox capacity.
+    ///      Collects 100_000 base units from msg.sender and immediately pays the portal admin.
+    function requestForcedExit(
+        address token,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted
+    )
+        external
+        returns (uint64 requestId, uint64 depositNumber);
+
     // Events
     event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
@@ -2026,11 +2165,11 @@ Address: `0x1c00000000000000000000000000000000000001`
 ```solidity
 interface IZoneInbox {
     /// @notice A canonical deposit queued by the portal for processing on the zone.
-    /// @dev WithdrawalBounceBack entries are internal. Every Deposit entry consumes
-    ///      one DecryptionData item and performs onchain verification.
+    /// @dev WithdrawalBounceBack entries are internal and consume no decryption.
+    ///      Every Deposit or ForcedExit consumes one verified DecryptionData item.
     struct QueuedDeposit {
         DepositType depositType;
-        bytes depositData; // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
+        bytes depositData; // abi.encode(WithdrawalBounceBackDeposit), abi.encode(Deposit), or abi.encode(ForcedExit)
     }
 
     event TempoAdvanced(
@@ -2094,6 +2233,15 @@ interface IZoneOutbox {
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
     function WITHDRAWAL_BASE_GAS() external view returns (uint64);
+
+    event ForcedWithdrawalRequested(
+        uint64 indexed withdrawalIndex,
+        address token,
+        bytes32 senderTag,
+        address to,
+        uint128 amount,
+        uint64 fallbackNonce
+    );
 
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex, address indexed sender, address token, address to,
@@ -2162,6 +2310,8 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its read method
 <br>
 
 ## Network Upgrades and Hard Fork Activation
+
+Forced-exit admission must remain disabled until the coordinated L1 runtime and Zone execution upgrade supports the complete request, execution, settlement, and recovery path. Version 1 activation is protocol-controlled, not an admin toggle. Validate the maximum admitted mixed workload and fork-boundary behavior against the final runtime before enabling admission.
 
 Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
 

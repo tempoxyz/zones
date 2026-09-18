@@ -1,6 +1,9 @@
 //! Native `ZoneOutbox` precompile.
 //!
 mod dispatch;
+mod forced;
+pub(crate) use forced::{ForcedWithdrawalError, ForcedWithdrawalRequest};
+
 #[cfg(test)]
 mod tests;
 
@@ -74,11 +77,25 @@ impl ZoneOutbox {
             return Err(ZonePortalError::token_not_enabled().into());
         }
 
+        self.validate_portal_pause(l1)?;
+        self.validate_recipient_policy(l1, to, gas_limit)
+    }
+
+    fn validate_portal_pause<P: L1StorageReader>(&self, l1: &L1State<P>) -> ZoneResult<()> {
         let pause_expiry = l1.read_portal(|portal| &portal.pause_expiry)?;
         if self.storage.timestamp().to::<u64>() < pause_expiry {
             return Err(ZonePortalError::portal_is_paused().into());
         }
 
+        Ok(())
+    }
+
+    fn validate_recipient_policy<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        to: Address,
+        gas_limit: u64,
+    ) -> ZoneResult<()> {
         let access_enforced = l1.read_portal(|portal| &portal.is_access_enforced)?;
         let gateway_enforced = l1.read_portal(|portal| &portal.is_gateway_enforced)?;
 
