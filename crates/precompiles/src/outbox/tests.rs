@@ -7,6 +7,7 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolEvent, SolInterface, SolValue};
 use revm::{context::JournalTr, precompile::PrecompileResult};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     storage::{StorageCtx, StorageKey},
     test_util::TIP20Setup,
@@ -16,7 +17,7 @@ use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 use crate::{
-    create_outbox_precompile,
+    ZonePrecompileError, create_outbox_precompile,
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
         MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
@@ -956,6 +957,7 @@ impl Harness {
 #[test]
 fn forced_withdrawals_bypass_and_preserve_ordinary_block_cap() -> eyre::Result<()> {
     let mut h = Harness::new()?;
+    h.ctx.cfg.spec = TempoHardfork::T13;
     assert!(!h.set_max_withdrawals(1)?.is_revert());
     // Even the maximum currently admitted forced workload leaves the ordinary slot available.
     for _ in 0..15 {
@@ -993,6 +995,7 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
 {
     use tempo_precompiles::account_keychain::AccountKeychain;
     let mut h = Harness::new()?;
+    h.ctx.cfg.spec = TempoHardfork::T13;
     // Leave an ordinary withdrawal pending to check its encoding/stride survives the new path.
     assert!(!h.request(100, BOB, B256::repeat_byte(3))?.is_revert());
     let ordinary = h.pending()?.remove(0);
@@ -1117,6 +1120,7 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
 #[test]
 fn forced_withdrawal_policy_and_fatal_failures_leave_no_partial_state() -> eyre::Result<()> {
     let mut h = Harness::new()?;
+    h.ctx.cfg.spec = TempoHardfork::T13;
     assert!(matches!(
         h.forced(ALICE, 1_000_000),
         Err(ForcedWithdrawalError::Fatal(_))
@@ -1177,6 +1181,7 @@ fn forced_withdrawal_enforces_native_pause_sender_and_receive_policies() -> eyre
     use tempo_precompiles::{RECEIVE_POLICY_GUARD_ADDRESS, tip403_registry::TIP403Registry};
     for policy in 0..3 {
         let mut h = Harness::new()?;
+        h.ctx.cfg.spec = TempoHardfork::T13;
         {
             let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> TempoResult<()> {
@@ -1223,23 +1228,13 @@ fn forced_withdrawal_enforces_native_pause_sender_and_receive_policies() -> eyre
 }
 
 #[test]
-fn forced_withdrawal_preserves_native_reward_hooks_and_outer_rollback() -> eyre::Result<()> {
-    use tempo_chainspec::hardfork::TempoHardfork;
+fn forced_withdrawal_preserves_outer_rollback() -> eyre::Result<()> {
     let mut h = Harness::new()?;
-    // Rewards are active before T7. Use the same helper against that native implementation.
-    h.ctx.cfg.spec = TempoHardfork::T6;
+    h.ctx.cfg.spec = TempoHardfork::T13;
     let l1 = L1State::new(h.l1.clone(), PORTAL);
     let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-        let mut token = TIP20Token::from_address(h.token)?;
-        token.set_reward_recipient(ALICE, ITIP20::setRewardRecipientCall { recipient: ALICE })?;
-        token.distribute_reward(
-            FEE_PAYER,
-            ITIP20::distributeRewardCall {
-                amount: U256::from(100),
-            },
-        )?;
-        assert_eq!(token.get_pending_rewards(ALICE)?, 100);
+        let token = TIP20Token::from_address(h.token)?;
         let outer = StorageCtx::default().checkpoint();
         let mut outbox = ZoneOutbox::new();
         let request = ForcedWithdrawalRequest {
@@ -1252,8 +1247,6 @@ fn forced_withdrawal_preserves_native_reward_hooks_and_outer_rollback() -> eyre:
         let withdrawal = outbox
             .request_forced_withdrawal(&l1, ZONE_INBOX_ADDRESS, request)
             .unwrap();
-        assert_eq!(token.get_opted_in_supply()?, 0);
-        assert_eq!(token.get_pending_rewards(ALICE)?, 100);
         assert_eq!(outbox.fallback_recipient(withdrawal.fallbackNonce)?, ALICE);
         // A later fatal inbox error must be able to roll back an already committed helper.
         drop(outer);
@@ -1261,8 +1254,6 @@ fn forced_withdrawal_preserves_native_reward_hooks_and_outer_rollback() -> eyre:
             token.balance_of(ITIP20::balanceOfCall { account: ALICE })?,
             U256::from(1_000_000)
         );
-        assert_eq!(token.get_opted_in_supply()?, 1_000_000);
-        assert_eq!(token.get_pending_rewards(ALICE)?, 100);
         assert_eq!(outbox.last_fallback_nonce.read()?, 0);
         assert_eq!(outbox.pending_withdrawals.len()?, 0);
         assert_eq!(outbox.fallback_recipient(1)?, Address::ZERO);
@@ -1274,6 +1265,7 @@ fn forced_withdrawal_preserves_native_reward_hooks_and_outer_rollback() -> eyre:
 fn forced_withdrawal_missing_l1_state_and_out_of_gas_are_fatal() -> eyre::Result<()> {
     for missing_l1 in [false, true] {
         let mut h = Harness::new()?;
+        h.ctx.cfg.spec = TempoHardfork::T13;
         let l1 = L1State::new(
             if missing_l1 {
                 MockL1Reader::failing_storage()
@@ -1308,5 +1300,46 @@ fn forced_withdrawal_missing_l1_state_and_out_of_gas_are_fatal() -> eyre::Result
         assert_eq!(h.last_fallback_nonce()?, 0);
         assert!(h.pending()?.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn forced_withdrawal_rejects_before_fork_without_state_changes() -> eyre::Result<()> {
+    let mut h = Harness::new()?;
+    h.ctx.cfg.spec = TempoHardfork::T12;
+    let logs_before = h.ctx.journaled_state.logs().to_vec();
+    // Missing L1 data must not be read before the activation check.
+    let l1 = L1State::new(MockL1Reader::failing_storage(), PORTAL);
+    let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || {
+        assert_eq!(
+            ZoneOutbox::new().request_forced_withdrawal(
+                &l1,
+                ZONE_INBOX_ADDRESS,
+                ForcedWithdrawalRequest {
+                    private_request_hash: B256::repeat_byte(7),
+                    token: h.token,
+                    account: ALICE,
+                    recipient: BOB,
+                    amount: 1_000_000,
+                },
+            ),
+            Err(ForcedWithdrawalError::Fatal(
+                ZonePrecompileError::MalformedCalldata
+            ))
+        );
+    });
+    drop(storage);
+    assert_eq!(h.ctx.journaled_state.logs(), logs_before.as_slice());
+    assert_eq!(h.balance_of(ALICE)?, U256::from(1_000_000));
+    assert_eq!(h.balance_of(ZONE_OUTBOX_ADDRESS)?, U256::ZERO);
+    assert_eq!(h.last_fallback_nonce()?, 0);
+    assert!(h.pending()?.is_empty());
+    // The same funded state can execute as soon as the selected fork is active.
+    h.ctx.cfg.spec = TempoHardfork::T13;
+    h.forced(ZONE_INBOX_ADDRESS, 1_000_000).unwrap();
+    assert_eq!(h.balance_of(ALICE)?, U256::ZERO);
+    assert_eq!(h.last_fallback_nonce()?, 1);
+    assert_eq!(h.pending()?.len(), 1);
     Ok(())
 }
