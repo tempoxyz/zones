@@ -353,18 +353,10 @@
       "type": "t_uint184"
     },
     {
-      "astId": 5952,
-      "contract": "src/runtime/tempo/ZonePortal.sol:ZonePortal",
-      "label": "forcedExitVersion",
-      "offset": 0,
-      "slot": "29",
-      "type": "t_uint64"
-    },
-    {
       "astId": 5954,
       "contract": "src/runtime/tempo/ZonePortal.sol:ZonePortal",
       "label": "forcedExitCount",
-      "offset": 8,
+      "offset": 0,
       "slot": "29",
       "type": "t_uint64"
     },

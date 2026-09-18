@@ -20,7 +20,6 @@ pub struct ForcedExitAdmissionMetadata {
 pub struct ForcedExitPortalStorage {
     /// Preserve all legacy fields and the complete T13 slot, including its unused bytes.
     _legacy: [U256; 29],
-    pub forced_exit_version: u64,
     pub forced_exit_count: u64,
     pub forced_exit_requests: Mapping<u64, ForcedExitAdmissionMetadata>,
 }
@@ -38,7 +37,6 @@ mod tests {
     #[test]
     fn appended_slots_match_solidity_layout() {
         let portal = ForcedExitPortalStorage::new(Address::repeat_byte(1));
-        assert_eq!(portal.forced_exit_version.slot(), U256::from(29));
         assert_eq!(portal.forced_exit_count.slot(), U256::from(29));
         assert_eq!(portal.forced_exit_requests.slot(), U256::from(30));
         // Mapping keys use standard Solidity ABI words; the value packs address + uint64.
@@ -52,6 +50,6 @@ mod tests {
         let value = &portal.forced_exit_requests[1];
         assert_eq!(value.token.slot(), value.deposit_number.slot());
         assert_eq!(value.deposit_number.ctx().packed_offset(), Some(20));
-        assert_eq!(portal.forced_exit_count.ctx().packed_offset(), Some(8));
+        assert_eq!(portal.forced_exit_count.ctx().packed_offset(), None);
     }
 }
