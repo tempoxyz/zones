@@ -12,7 +12,7 @@ use zone_prover::{
     ProverConnection, TrustedChainSpecs, VerifyRequest, VerifyResponse,
     nitro_batch_attestation_hash, request_error_response,
 };
-use zone_spf::{BatchOutput, CancelToken, PublicInputs, SpfConfig, prove_zone_batch_with_cancel};
+use zone_spf::{BatchOutput, PublicInputs, SpfConfig, prove_zone_batch};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -66,7 +66,7 @@ struct Cli {
 
 impl Cli {
     async fn run(self) -> io::Result<()> {
-        let specs = Arc::new(self.load_trusted_chain_specs()?);
+        let specs = self.load_trusted_chain_specs()?;
 
         if self.use_tcp {
             return serve_tcp(self.port, self.max_request_bytes, specs, self.timeouts).await;
@@ -125,9 +125,6 @@ struct Timeouts {
     /// Deadline for receiving one complete logical request.
     #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
     request: Duration,
-    /// Deadline for processing and proving one request.
-    #[arg(long = "proving-timeout-secs", env = "SPF_PROVING_TIMEOUT_SECS", default_value = "30", value_parser = non_zero_secs)]
-    proving: Duration,
     /// Deadline for writing one complete logical response.
     #[arg(long = "response-timeout-secs", env = "SPF_RESPONSE_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
     response: Duration,
@@ -146,7 +143,7 @@ fn non_zero_secs(value: &str) -> Result<Duration, String> {
 async fn serve_tcp(
     port: u32,
     maximum: usize,
-    specs: Arc<TrustedChainSpecs>,
+    specs: TrustedChainSpecs,
     timeouts: Timeouts,
 ) -> io::Result<()> {
     use tokio::net::TcpListener;
@@ -163,7 +160,6 @@ async fn serve_tcp(
         port,
         max_request_bytes = maximum,
         request_timeout_secs = timeouts.request.as_secs(),
-        proving_timeout_secs = timeouts.proving.as_secs(),
         response_timeout_secs = timeouts.response.as_secs(),
         "SPF TCP service listening"
     );
@@ -176,7 +172,7 @@ async fn serve_tcp(
                 continue;
             }
         };
-        handle_connection(connection, maximum, Arc::clone(&specs), &timeouts).await;
+        handle_connection(connection, maximum, &specs, &timeouts).await;
     }
 }
 
@@ -192,7 +188,7 @@ mod linux {
     pub(super) async fn serve_vsock(
         port: u32,
         maximum: usize,
-        specs: Arc<TrustedChainSpecs>,
+        specs: TrustedChainSpecs,
         timeouts: Timeouts,
     ) -> io::Result<()> {
         let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))?;
@@ -200,7 +196,6 @@ mod linux {
             port,
             max_request_bytes = maximum,
             request_timeout_secs = timeouts.request.as_secs(),
-            proving_timeout_secs = timeouts.proving.as_secs(),
             response_timeout_secs = timeouts.response.as_secs(),
             "SPF enclave service listening"
         );
@@ -213,7 +208,7 @@ mod linux {
                     continue;
                 }
             };
-            handle_connection(connection, maximum, Arc::clone(&specs), &timeouts).await;
+            handle_connection(connection, maximum, &specs, &timeouts).await;
         }
     }
 }
@@ -221,7 +216,7 @@ mod linux {
 async fn handle_connection<T>(
     stream: T,
     maximum: usize,
-    specs: Arc<TrustedChainSpecs>,
+    specs: &TrustedChainSpecs,
     timeouts: &Timeouts,
 ) where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -258,34 +253,7 @@ async fn handle_connection<T>(
             }
         };
     let request_bytes = connection.last_received_bytes().unwrap_or_default();
-    let request_id = request.request_id.clone();
-    let cancellation = CancelToken::default();
-    let worker_cancellation = cancellation.clone();
-    let mut worker =
-        tokio::task::spawn_blocking(move || process_request(request, &specs, &worker_cancellation));
-    let deadline = tokio::time::sleep(timeouts.proving);
-    tokio::pin!(deadline);
-    let response = tokio::select! {
-        biased;
-        result = &mut worker => match result {
-            Ok(response) => response,
-            Err(error) => err_response(
-                request_id.clone(),
-                ErrorCode::InternalError,
-                format!("proving worker failed: {error}"),
-            ),
-        },
-        () = &mut deadline => {
-            cancellation.cancel();
-            let _ = worker.await;
-            warn!(elapsed_ms = started.elapsed().as_millis(), limit_secs = timeouts.proving.as_secs(), "SPF proving timed out; cancelled worker joined");
-            err_response(
-                request_id,
-                ErrorCode::ProvingTimedOut,
-                format!("proving exceeded the configured {} second deadline", timeouts.proving.as_secs()),
-            )
-        }
-    };
+    let response = process_request(request, &specs);
     if let Some(response_bytes) = timed_send(&mut connection, response, timeouts.response).await {
         info!(
             request_bytes,
@@ -323,11 +291,7 @@ where
     }
 }
 
-fn process_request(
-    request: VerifyRequest,
-    specs: &TrustedChainSpecs,
-    cancel: &CancelToken,
-) -> VerifyResponse {
+fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyResponse {
     if request.version != PROTOCOL_VERSION {
         return err_response(
             request.request_id,
@@ -372,12 +336,7 @@ fn process_request(
     let config = SpfConfig::new(Arc::new(zone_spec));
 
     let public_inputs = request.witness.public_inputs.clone();
-    match prove_zone_batch_with_cancel(&config, request.witness, cancel) {
-        Ok(_output) if cancel.is_cancelled() => err_response(
-            request.request_id,
-            ErrorCode::ProvingTimedOut,
-            "proving was cancelled before attestation",
-        ),
+    match prove_zone_batch(&config, request.witness) {
         Ok(output) => match build_proof_bundle(&public_inputs, &output, nitro_attestation) {
             Ok(proof_bundle) => VerifyResponse::Ok {
                 version: PROTOCOL_VERSION,
@@ -477,11 +436,7 @@ mod tests {
             request_id: "version-test".into(),
             witness: empty_witness(),
         };
-        let response = process_request(
-            request,
-            &TrustedChainSpecs::default(),
-            &CancelToken::default(),
-        );
+        let response = process_request(request, &TrustedChainSpecs::default());
 
         assert!(matches!(
             response,
@@ -502,11 +457,7 @@ mod tests {
             request_id: "chain-test".into(),
             witness,
         };
-        let response = process_request(
-            request,
-            &TrustedChainSpecs::default(),
-            &CancelToken::default(),
-        );
+        let response = process_request(request, &TrustedChainSpecs::default());
 
         assert!(matches!(
             response,
@@ -561,11 +512,7 @@ mod tests {
             request_id: "spf-test".into(),
             witness: empty_witness(),
         };
-        let response = process_request(
-            request,
-            &TrustedChainSpecs::default(),
-            &CancelToken::default(),
-        );
+        let response = process_request(request, &TrustedChainSpecs::default());
 
         assert!(matches!(
             response,
@@ -592,7 +539,7 @@ mod tests {
             witness: empty_witness(),
         };
 
-        let response = process_request(request, &specs, &CancelToken::default());
+        let response = process_request(request, &specs);
 
         assert!(matches!(
             response,

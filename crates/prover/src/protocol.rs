@@ -103,8 +103,6 @@ pub enum ErrorCode {
     UnsupportedChain,
     /// Stateless proof execution rejected the supplied witness.
     VerificationFailed,
-    /// Processing exceeded the enclave's configured proving deadline.
-    ProvingTimedOut,
     /// The prover could not obtain an attestation from the Nitro Secure Module.
     AttestationUnavailable,
     /// A physical frame or logical request exceeds its size limit.
@@ -166,19 +164,6 @@ mod tests {
         assert_eq!(json["version"], PROTOCOL_VERSION);
         assert_eq!(json["requestId"], "wire-test");
         assert_eq!(json["code"], "unsupported_chain");
-    }
-
-    #[test]
-    fn proving_timeout_uses_stable_wire_code() {
-        let value = serde_json::to_value(VerifyResponse::Error {
-            version: PROTOCOL_VERSION,
-            request_id: Some("timeout-test".into()),
-            code: ErrorCode::ProvingTimedOut,
-            message: "timed out".into(),
-        })
-        .unwrap();
-        assert_eq!(value["code"], "proving_timed_out");
-        assert_eq!(value["requestId"], "timeout-test");
     }
 
     #[test]

@@ -39,19 +39,12 @@ pass `--port` to change the selected transport's port. The maximum request paylo
 MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. Logical JSON messages
 are streamed as fragments followed by an empty terminator frame. Each frame is limited to 1 MiB.
 
-The enclave applies separate absolute, total phase deadlines. `--request-timeout-secs`
-(`SPF_REQUEST_TIMEOUT_SECS`, default 5) covers reception of the complete logical message, including
-its terminator and JSON decoding. `--proving-timeout-secs` (`SPF_PROVING_TIMEOUT_SECS`, default 30)
-covers validation and SPF replay. `--response-timeout-secs` (`SPF_RESPONSE_TIMEOUT_SECS`, default
-5) covers serialization and transmission of every normal or error response. Values are
-whole seconds and must be greater than zero; progress does not reset a deadline.
-
-On a proving timeout the Tokio timer cooperatively cancels synchronous SPF execution, including a
-periodic EVM opcode check, and joins the blocking worker before accepting another request. The
-result is `proving_timed_out`; cancelled work produces no successful output and is never attested.
-These operational deadlines use a monotonic clock and do not affect deterministic output from
-successful SPF execution. They are distinct from the host proxy's VSOCK connection-establishment
-timeout; there is intentionally no overall proxy session timeout.
+The enclave applies separate absolute deadlines to request reception and response transmission.
+`--request-timeout-secs` (`SPF_REQUEST_TIMEOUT_SECS`, default 5) covers reception of the complete
+logical message, including its terminator and JSON decoding. `--response-timeout-secs`
+(`SPF_RESPONSE_TIMEOUT_SECS`, default 5) covers serialization and transmission of every normal or
+error response. Values are whole seconds and must be greater than zero; progress does not reset a
+deadline. SPF execution itself has no timeout.
 
 TCP mode is intended for development of framing, chain validation, and SPF error handling. The
 binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
