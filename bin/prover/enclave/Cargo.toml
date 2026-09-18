@@ -27,7 +27,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-aws-nitro-enclaves-nsm-api.workspace = true
+ciborium.workspace = true
+libc.workspace = true
+serde.workspace = true
 serde_bytes.workspace = true
 tokio-vsock.workspace = true
 

@@ -33,6 +33,13 @@ response includes `proofBundle.verifierConfig = 0x01` and the raw COSE/CBOR docu
 `proofBundle.proof`. The prover returns `attestation_unavailable` when `/dev/nsm` is unavailable or
 the NSM request fails.
 
+The Linux client in `src/nsm.rs` uses the kernel's NSM ioctl ABI and `ciborium` for
+the attestation request/response envelope. It returns the signed document unchanged.
+Protocol fixture tests run without Nitro hardware. Before deploying a client change,
+run the ignored `nsm::tests::live_attestation_contains_requested_digest` test inside
+a Nitro Enclave with `/dev/nsm`; it checks that the returned document contains the
+requested digest, but does not replace signature verification by the consumer.
+
 Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
 operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
 pass `--port` to change the selected transport's port. The maximum request payload defaults to 512
