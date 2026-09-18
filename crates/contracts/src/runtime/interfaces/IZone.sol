@@ -453,7 +453,8 @@ interface IZonePortal {
 
     event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
 
-    function forcedExitVersion() external view returns (uint64);
+    /// @notice Supported payload format. Always returns 1.
+    function forcedExitVersion() external pure returns (uint64);
     function forcedExitCount() external view returns (uint64);
     function forcedExitRequests(uint64 requestId)
         external
@@ -462,7 +463,7 @@ interface IZonePortal {
     function FORCED_EXIT_COMPENSATION() external view returns (uint128);
 
     /// @notice Queue an encrypted root authorization; processing is performed by the Zone.
-    /// @dev Requires protocol activation, an unpaused portal, an eligible fee payer, an enabled
+    /// @dev Requires an unpaused portal, an eligible fee payer, an enabled
     ///      token, a valid bounded envelope/key, and shared public inbox capacity.
     ///      Collects 100_000 base units from msg.sender and immediately pays the portal admin.
     function requestForcedExit(
@@ -613,7 +614,6 @@ interface IZonePortal {
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidForcedExitCiphertextLength(uint256 actual);
-    error ForcedExitsNotActive();
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);

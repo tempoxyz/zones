@@ -239,10 +239,6 @@ contract ZonePortal is IZonePortal {
     ///      This will need to be conflict-resolved before merging.
     uint256 private _reservedT13TokenCursor;
 
-    /// @notice Protocol admission version. Zero disables forced exits.
-    /// @dev No public setter: only a coordinated protocol upgrade may activate admission after
-    ///      all nodes support execution and settlement. Existing/new portals remain disabled.
-    uint64 public forcedExitVersion;
     uint64 public forcedExitCount;
     mapping(uint64 requestId => ForcedExitMetadata) public forcedExitRequests;
 
@@ -1022,6 +1018,13 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
+    /// @notice Supported forced-exit payload format.
+    /// @dev Tempo activates admission by installing this runtime at the coordinated hard fork.
+    function forcedExitVersion() external pure returns (uint64) {
+        return 1;
+    }
+
+    /// @inheritdoc IZonePortal
     function requestForcedExit(
         address token,
         uint256 keyIndex,
@@ -1031,7 +1034,6 @@ contract ZonePortal is IZonePortal {
         whenNotPaused
         returns (uint64 requestId, uint64 depositNumber)
     {
-        if (forcedExitVersion != 1) revert ForcedExitsNotActive();
         _requireAllowedDepositor(msg.sender);
 
         // Enabled tokens have already passed the native TIP-20 factory validation. TIP-20

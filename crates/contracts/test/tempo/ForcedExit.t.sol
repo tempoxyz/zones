@@ -21,12 +21,8 @@ import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
-/// Activation and internal queue access exist only in the test fixture, never the portal ABI.
+/// Internal queue access exists only in the test fixture, never the portal ABI.
 contract ForcedExitPortalHarness is ZonePortal {
-
-    function setTestVersion(uint64 version) external {
-        forcedExitVersion = version;
-    }
 
     function enqueueTestBounceBack(address token) external {
         _recordDeposit(
@@ -108,31 +104,23 @@ contract ForcedExitTest is BaseTest {
         assertEq(number, 0);
     }
 
-    function test_admissionDisabledUntilProtocolActivation() public {
-        uint256 balance = pathUSD.balanceOf(alice);
-        uint256 adminBalance = pathUSD.balanceOf(admin);
-        vm.expectRevert(IZonePortal.ForcedExitsNotActive.selector);
-        request(384);
-        assertUnchanged(balance, adminBalance);
-        portal.setTestVersion(2);
-        vm.expectRevert(IZonePortal.ForcedExitsNotActive.selector);
-        request(384);
-        // Production bytecode exposes no enable switch.
+    function test_runtimeSupportsVersionOneWithoutStorageActivation() public {
         ZonePortal production = new ZonePortal();
-        assertEq(production.forcedExitVersion(), 0);
-        (bool ok,) = address(production).call(abi.encodeWithSignature("setTestVersion(uint64)", 1));
-        assertFalse(ok);
+        assertEq(production.forcedExitVersion(), 1);
+        assertEq(portal.forcedExitVersion(), 1);
+        assertEq(vm.load(address(portal), bytes32(uint256(29))), bytes32(0));
+        (uint64 id, uint64 number) = request(384);
+        assertEq(id, 1);
+        assertEq(number, 1);
+        assertEq(portal.forcedExitVersion(), 1);
     }
 
     function test_appendedStoragePreservesT13Slot() public {
         bytes32 sentinel = keccak256("T13 token cursor and padding");
         vm.store(address(portal), bytes32(uint256(28)), sentinel);
-        portal.setTestVersion(1);
         request(384);
         assertEq(vm.load(address(portal), bytes32(uint256(28))), sentinel);
-        assertEq(
-            vm.load(address(portal), bytes32(uint256(29))), bytes32(uint256(1) | (uint256(1) << 64))
-        );
+        assertEq(vm.load(address(portal), bytes32(uint256(29))), bytes32(uint256(1)));
         bytes32 metadataSlot = keccak256(abi.encode(uint64(1), uint256(30)));
         assertEq(
             vm.load(address(portal), metadataSlot),
@@ -141,7 +129,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_feeIdentityQueueAndReconstructibleEvent() public {
-        portal.setTestVersion(1);
         uint256 balance = pathUSD.balanceOf(alice);
         uint256 adminBalance = pathUSD.balanceOf(admin);
         // An ordinary deposit establishes that request ID differs from global queue position.
@@ -184,7 +171,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function testFuzz_ciphertextBounds(uint16 rawLength) public {
-        portal.setTestVersion(1);
         uint256 length = bound(uint256(rawLength), 0, 2500);
         if (length < 384 || length > 2368 || length % 32 != 0) {
             vm.expectRevert(
@@ -201,7 +187,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_lengthEndpointsAndLegacyDepositRule() public {
-        portal.setTestVersion(1);
         request(384);
         request(2368);
         vm.expectRevert(
@@ -212,7 +197,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_pausedPortalAndPausedDeposits() public {
-        portal.setTestVersion(1);
         vm.prank(admin);
         portal.pauseDeposits(address(pathUSD));
         request(384);
@@ -226,7 +210,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_feePayerAccessAndGatewayException() public {
-        portal.setTestVersion(1);
         vm.prank(admin);
         portal.setAllowedAccount(alice, false);
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, alice));
@@ -239,7 +222,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_tokenPointAndKeyValidation() public {
-        portal.setTestVersion(1);
         vm.expectRevert(IZonePortal.TokenNotEnabled.selector);
         vm.prank(alice);
         portal.requestForcedExit(address(token1), 0, payload(384));
@@ -272,7 +254,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_firstFeeTransferFailureIsAtomic() public {
-        portal.setTestVersion(1);
         vm.prank(alice);
         pathUSD.approve(address(portal), 0);
         uint256 balance = pathUSD.balanceOf(alice);
@@ -288,7 +269,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_blockedAdminRollsBackBothFeeTransfers() public {
-        portal.setTestVersion(1);
         address[] memory blocked = new address[](1);
         blocked[0] = admin;
         uint64 policy = registry.createPolicyWithAccounts(
@@ -307,7 +287,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_adminReceivePolicyBlockedRollsBackAdmission() public {
-        portal.setTestVersion(1);
         vm.prank(admin);
         registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
 
@@ -328,7 +307,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_pausedTokenRollsBackAdmission() public {
-        portal.setTestVersion(1);
         vm.startPrank(pathUSDAdmin);
         pathUSD.grantRole(_PAUSE_ROLE, pathUSDAdmin);
         pathUSD.pause();
@@ -341,7 +319,6 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_sharedCapacityRetainsBounceBackReserve() public {
-        portal.setTestVersion(1);
         uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK() - 20;
         vm.prank(alice);
         portal.depositEncrypted(address(pathUSD), 1e6, 0, _depositPayload(alice, 0), alice);
