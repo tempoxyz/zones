@@ -2590,6 +2590,43 @@ async fn forced_requests_survive_logs_restart_and_mixed_preparation() {
             .await
             .is_err()
     );
+    // Exercise main's parallel preparation path with the same mixed queue and witnesses.
+    let mut parallel = restarted.clone();
+    parallel.events.deposits = restarted
+        .events
+        .deposits
+        .iter()
+        .cloned()
+        .cycle()
+        .take(restarted.events.deposits.len() * 6)
+        .collect::<Vec<_>>();
+    let parallel_prepared = parallel.clone().prepare(&keys, portal).await.unwrap();
+    assert_eq!(
+        parallel_prepared.queued_deposits,
+        prepared
+            .queued_deposits
+            .iter()
+            .cloned()
+            .cycle()
+            .take(prepared.queued_deposits.len() * 6)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        parallel_prepared.decryptions,
+        prepared
+            .decryptions
+            .iter()
+            .cloned()
+            .cycle()
+            .take(prepared.decryptions.len() * 6)
+            .collect::<Vec<_>>()
+    );
+    let L1Deposit::ForcedExit(request) = &mut parallel.events.deposits[16] else {
+        panic!()
+    };
+    request.entry.encrypted.ephemeralPubkeyYParity = 4;
+    assert!(parallel.prepare(&keys, portal).await.is_err());
+
     let mut invalid_point = restarted;
     let L1Deposit::ForcedExit(request) = &mut invalid_point.events.deposits[1] else {
         panic!()
