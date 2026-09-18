@@ -101,6 +101,15 @@ impl ZoneInbox {
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
         let deposits = decode_deposits(call.deposits)?;
+        // TODO: Replace temporary T13 with the coordinated post-prover Tempo fork before merge.
+        // Reject the whole transition before anchoring L1 or changing any inbox state.
+        if !self.storage.spec().is_t13()
+            && deposits
+                .iter()
+                .any(|entry| matches!(entry, DecodedQueuedDeposit::ForcedExit(_)))
+        {
+            return Err(ZonePrecompileError::MalformedCalldata);
+        }
 
         let mut tempo_state = TempoState::new();
 
@@ -172,8 +181,6 @@ impl ZoneInbox {
 
             match queued {
                 DecodedQueuedDeposit::ForcedExit(entry) => {
-                    // Admission currently accepts only v1 forced exits. If there's ever a new version
-                    // add a check here to make sure it is processed with the correct logic.
                     let decryption = decryptions
                         .next()
                         .ok_or_else(ZoneInboxError::missing_decryption_data)?;

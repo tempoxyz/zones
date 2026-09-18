@@ -1155,6 +1155,34 @@ impl ZoneTestNode {
         .await
     }
 
+    pub(crate) async fn start_from_l1_with_forced_exits(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        withdrawal_batch_interval_blocks: u64,
+    ) -> eyre::Result<Self> {
+        let (mut genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+
+        // Explicit Zone activation; L1 uses the branch's compiled portal in test genesis.
+        // This tests the flow, not Tempo's eventual coordinated runtime installation.
+        genesis
+            .config
+            .extra_fields
+            .insert("t13Time".into(), serde_json::json!(0));
+        let signer = l1_dev_signer();
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
+            l1_ws_url.to_string(),
+            portal_address,
+            next_unique_chain_id(),
+            Some(genesis),
+            signer,
+            withdrawal_batch_interval_blocks,
+            None,
+            true,
+        )
+        .await
+    }
+
     /// Start a zone node connected to a real L1 at an explicit genesis block.
     ///
     /// Unlike [`start_from_l1`], this preserves the full replay gap between the
@@ -2757,22 +2785,6 @@ impl L1TestNode {
             }
             cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
             cfg.dev.block_time = None;
-        })
-        .await
-    }
-
-    /// Install explicit test-only forced-exit activation; production runtime has no setter.
-    pub(crate) async fn start_with_forced_exit_test_runtime() -> eyre::Result<Self> {
-        use reth_chainspec::EthChainSpec;
-        let runtime = forge_deployed_bytecode_at("ForcedExit.t.sol", "ForcedExitPortalHarness")?;
-        Self::start_with(move |config| {
-            let mut genesis = config.chain.genesis().clone();
-            genesis
-                .alloc
-                .get_mut(&tempo_zone_contracts::ZONE_PORTAL_IMPL_ADDRESS)
-                .expect("portal implementation installed")
-                .code = Some(runtime);
-            config.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
         })
         .await
     }

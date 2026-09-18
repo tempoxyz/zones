@@ -2,9 +2,23 @@ use super::*;
 use crate::{ecies, forced_exit_storage::ForcedExitPortalStorage};
 use exithatch::ForcedExitAuthorization;
 use k256::ecdsa::SigningKey;
+use revm::context_interface::JournalTr;
 
 const ROOT: Address = address!("7e5f4552091a69125d5dfcb7b8c2659029395bdf");
 const PARENT_CHAIN: u64 = 42431;
+
+fn set_spec(h: &mut Harness, spec: TempoHardfork) {
+    h.ctx.cfg.spec = spec;
+    let env = test_env(&h.ctx);
+    h.precompile = ZoneInbox::create(h.l1_state.clone(), &env);
+    h.outbox_precompile = crate::create_outbox_precompile(h.l1_state.clone(), &env);
+}
+
+fn active_harness() -> eyre::Result<Harness> {
+    let mut h = Harness::new()?;
+    set_spec(&mut h, TempoHardfork::T13);
+    Ok(h)
+}
 
 fn auth(nonce: u64) -> ForcedExitAuthorization {
     ForcedExitAuthorization {
@@ -62,7 +76,6 @@ fn request(
         portal.encryption_keys[0].y_parity.write(parity)?;
         portal.token_configs[PATH_USD_ADDRESS].enabled.write(true)?;
         let mut forced = ForcedExitPortalStorage::new(PORTAL);
-        forced.forced_exit_version.write(1)?;
         forced.forced_exit_requests[id]
             .token
             .write(PATH_USD_ADDRESS)?;
@@ -129,7 +142,7 @@ fn consumed(h: &mut Harness, nonce: u64) -> eyre::Result<bool> {
 #[test]
 fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Result<()> {
     for paused in [true, false] {
-        let mut h = Harness::new()?;
+        let mut h = active_harness()?;
         fund(&mut h, U256::from(42))?;
         let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
         let second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
@@ -163,7 +176,7 @@ fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Re
 
 #[test]
 fn forced_full_balance_replay_and_empty_finalize_with_exact_commitment() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     fund(&mut h, U256::from(42))?;
     let requests = [7, 7, 8]
         .into_iter()
@@ -225,7 +238,7 @@ fn forced_full_balance_replay_and_empty_finalize_with_exact_commitment() -> eyre
 #[test]
 fn forced_failure_categories_preserve_nonce_and_principal_boundaries() -> eyre::Result<()> {
     for case in 0..8 {
-        let mut h = Harness::new()?;
+        let mut h = active_harness()?;
         let mut a = auth(1);
         let balance = if case == 6 {
             U256::ZERO
@@ -269,7 +282,7 @@ fn forced_failure_categories_preserve_nonce_and_principal_boundaries() -> eyre::
 
 #[test]
 fn later_bad_proof_rolls_back_earlier_exit_without_an_external_checkpoint() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     fund(&mut h, U256::from(50))?;
     let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
     let mut second = request(&mut h, 2, 2, &signed_payload(&auth(2)))?;
@@ -294,7 +307,7 @@ fn forced_balance_boundaries_and_exhausted_ordinary_capacity() -> eyre::Result<(
         U256::from(u128::MAX),
         U256::from(u128::MAX) + U256::ONE,
     ] {
-        let mut h = Harness::new()?;
+        let mut h = active_harness()?;
         // The current native mint caps supply at u128::MAX. Seed an oversized liquid
         // balance only to exercise the protocol's defensive overflow branch.
         if amount > U256::from(u128::MAX) {
@@ -320,7 +333,7 @@ fn forced_balance_boundaries_and_exhausted_ordinary_capacity() -> eyre::Result<(
             assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::ZERO);
         }
     }
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     fund(&mut h, U256::from(5))?;
     let req = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
     let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
@@ -348,7 +361,7 @@ fn forced_balance_boundaries_and_exhausted_ordinary_capacity() -> eyre::Result<(
 #[test]
 fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
     const REQUESTS: usize = 210 / 14; // ZonePortal.FORCED_EXIT_ADMISSION_WEIGHT
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     let enabled_tokens = (1..=8).map(maximum_metadata_token).collect::<Vec<_>>();
     h.set_token_enablement_hash(
         enabled_tokens
@@ -429,7 +442,7 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
 
 #[test]
 fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     fund(&mut h, U256::from(17))?;
     let req = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
     assert!(execute(&mut h, vec![req])?.is_success());
@@ -487,7 +500,7 @@ fn forced_exit_keeps_nonce_consumed_through_pending_credit_recovery() -> eyre::R
 
 #[test]
 fn forced_authorization_nonce_is_shared_across_tokens() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     let first = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
     let mut other_auth = auth(1);
     other_auth.token = address!("20c0000000000000000000000000000000000002");
@@ -510,7 +523,7 @@ fn forced_authorization_nonce_is_shared_across_tokens() -> eyre::Result<()> {
 fn admitted_forced_workload_preserves_ordinary_capacity() -> eyre::Result<()> {
     const REQUESTS: u64 = 15;
     for used in [0, 1] {
-        let mut h = Harness::new()?;
+        let mut h = active_harness()?;
         let mut accounts = Vec::new();
         let mut requests = Vec::new();
         for id in 1..=REQUESTS {
@@ -591,7 +604,7 @@ fn admitted_forced_workload_preserves_ordinary_capacity() -> eyre::Result<()> {
 #[test]
 fn zero_authorization_fields_reject_without_blocking_next_request() -> eyre::Result<()> {
     for zero_account in [true, false] {
-        let mut h = Harness::new()?;
+        let mut h = active_harness()?;
         fund(&mut h, U256::from(42))?;
         let mut invalid = auth(1);
         if zero_account {
@@ -621,7 +634,7 @@ fn zero_authorization_fields_reject_without_blocking_next_request() -> eyre::Res
 
 #[test]
 fn policy_rejection_consumes_nonce_without_debit_and_processes_next_request() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
+    let mut h = active_harness()?;
     fund(&mut h, U256::from(42))?;
     let mut rejected = auth(1);
     rejected.recipient = Address::repeat_byte(0x77);
@@ -656,5 +669,41 @@ fn policy_rejection_consumes_nonce_without_debit_and_processes_next_request() ->
         assert_eq!(ZoneOutbox::new().last_fallback_nonce.read()?, 1);
         Ok(())
     })?;
+    Ok(())
+}
+
+#[test]
+fn forced_requests_require_t13_even_when_no_withdrawal_would_be_created() -> eyre::Result<()> {
+    // Success, Empty, and invalid plaintext must all be rejected before activation.
+    for (balance, invalid_payload) in [(42, false), (0, false), (42, true)] {
+        let mut h = active_harness()?;
+        fund(&mut h, U256::from(balance))?;
+        let payload = if invalid_payload {
+            vec![0; 384]
+        } else {
+            signed_payload(&auth(1))
+        };
+        let entry = request(&mut h, 1, 1, &payload)?;
+        set_spec(&mut h, TempoHardfork::T12);
+        let logs_before = h.ctx.journaled_state.logs().to_vec();
+        assert!(execute(&mut h, vec![entry.clone()])?.is_revert());
+        assert_eq!(h.ctx.journaled_state.logs(), logs_before.as_slice());
+        assert!(!consumed(&mut h, 1)?);
+        assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::from(balance));
+        assert!(h.pending_withdrawals()?.is_empty());
+        let metadata = ForcedExitPortalStorage::new(PORTAL);
+        assert!(!h.l1.requested(1, &metadata.forced_exit_requests[1].token));
+        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            assert_eq!(ZoneInbox::new().processed_deposit_number()?, 0);
+            assert_eq!(ZoneInbox::new().processed_deposit_queue_hash()?, B256::ZERO);
+            assert_eq!(TempoState::new().tempo_block_number()?, 0);
+            Ok(())
+        })?;
+        drop(storage);
+        set_spec(&mut h, TempoHardfork::T13);
+        assert!(execute(&mut h, vec![entry])?.is_success());
+        assert_eq!(consumed(&mut h, 1)?, !invalid_payload);
+    }
     Ok(())
 }

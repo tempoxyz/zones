@@ -51,7 +51,6 @@ fn zone_portal_slot_constants_match_solidity() {
 fn forced_exit_portal_extension_matches_solidity() {
     use zone_precompiles::forced_exit_storage::slots;
     let fields = [
-        ("forcedExitVersion", slots::FORCED_EXIT_VERSION),
         ("forcedExitCount", slots::FORCED_EXIT_COUNT),
         ("forcedExitRequests", slots::FORCED_EXIT_REQUESTS),
     ]
