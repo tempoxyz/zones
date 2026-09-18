@@ -12,7 +12,9 @@ use k256::elliptic_curve::rand_core::{OsRng, RngCore};
 use std::time::Duration;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
-use tempo_zone_contracts::{ForcedExitAuthorization, ZonePortal};
+use tempo_zone_contracts::{
+    ForcedExitAuthorization, ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal,
+};
 use zone_precompiles::ecies::{EncryptionContext, encrypt_request};
 use zone_primitives::constants::zone_chain_id;
 
@@ -107,22 +109,59 @@ impl ForcedWithdraw {
             .wallet(EthereumWallet::from(payer))
             .connect(&self.l1_rpc_url)
             .await?;
-        let portal = ZonePortal::new(self.portal, &provider);
-        ensure!(
-            portal.forcedExitVersion().call().await? == 1,
-            "forced exits are not active on this portal (expected version 1)"
-        );
-        ensure!(!portal.paused().call().await?, "portal is paused");
-        ensure!(
-            portal.tokenConfig(self.token).call().await?.enabled,
-            "token is not enabled on portal"
-        );
-        let l1_chain_id = provider.get_chain_id().await?;
-        let chain_id = zone_chain_id(l1_chain_id, portal.zoneId().call().await?)?;
         let header = provider
             .get_header_by_number(alloy_eips::BlockNumberOrTag::Latest)
             .await?
             .ok_or_else(|| eyre!("latest L1 header unavailable"))?;
+        let block = alloy_eips::BlockId::hash_canonical(header.hash);
+        let factory = ZoneFactory::new(ZONE_FACTORY_ADDRESS, &provider);
+        // Authenticate the spender against protocol state, not the supplied portal's getters.
+        // Pin all identity/format checks to one block before signing or sending any transaction.
+        ensure!(
+            factory
+                .isZonePortal(self.portal)
+                .block(block)
+                .call()
+                .await?,
+            "portal is not registered in the canonical ZoneFactory"
+        );
+        let portal = ZonePortal::new(self.portal, &provider);
+        let zone_id = portal.zoneId().block(block).call().await?;
+        let registration = factory.zones(zone_id).block(block).call().await?;
+        ensure!(
+            registration.portal == self.portal && registration.zoneId == zone_id,
+            "portal does not match ZoneFactory registration for zone {zone_id}"
+        );
+        ensure!(
+            portal.forcedExitVersion().block(block).call().await? == 1,
+            "unsupported forced-exit format (expected version 1)"
+        );
+        ensure!(
+            portal
+                .FORCED_EXIT_COMPENSATION()
+                .block(block)
+                .call()
+                .await?
+                == exithatch::FORCED_EXIT_COMPENSATION,
+            "unexpected compensation for forced-exit v1"
+        );
+        // The approved amount comes from the protocol constant, never from an RPC getter.
+        let compensation = U256::from(exithatch::FORCED_EXIT_COMPENSATION);
+        ensure!(
+            !portal.paused().block(block).call().await?,
+            "portal is paused"
+        );
+        ensure!(
+            portal
+                .tokenConfig(self.token)
+                .block(block)
+                .call()
+                .await?
+                .enabled,
+            "token is not enabled on portal"
+        );
+        let l1_chain_id = provider.get_chain_id().await?;
+        let chain_id = zone_chain_id(l1_chain_id, zone_id)?;
         let mut random_nonce = [0u8; 32];
         OsRng.fill_bytes(&mut random_nonce);
         let auth = authorization(
@@ -135,7 +174,6 @@ impl ForcedWithdraw {
             self.admit_before,
             header.timestamp(),
         )?;
-        let compensation = U256::from(portal.FORCED_EXIT_COMPENSATION().call().await?);
         let token = ITIP20::new(self.token, &provider);
         ensure!(
             token.balanceOf(payer_address).call().await? >= compensation,
@@ -367,5 +405,279 @@ mod tests {
                 .is_err()
         );
         assert!(ForcedWithdraw::try_parse_from(args.into_iter().chain(["--amount", "1"])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+    use alloy::{
+        consensus::Transaction,
+        primitives::Bytes,
+        sol_types::{SolCall, SolValue},
+    };
+    use alloy_eips::eip2718::Decodable2718;
+    use jsonrpsee::{RpcModule, server::ServerBuilder, types::ErrorObjectOwned};
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    const PORTAL: Address = Address::repeat_byte(0x11);
+    const ZONE_ID: u32 = 42;
+
+    struct Scenario {
+        registered: bool,
+        registry_portal: Address,
+        registry_zone_id: u32,
+        version: u64,
+        compensation: u128,
+    }
+
+    impl Default for Scenario {
+        fn default() -> Self {
+            Self {
+                registered: true,
+                registry_portal: PORTAL,
+                registry_zone_id: ZONE_ID,
+                version: 1,
+                compensation: exithatch::FORCED_EXIT_COMPENSATION,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Observed {
+        calls: Vec<Value>,
+        transactions: Vec<Bytes>,
+    }
+
+    // Exercise the actual CLI, including its wallet and signed approval transaction.
+    // Stop at transaction submission: the mock must never execute a token transfer.
+    async fn run(scenario: Scenario, approve: bool) -> (String, Observed) {
+        let observed = Arc::new(Mutex::new(Observed::default()));
+        let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let mut rpc = RpcModule::new(());
+        let mut header = tempo_primitives::TempoHeader::default();
+        header.inner.number = 100;
+        header.inner.timestamp = 1000;
+        header.inner.base_fee_per_gas = Some(1);
+        let header = tempo_alloy::rpc::TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header::new(header),
+            timestamp_millis: 1_000_000,
+        };
+        let block = alloy_eips::BlockId::hash_canonical(header.hash);
+        rpc.register_method("eth_getBlockByNumber", move |_, _, _| {
+            serde_json::to_value(&header).unwrap()
+        })
+        .unwrap();
+        let calls = observed.clone();
+        rpc.register_method("eth_call", move |params, _, _| {
+            let params: Vec<Value> = params.parse()?;
+            calls.lock().unwrap().calls.push(json!(params));
+            let to: Address = serde_json::from_value(params[0]["to"].clone()).unwrap();
+            let input: Bytes = serde_json::from_value(
+                params[0]
+                    .get("input")
+                    .or_else(|| params[0].get("data"))
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap();
+            let selector = &input[..4];
+            let output = if to == ZONE_FACTORY_ADDRESS {
+                assert_eq!(params[1], serde_json::to_value(block).unwrap());
+                if selector == ZoneFactory::isZonePortalCall::SELECTOR {
+                    assert_eq!(
+                        ZoneFactory::isZonePortalCall::abi_decode(&input)
+                            .unwrap()
+                            .portal,
+                        PORTAL
+                    );
+                    scenario.registered.abi_encode()
+                } else {
+                    assert_eq!(
+                        ZoneFactory::zonesCall::abi_decode(&input).unwrap().zoneId,
+                        ZONE_ID
+                    );
+                    (ZoneFactory::ZoneInfo {
+                        zoneId: scenario.registry_zone_id,
+                        portal: scenario.registry_portal,
+                        accessMode: false,
+                        gatewayMode: false,
+                        admin: Address::ZERO,
+                        sequencers: vec![],
+                        threshold: 0,
+                        verifier: Address::ZERO,
+                        rpcUrl: String::new(),
+                    },)
+                        .abi_encode_params()
+                }
+            } else if to == PORTAL {
+                assert_eq!(params[1], serde_json::to_value(block).unwrap());
+                if selector == ZonePortal::zoneIdCall::SELECTOR {
+                    ZONE_ID.abi_encode()
+                } else if selector == ZonePortal::forcedExitVersionCall::SELECTOR {
+                    scenario.version.abi_encode()
+                } else if selector == ZonePortal::FORCED_EXIT_COMPENSATIONCall::SELECTOR {
+                    scenario.compensation.abi_encode()
+                } else if selector == ZonePortal::pausedCall::SELECTOR {
+                    false.abi_encode()
+                } else if selector == ZonePortal::tokenConfigCall::SELECTOR {
+                    (true, true).abi_encode_params()
+                } else {
+                    return Err(ErrorObjectOwned::owned(
+                        -32000,
+                        "unexpected portal call",
+                        None::<()>,
+                    ));
+                }
+            } else {
+                assert_eq!(to, tempo_precompiles::PATH_USD_ADDRESS);
+                if selector == ITIP20::balanceOfCall::SELECTOR {
+                    U256::from(1_000_000_000u64).abi_encode()
+                } else {
+                    assert_eq!(selector, ITIP20::allowanceCall::SELECTOR);
+                    U256::ZERO.abi_encode()
+                }
+            };
+            Ok::<_, ErrorObjectOwned>(Bytes::from(output))
+        })
+        .unwrap();
+        for (method, value) in [
+            ("eth_chainId", json!("0x539")),
+            ("eth_getTransactionCount", json!("0x0")),
+            ("eth_estimateGas", json!("0x100000")),
+            ("eth_gasPrice", json!("0x1")),
+            ("eth_maxPriorityFeePerGas", json!("0x1")),
+            (
+                "eth_feeHistory",
+                json!({
+                    "oldestBlock": "0x63", "baseFeePerGas": ["0x1", "0x1"],
+                    "gasUsedRatio": [0.5], "reward": [["0x1"]]
+                }),
+            ),
+        ] {
+            rpc.register_method(method, move |_, _, _| value.clone())
+                .unwrap();
+        }
+        for method in ["eth_sendRawTransactionSync", "eth_sendRawTransaction"] {
+            let transactions = observed.clone();
+            rpc.register_method(method, move |params, _, _| {
+                let params: Vec<Value> = params.parse()?;
+                let raw: Bytes = serde_json::from_value(params[0].clone()).unwrap();
+                transactions.lock().unwrap().transactions.push(raw);
+                Err::<Value, _>(ErrorObjectOwned::owned(
+                    -32000,
+                    "stop after recording transaction",
+                    None::<()>,
+                ))
+            })
+            .unwrap();
+        }
+        let handle = server.start(rpc);
+        let command = ForcedWithdraw {
+            l1_rpc_url: format!("http://{address}"),
+            portal: PORTAL,
+            private_key: "07".repeat(32),
+            fee_payer_private_key: Some("08".repeat(32)),
+            token: tempo_precompiles::PATH_USD_ADDRESS,
+            to: None,
+            nonce: Some(U256::ONE),
+            admit_before: None,
+            approve,
+            wait_for_processing: false,
+            timeout_secs: 1,
+        };
+        let error = tokio::time::timeout(Duration::from_secs(10), command.run())
+            .await
+            .unwrap()
+            .unwrap_err();
+        handle.stop().unwrap();
+        handle.stopped().await;
+        let observed = std::mem::take(&mut *observed.lock().unwrap());
+        (format!("{error:#}"), observed)
+    }
+
+    #[tokio::test]
+    async fn rejects_spoofed_portal_before_any_transaction_or_portal_getter() {
+        for approve in [false, true] {
+            let (error, observed) = run(
+                Scenario {
+                    registered: false,
+                    compensation: 1_000_000_000,
+                    ..Default::default()
+                },
+                approve,
+            )
+            .await;
+            assert!(error.contains("not registered"), "{error}");
+            assert!(observed.transactions.is_empty());
+            assert_eq!(observed.calls.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_registry_mismatches_and_unexpected_format_or_fee_without_transactions() {
+        for (scenario, expected) in [
+            (
+                Scenario {
+                    registry_portal: Address::repeat_byte(2),
+                    ..Default::default()
+                },
+                "does not match",
+            ),
+            (
+                Scenario {
+                    registry_zone_id: 43,
+                    ..Default::default()
+                },
+                "does not match",
+            ),
+            (
+                Scenario {
+                    version: 2,
+                    ..Default::default()
+                },
+                "unsupported forced-exit format",
+            ),
+            (
+                Scenario {
+                    compensation: 1_000_000_000,
+                    ..Default::default()
+                },
+                "unexpected compensation",
+            ),
+            (
+                Scenario {
+                    compensation: 0,
+                    ..Default::default()
+                },
+                "unexpected compensation",
+            ),
+        ] {
+            let (error, observed) = run(scenario, true).await;
+            assert!(error.contains(expected), "{error}");
+            assert!(observed.transactions.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_portal_approval_is_exactly_the_protocol_fee() {
+        let (error, observed) = run(Scenario::default(), true).await;
+        assert!(
+            error.contains("stop after recording transaction"),
+            "{error}"
+        );
+        assert_eq!(observed.transactions.len(), 1);
+        let tx =
+            tempo_primitives::TempoTxEnvelope::decode_2718(&mut observed.transactions[0].as_ref())
+                .unwrap();
+        assert_eq!(tx.to(), Some(tempo_precompiles::PATH_USD_ADDRESS));
+        let approval = ITIP20::approveCall::abi_decode(tx.input()).unwrap();
+        assert_eq!(approval.spender, PORTAL);
+        assert_eq!(
+            approval.amount,
+            U256::from(exithatch::FORCED_EXIT_COMPENSATION)
+        );
     }
 }
