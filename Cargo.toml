@@ -141,7 +141,17 @@ zone-spf = { path = "crates/spf" }
 zone-checker = { path = "crates/checker" }
 
 # AWS Nitro Enclaves
+aws-lc-rs = { version = "1.17.0", default-features = false, features = [
+  "alloc",
+  "non-fips",
+  "ring-sig-verify",
+] }
 aws-nitro-enclaves-nsm-api = "0.5.2"
+rcgen = "0.14.7"
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs"] }
+tempo-nitro-attestation = { git = "https://github.com/tempoxyz/tempo", rev = "cf0cf640d17013f53e5ce36dba23bb9fa858f051", default-features = false }
+tokio-rustls = "0.26.4"
+x509-parser = { version = "0.18.1", features = ["verify"] }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "5f02aa3" }

@@ -21,7 +21,6 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
     ZonePortal,
 };
-use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
@@ -29,7 +28,7 @@ use zone_precompiles::outbox;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProofBundle, ProverConnection, VerifyRequest,
-    VerifyResponse,
+    VerifyResponse, attested_transport::RemoteProverConfig,
 };
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
@@ -87,6 +86,10 @@ struct ProveArgs {
     #[arg(long, value_name = "HOST:PORT")]
     target: String,
 
+    /// JSON allowlist used to authenticate the prover's Nitro attestation.
+    #[arg(long, value_name = "PATH")]
+    attestation_policy: PathBuf,
+
     /// Write the complete successful JSON response, including output and proofBundle.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -135,8 +138,12 @@ struct GenerateInputArgs {
     output: Option<PathBuf>,
 
     /// Send the generated witness to a Tempo Zone prover TCP socket.
-    #[arg(long, value_name = "HOST:PORT")]
+    #[arg(long, value_name = "HOST:PORT", requires = "attestation_policy")]
     target: Option<String>,
+
+    /// JSON allowlist used to authenticate the target prover's Nitro attestation.
+    #[arg(long, value_name = "PATH", requires = "target")]
+    attestation_policy: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -417,8 +424,13 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     );
 
     if let Some(target) = &args.target {
+        let policy = args
+            .attestation_policy
+            .as_deref()
+            .ok_or_eyre("--attestation-policy is required with --target")?;
+        let remote = RemoteProverConfig::from_policy_file(target.clone(), policy)?;
         let started = start_phase("target prover");
-        let bytes = send_to_prover(target, request, &output).await?;
+        let bytes = send_to_prover(&remote, request, &output).await?;
         timings.record("target prover", started, ());
         println!("  Target prover:         {target} ({bytes} request bytes, verified)");
     } else {
@@ -429,6 +441,8 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 }
 
 async fn prove(args: ProveArgs) -> Result<()> {
+    let remote =
+        RemoteProverConfig::from_policy_file(args.target.clone(), &args.attestation_policy)?;
     let total_started = Instant::now();
     let mut timings = Timings::default();
     info!(input = %args.input.display(), target = %args.target, output = %args.output.display(), "proving saved witness");
@@ -446,19 +460,29 @@ async fn prove(args: ProveArgs) -> Result<()> {
         witness,
     };
     let started = start_phase("target prover");
-    let (_, response) = exchange_with_prover(&args.target, request).await?;
+    let (_, response) = exchange_with_prover(&remote, request).await?;
     timings.record("target prover", started, ());
     let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
     timings.record("validate response", started, ());
     let started = start_phase("output");
-    let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
-    std::fs::write(&args.output, &json)
-        .wrap_err_with(|| format!("write prover response to {}", args.output.display()))?;
-    println!("Saved prover output and proof to {}", args.output.display());
-    info!(bytes = json.len(), "saved prover response");
+    save_proof_response(&args.output, &request_id, &response)?;
     timings.record("output", started, ());
     timings.print(total_started.elapsed());
+    Ok(())
+}
+
+fn save_proof_response(
+    output: &std::path::Path,
+    request_id: &str,
+    response: &VerifyResponse,
+) -> Result<()> {
+    validate_proof_response(response, request_id)?;
+    let json = serde_json::to_vec_pretty(response).context("serialize prover response")?;
+    std::fs::write(output, &json)
+        .wrap_err_with(|| format!("write prover response to {}", output.display()))?;
+    println!("Saved prover output and proof to {}", output.display());
+    info!(bytes = json.len(), "saved prover response");
     Ok(())
 }
 
@@ -508,12 +532,14 @@ fn validate_proof_response<'a>(
 }
 
 async fn exchange_with_prover(
-    target: &str,
+    remote: &RemoteProverConfig,
     request: VerifyRequest,
 ) -> Result<(usize, VerifyResponse)> {
+    let target = remote.address();
     let started = Instant::now();
     info!(target, "connecting to prover");
-    let stream = TcpStream::connect(target)
+    let stream = remote
+        .connect()
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
     info!(
@@ -546,12 +572,12 @@ async fn exchange_with_prover(
 }
 
 async fn send_to_prover(
-    target: &str,
+    remote: &RemoteProverConfig,
     request: VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
     let expected_id = request.request_id.clone();
-    let (request_bytes, response) = exchange_with_prover(target, request).await?;
+    let (request_bytes, response) = exchange_with_prover(remote, request).await?;
     validate_proof_response(&response, &expected_id)?;
     let VerifyResponse::Ok { output, .. } = response else {
         unreachable!("successful validation requires an ok response")
@@ -1383,38 +1409,6 @@ mod tests {
         }
     }
 
-    fn empty_witness() -> BatchWitness {
-        let tempo_header = TempoHeader {
-            inner: alloy_consensus::Header {
-                number: 2,
-                state_root: B256::ZERO,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        BatchWitness {
-            public_inputs: PublicInputs {
-                parent_chain_id: 42_431,
-                zone_id: 1,
-                tempo_block_number: 2,
-                anchor_block_number: 2,
-                anchor_block_hash: B256::ZERO,
-                expected_withdrawal_batch_index: 3,
-            },
-            parent_header: TempoHeader::default(),
-            zone_blocks: Vec::new(),
-            zone_state_witness: ZoneStateWitness {
-                node_pool: Vec::new(),
-                bytecodes: Vec::new(),
-            },
-            tempo_state_witness: TempoStateWitness {
-                initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(tempo_header)),
-                node_pool: Vec::new(),
-            },
-            tempo_ancestry_headers: Vec::new(),
-        }
-    }
-
     #[test]
     fn parses_prove_without_rpc_or_wallet_arguments() {
         let cli = Cli::try_parse_from([
@@ -1424,6 +1418,8 @@ mod tests {
             "witness.json",
             "--target",
             "localhost:5000",
+            "--attestation-policy",
+            "measurements.json",
             "--output",
             "proof.json",
         ])
@@ -1433,6 +1429,7 @@ mod tests {
         };
         assert_eq!(args.input, PathBuf::from("witness.json"));
         assert_eq!(args.target, "localhost:5000");
+        assert_eq!(args.attestation_policy, PathBuf::from("measurements.json"));
         assert_eq!(args.output, PathBuf::from("proof.json"));
         assert!(
             Cli::try_parse_from([
@@ -1487,60 +1484,32 @@ mod tests {
         assert!(error.to_string().contains("NSM unavailable"));
     }
 
-    #[tokio::test]
-    async fn prove_transcodes_json_witness_and_does_not_save_errors() {
+    #[test]
+    fn proof_response_persistence_does_not_overwrite_success_with_errors() {
         let directory =
             std::env::temp_dir().join(format!("prover-cli-prove-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let input = directory.join("witness.json");
         let output = directory.join("proof.json");
-        let witness = empty_witness();
-        std::fs::write(&input, serde_json::to_vec(&witness).unwrap()).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let target = listener.local_addr().unwrap().to_string();
-        let server = tokio::spawn(async move {
-            let mut success = None;
-            for attempt in 0..2 {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
-                let request: VerifyRequest = connection.receive().await.unwrap().unwrap();
-                assert_eq!(request.version, PROTOCOL_VERSION);
-                assert_eq!(request.witness, witness);
-                let response = if attempt == 0 {
-                    let response = successful_proof_response(&request.request_id);
-                    success = Some(serde_json::to_value(&response).unwrap());
-                    response
-                } else {
-                    VerifyResponse::Error {
-                        version: PROTOCOL_VERSION,
-                        request_id: Some(request.request_id),
-                        code: ErrorCode::VerificationFailed,
-                        message: "bad witness".into(),
-                    }
-                };
-                connection.send(response).await.unwrap();
-            }
-            success.unwrap()
-        });
-        prove(ProveArgs {
-            input: input.clone(),
-            target: target.clone(),
-            output: output.clone(),
-        })
-        .await
-        .unwrap();
+        let response = successful_proof_response("test");
+        save_proof_response(&output, "test", &response).unwrap();
         let saved = std::fs::read(&output).unwrap();
-        let error = prove(ProveArgs {
-            input,
-            target,
-            output: output.clone(),
-        })
-        .await
+        let error = save_proof_response(
+            &output,
+            "test",
+            &VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some("test".into()),
+                code: ErrorCode::VerificationFailed,
+                message: "bad witness".into(),
+            },
+        )
         .unwrap_err();
         assert!(error.to_string().contains("VerificationFailed"));
         assert_eq!(std::fs::read(&output).unwrap(), saved);
-        let response: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(response, server.await.unwrap());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&saved).unwrap(),
+            serde_json::to_value(response).unwrap()
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

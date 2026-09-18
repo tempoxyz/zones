@@ -1,7 +1,9 @@
 //! Versioned request protocol for the Tempo Zone prover service.
 
+pub mod attested_transport;
 mod chainspec;
 mod connection;
+pub mod nitro_tls;
 mod protocol;
 
 pub use chainspec::{TrustedChainSpecError, TrustedChainSpecs};

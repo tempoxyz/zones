@@ -1384,7 +1384,7 @@ impl ZoneTestNode {
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
                     enable_prover: false,
-                    prover_address: None,
+                    remote_prover: None,
                 });
         }
         // Multi-sequencer nodes run the real role controller, which owns the engine; the
