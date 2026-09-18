@@ -120,7 +120,7 @@ impl Cli {
     }
 }
 
-#[derive(Clone, Debug, Args)]
+#[derive(Debug, Args)]
 struct Timeouts {
     /// Deadline for receiving one complete logical request.
     #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
@@ -253,7 +253,7 @@ async fn handle_connection<T>(
             }
         };
     let request_bytes = connection.last_received_bytes().unwrap_or_default();
-    let response = process_request(request, &specs);
+    let response = process_request(request, specs);
     if let Some(response_bytes) = timed_send(&mut connection, response, timeouts.response).await {
         info!(
             request_bytes,
@@ -293,32 +293,35 @@ where
 
 fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyResponse {
     if request.version != PROTOCOL_VERSION {
-        return err_response(
-            request.request_id,
-            ErrorCode::UnsupportedVersion,
-            format!(
+        return VerifyResponse::Error {
+            version: PROTOCOL_VERSION,
+            request_id: Some(request.request_id),
+            code: ErrorCode::UnsupportedVersion,
+            message: format!(
                 "unsupported protocol version {}; expected {PROTOCOL_VERSION}",
                 request.version
             ),
-        );
+        };
     }
 
     let tempo_chain_id = request.witness.public_inputs.parent_chain_id;
     let Some(tempo_spec) = specs.resolve(tempo_chain_id) else {
-        return err_response(
-            request.request_id,
-            ErrorCode::UnsupportedChain,
-            format!("unsupported Tempo chain ID {tempo_chain_id}"),
-        );
+        return VerifyResponse::Error {
+            version: PROTOCOL_VERSION,
+            request_id: Some(request.request_id),
+            code: ErrorCode::UnsupportedChain,
+            message: format!("unsupported Tempo chain ID {tempo_chain_id}"),
+        };
     };
     let zone_chain_id = match zone_chain_id(tempo_chain_id, request.witness.public_inputs.zone_id) {
         Ok(chain_id) => chain_id,
         Err(error) => {
-            return err_response(
-                request.request_id,
-                ErrorCode::VerificationFailed,
-                error.to_string(),
-            );
+            return VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::VerificationFailed,
+                message: error.to_string(),
+            };
         }
     };
     let mut zone_genesis = tempo_spec.inner.genesis.clone();
@@ -326,11 +329,12 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
     let zone_spec = match ZoneChainSpec::from_genesis_with_l1(zone_genesis, tempo_spec.as_ref()) {
         Ok(spec) => spec,
         Err(error) => {
-            return err_response(
-                request.request_id,
-                ErrorCode::UnsupportedChain,
-                error.to_string(),
-            );
+            return VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::UnsupportedChain,
+                message: error.to_string(),
+            };
         }
     };
     let config = SpfConfig::new(Arc::new(zone_spec));
@@ -344,26 +348,19 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
                 output: Box::new(output),
                 proof_bundle,
             },
-            Err(message) => err_response(
-                request.request_id,
-                ErrorCode::AttestationUnavailable,
+            Err(message) => VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                code: ErrorCode::AttestationUnavailable,
                 message,
-            ),
+            },
         },
-        Err(error) => err_response(
-            request.request_id,
-            ErrorCode::VerificationFailed,
-            error.to_string(),
-        ),
-    }
-}
-
-fn err_response(request_id: String, code: ErrorCode, message: impl Into<String>) -> VerifyResponse {
-    VerifyResponse::Error {
-        version: PROTOCOL_VERSION,
-        request_id: Some(request_id),
-        code,
-        message: message.into(),
+        Err(error) => VerifyResponse::Error {
+            version: PROTOCOL_VERSION,
+            request_id: Some(request.request_id),
+            code: ErrorCode::VerificationFailed,
+            message: error.to_string(),
+        },
     }
 }
 
