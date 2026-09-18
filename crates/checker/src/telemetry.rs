@@ -213,6 +213,9 @@ fn log_zone_action(action: &L2BridgeAction, context: &ActivityContext) {
             result: DepositResult::Failed,
             ..
         } => activity_log!(context, activity_event::ZONE_DEPOSIT_FAILED,),
+        L2BridgeAction::ForcedWithdrawalRequested { .. } => {
+            activity_log!(context, activity_event::ZONE_WITHDRAWAL_BURNED,)
+        }
         L2BridgeAction::WithdrawalRequested { origin, .. } => match origin {
             WithdrawalOrigin::DepositBounceBack => {
                 activity_log!(context, activity_event::ZONE_DEPOSIT_BOUNCE_BACK_REQUESTED,)

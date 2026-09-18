@@ -35,6 +35,8 @@ crate::sol! {
             WithdrawalBounceBack,
             /// User deposit with an encrypted recipient and memo.
             Deposit,
+            /// Root-authorized full-balance withdrawal; execution is not activated yet.
+            ForcedExit,
         }
 
         /// A user deposit or internal withdrawal bounce-back passed to `advanceTempo`.
