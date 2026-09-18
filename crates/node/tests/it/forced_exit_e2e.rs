@@ -1,20 +1,11 @@
 //! Native L1 -> shared Zone execution -> quorum settlement -> ordinary L1 delivery.
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, poll_until, spawn_sequencer};
-use alloy::{
-    primitives::U256,
-    providers::{Provider, ProviderBuilder},
-    sol_types::SolEvent,
-};
+use alloy::{primitives::U256, providers::Provider, sol_types::SolEvent};
 use alloy_signer::SignerSync;
 use std::time::Duration;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{ForcedExitAuthorization, ZonePortal};
 use zone_precompiles::ecies;
-
-alloy::sol! {
-    #[sol(rpc)]
-    interface TestActivation { function setTestVersion(uint64 version) external; }
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn encrypted_forced_exit_settles_and_pays_without_an_l2_transaction() -> eyre::Result<()> {
@@ -29,21 +20,11 @@ async fn forced_exit_uses_ordinary_delivery_failure_and_private_bounceback() -> 
 async fn forced_exit_flow(bounce: bool) -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let timeout = Duration::from_secs(90);
-    let l1 = L1TestNode::start_with_forced_exit_test_runtime().await?;
+    let l1 = L1TestNode::start().await?;
     let factory = l1.native_zone_factory().await?;
     let portal_address = l1.create_zone(factory).await?;
-    let operator = ProviderBuilder::new()
-        .wallet(l1.dev_signer())
-        .connect_http(l1.http_url().clone());
-    let activation = TestActivation::new(portal_address, &operator)
-        .setTestVersion(1)
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    assert!(activation.status());
     // Empty/rejected entries settle through the existing empty-batch cadence.
-    let zone = ZoneTestNode::start_from_l1_with_withdrawal_batch_interval(
+    let zone = ZoneTestNode::start_from_l1_with_forced_exits(
         l1.http_url(),
         l1.ws_url(),
         portal_address,

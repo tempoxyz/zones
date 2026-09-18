@@ -93,7 +93,6 @@ contract ForcedExitSettlementTest is ForcedExitTest {
     }
 
     function test_activated_forced_requests_use_existing_selector_statement_and_event() public {
-        portal.setTestVersion(1);
         uint64 count =
             (portal.MAX_DEPOSITS_PER_TEMPO_BLOCK() - 20) / portal.FORCED_EXIT_ADMISSION_WEIGHT();
         for (uint64 i; i < count; ++i) {
@@ -131,7 +130,6 @@ contract ForcedExitSettlementTest is ForcedExitTest {
     }
 
     function test_forced_withdrawals_use_ordinary_delivery_and_bounceback() public {
-        portal.setTestVersion(1);
         request(384);
         request(384);
         vm.prank(pathUSDAdmin);
