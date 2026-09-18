@@ -102,6 +102,7 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
+use zone_prover::attested_transport::RemoteProverConfig;
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, SettlementProverConfig, ShadowProverConfig,
@@ -201,9 +202,9 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// Require SPF validation and a Nitro NSM attestation before settlement.
     pub enable_prover: bool,
-    /// Remote Nitro prover TCP address. Required for proof-gated settlement; when absent, the SPF
-    /// runs in-process but settlement fails because no NSM attestation can be produced.
-    pub prover_address: Option<String>,
+    /// Authenticated remote Nitro prover. Required for proof-gated settlement; when absent, the
+    /// SPF runs in-process but settlement fails because no NSM attestation can be produced.
+    pub remote_prover: Option<RemoteProverConfig>,
 }
 
 /// Execution mode for the detached shadow prover.
@@ -211,15 +212,15 @@ pub struct ZoneSequencerAddOnsConfig {
 pub enum ProverRuntime {
     /// Execute the SPF in this process.
     InProcess,
-    /// Send witnesses to the prover at the given `HOST:PORT` address.
-    Remote(String),
+    /// Send witnesses to an authenticated remote Nitro prover.
+    Remote(RemoteProverConfig),
 }
 
 impl ProverRuntime {
-    fn remote_address(&self) -> Option<&str> {
+    fn remote_config(&self) -> Option<&RemoteProverConfig> {
         match self {
             Self::InProcess => None,
-            Self::Remote(address) => Some(address),
+            Self::Remote(config) => Some(config),
         }
     }
 }
@@ -665,7 +666,7 @@ where
                     zone_id: config.zone_id,
                     batch_anchor_config: config.batch_anchor_config,
                     prover_runtime: config
-                        .prover_address
+                        .remote_prover
                         .clone()
                         .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
                 })
@@ -849,7 +850,7 @@ where
                     handle.eth_handlers().api.clone(),
                     l1_provider.clone(),
                 )),
-                prover_address: config.prover_address.clone(),
+                remote_prover: config.remote_prover.clone(),
             });
 
         let shadow_prover_config =
@@ -863,10 +864,7 @@ where
                         handle.eth_handlers().api.clone(),
                         l1_provider.clone(),
                     )),
-                    prover_address: config
-                        .prover_runtime
-                        .remote_address()
-                        .map(ToOwned::to_owned),
+                    remote_prover: config.prover_runtime.remote_config().cloned(),
                 });
 
         if let (Some(runtime_config), Some(submissions)) =
