@@ -975,6 +975,7 @@ where
             match deposit {
                 L1Deposit::WithdrawalBounceBack(_) => withdrawal_bounce_backs += 1,
                 L1Deposit::Deposit(_) => deposits += 1,
+                L1Deposit::ForcedExit(_) => self.subscriber_metrics.forced_exit_events.increment(1),
             }
         }
         if withdrawal_bounce_backs > 0 {
