@@ -11,6 +11,5 @@ pub use protocol::{
     VerifyRequest, VerifyResponse, nitro_batch_attestation_hash,
 };
 
-/// Allows large batch witnesses containing trie proofs and bytecode pools while bounding the
-/// allocation an untrusted frame length can request.
-pub const DEFAULT_MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
+/// Allows batch witnesses up to 2 GiB to bound untrusted frame allocations.
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024 * 1024;

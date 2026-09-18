@@ -524,31 +524,6 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_ancestry_headers: anchor.ancestry_headers().to_vec(),
     };
 
-    let started = Instant::now();
-    let (output, proof_bundle) = if let Some(address) = &context.config.prover_address {
-        let (output, proof_bundle) =
-            verify_remotely(address, context.config.zone_id, job, &witness, metrics).await?;
-        (output, Some(proof_bundle))
-    } else {
-        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
-        let attempt = witness.clone();
-        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
-            .await
-            .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")
-            .context(ValidationFailure)?;
-        (output, None)
-    };
-    metrics
-        .spf_execution_duration_seconds
-        .record(started.elapsed().as_secs_f64());
-
-    let started = Instant::now();
-    compare_output(&output, batch, batch.prev_block_hash).context(ValidationFailure)?;
-    metrics
-        .output_validation_duration_seconds
-        .record(started.elapsed().as_secs_f64());
-
     let stats = ValidationStats {
         witness_bytes: witness_size(&witness),
         blocks: witness.zone_blocks.len(),
@@ -570,6 +545,31 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         zone_state_nodes: witness.zone_state_witness.node_pool.len(),
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     };
+
+    let started = Instant::now();
+    let (output, proof_bundle) = if let Some(address) = &context.config.prover_address {
+        let (output, proof_bundle) =
+            verify_remotely(address, context.config.zone_id, job, witness, metrics).await?;
+        (output, Some(proof_bundle))
+    } else {
+        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
+        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, witness))
+            .await
+            .context("SPF worker panicked")?
+            .context("SPF rejected generated witness")
+            .context(ValidationFailure)?;
+        (output, None)
+    };
+    metrics
+        .spf_execution_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+
+    let started = Instant::now();
+    compare_output(&output, batch, batch.prev_block_hash).context(ValidationFailure)?;
+    metrics
+        .output_validation_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+
     if job.response.is_some() && proof_bundle.is_none() {
         bail!("attested settlement requires a remote prover with Nitro NSM support");
     }
@@ -603,7 +603,7 @@ async fn verify_remotely(
     address: &str,
     zone_id: u32,
     job: &ProverJob,
-    witness: &BatchWitness,
+    witness: BatchWitness,
     metrics: &ProverMetrics,
 ) -> Result<(BatchOutput, ProofBundle)> {
     let request = VerifyRequest {
@@ -612,7 +612,7 @@ async fn verify_remotely(
             "zone-{zone_id}-{}-{}-{}",
             job.from, job.to, job.batch.next_block_hash
         ),
-        witness: witness.clone(),
+        witness,
     };
     let started = Instant::now();
     let stream = TcpStream::connect(address).await;

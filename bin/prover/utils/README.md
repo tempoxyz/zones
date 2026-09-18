@@ -60,10 +60,10 @@ cargo run --release -p tempo-zone-prover-utils -- prove \
 ```
 
 The target is a `HOST:PORT` TCP endpoint, such as the Nitro host's TCP-to-vsock proxy.
-The command handles request framing and saves the complete successful JSON response, including
-`output` and `proofBundle` (`verifierConfig` and the attestation in `proof`). No RPC endpoints,
-chain specification, or wallet key are needed. The witness is forwarded to the remote prover
-without local replay or conversion to this CLI version's witness schema.
+The command parses the local JSON witness using this CLI version's schema, CBOR-encodes the prover
+request, and saves the complete successful response as JSON, including `output` and `proofBundle`
+(`verifierConfig` and the attestation in `proof`). No RPC endpoints, chain specification, or wallet
+key are needed, and the witness is not replayed locally.
 
 Protocol/version mismatches, missing proofs, and prover errors fail the command without writing
 the output file. A saved response is not independently authenticated by the CLI; submit the proof
