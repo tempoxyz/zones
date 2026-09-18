@@ -311,28 +311,44 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier onlySequencer() {
-        if (!isSequencer(msg.sender)) revert NotSequencer();
+        _checkSequencer();
         _;
     }
 
     modifier onlySequencerOrAdmin() {
-        if (msg.sender != admin && !isSequencer(msg.sender)) revert NotSequencer();
+        _checkSequencerOrAdmin();
         _;
     }
 
     modifier onlyAdmin() {
-        if (msg.sender != admin) revert NotAdmin();
+        _checkAdmin();
         _;
     }
 
     modifier whenNotPaused() {
-        if (paused()) revert PortalIsPaused();
+        _checkNotPaused();
         _;
     }
 
     modifier onlySelf() {
         if (msg.sender != address(this)) revert NotSelf();
         _;
+    }
+
+    function _checkSequencer() internal view {
+        if (!isSequencer(msg.sender)) revert NotSequencer();
+    }
+
+    function _checkSequencerOrAdmin() internal view {
+        if (msg.sender != admin && !isSequencer(msg.sender)) revert NotSequencer();
+    }
+
+    function _checkAdmin() internal view {
+        if (msg.sender != admin) revert NotAdmin();
+    }
+
+    function _checkNotPaused() internal view {
+        if (paused()) revert PortalIsPaused();
     }
 
     modifier nonReentrantWithdrawal() {
@@ -784,11 +800,7 @@ contract ZonePortal is IZonePortal {
         external
         onlySequencerOrAdmin
     {
-        // Validate yParity
-        if (!Secp256k1Lib.isCompressedYParity(yParity)) revert InvalidEphemeralPubkey();
-
-        // Validate x is on the secp256k1 curve
-        if (!Secp256k1Lib.isValidX(x)) revert InvalidEphemeralPubkey();
+        _validatePublicKey(x, yParity);
 
         // Verify proof of possession: the caller must prove control of the encryption private key.
         bytes32 message = keccak256(abi.encode(address(this), x, yParity));
@@ -1039,12 +1051,7 @@ contract ZonePortal is IZonePortal {
         // Enabled tokens have already passed the native TIP-20 factory validation. TIP-20
         // decimals are fixed at six. depositsActive controls principal deposits only.
         if (!_tokenConfigs[token].enabled) revert TokenNotEnabled();
-        if (
-            !Secp256k1Lib.isCompressedYParity(encrypted.ephemeralPubkeyYParity)
-                || !Secp256k1Lib.isValidX(encrypted.ephemeralPubkeyX)
-        ) {
-            revert InvalidEphemeralPubkey();
-        }
+        _validatePublicKey(encrypted.ephemeralPubkeyX, encrypted.ephemeralPubkeyYParity);
         uint256 length = encrypted.ciphertext.length;
         if (length < 384 || length > 2368 || length % 32 != 0) {
             revert InvalidForcedExitCiphertextLength(length);
@@ -1076,6 +1083,11 @@ contract ZonePortal is IZonePortal {
         forcedExitRequests[requestId] = ForcedExitMetadata(token, depositNumber);
 
         emit ForcedExitRequested(depositNumber, entry);
+    }
+
+    function _validatePublicKey(bytes32 x, uint8 yParity) internal view {
+        if (!Secp256k1Lib.isCompressedYParity(yParity)) revert InvalidEphemeralPubkey();
+        if (!Secp256k1Lib.isValidX(x)) revert InvalidEphemeralPubkey();
     }
 
     function _validateEncryptionKey(uint256 keyIndex) internal view {
@@ -1115,12 +1127,7 @@ contract ZonePortal is IZonePortal {
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
         // which would block chain progress on the zone side.
-        if (!Secp256k1Lib.isCompressedYParity(encrypted.ephemeralPubkeyYParity)) {
-            revert InvalidEphemeralPubkey();
-        }
-        if (!Secp256k1Lib.isValidX(encrypted.ephemeralPubkeyX)) {
-            revert InvalidEphemeralPubkey();
-        }
+        _validatePublicKey(encrypted.ephemeralPubkeyX, encrypted.ephemeralPubkeyYParity);
 
         // Validate ciphertext length — GCM ciphertext == plaintext length (tag is separate)
         // Prevents DoS: oversized ciphertexts inflate zone-side AES-GCM processing cost
@@ -1209,14 +1216,6 @@ contract ZonePortal is IZonePortal {
             return;
         }
 
-        if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
-            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
-            emit WithdrawalProcessed(
-                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
-            );
-            return;
-        }
-
         bool success;
         if (withdrawal.gasLimit == 0) {
             // Re-check current roles without reverting so an in-flight withdrawal to a revoked
@@ -1224,7 +1223,7 @@ contract ZonePortal is IZonePortal {
             success = (!_isGatewayEnforced || !hasRole(withdrawal.to, Role.CallbackGateway))
                 && _isAllowed(withdrawal.to)
                 && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
-        } else {
+        } else if (withdrawal.gasLimit <= MAX_WITHDRAWAL_GAS_LIMIT) {
             // Isolate callback effects so failure can be caught without reverting the dequeue.
             try this.deliverWithdrawal(
                 _token,
