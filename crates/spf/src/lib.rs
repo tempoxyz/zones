@@ -52,6 +52,13 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             actual: expected_chain_id,
         });
     }
+    if witness.zone_blocks[0].number == 1 {
+        let actual = witness.parent_header.hash_slow();
+        let expected = config.chain_spec().genesis_hash();
+        if actual != expected {
+            return Err(Error::GenesisHashMismatch { expected, actual });
+        }
+    }
 
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
@@ -519,6 +526,9 @@ pub enum Error {
     /// The witness identifies a Zone other than the verifier-selected chain specification.
     #[error("Zone chain ID mismatch: expected {expected}, got {actual}")]
     ChainIdMismatch { expected: u64, actual: u64 },
+    /// The hidden parent of the first submitted Zone block is not the canonical genesis.
+    #[error("Zone genesis hash mismatch: expected {expected:?}, got {actual:?}")]
+    GenesisHashMismatch { expected: B256, actual: B256 },
     /// The initial Tempo witness header is not the checkpoint stored in the
     /// parent Zone state.
     #[error(
@@ -829,6 +839,31 @@ mod tests {
         assert_eq!(
             prove_zone_batch(&test_config(), witness),
             Err(Error::EmptyZoneBatch)
+        );
+    }
+
+    #[test]
+    fn rejects_a_forged_genesis_parent_for_the_first_batch() {
+        let config = test_config();
+        let mut witness = minimal_batch_witness();
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash_slow(),
+            timestamp: 100,
+            timestamp_millis_part: 0,
+            beneficiary: Address::ZERO,
+            tempo_import: full_import(Bytes::from([0x01])),
+            finalize_withdrawal_batch_count: Some(U256::ZERO),
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        });
+        let actual = witness.parent_header.hash_slow();
+        let expected = config.chain_spec().genesis_hash();
+        assert_ne!(actual, expected);
+
+        assert_eq!(
+            prove_zone_batch(&config, witness),
+            Err(Error::GenesisHashMismatch { expected, actual })
         );
     }
 
@@ -1294,7 +1329,7 @@ mod tests {
     fn binds_the_initial_tempo_checkpoint_before_block_execution() {
         let mut witness = minimal_batch_witness();
         witness.zone_blocks.push(ZoneBlock {
-            number: 1,
+            number: 2,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             timestamp_millis_part: 0,
@@ -1320,7 +1355,7 @@ mod tests {
     fn initial_tempo_checkpoint_binding_precedes_header_import_validation() {
         let mut witness = minimal_batch_witness();
         witness.zone_blocks.push(ZoneBlock {
-            number: 1,
+            number: 2,
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             timestamp_millis_part: 0,
