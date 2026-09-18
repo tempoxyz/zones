@@ -29,6 +29,7 @@ use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, PoolTransaction as _, TransactionPool,
     ValidPoolTransaction, error::InvalidPoolTransactionError,
@@ -50,7 +51,7 @@ use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
-use crate::{ZonePayloadAttributes, ZonePayloadTypes};
+use crate::{ZonePayloadAttributes, ZonePayloadTypes, prewarming::PrewarmingExecutionContext};
 
 /// Default empty-batch cadence: every 120 zone blocks (~60 sec at Tempo's 500 ms block time).
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
@@ -124,6 +125,7 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
+            task_executor: ctx.task_executor().clone(),
             withdrawal_batch_interval_blocks: self.withdrawal_batch_interval_blocks,
             withdrawal_reveal_encryptor: self.withdrawal_reveal_encryptor.clone(),
         })
@@ -139,6 +141,8 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: ZoneEvmConfig,
+    /// Runs disposable simulations on Reth's dedicated prewarming pool.
+    task_executor: TaskExecutor,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data for batch finalization.
@@ -219,7 +223,7 @@ where
         };
         let mut builder = self
             .evm_config
-            .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
+            .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes.clone())
             .map_err(PayloadBuilderError::other)?;
         let base_fee = builder.evm().block().basefee;
         let block_number: u64 = builder
@@ -233,6 +237,17 @@ where
             warn!(%err, "failed to apply pre-execution changes");
             PayloadBuilderError::Internal(err.into())
         })?;
+
+        // Prewarm L1 reads in parallel with canonical `advanceTempo` (the pool bounds concurrency).
+        let prewarming = PrewarmingExecutionContext {
+            provider: self.provider.clone(),
+            evm_config: self.evm_config.clone(),
+            parent_hash: parent_header.hash(),
+            parent_header: (*parent_header).clone(),
+            next_block_env_attributes,
+            chain_id,
+        }
+        .start(&self.task_executor, prepared);
 
         // Execute advanceTempo system transaction — exactly one per zone block.
         builder
@@ -248,6 +263,7 @@ where
                 );
                 err
             })?;
+        drop(prewarming);
 
         // Execute pool transactions until either all of them fit or their packed RLP bytes reach
         // the size budget
@@ -687,15 +703,44 @@ pub fn build_advance_tempo_tx(
     prepared: &PreparedL1Block,
     chain_id: u64,
 ) -> Recovered<TempoTxEnvelope> {
-    // RLP-encode the Tempo header
+    build_advance_tempo_tx_from_parts(
+        prepared.header.header(),
+        prepared.queued_deposits.clone(),
+        prepared.decryptions.clone(),
+        prepared.enabled_tokens.clone(),
+        chain_id,
+    )
+}
+
+/// Consume a throwaway prepared block without cloning its calldata vectors.
+pub(crate) fn build_advance_tempo_tx_owned(
+    prepared: PreparedL1Block,
+    chain_id: u64,
+) -> Recovered<TempoTxEnvelope> {
+    build_advance_tempo_tx_from_parts(
+        prepared.header.header(),
+        prepared.queued_deposits,
+        prepared.decryptions,
+        prepared.enabled_tokens,
+        chain_id,
+    )
+}
+
+fn build_advance_tempo_tx_from_parts(
+    header: &TempoHeader,
+    deposits: Vec<abi::QueuedDeposit>,
+    decryptions: Vec<abi::DecryptionData>,
+    enabled_tokens: Vec<abi::EnabledToken>,
+    chain_id: u64,
+) -> Recovered<TempoTxEnvelope> {
     let mut header_rlp = Vec::new();
-    prepared.header.header().encode(&mut header_rlp);
+    header.encode(&mut header_rlp);
 
     let calldata = abi::IZoneInbox::advanceTempoCall {
         header: Bytes::from(header_rlp),
-        deposits: prepared.queued_deposits.clone(),
-        decryptions: prepared.decryptions.clone(),
-        enabledTokens: prepared.enabled_tokens.clone(),
+        deposits,
+        decryptions,
+        enabledTokens: enabled_tokens,
     }
     .abi_encode();
 
