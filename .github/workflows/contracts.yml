@@ -225,6 +225,10 @@ jobs:
             crates/contracts/out
           key: tempo-forge-specs-v1-${{ runner.os }}-${{ steps.foundry-ref.outputs.sha }}-${{ env.TEMPO_FOUNDRY_REF }}-${{ steps.contracts-key.outputs.tree }}
 
+      - name: Check contract sizes with Tempo-capable Forge
+        working-directory: crates/contracts
+        run: '"$GITHUB_WORKSPACE/foundry/target/release/forge" build --sizes --skip test'
+
       - name: Run Forge tests (zone specs)
         working-directory: crates/contracts
         run: |
