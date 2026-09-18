@@ -6,9 +6,11 @@ the enclave performs no RPC or filesystem access.
 
 ## Protocol
 
-The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` when `--use-tcp` is
-enabled. Each connection carries one request and one response, then closes. A frame consists of a
-four-byte, big-endian payload length followed by a UTF-8 JSON payload.
+The server listens on AF_VSOCK port `5000` by default. Every connection uses TLS 1.3 with a
+single-use enclave key bound to fresh Nitro evidence; there is no plaintext mode. The host proxy
+forwards the challenge preface and TLS ciphertext without seeing witness or response plaintext.
+Inside TLS, JSON messages use the chunked framing protocol (1 MiB per frame, 512 MiB per request by
+default).
 
 Requests use this envelope:
 
@@ -16,7 +18,6 @@ Requests use this envelope:
 {
   "version": 1,
   "requestId": "caller-selected-id",
-  "tempoChainId": 42431,
   "witness": {}
 }
 ```
@@ -25,7 +26,7 @@ Requests use this envelope:
 compiled into Tempo plus custom genesis files configured by the enclave operator through a
 `--tempo-genesis` directory. A request cannot supply its own chain specification. Responses have
 `status: "ok"` with a `zone_spf::BatchOutput`, or `status: "error"` with a stable `code` and a
-diagnostic `message`. The requested `tempoChainId` must match the witness's `parentChainId`.
+diagnostic `message`.
 
 After successful SPF execution, the enclave derives the canonical Zone batch digest and asks the
 Nitro Secure Module to place it in the signed attestation document's `user_data`. A successful
@@ -35,13 +36,10 @@ the NSM request fails.
 
 Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
 operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
-pass `--port` to change the selected transport's port. The maximum request payload defaults to 512
-MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. Logical JSON messages
-are streamed as fragments followed by an empty terminator frame. Each frame is limited to 1 MiB.
+pass `--port` to change the selected transport's port. The maximum request payload can be changed
+with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`.
 
-TCP mode is intended for development of framing, chain validation, and SPF error handling. The
-binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
-outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
+TCP mode is for enclave-side development and still requires the Nitro Secure Module.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
 JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
 override a built-in Tempo network.
@@ -99,11 +97,11 @@ The EIF uses Linux 6.6.79 and its matching NSM driver, built from a pinned AWS N
 commit. Changing either one changes the EIF PCR measurements, so the expected measurements must
 also be updated.
 
-Verifying a batch does not use local randomness or wall-clock time. If we add key or nonce
-generation or KMS/HTTPS calls, configure `random.trust_bootloader=off random.trust_cpu=off` and
-require `rng_current` to be `nsm-hwrng`. If we add KMS/HTTPS calls, expiring credentials, protocol
-timestamps, or time-based replay checks, use `kvm-clock`. Operational timeouts affect only liveness
-and can use a monotonic clock.
+Each TLS connection generates a fresh private key inside the enclave. The EIF builder therefore
+forces `random.trust_bootloader=off random.trust_cpu=off`, and enclave startup fails closed unless
+`rng_current` is `nsm-hwrng`. Certificate freshness comes from the client nonce and NSM-signed
+timestamp, so the enclave does not need a trusted wall clock.
+Operational timeouts affect only liveness and can use a monotonic clock.
 
 The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
 `PROVER_EIF_PATH`, `ENCLAVE_NAME`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_CID`,

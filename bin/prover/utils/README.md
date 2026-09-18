@@ -30,15 +30,22 @@ must not be used directly as the inclusive `--from-block` value.
 cargo run --release -p tempo-zone-prover-utils -- prove \
   --input witness.json \
   --target "$PROVER_TARGET" \
+  --attestation-policy prover-attestation-policy.json \
   --output proof.json
 ```
 
-The target is a `HOST:PORT` TCP endpoint, such as the Nitro host's TCP-to-vsock proxy.
-The command handles request framing and saves the complete successful JSON response, including
-`output` and `proofBundle` (`verifierConfig` and the attestation in `proof`). No RPC endpoints,
-chain specification, or wallet key are needed. The witness is forwarded to the remote prover
-without local replay or conversion to this CLI version's witness schema.
+The policy pins PCR0–2 and limits evidence age; each PCR may list multiple deployment values:
 
-Protocol/version mismatches, missing proofs, and prover errors fail the command without writing
-the output file. A saved response is not independently authenticated by the CLI; submit the proof
-and its public commitments to the on-chain verifier to check the attestation.
+```json
+{
+  "pcrs": {
+    "0": ["<96 lowercase-or-uppercase hex characters>"],
+    "1": ["<96 hex characters>"],
+    "2": ["<96 hex characters>"]
+  },
+  "max_age_seconds": 300
+}
+```
+
+The command authenticates Nitro-attested TLS before sending the witness and only writes successful
+responses. The saved batch proof is still verified on-chain during settlement.

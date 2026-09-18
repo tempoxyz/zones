@@ -17,6 +17,7 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
+use zone_prover::attested_transport::RemoteProverConfig;
 
 use crate::{
     ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
@@ -271,6 +272,10 @@ async fn configure_sequencing(
         || p2p_config
             .as_ref()
             .is_some_and(|config| !config.is_rpc_only());
+    let remote_prover = load_remote_prover_config(
+        args.prover_address.clone(),
+        args.prover_attestation_policy.as_deref(),
+    )?;
     if rpc_only && args.sequencer_key_file.is_some() {
         return Err(eyre::eyre!(
             "this node is `rpc_only` in the manifest, so --sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
@@ -281,8 +286,8 @@ async fn configure_sequencing(
         "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
     );
     eyre::ensure!(
-        !args.enable_prover || !should_sequence_blocks || args.prover_address.is_some(),
-        "settlement proving requires --sequencer.prover-address for Nitro attestation"
+        !args.enable_prover || !should_sequence_blocks || remote_prover.is_some(),
+        "settlement proving requires --sequencer.prover-address and --sequencer.prover-attestation-policy"
     );
 
     if should_sequence_blocks {
@@ -303,16 +308,13 @@ async fn configure_sequencing(
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
             enable_prover: args.enable_prover,
-            prover_address: args.prover_address.clone(),
+            remote_prover: remote_prover.clone(),
         });
     } else if args.enable_prover {
         node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
             zone_id,
             batch_anchor_config: BatchAnchorConfig::default(),
-            prover_runtime: args
-                .prover_address
-                .clone()
-                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+            prover_runtime: remote_prover.map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
         });
     }
     if let Some(config) = p2p_config {
@@ -593,9 +595,33 @@ pub struct ZoneArgs {
         long = "sequencer.prover-address",
         env = "SEQUENCER_PROVER_ADDRESS",
         value_name = "HOST:PORT",
-        requires = "enable_prover"
+        requires_all = ["enable_prover", "prover_attestation_policy"]
     )]
     pub prover_address: Option<String>,
+
+    /// JSON allowlist used to authenticate the remote prover's Nitro attestation.
+    #[arg(
+        long = "sequencer.prover-attestation-policy",
+        env = "SEQUENCER_PROVER_ATTESTATION_POLICY",
+        value_name = "PATH",
+        requires_all = ["enable_prover", "prover_address"]
+    )]
+    pub prover_attestation_policy: Option<PathBuf>,
+}
+
+fn load_remote_prover_config(
+    address: Option<String>,
+    policy: Option<&std::path::Path>,
+) -> eyre::Result<Option<RemoteProverConfig>> {
+    match (address, policy) {
+        (None, None) => Ok(None),
+        (Some(address), Some(policy)) => RemoteProverConfig::from_policy_file(address, policy)
+            .map(Some)
+            .map_err(Into::into),
+        _ => Err(eyre::eyre!(
+            "--sequencer.prover-address and --sequencer.prover-attestation-policy must be provided together"
+        )),
+    }
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
