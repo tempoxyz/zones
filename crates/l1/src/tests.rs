@@ -1755,6 +1755,38 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
 }
 
 #[test]
+fn token_pause_and_unpause_invalidate_cached_token_storage() {
+    use tempo_contracts::precompiles::ITIP20::PauseStateUpdate;
+
+    for paused in [true, false] {
+        let subscriber = test_subscriber(9);
+        let token = address!("20c0000000000000000000000000000000000000");
+        let slot = B256::with_last_byte(15);
+        subscriber
+            .l1_state_cache
+            .lock()
+            .set(token, slot, 0, B256::ZERO);
+        let log = Log {
+            inner: alloy_primitives::Log {
+                address: token,
+                data: PauseStateUpdate {
+                    updater: Address::ZERO,
+                    isPaused: paused,
+                }
+                .encode_log_data(),
+            },
+            ..Default::default()
+        };
+        let block = NumHash::new(1, B256::with_last_byte(1));
+        let receipt = make_receipt_with_logs(block.number, block.hash, vec![log]);
+        let (_, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+        assert!(invalidated.contains(&token));
+        subscriber.update_l1_state_anchor(1, &invalidated);
+        assert_eq!(subscriber.l1_state_cache.lock().get(token, slot, 1), None);
+    }
+}
+
+#[test]
 fn pause_events_invalidate_cached_portal_storage() {
     let subscriber = test_subscriber(9);
     let portal = subscriber.config.portal_address;

@@ -212,9 +212,16 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 }
 
 fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    forge_deployed_bytecode_at(&format!("{contract}.sol"), contract)
+}
+
+fn forge_deployed_bytecode_at(
+    source: &str,
+    contract: &str,
+) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
-    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
+    let path = specs_dir.join(format!("{source}/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
         format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
@@ -1122,6 +1129,34 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         let (genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
+        let signer = l1_dev_signer();
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
+            l1_ws_url.to_string(),
+            portal_address,
+            next_unique_chain_id(),
+            Some(genesis),
+            signer,
+            withdrawal_batch_interval_blocks,
+            None,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_from_l1_with_forced_exits(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        withdrawal_batch_interval_blocks: u64,
+    ) -> eyre::Result<Self> {
+        let (mut genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+
+        // Explicit Zone activation; L1 uses the branch's compiled portal in test genesis.
+        // This tests the flow, not Tempo's eventual coordinated runtime installation.
+        genesis
+            .config
+            .extra_fields
+            .insert("t13Time".into(), serde_json::json!(0));
         let signer = l1_dev_signer();
         Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_ws_url.to_string(),

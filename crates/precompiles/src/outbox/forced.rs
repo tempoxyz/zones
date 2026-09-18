@@ -1,7 +1,11 @@
-//! Inbox-only building block. Authorization and replay processing are connected in PR3.
+//! Atomic debit and withdrawal construction for authenticated inbox requests.
 use super::*;
 use crate::error::ZonePrecompileError;
-use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
+use tempo_precompiles::{
+    storage::Slot,
+    tip20::{Recipient, slots},
+    tip403_registry::TIP403Registry,
+};
 
 /// Private authenticated input; never emitted as a public L1 attribution.
 #[derive(Clone, Copy, Debug)]
@@ -44,8 +48,7 @@ impl ForcedWithdrawalError {
 
 impl ZoneOutbox {
     /// Debit an already root-authorized full balance and enqueue a plain withdrawal atomically.
-    /// No ABI selector exposes this operation. PR3 calls it after authorization and replay checks.
-    #[allow(dead_code)]
+    /// No ABI selector exposes this operation. The inbox checks authorization and replay first.
     pub(crate) fn request_forced_withdrawal<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
@@ -96,6 +99,11 @@ impl ZoneOutbox {
         if token.balance_of(ITIP20::balanceOfCall { account })? != amount256 {
             // Balance was checked by the inbox immediately before this call. Drift is fatal.
             return Err(TempoPrecompileError::under_overflow().into());
+        }
+        // TIP-20 storage is Zone-local; the native check below does not observe L1 pauses.
+        // Enforce token pause at the authenticated execution anchor before any debit.
+        if l1.read_l1(&Slot::<bool>::new(slots::PAUSED, request.token))? {
+            return Err(ForcedWithdrawalError::PolicyRejected);
         }
         token
             .check_not_paused()
