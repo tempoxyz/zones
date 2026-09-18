@@ -29,6 +29,14 @@ helpers. Stateful execution lives in the Zone inbox and outbox precompiles.
    existing pending-credit recovery path if policy prevents an immediate mint.
    Admission compensation is not refunded.
 
+## Activation
+
+L1 admission activates when a coordinated Tempo hard fork installs the forced-exit
+portal runtime. Historical portal runtimes remain in use before that fork and do
+not support forced requests. `forcedExitVersion()` is a pure format accessor that
+always returns 1 in the new runtime; it is not an activation flag. There is no
+version storage slot, operator enable transaction, or activation-time version bump.
+
 ## Status and usage
 
 Production admission remains disabled until a coordinated protocol upgrade
