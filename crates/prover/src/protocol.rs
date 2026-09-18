@@ -5,7 +5,7 @@ use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 use zone_spf::{BatchOutput, BatchWitness, PublicInputs};
 
 /// Current version of the prover request and response wire format.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Canonical verifier configuration for the first Nitro-backed verifier policy.
 pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
@@ -37,7 +37,7 @@ sol! {
 
 /// Proof material returned by an attesting prover.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProofBundle {
     /// Opaque configuration passed to `IVerifier` and committed by the settlement certificate.
     pub verifier_config: Bytes,
@@ -47,7 +47,7 @@ pub struct ProofBundle {
 
 /// Request to verify a Zone batch witness against a trusted Tempo chain.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyRequest {
     /// Wire-format version expected by the sender.
     pub version: u16,
@@ -62,7 +62,8 @@ pub struct VerifyRequest {
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
-    tag = "status"
+    tag = "status",
+    deny_unknown_fields
 )]
 pub enum VerifyResponse {
     /// The witness was verified successfully.
@@ -96,7 +97,7 @@ pub enum VerifyResponse {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// The request is not valid JSON or does not match the request schema.
+    /// The request is not valid CBOR or does not match the request schema.
     MalformedRequest,
     /// The request uses a wire-format version unsupported by the prover.
     UnsupportedVersion,

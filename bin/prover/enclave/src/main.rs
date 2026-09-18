@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long, env = "SPF_PORT", default_value_t = 5000)]
     port: u32,
 
-    /// Maximum accepted JSON request size in bytes.
+    /// Maximum accepted CBOR request size in bytes.
     #[arg(
         long,
         env = "SPF_MAX_REQUEST_BYTES",
