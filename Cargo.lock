@@ -11983,6 +11983,7 @@ dependencies = [
  "exithatch",
  "eyre",
  "futures",
+ "jsonrpsee",
  "k256",
  "rand 0.10.2",
  "reth-evm",
