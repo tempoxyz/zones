@@ -51,7 +51,10 @@ impl SpfConfig {
 /// Public values that the verifier binds to a submitted batch proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct PublicInputs {
     /// Parent Tempo chain ID used to domain-separate the Zone EVM chain ID.
     pub parent_chain_id: u64,
@@ -70,12 +73,16 @@ pub struct PublicInputs {
 /// Complete prover input for one Zone batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct BatchWitness {
     /// Values committed by the verifier.
     pub public_inputs: PublicInputs,
     /// Canonical Tempo header of the first Zone block's parent. Its hash and
     /// state root anchor the batch and its execution fields seed replay.
+    #[cfg_attr(feature = "serde", serde(with = "tempo_header_serde"))]
     pub parent_header: TempoHeader,
     /// Zone blocks in execution order.
     pub zone_blocks: Vec<ZoneBlock>,
@@ -91,7 +98,10 @@ pub struct BatchWitness {
 /// Typed inputs for the opening ZoneInbox system transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub enum TempoImport {
     Full {
         header_rlp: Bytes,
@@ -123,7 +133,10 @@ impl TempoImport {
 /// Zone block input, including its system-call inputs and raw user transactions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct ZoneBlock {
     pub number: u64,
     pub parent_hash: B256,
@@ -142,7 +155,10 @@ pub struct ZoneBlock {
 /// Stateless Zone state input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct ZoneStateWitness {
     /// Deduplicated RLP-encoded nodes used for Zone state reads.
     pub node_pool: Vec<Bytes>,
@@ -153,7 +169,10 @@ pub struct ZoneStateWitness {
 /// Stateless Tempo state input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct TempoStateWitness {
     /// RLP-encoded header for the Tempo checkpoint bound in the initial Zone
     /// state. Its decoded state root anchors initial Tempo reads.
@@ -165,7 +184,10 @@ pub struct TempoStateWitness {
 /// Commitments returned by a successful Zone batch transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct BatchOutput {
     /// Number of the final executed Zone header committed by `block_transition.nextBlockHash`.
     pub next_zone_height: u64,
@@ -184,7 +206,64 @@ pub struct BatchOutput {
 /// The portion of `ZoneOutbox.lastBatch` independently committed by the SPF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(rename_all = "camelCase", deny_unknown_fields)
+)]
 pub struct LastBatchCommitment {
     pub withdrawal_batch_index: u64,
+}
+
+/// Preserves `TempoHeader`'s structured JSON while encoding it as compact RLP bytes in CBOR.
+/// Necessary because Tempo's Serde implementation does not provide this format-sensitive adapter.
+#[cfg(feature = "serde")]
+mod tempo_header_serde {
+    use super::TempoHeader;
+    use alloy_rlp::Decodable as _;
+    use core::fmt;
+    use serde::{Deserialize as _, Serialize as _};
+
+    pub(super) fn serialize<S>(header: &TempoHeader, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            header.serialize(serializer)
+        } else {
+            serializer.serialize_bytes(&alloy_rlp::encode(header))
+        }
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<TempoHeader, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            TempoHeader::deserialize(deserializer)
+        } else {
+            deserializer.deserialize_bytes(TempoHeaderVisitor)
+        }
+    }
+
+    struct TempoHeaderVisitor;
+
+    impl serde::de::Visitor<'_> for TempoHeaderVisitor {
+        type Value = TempoHeader;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an RLP-encoded Tempo header byte string")
+        }
+
+        fn visit_bytes<E>(self, encoded: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let mut input = encoded;
+            let header = TempoHeader::decode(&mut input).map_err(E::custom)?;
+            if !input.is_empty() {
+                return Err(E::custom("trailing bytes in RLP-encoded Tempo header"));
+            }
+            Ok(header)
+        }
+    }
 }
