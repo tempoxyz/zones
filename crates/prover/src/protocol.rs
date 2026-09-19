@@ -60,9 +60,8 @@ pub struct VerifyRequest {
 /// Result of processing a [`VerifyRequest`].
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(
-    rename_all = "camelCase",
+    rename_all = "snake_case",
     rename_all_fields = "camelCase",
-    tag = "status",
     deny_unknown_fields
 )]
 pub enum VerifyResponse {
@@ -162,11 +161,11 @@ mod tests {
         })
         .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let error = &json["error"];
 
-        assert_eq!(json["status"], "error");
-        assert_eq!(json["version"], PROTOCOL_VERSION);
-        assert_eq!(json["requestId"], "wire-test");
-        assert_eq!(json["code"], "unsupported_chain");
+        assert_eq!(error["version"], PROTOCOL_VERSION);
+        assert_eq!(error["requestId"], "wire-test");
+        assert_eq!(error["code"], "unsupported_chain");
     }
 
     #[test]

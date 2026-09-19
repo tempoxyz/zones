@@ -10,13 +10,13 @@ The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` whe
 enabled. Each connection carries one request and one response, then closes. A frame consists of a
 four-byte, big-endian payload length followed by a CBOR payload.
 
-Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `1`.
+Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `2`.
 The witness's byte-heavy fields are encoded as CBOR byte strings rather than human-readable hex.
 Decoding is schema-driven and rejects unknown, duplicate, or trailing request data. The prover
 accepts chain IDs compiled into Tempo plus custom genesis files configured by the enclave operator
 through a `--tempo-genesis` directory. A request cannot supply its own chain
-specification. Responses use `zone_prover::VerifyResponse`: `status: "ok"` includes a
-`zone_spf::BatchOutput`, while `status: "error"` includes a stable `code` and diagnostic `message`.
+specification. Responses use the externally tagged `zone_prover::VerifyResponse`: `ok` includes a
+`zone_spf::BatchOutput`, while `error` includes a stable `code` and diagnostic `message`.
 
 After successful SPF execution, the enclave derives the canonical Zone batch digest and asks the
 Nitro Secure Module to place it in the signed attestation document's `user_data`. A successful
