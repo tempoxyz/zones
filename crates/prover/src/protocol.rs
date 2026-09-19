@@ -5,7 +5,7 @@ use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 use zone_spf::{BatchOutput, BatchWitness, PublicInputs};
 
 /// Current version of the prover request and response wire format.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Canonical verifier configuration for the first Nitro-backed verifier policy.
 pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
@@ -21,6 +21,7 @@ sol! {
         uint64 anchorBlockNumber;
         bytes32 anchorBlockHash;
         uint64 expectedWithdrawalBatchIndex;
+        uint256 nextZoneHeight;
         bytes32 prevBlockHash;
         bytes32 nextBlockHash;
         bytes32 prevProcessedHash;
@@ -36,7 +37,7 @@ sol! {
 
 /// Proof material returned by an attesting prover.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProofBundle {
     /// Opaque configuration passed to `IVerifier` and committed by the settlement certificate.
     pub verifier_config: Bytes,
@@ -46,7 +47,7 @@ pub struct ProofBundle {
 
 /// Request to verify a Zone batch witness against a trusted Tempo chain.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifyRequest {
     /// Wire-format version expected by the sender.
     pub version: u16,
@@ -59,9 +60,9 @@ pub struct VerifyRequest {
 /// Result of processing a [`VerifyRequest`].
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(
-    rename_all = "camelCase",
+    rename_all = "snake_case",
     rename_all_fields = "camelCase",
-    tag = "status"
+    deny_unknown_fields
 )]
 pub enum VerifyResponse {
     /// The witness was verified successfully.
@@ -95,7 +96,7 @@ pub enum VerifyResponse {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// The request is not valid JSON or does not match the request schema.
+    /// The request is not valid CBOR or does not match the request schema.
     MalformedRequest,
     /// The request uses a wire-format version unsupported by the prover.
     UnsupportedVersion,
@@ -105,7 +106,7 @@ pub enum ErrorCode {
     VerificationFailed,
     /// The prover could not obtain an attestation from the Nitro Secure Module.
     AttestationUnavailable,
-    /// A physical frame or logical request exceeds its size limit.
+    /// The framed request exceeds the configured size limit.
     RequestTooLarge,
     /// The connection ended before the complete frame was received.
     TruncatedFrame,
@@ -127,6 +128,7 @@ pub fn nitro_batch_attestation_hash(public_inputs: &PublicInputs, output: &Batch
         anchorBlockNumber: public_inputs.anchor_block_number,
         anchorBlockHash: public_inputs.anchor_block_hash,
         expectedWithdrawalBatchIndex: public_inputs.expected_withdrawal_batch_index,
+        nextZoneHeight: alloy_primitives::U256::from(output.next_zone_height),
         prevBlockHash: output.block_transition.prevBlockHash,
         nextBlockHash: output.block_transition.nextBlockHash,
         prevProcessedHash: output.deposit_queue_transition.prevProcessedHash,
@@ -159,11 +161,11 @@ mod tests {
         })
         .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let error = &json["error"];
 
-        assert_eq!(json["status"], "error");
-        assert_eq!(json["version"], PROTOCOL_VERSION);
-        assert_eq!(json["requestId"], "wire-test");
-        assert_eq!(json["code"], "unsupported_chain");
+        assert_eq!(error["version"], PROTOCOL_VERSION);
+        assert_eq!(error["requestId"], "wire-test");
+        assert_eq!(error["code"], "unsupported_chain");
     }
 
     #[test]
@@ -175,6 +177,7 @@ mod tests {
     #[test]
     fn batch_attestation_hash_matches_solidity_golden_vector() {
         let output = BatchOutput {
+            next_zone_height: 14,
             block_transition: BlockTransition {
                 prevBlockHash: B256::with_last_byte(1),
                 nextBlockHash: B256::with_last_byte(2),
@@ -210,6 +213,12 @@ mod tests {
                 .is_none()
         );
         let digest = nitro_batch_attestation_hash(&public_inputs, &output);
+        let mut other_height = output.clone();
+        other_height.next_zone_height += 1;
+        assert_ne!(
+            nitro_batch_attestation_hash(&public_inputs, &other_height),
+            digest
+        );
         let mut other_zone = public_inputs.clone();
         other_zone.zone_id += 1;
         assert_ne!(nitro_batch_attestation_hash(&other_zone, &output), digest);
@@ -219,7 +228,7 @@ mod tests {
         assert_eq!(
             nitro_batch_attestation_hash(&public_inputs, &output),
             alloy_primitives::b256!(
-                "0xc01ffd959ca368959c0724a9de479a8fc678f36ff608cc0565f6cfd86e98202e"
+                "0x1a703e80dd395e4720d1c88c877ed9f7d77c03052a985133b25cbf3e2b745b9d"
             ),
         );
     }
@@ -227,6 +236,7 @@ mod tests {
     #[test]
     fn batch_attestation_hash_binds_token_enablement_progress() {
         let mut output = BatchOutput {
+            next_zone_height: 1,
             block_transition: BlockTransition {
                 prevBlockHash: B256::ZERO,
                 nextBlockHash: B256::ZERO,

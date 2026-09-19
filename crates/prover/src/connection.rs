@@ -1,21 +1,13 @@
-use std::io::{self, BufReader, Read, Write};
+use std::{convert::Infallible, io};
 
 use futures::{SinkExt as _, StreamExt as _};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::mpsc,
-};
-use tokio_util::{
-    bytes::Bytes,
-    codec::{Framed, LengthDelimitedCodec, LengthDelimitedCodecError},
-};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::codec::{Framed, LengthDelimitedCodec, LengthDelimitedCodecError};
 
-use crate::{ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION, VerifyResponse};
+use crate::{ErrorCode, PROTOCOL_VERSION, VerifyResponse};
 
-const CHANNEL_CAPACITY: usize = 2;
-
-/// A typed connection using the prover's length-delimited JSON protocol.
+/// A typed connection using the prover's length-delimited CBOR protocol.
 pub struct ProverConnection<T> {
     inner: Framed<T, LengthDelimitedCodec>,
     maximum: usize,
@@ -28,16 +20,11 @@ where
 {
     /// Wraps an I/O stream with the prover protocol and its maximum message size.
     pub fn new(io: IO, maximum: usize) -> Self {
-        Self::with_limits(io, MAX_FRAME_BYTES, maximum)
-    }
-
-    /// Wraps an I/O stream with the prover protocol and its maximum message and chunk size.
-    fn with_limits(io: IO, frame_maximum: usize, msg_maximum: usize) -> Self {
         Self {
             inner: LengthDelimitedCodec::builder()
-                .max_frame_length(frame_maximum)
+                .max_frame_length(maximum)
                 .new_framed(io),
-            maximum: msg_maximum,
+            maximum,
             last_received_bytes: None,
         }
     }
@@ -52,196 +39,49 @@ where
         &mut self,
         message: T,
     ) -> Result<usize, ProverConnectionError> {
-        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let frame_maximum = self.inner.codec().max_frame_length();
-        let maximum = self.maximum;
-        let worker = tokio::task::spawn_blocking(move || {
-            let mut writer = ChunkWriter::new(tx, frame_maximum, maximum);
-            match serde_json::to_writer(&mut writer, &message) {
-                Ok(()) => writer.finish().map_err(ProverConnectionError::Io),
-                Err(error) if error.io_error_kind() == Some(io::ErrorKind::InvalidData) => {
-                    Err(ProverConnectionError::MessageTooLarge { maximum })
-                }
-                Err(error) => Err(ProverConnectionError::Json(error)),
-            }
-        });
-
-        while let Some(frame) = rx.recv().await {
-            if let Err(error) = self.inner.send(frame).await {
-                drop(rx);
-                let _ = worker.await;
-                return Err(classify_io_error(
-                    error,
-                    self.inner.codec().max_frame_length(),
-                ));
-            }
-        }
-        join_worker(worker.await)?
+        let payload = join_worker(
+            tokio::task::spawn_blocking(move || {
+                minicbor_serde::to_vec(message).map_err(ProverConnectionError::CborEncode)
+            })
+            .await,
+        )??;
+        let bytes = payload.len();
+        self.inner
+            .send(payload.into())
+            .await
+            .map_err(|error| classify_io_error(error, self.maximum))?;
+        Ok(bytes)
     }
 
-    /// Receives and deserializes one chunked logical message.
+    /// Receives and deserializes a typed message.
     pub async fn receive<T: DeserializeOwned + Send + 'static>(
         &mut self,
     ) -> Result<Option<T>, ProverConnectionError> {
         self.last_received_bytes = None;
-        let Some(first) = self.inner.next().await else {
+        let Some(payload) = self.inner.next().await else {
             return Ok(None);
         };
-        let first = first
-            .map_err(|error| classify_io_error(error, self.inner.codec().max_frame_length()))?;
-
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let mut worker = tokio::task::spawn_blocking(move || {
-            serde_json::from_reader(BufReader::new(ChunkReader {
-                rx,
-                current: Bytes::new(),
-            }))
-            .map_err(ProverConnectionError::Json)
-        });
-        let (mut total, mut frame) = (0usize, first);
-        while !frame.is_empty() {
-            total = total.saturating_add(frame.len());
-            if total > self.maximum {
-                drop(tx);
-                let _ = worker.await;
-                return Err(ProverConnectionError::MessageTooLarge {
-                    maximum: self.maximum,
-                });
-            }
-            if tx.send(frame.freeze()).await.is_err() {
-                return Err(worker_error_before_terminator(worker.await));
-            }
-            frame = tokio::select! {
-                biased; // Prefer decoder failure over another ready frame from the peer.
-                result = &mut worker => return Err(worker_error_before_terminator(result)),
-                frame = self.inner.next() => match frame {
-                    Some(Ok(frame)) => frame,
-                    Some(Err(error)) => {
-                        drop(tx);
-                        let _ = worker.await;
-                        return Err(classify_io_error(
-                            error,
-                            self.inner.codec().max_frame_length(),
-                        ));
-                    }
-                    None => {
-                        drop(tx);
-                        let _ = worker.await;
-                        return Err(ProverConnectionError::TruncatedFrame);
-                    }
-                },
-            };
-        }
-        drop(tx);
-        self.last_received_bytes = Some(total);
-        let value = join_worker(worker.await)??;
-        Ok(Some(value))
-    }
-}
-
-/// Streams serialized JSON into bounded physical protocol frames.
-struct ChunkWriter {
-    tx: mpsc::Sender<Bytes>,
-    buffer: Vec<u8>,
-    max_frame_bytes: usize,
-    max_message_bytes: usize,
-    total: usize,
-}
-
-impl ChunkWriter {
-    fn new(tx: mpsc::Sender<Bytes>, max_frame_bytes: usize, max_message_bytes: usize) -> Self {
-        Self {
-            tx,
-            buffer: Vec::with_capacity(max_frame_bytes),
-            max_frame_bytes,
-            max_message_bytes,
-            total: 0,
-        }
-    }
-
-    fn push(&self, frame: Bytes) -> io::Result<()> {
-        self.tx
-            .blocking_send(frame)
-            .map_err(|_| io::ErrorKind::BrokenPipe.into())
-    }
-
-    fn finish(mut self) -> io::Result<usize> {
-        if !self.buffer.is_empty() {
-            let frame = Bytes::from(std::mem::take(&mut self.buffer));
-            self.push(frame)?;
-        }
-        self.push(Bytes::new())?;
-        Ok(self.total)
-    }
-}
-
-impl Write for ChunkWriter {
-    fn write(&mut self, mut input: &[u8]) -> io::Result<usize> {
-        let written = input.len();
-        if self.total.saturating_add(written) > self.max_message_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "message exceeds the maximum of {} bytes",
-                    self.max_message_bytes
-                ),
-            ));
-        }
-        while !input.is_empty() {
-            let space = self.max_frame_bytes - self.buffer.len();
-            let take = space.min(input.len());
-            self.buffer.extend_from_slice(&input[..take]);
-            input = &input[take..];
-            if self.buffer.len() == self.max_frame_bytes {
-                let frame = Bytes::from(std::mem::take(&mut self.buffer));
-                self.push(frame)?;
-                self.buffer = Vec::with_capacity(self.max_frame_bytes);
-            }
-        }
-        self.total += written;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Exposes asynchronously received JSON fragments as a synchronous byte stream.
-struct ChunkReader {
-    rx: mpsc::Receiver<Bytes>,
-    current: Bytes,
-}
-
-impl Read for ChunkReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if output.is_empty() {
-            return Ok(0);
-        }
-        if self.current.is_empty() {
-            let Some(chunk) = self.rx.blocking_recv() else {
-                return Ok(0);
-            };
-            self.current = chunk;
-        }
-        let count = output.len().min(self.current.len());
-        output[..count].copy_from_slice(&self.current[..count]);
-        self.current = self.current.slice(count..);
-        Ok(count)
+        let payload = payload.map_err(|error| classify_io_error(error, self.maximum))?;
+        self.last_received_bytes = Some(payload.len());
+        join_worker(tokio::task::spawn_blocking(move || decode_exact(&payload)).await)?.map(Some)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProverConnectionError {
-    #[error("message or frame exceeds the maximum of {maximum} bytes")]
+    #[error("message exceeds the maximum of {maximum} bytes")]
     MessageTooLarge { maximum: usize },
     #[error("message frame is truncated")]
     TruncatedFrame,
-    #[error("message JSON is invalid: {0}")]
-    Json(#[source] serde_json::Error),
+    #[error("message CBOR encoding failed: {0}")]
+    CborEncode(#[source] minicbor_serde::error::EncodeError<Infallible>),
+    #[error("message CBOR is invalid: {0}")]
+    CborDecode(#[source] minicbor_serde::error::DecodeError),
+    #[error("message CBOR has trailing data")]
+    TrailingCborData,
     #[error("connection I/O failed: {0}")]
     Io(#[source] io::Error),
-    #[error("JSON worker panicked")]
+    #[error("CBOR worker panicked")]
     WorkerPanic,
 }
 
@@ -249,13 +89,15 @@ fn join_worker<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, Prover
     result.map_err(|_| ProverConnectionError::WorkerPanic)
 }
 
-fn worker_error_before_terminator<T>(
-    result: Result<Result<T, ProverConnectionError>, tokio::task::JoinError>,
-) -> ProverConnectionError {
-    match join_worker(result) {
-        Err(error) | Ok(Err(error)) => error,
-        Ok(Ok(_)) => ProverConnectionError::TruncatedFrame,
+/// Decodes one schema-driven CBOR value and requires it to consume the complete frame.
+fn decode_exact<T: DeserializeOwned>(payload: &[u8]) -> Result<T, ProverConnectionError> {
+    let decoder = minicbor::Decoder::new(payload);
+    let mut deserializer = minicbor_serde::Deserializer::from(decoder);
+    let value = T::deserialize(&mut deserializer).map_err(ProverConnectionError::CborDecode)?;
+    if deserializer.decoder().position() != payload.len() {
+        return Err(ProverConnectionError::TrailingCborData);
     }
+    Ok(value)
 }
 
 fn classify_io_error(error: io::Error, maximum: usize) -> ProverConnectionError {
@@ -278,22 +120,30 @@ pub fn request_error_response(error: &ProverConnectionError) -> VerifyResponse {
     let (code, message) = match error {
         ProverConnectionError::MessageTooLarge { maximum } => (
             ErrorCode::RequestTooLarge,
-            format!("request or frame exceeds the maximum of {maximum} bytes"),
+            format!("request payload exceeds the maximum of {maximum} bytes"),
         ),
         ProverConnectionError::TruncatedFrame => (
             ErrorCode::TruncatedFrame,
             "request frame is truncated".into(),
         ),
-        ProverConnectionError::Json(error) => (
+        ProverConnectionError::CborDecode(error) => (
             ErrorCode::MalformedRequest,
-            format!("invalid request JSON: {error}"),
+            format!("invalid request CBOR: {error}"),
+        ),
+        ProverConnectionError::CborEncode(error) => (
+            ErrorCode::InternalError,
+            format!("CBOR encoding failed: {error}"),
+        ),
+        ProverConnectionError::TrailingCborData => (
+            ErrorCode::MalformedRequest,
+            "request CBOR has trailing data".into(),
         ),
         ProverConnectionError::Io(error) => (
             ErrorCode::InternalError,
             format!("frame I/O failed: {error}"),
         ),
         ProverConnectionError::WorkerPanic => {
-            (ErrorCode::InternalError, "JSON worker panicked".into())
+            (ErrorCode::InternalError, "CBOR worker panicked".into())
         }
     };
     VerifyResponse::Error {
@@ -306,115 +156,202 @@ pub fn request_error_response(error: &ProverConnectionError) -> VerifyResponse {
 
 #[cfg(test)]
 mod tests {
+    use alloy_consensus::Header;
+    use alloy_primitives::{Address, B256, Bytes};
+    use reth_trie_common::EMPTY_ROOT_HASH;
+    use tempo_primitives::TempoHeader;
+    use tokio::io::AsyncWriteExt as _;
+    use zone_spf::{
+        BatchWitness, PublicInputs, TempoImport, TempoStateWitness, ZoneBlock, ZoneStateWitness,
+    };
+
     use super::*;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use crate::VerifyRequest;
 
     #[tokio::test]
-    async fn chunked_round_trip_and_metrics() {
-        let (client, server) = tokio::io::duplex(7);
-        let mut client = ProverConnection::with_limits(client, 5, usize::MAX);
-        let mut server = ProverConnection::with_limits(server, 5, usize::MAX);
-        let value = "a long hexadecimal-ish 0123456789abcdef".to_string();
-        let expected = serde_json::to_vec(&value).unwrap().len();
-        let send = tokio::spawn(async move { client.send(value).await.map(|n| (n, client)) });
-        let received: String = server.receive().await.unwrap().unwrap();
-        let (sent, _) = send.await.unwrap().unwrap();
-        assert_eq!(received, "a long hexadecimal-ish 0123456789abcdef");
-        assert_eq!(sent, expected);
-        assert_eq!(server.last_received_bytes(), Some(expected));
-    }
+    async fn request_round_trip() {
+        let maximum = 1024 * 1024;
+        let (client, server) = tokio::io::duplex(maximum);
+        let mut client = ProverConnection::new(client, maximum);
+        let mut server = ProverConnection::new(server, maximum);
+        let request = VerifyRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "round-trip".into(),
+            witness: empty_witness(),
+        };
+        let sent_bytes = client.send(request).await.unwrap();
+        let received: VerifyRequest = server.receive().await.unwrap().unwrap();
 
-    #[tokio::test]
-    async fn exact_boundary_has_terminator() {
-        let (client, mut server) = tokio::io::duplex(64);
-        let mut connection = ProverConnection::with_limits(client, 3, usize::MAX);
-        connection.send(123_u32).await.unwrap();
-        let mut header = [0; 4];
-        server.read_exact(&mut header).await.unwrap();
-        assert_eq!(u32::from_be_bytes(header), 3);
-        let mut payload = [0; 3];
-        server.read_exact(&mut payload).await.unwrap();
-        server.read_exact(&mut header).await.unwrap();
-        assert_eq!(u32::from_be_bytes(header), 0);
-    }
+        assert_eq!(received.version, PROTOCOL_VERSION);
+        assert_eq!(received.request_id, "round-trip");
+        assert_eq!(server.last_received_bytes(), Some(sent_bytes));
 
-    #[tokio::test]
-    async fn rejects_truncation_oversize_and_missing_terminator() {
-        for raw in [&[0, 0, 0, 2, 1][..], &[0, 0, 0, 1, b'1'][..]] {
-            let (mut writer, reader) = tokio::io::duplex(32);
-            writer.write_all(raw).await.unwrap();
-            writer.shutdown().await.unwrap();
-            let error = ProverConnection::with_limits(reader, 4, usize::MAX)
-                .receive::<u32>()
-                .await
-                .unwrap_err();
-            assert!(matches!(error, ProverConnectionError::TruncatedFrame));
-        }
-        let (mut writer, reader) = tokio::io::duplex(32);
-        writer.write_all(&10_u32.to_be_bytes()).await.unwrap();
-        let error = ProverConnection::with_limits(reader, 4, usize::MAX)
-            .receive::<u32>()
-            .await
-            .unwrap_err();
+        let response = VerifyResponse::Error {
+            version: PROTOCOL_VERSION,
+            request_id: Some(received.request_id),
+            code: ErrorCode::VerificationFailed,
+            message: "round-trip".into(),
+        };
+        let sent_bytes = server.send(response).await.unwrap();
+        let received: VerifyResponse = client.receive().await.unwrap().unwrap();
         assert!(matches!(
-            error,
-            ProverConnectionError::MessageTooLarge { .. }
+            received,
+            VerifyResponse::Error {
+                request_id: Some(id),
+                code: ErrorCode::VerificationFailed,
+                ..
+            } if id == "round-trip"
+        ));
+        assert_eq!(client.last_received_bytes(), Some(sent_bytes));
+    }
+
+    #[test]
+    fn request_cbor_rejects_unknown_and_duplicate_fields() {
+        for field in ["unknown", "version"] {
+            let request = VerifyRequest {
+                version: PROTOCOL_VERSION,
+                request_id: "strict".into(),
+                witness: empty_witness(),
+            };
+            let mut encoded = minicbor_serde::to_vec(&request).unwrap();
+            assert_eq!(
+                encoded[0], 0xa3,
+                "VerifyRequest must encode as a three-field map"
+            );
+            encoded[0] = 0xa4;
+            // Deliberately omit the field value: strict schema rejection must happen at the key.
+            encoded.extend(minicbor_serde::to_vec(field).unwrap());
+
+            assert!(matches!(
+                decode_exact::<VerifyRequest>(&encoded),
+                Err(ProverConnectionError::CborDecode(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn response_rejects_deep_unknown_fields_without_traversing_them() {
+        let mut encoded = vec![0xa1, 0x65];
+        encoded.extend_from_slice(b"error");
+        encoded.extend_from_slice(&[0xa1, 0x66]);
+        encoded.extend_from_slice(b"nested");
+        encoded.extend(std::iter::repeat_n(0x81, 10_000));
+        encoded.push(0xf6);
+
+        assert!(matches!(
+            decode_exact::<VerifyResponse>(&encoded),
+            Err(ProverConnectionError::CborDecode(_))
         ));
     }
 
+    #[test]
+    fn cbor_keeps_byte_payloads_binary() {
+        let value = Bytes::from(vec![0xab; 1024]);
+        let encoded = minicbor_serde::to_vec(&value).unwrap();
+        let decoded: Bytes = decode_exact(&encoded).unwrap();
+
+        assert_eq!(decoded, value);
+        assert!(encoded.len() < serde_json::to_vec(&value).unwrap().len());
+    }
+
     #[tokio::test]
-    async fn malformed_json_fails_without_a_terminator() {
-        let (mut writer, reader) = tokio::io::duplex(32);
-        writer
-            .write_all(&[0, 0, 0, 4, b'n', b'o', b't', b'!'])
+    async fn rejects_oversized_and_truncated_frames() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        writer.write_all(&10_u32.to_be_bytes()).await.unwrap();
+        let error = ProverConnection::new(reader, 4)
+            .receive::<VerifyRequest>()
             .await
-            .unwrap();
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            ProverConnection::with_limits(reader, 4, usize::MAX).receive::<u32>(),
-        )
-        .await
-        .expect("malformed JSON must not wait for a terminator")
-        .unwrap_err();
+            .unwrap_err();
         assert!(matches!(
             request_error_response(&error),
             VerifyResponse::Error {
-                code: ErrorCode::MalformedRequest,
+                code: ErrorCode::RequestTooLarge,
+                ..
+            }
+        ));
+
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        writer.write_all(&[0, 0, 0, 2, 1]).await.unwrap();
+        writer.shutdown().await.unwrap();
+        let error = ProverConnection::new(reader, 4)
+            .receive::<VerifyRequest>()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            request_error_response(&error),
+            VerifyResponse::Error {
+                code: ErrorCode::TruncatedFrame,
                 ..
             }
         ));
     }
 
     #[tokio::test]
-    async fn logical_oversize_fails_without_a_terminator() {
-        let (mut writer, reader) = tokio::io::duplex(32);
-        writer
-            .write_all(&[0, 0, 0, 3, b'1', b'2', b'3', 0, 0, 0, 3, b'4', b'5', b'6'])
-            .await
-            .unwrap();
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            ProverConnection::with_limits(reader, 3, 5).receive::<u32>(),
-        )
-        .await
-        .expect("oversized JSON must not wait for a terminator")
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            ProverConnectionError::MessageTooLarge { maximum: 5 }
-        ));
+    async fn malformed_cbor_has_a_stable_error() {
+        for payload in [&[0xff][..], &[0x01, 0x02][..]] {
+            let (mut writer, reader) = tokio::io::duplex(1024);
+            writer
+                .write_all(&u32::try_from(payload.len()).unwrap().to_be_bytes())
+                .await
+                .unwrap();
+            writer.write_all(payload).await.unwrap();
+            let error = ProverConnection::new(reader, 1024)
+                .receive::<u8>()
+                .await
+                .unwrap_err();
+            let response = request_error_response(&error);
+            assert!(matches!(
+                response,
+                VerifyResponse::Error {
+                    request_id: None,
+                    code: ErrorCode::MalformedRequest,
+                    ..
+                }
+            ));
+        }
     }
 
-    #[tokio::test]
-    async fn sending_logical_oversize_reports_the_size_limit() {
-        let (client, _server) = tokio::io::duplex(32);
-        let error = ProverConnection::with_limits(client, 16, 3)
-            .send("abcd")
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ProverConnectionError::MessageTooLarge { maximum: 3 }
-        ));
+    fn empty_witness() -> BatchWitness {
+        let tempo_header = TempoHeader {
+            inner: Header {
+                number: 2,
+                state_root: EMPTY_ROOT_HASH,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        BatchWitness {
+            public_inputs: PublicInputs {
+                parent_chain_id: 42_431,
+                zone_id: 1,
+                tempo_block_number: 2,
+                anchor_block_number: 2,
+                anchor_block_hash: B256::ZERO,
+                expected_withdrawal_batch_index: 3,
+            },
+            parent_header: TempoHeader::default(),
+            zone_blocks: vec![ZoneBlock {
+                number: 1,
+                parent_hash: B256::ZERO,
+                timestamp: 1,
+                timestamp_millis_part: 2,
+                beneficiary: Address::ZERO,
+                tempo_import: TempoImport::CheckpointOnly {
+                    headers_rlp: vec![Bytes::from_static(&[0x01, 0x02])],
+                },
+                finalize_withdrawal_batch_count: None,
+                finalize_withdrawal_batch_encrypted_senders: vec![Bytes::from_static(&[0x03])],
+                transactions: vec![Bytes::from_static(&[0x04, 0x05])],
+            }],
+            zone_state_witness: ZoneStateWitness {
+                node_pool: vec![Bytes::from_static(&[0x06])],
+                bytecodes: vec![Bytes::from_static(&[0x07])],
+            },
+            tempo_state_witness: TempoStateWitness {
+                initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(tempo_header)),
+                node_pool: vec![Bytes::from_static(&[0x08])],
+            },
+            tempo_ancestry_headers: vec![Bytes::from_static(&[0x09])],
+        }
     }
 }

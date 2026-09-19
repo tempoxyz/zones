@@ -1341,6 +1341,9 @@ pub struct TempoStateWitness {
 
 /// Commitments returned by a successful zone batch transition.
 pub struct BatchOutput {
+    /// Number of the final executed Zone header.
+    pub next_zone_height: u64,
+
     /// Hash transition covering every zone block in the batch.
     pub block_transition: BlockTransition,
 
@@ -1436,7 +1439,7 @@ The stateless execution function must reject the witness on any failed check, mi
     Require the final `TempoState.tempoBlockNumber` to equal `public_inputs.tempo_block_number`. In direct mode, require `anchor_block_number == tempo_block_number`, no ancestry headers, and exact hash equality. In ancestry mode, require exactly `anchor_block_number - tempo_block_number` headers, validate their complete RLP, consecutive numbers, and parent hashes, and require the chain to end at `anchor_block_hash`. See [Anchor Block Validation](#anchor-block-validation).
 
 12. **Return the public output.**
-    Construct the [Batch Output](#batch-output) from the captured pre-state and final post-state. Set the next block hash to the final assembled header hash; set the next deposit hash and number and next enabled-token count to the final inbox values; and set the withdrawal queue hash and batch index from `ZoneOutbox.lastBatch`. For a batch beginning at block 1, substitute the zero portal sentinel for the block transition's previous hash.
+    Construct the [Batch Output](#batch-output) from the captured pre-state and final post-state. Set `next_zone_height` to the final assembled header number and the next block hash to its hash; set the next deposit hash and number and next enabled-token count to the final inbox values; and set the withdrawal queue hash and batch index from `ZoneOutbox.lastBatch`. For a batch beginning at block 1, substitute the zero portal sentinel for the block transition's previous hash.
 
 ### Tempo State Witness
 
@@ -1465,6 +1468,7 @@ struct NitroBatchAttestation {
     uint64 anchorBlockNumber;
     bytes32 anchorBlockHash;
     uint64 expectedWithdrawalBatchIndex;
+    uint256 nextZoneHeight;
     bytes32 prevBlockHash;
     bytes32 nextBlockHash;
     bytes32 prevProcessedHash;
@@ -1478,7 +1482,7 @@ struct NitroBatchAttestation {
 }
 ```
 
-`verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, and zone prevents cross-domain reuse because the portal is uniquely derived from the zone ID on that parent chain; binding both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
+`verifier` is the fixed `ZONE_VERIFIER_ADDRESS`, and `verifierConfigHash` is `keccak256(0x01)`. The remaining fields come from `PublicInputs` and `BatchOutput`. Binding the parent chain, verifier, and zone prevents cross-domain reuse because the portal is uniquely derived from the zone ID on that parent chain; binding the executed Zone height, both ends of every transition, the withdrawal index and hash, and the exact anchor prevents reuse for another batch.
 
 When checking the attestation, the Nitro verifier MUST reconstruct `parentChainId` from `block.chainid`, `verifier` from `address(this)`, and MUST require `msg.sender == portalAddress(zoneId)` using the same canonical TIP-1091 derivation as the SPF. Merely checking `zoneId == IZonePortal(msg.sender).zoneId()` is insufficient because an arbitrary contract can report that ID. It reconstructs the remaining digest fields from the arguments supplied by `ZonePortal` to `verify`; it MUST NOT trust domain values copied from the proof or prover witness.
 
@@ -1498,7 +1502,7 @@ The Nitro verifier MUST validate the COSE signature and certificate chain, enfor
 
 The settlement prover runs the state transition function inside a Nitro Enclave. The parent node collects the complete `BatchWitness`; the enclave performs no RPC or filesystem reads while handling it. A configured settlement sequencer MUST use a remote attesting prover. In-process execution is available for observational shadow validation but does not produce a settlement proof.
 
-The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by UTF-8 JSON. The request contains `version`, a caller-selected `requestId`, and `witness`. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification independently of the witness and derive the portal from its zone ID.
+The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by CBOR and is bounded by a configurable limit of 2 GiB by default. The request contains `version`, a caller-selected `requestId`, and `witness`; byte-heavy witness fields use CBOR byte strings rather than human-readable hex. Decoding is schema-driven and rejects unknown, duplicate, or trailing request data. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification independently of the witness and derive the portal from its zone ID.
 
 Errors use stable machine-readable categories: `malformed_request`, `unsupported_version`, `unsupported_chain`, `verification_failed`, `attestation_unavailable`, `request_too_large`, `truncated_frame`, and `internal_error`. A successful state transition for which the Nitro Secure Module cannot produce an attestation returns `attestation_unavailable`, not an unattested success.
 
@@ -1522,7 +1526,7 @@ The call takes the following parameters:
 | `withdrawalQueueHash` | Hash chain of withdrawals finalized in this batch (`0` if none) |
 | `verifierConfig` | Opaque payload for the verifier (domain separation, attestation data) |
 | `proof` | The proof or attestation produced by the proving backend |
-| `zoneHeight` | Strictly increasing zone height committed by the certificate |
+| `zoneHeight` | Strictly increasing final executed Zone height committed by the proof and certificate |
 | `signatures` | Distinct active-sequencer signatures meeting `sequencerThreshold` |
 
 The EIP-712 settlement commitment binds the Tempo chain, portal, zone ID, sequencer-set version,
@@ -1556,6 +1560,7 @@ interface IVerifier {
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
+        uint256 nextZoneHeight,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         TokenEnablementTransition calldata tokenEnablementTransition,
@@ -1566,7 +1571,7 @@ interface IVerifier {
 }
 ```
 
-The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)), and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex`. The `verifierConfig` and `proof` are opaque to the portal. Sequencer authorization is enforced separately by the portal's versioned threshold certificate.
+The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)), and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex`. It also forwards the exact `uint256 nextZoneHeight` supplied to `submitBatch`, without narrowing it; verification MUST bind this value to the final executed Zone header number before the portal stores it. The `verifierConfig` and `proof` are opaque to the portal. Sequencer authorization is enforced separately by the portal's versioned threshold certificate.
 
 ### Anchor Block Validation
 
@@ -1582,7 +1587,7 @@ If `recentTempoBlockNumber` is greater than `tempoBlockNumber`, the portal looks
 
 The proof must validate:
 
-1. The state transition from `prevBlockHash` to `nextBlockHash` is correct.
+1. The state transition from `prevBlockHash` to `nextBlockHash` is correct, and the final executed header number equals `nextZoneHeight`.
 2. The zone committed to `tempoBlockNumber` via `TempoState`.
 3. The zone's `tempoBlockHash` matches `anchorBlockHash` (direct), or the parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber` is valid (ancestry).
 4. `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`.

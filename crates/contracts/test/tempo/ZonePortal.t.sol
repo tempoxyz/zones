@@ -934,6 +934,18 @@ contract ZonePortalTest is BaseTest {
         bytes[] memory signatures = _quorumSignatures(
             _attestationDigestFor(portal, block.chainid, attestation), firstSigner, secondSigner
         );
+        vm.expectCall(
+            ZONE_VERIFIER_ADDRESS,
+            abi.encodeWithSelector(
+                IVerifier.verify.selector,
+                attestation.zoneId,
+                attestation.tempoBlockNumber,
+                attestation.anchorBlockNumber,
+                attestation.anchorBlockHash,
+                attestation.withdrawalBatchIndex,
+                batch.nextZoneHeight
+            )
+        );
         _submitQuorumBatch(portal, caller, batch, signatures);
         assertEq(portal.blockHash(), batch.blockTransition.nextBlockHash);
         assertEq(portal.zoneHeight(), batch.nextZoneHeight);

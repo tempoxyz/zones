@@ -5794,6 +5794,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "minicbor"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c12b4033ffaa92fbf9df03df38d19324f52bad130dd223f811734a8006dd2d69"
+
+[[package]]
+name = "minicbor-serde"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7abdec9761edcb452764c68564ae4b77ec62f6c1a361aa68f5de15fd788c679"
+dependencies = [
+ "minicbor",
+ "serde",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11928,18 +11944,19 @@ dependencies = [
  "alloy-provider",
  "alloy-rlp",
  "alloy-rpc-types-eth",
- "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
  "clap",
  "const-hex",
  "eyre",
  "futures",
+ "reqwest",
  "reth-cli",
  "serde",
  "serde_json",
  "tempo-alloy",
  "tempo-chainspec",
+ "tempo-precompiles",
  "tempo-primitives",
  "tempo-zone-contracts",
  "tokio",
@@ -13904,6 +13921,7 @@ dependencies = [
  "k256",
  "metrics",
  "parking_lot",
+ "rayon",
  "reth-metrics",
  "reth-primitives-traits",
  "reth-provider",
@@ -14068,6 +14086,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-revm",
  "reth-storage-api",
+ "reth-tasks",
  "reth-transaction-pool",
  "serde",
  "tempo-evm",
@@ -14134,6 +14153,8 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "futures",
+ "minicbor",
+ "minicbor-serde",
  "reth-trie-common",
  "serde",
  "serde_json",

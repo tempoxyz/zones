@@ -1110,6 +1110,12 @@ async fn resolve_ancestry_anchor(
 
 fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B256) -> Result<()> {
     ensure!(
+        output.next_zone_height == batch.zone_height,
+        "next Zone height mismatch: SPF {}, candidate {}",
+        output.next_zone_height,
+        batch.zone_height
+    );
+    ensure!(
         output.block_transition.prevBlockHash == expected_prev_hash,
         "previous Zone block commitment mismatch: SPF {}, canonical parent {}",
         output.block_transition.prevBlockHash,
@@ -1317,8 +1323,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shadow_output_comparison_preserves_raw_migration_cursor() {
+    fn comparison_fixture() -> (BatchData, BatchOutput) {
         let batch = BatchData {
             zone_height: 1,
             tempo_block_number: 1,
@@ -1333,7 +1338,8 @@ mod tests {
             withdrawal_queue_hash: B256::repeat_byte(9),
             withdrawal_batch_index: 10,
         };
-        let mut output = BatchOutput {
+        let output = BatchOutput {
+            next_zone_height: batch.zone_height,
             block_transition: BlockTransition {
                 prevBlockHash: batch.prev_block_hash,
                 nextBlockHash: batch.next_block_hash,
@@ -1353,6 +1359,25 @@ mod tests {
                 withdrawal_batch_index: batch.withdrawal_batch_index,
             },
         };
+        (batch, output)
+    }
+
+    #[test]
+    fn proof_output_must_match_settlement_height() {
+        let (batch, mut output) = comparison_fixture();
+        compare_output(&output, &batch, batch.prev_block_hash).unwrap();
+        output.next_zone_height += 1;
+        assert!(
+            compare_output(&output, &batch, batch.prev_block_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("next Zone height mismatch")
+        );
+    }
+
+    #[test]
+    fn shadow_output_comparison_preserves_raw_migration_cursor() {
+        let (batch, mut output) = comparison_fixture();
         compare_output(&output, &batch, batch.prev_block_hash).unwrap();
         output.token_enablement_transition.prevProcessedTokenCount = 7;
         assert!(

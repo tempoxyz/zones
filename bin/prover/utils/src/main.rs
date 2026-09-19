@@ -11,7 +11,6 @@ use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall as _, SolInterface as _};
 use clap::{Parser, Subcommand};
 use eyre::{Context, OptionExt, Result, bail, eyre};
@@ -29,18 +28,23 @@ use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_precompiles::outbox;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProofBundle, ProverConnection, VerifyRequest,
+    VerifyResponse,
 };
-use zone_rpc::{ZoneProvider, ZoneProviderConfig, types::ZoneExecutionWitness};
+use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoImport, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
 };
 
+mod verifier_request;
+mod verify;
+
 const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
 const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const LOG_QUERY_BLOCK_CHUNK: u64 = 1_000;
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 
@@ -69,6 +73,8 @@ enum Command {
     GenerateInput(GenerateInputArgs),
     /// Send a saved witness to a prover and save its output and proof.
     Prove(ProveArgs),
+    /// Verify a saved proof against the native L1 verifier using eth_call.
+    Verify(verify::VerifyArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -92,29 +98,21 @@ struct GenerateInputArgs {
     #[arg(long)]
     tempo_rpc_url: String,
 
-    /// The Zone chain specification used for SPF execution.
-    #[arg(
-        long,
-        value_name = "CHAIN_OR_PATH",
-        value_parser = <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parser()
-    )]
-    chain: Arc<ZoneChainSpec>,
-
-    /// Authenticated private Zone HTTP RPC URL validated against Zone discovery.
-    #[arg(long)]
-    zone_private_rpc_url: String,
+    /// The Zone genesis JSON: a local path, inline JSON, or an HTTP(S) URL.
+    #[arg(long, value_name = "CHAIN_OR_PATH_OR_URL")]
+    chain: String,
 
     /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
     #[arg(long)]
-    zone_unrestricted_rpc_url: String,
-
-    /// Private key used to authenticate with the private Zone RPC.
-    #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
-    private_key: String,
+    zone_rpc_url: String,
 
     /// Override the first Zone block (inclusive) by number or hash.
     #[arg(long, value_name = "NUMBER_OR_HASH")]
     from_block: Option<BlockHashOrNumber>,
+
+    /// Select the submitted batch containing this Zone block; fail if not yet submitted.
+    #[arg(long, value_name = "NUMBER_OR_HASH", conflicts_with_all = ["from_block", "to_block", "zone_block_count", "wait_timeout"])]
+    block: Option<BlockHashOrNumber>,
 
     /// Override the final Zone block (inclusive) by number or hash. Defaults to the Zone tip.
     #[arg(
@@ -198,6 +196,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
         Command::Prove(args) => prove(args).await,
+        Command::Verify(args) => verify::run(args).await,
     }
 }
 
@@ -219,6 +218,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
     info!(
+        block = ?args.block,
         from_block = ?args.from_block,
         to_block = ?args.to_block,
         zone_block_count = ?args.zone_block_count,
@@ -230,23 +230,16 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     if args.zone_block_count == Some(0) {
         bail!("--zone-block-count must be greater than zero");
     }
+    if args.block == Some(0.into()) {
+        bail!("Zone genesis block 0 does not belong to a submitted batch");
+    }
+    let chain = load_chain(&args.chain).await?;
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
-    let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
-    let signer = args
-        .private_key
-        .parse::<PrivateKeySigner>()
-        .context("parse private Zone RPC key")?;
-    let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = SpfConfig::new(args.chain);
-    let private_zone_provider = connect_private_zone(
-        &args.zone_private_rpc_url,
-        signer,
-        discovery.zone_id,
-        zone_chain_id,
-    )?;
-    validate_private_zone(&private_zone_provider, &discovery).await?;
+    let zone_provider = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
+    let mut discovery = discover(&tempo_provider, &zone_provider).await?;
+    let spf_config = SpfConfig::new(chain);
     info!(
         zone_id = discovery.zone_id,
         portal = %discovery.portal,
@@ -258,12 +251,28 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("discovery", started, ());
 
     let started = start_phase("batch extraction");
-    let (from_override, to_override) = tokio::try_join!(
+    let (from_override, to_override, target_block) = tokio::try_join!(
         resolve_block_number(&zone_provider, args.from_block),
         resolve_block_number(&zone_provider, args.to_block),
+        resolve_block_number(&zone_provider, args.block),
     )?;
-    let (parent_header, parent_number, extracted) = if let Some(block_count) = args.zone_block_count
-    {
+    let (parent_header, parent_number, extracted) = if let Some(block) = target_block {
+        let batch =
+            find_submitted_batch(&tempo_provider, &zone_provider, &discovery, block).await?;
+        let (parent, parent_number, extracted) =
+            discover_batch(&zone_provider, &discovery, Some(batch.from), Some(batch.to)).await?;
+        if parent.hash_slow() != batch.parent_hash
+            || extracted.last().expect("non-empty batch").block_hash != batch.block_hash
+        {
+            bail!("selected Zone range does not match the submitted batch hashes");
+        }
+        let target = extracted
+            .iter()
+            .find(|extracted| extracted.input.number == block)
+            .expect("selected batch contains the target block");
+        validate_boundary_hash(args.block, block, target.block_hash)?;
+        (parent, parent_number, extracted)
+    } else if let Some(block_count) = args.zone_block_count {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
             &zone_provider,
             &tempo_provider,
@@ -295,6 +304,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .await
         .context("read withdrawal batch index from parent Zone state")?;
     if args.from_block.is_none()
+        && args.block.is_none()
         && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
     {
         bail!(
@@ -419,84 +429,119 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 }
 
 async fn prove(args: ProveArgs) -> Result<()> {
+    let total_started = Instant::now();
+    let mut timings = Timings::default();
+    info!(input = %args.input.display(), target = %args.target, output = %args.output.display(), "proving saved witness");
+    let started = start_phase("read witness");
     let input = std::fs::read(&args.input)
         .wrap_err_with(|| format!("read batch witness from {}", args.input.display()))?;
-    // Forward the witness unchanged: the remote prover selects the STF and witness schema.
-    // In particular, do not drop fields introduced by a newer prover revision.
-    let witness: serde_json::Value =
+    let witness: BatchWitness =
         serde_json::from_slice(&input).context("parse batch witness JSON")?;
-    if !witness.is_object() {
-        bail!("batch witness must be a JSON object");
-    }
+    info!(bytes = input.len(), "loaded batch witness");
+    timings.record("read witness", started, ());
     let request_id = format!("prove-{}", keccak256(&input));
-    let request = serde_json::json!({
-        "version": PROTOCOL_VERSION,
-        "requestId": request_id,
-        "witness": witness,
-    });
+    let request = VerifyRequest {
+        version: PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        witness,
+    };
+    let started = start_phase("target prover");
     let (_, response) = exchange_with_prover(&args.target, request).await?;
+    timings.record("target prover", started, ());
+    let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
+    timings.record("validate response", started, ());
+    let started = start_phase("output");
     let json = serde_json::to_vec_pretty(&response).context("serialize prover response")?;
     std::fs::write(&args.output, &json)
         .wrap_err_with(|| format!("write prover response to {}", args.output.display()))?;
     println!("Saved prover output and proof to {}", args.output.display());
+    info!(bytes = json.len(), "saved prover response");
+    timings.record("output", started, ());
+    timings.print(total_started.elapsed());
     Ok(())
 }
 
-fn validate_proof_response(response: &serde_json::Value, request_id: &str) -> Result<()> {
-    if response["version"].as_u64() != Some(u64::from(PROTOCOL_VERSION)) {
-        bail!("target prover responded with an invalid or unsupported protocol version");
-    }
-    let response_id = response["requestId"].as_str();
-    if response_id.is_some_and(|id| id != request_id) {
-        bail!("target prover response request ID does not match {request_id:?}");
-    }
-    match response["status"].as_str() {
-        Some("ok") => {
-            if response_id != Some(request_id) {
-                bail!("target prover response is missing requestId");
+fn validate_proof_response<'a>(
+    response: &'a VerifyResponse,
+    request_id: &str,
+) -> Result<(&'a BatchOutput, &'a ProofBundle)> {
+    match response {
+        VerifyResponse::Ok {
+            version,
+            request_id: response_id,
+            proof_bundle,
+            output,
+            ..
+        } => {
+            if *version != PROTOCOL_VERSION {
+                bail!("target prover response version {version}; expected {PROTOCOL_VERSION}");
             }
-            if !response["output"].is_object() {
-                bail!("target prover response is missing batch output");
+            if response_id != request_id {
+                bail!("target prover response ID {response_id} does not match {request_id}");
             }
-            for field in ["verifierConfig", "proof"] {
-                let bytes: Bytes =
-                    serde_json::from_value(response["proofBundle"][field].clone())
-                        .wrap_err_with(|| format!("invalid or missing proofBundle.{field}"))?;
-                if bytes.is_empty() {
-                    bail!("target prover returned empty proofBundle.{field}");
-                }
+            if proof_bundle.verifier_config.is_empty() {
+                bail!("target prover returned empty proofBundle.verifierConfig");
             }
+            if proof_bundle.proof.is_empty() {
+                bail!("target prover returned empty proofBundle.proof");
+            }
+            Ok((output, proof_bundle))
         }
-        Some("error") => bail!(
-            "target prover rejected request ({}): {}",
-            response["code"].as_str().unwrap_or("unknown"),
-            response["message"]
-                .as_str()
-                .unwrap_or("no diagnostic message"),
-        ),
-        _ => bail!("target prover returned an invalid response status"),
+        VerifyResponse::Error {
+            version,
+            request_id: response_id,
+            code,
+            message,
+        } => {
+            if *version != PROTOCOL_VERSION {
+                bail!("target prover response version {version}; expected {PROTOCOL_VERSION}");
+            }
+            if let Some(response_id) = response_id
+                && response_id != request_id
+            {
+                bail!("target prover response ID {response_id} does not match {request_id}");
+            }
+            bail!("target prover rejected request ({code:?}): {message}");
+        }
     }
-    Ok(())
 }
 
 async fn exchange_with_prover(
     target: &str,
-    request: impl serde::Serialize + Send + 'static,
-) -> Result<(usize, serde_json::Value)> {
+    request: VerifyRequest,
+) -> Result<(usize, VerifyResponse)> {
+    let started = Instant::now();
+    info!(target, "connecting to prover");
     let stream = TcpStream::connect(target)
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "connected to prover"
+    );
     let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
+    let started = Instant::now();
+    info!("sending witness to prover");
     let request_bytes = connection
         .send(request)
         .await
         .wrap_err_with(|| format!("send request to target prover at {target}"))?;
+    info!(
+        bytes = request_bytes,
+        elapsed_ms = started.elapsed().as_millis(),
+        "sent witness; waiting for prover response"
+    );
+    let started = Instant::now();
     let response = connection
         .receive()
         .await
         .wrap_err_with(|| format!("read response from target prover at {target}"))?
         .ok_or_else(|| eyre!("target prover closed the connection without a response"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "received prover response"
+    );
     Ok((request_bytes, response))
 }
 
@@ -507,47 +552,13 @@ async fn send_to_prover(
 ) -> Result<usize> {
     let expected_id = request.request_id.clone();
     let (request_bytes, response) = exchange_with_prover(target, request).await?;
-    let response: VerifyResponse =
-        serde_json::from_value(response).context("decode target prover response")?;
-    match response {
-        VerifyResponse::Ok {
-            version,
-            request_id,
-            output,
-            proof_bundle: _,
-        } => {
-            if version != PROTOCOL_VERSION {
-                bail!(
-                    "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-                );
-            }
-            if request_id != expected_id {
-                bail!("target prover response request ID {request_id} doesn't match {expected_id}");
-            }
-            if *output != *expected_output {
-                bail!("target prover output does not match local SPF output");
-            }
-        }
-        VerifyResponse::Error {
-            version,
-            request_id,
-            code,
-            message,
-        } => {
-            if version != PROTOCOL_VERSION {
-                bail!(
-                    "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-                );
-            }
-            if let Some(response_id) = request_id
-                && response_id != expected_id
-            {
-                bail!("target prover error request ID {response_id} doesn't match {expected_id}",);
-            }
-            bail!("target prover rejected request ({code:?}): {message}");
-        }
+    validate_proof_response(&response, &expected_id)?;
+    let VerifyResponse::Ok { output, .. } = response else {
+        unreachable!("successful validation requires an ok response")
+    };
+    if *output != *expected_output {
+        bail!("target prover output does not match local SPF output");
     }
-
     Ok(request_bytes)
 }
 
@@ -559,30 +570,102 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .map(Provider::erased)
 }
 
-fn connect_private_zone(
-    url: &str,
-    signer: PrivateKeySigner,
-    zone_id: u32,
-    chain_id: u64,
-) -> Result<DynProvider<TempoNetwork>> {
-    let rpc_url = url
-        .parse()
-        .wrap_err_with(|| format!("parse private Zone RPC URL {url}"))?;
-    ZoneProvider::new(ZoneProviderConfig {
-        signer,
-        zone_id,
-        chain_id,
-        token_ttl: Duration::from_secs(600),
-        rpc_url,
-    })
-    .wrap_err_with(|| format!("connect to private Zone RPC at {url}"))
-    .map(|provider| provider.provider())
+async fn load_chain(source: &str) -> Result<Arc<ZoneChainSpec>> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let genesis = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?
+            .get(source)
+            .send()
+            .await
+            .context("download Zone genesis JSON")?
+            .error_for_status()
+            .context("download Zone genesis JSON")?
+            .json()
+            .await
+            .context("decode Zone genesis JSON")?;
+        Ok(Arc::new(ZoneChainSpec::from_genesis(genesis)?))
+    } else {
+        <ZoneChainSpecParser as reth_cli::chainspec::ChainSpecParser>::parse(source)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SubmittedBatch {
+    from: u64,
+    to: u64,
+    parent_hash: B256,
+    block_hash: B256,
+}
+
+async fn find_submitted_batch(
+    tempo: &DynProvider<TempoNetwork>,
+    zone: &DynProvider<TempoNetwork>,
+    discovery: &Discovery,
+    target: u64,
+) -> Result<SubmittedBatch> {
+    if target == 0 {
+        bail!("Zone genesis block 0 does not belong to a submitted batch");
+    }
+    let committed = portal_parent_number(zone, discovery).await?;
+    if target > committed {
+        bail!(
+            "batch containing Zone block {target} has not been submitted yet (last submitted block: {committed})"
+        );
+    }
+
+    let portal = ZonePortal::new(discovery.portal, tempo.clone());
+    let mut hi = tempo.get_block_number().await?;
+    let mut end = None;
+    loop {
+        let lo = hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1);
+        let mut events = portal
+            .BatchSubmitted_1_filter()
+            .from_block(lo)
+            .to_block(hi)
+            .query()
+            .await
+            .wrap_err_with(|| format!("read submitted batches in Tempo blocks {lo}..={hi}"))?;
+        events.sort_by_key(|(_, log)| (log.block_number, log.transaction_index, log.log_index));
+        for (event, _) in events.into_iter().rev() {
+            let hash = event.nextBlockHash;
+            let block = zone.get_block_by_hash(hash).await?.ok_or_else(|| {
+                eyre!("submitted Zone block {hash} not found on unrestricted RPC")
+            })?;
+            let number = block.header.number();
+            if number < target {
+                let (to, block_hash) =
+                    end.ok_or_else(|| eyre!("no submitted batch contains Zone block {target}"))?;
+                return Ok(SubmittedBatch {
+                    from: number + 1,
+                    to,
+                    parent_hash: hash,
+                    block_hash,
+                });
+            }
+            end = Some((number, hash));
+            // The portal starts at index zero and increments before emitting. Recognizing
+            // its first submission avoids scanning all of Tempo history before deployment.
+            if event.withdrawalBatchIndex == 1 {
+                return Ok(SubmittedBatch {
+                    from: 1,
+                    to: number,
+                    parent_hash: zone_header(zone, 0).await?.hash_slow(),
+                    block_hash: hash,
+                });
+            }
+        }
+        if lo == 0 {
+            bail!("could not find complete submitted batch boundaries for Zone block {target}");
+        }
+        hi = lo - 1;
+    }
 }
 
 async fn discover(
     tempo: &DynProvider<TempoNetwork>,
     zone: &DynProvider<TempoNetwork>,
-) -> Result<(Discovery, u64)> {
+) -> Result<Discovery> {
     let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.clone());
     let portal_call = inbox.tempoPortal();
     let (tempo_chain_id, actual_zone_chain_id, portal_address) = tokio::try_join!(
@@ -619,17 +702,14 @@ async fn discover(
         );
     }
 
-    Ok((
-        Discovery {
-            zone_id,
-            portal: portal_address,
-            portal_withdrawal_batch_index: portal.withdrawal_batch_index,
-            portal_tempo_block_number: portal.tempo_block_number,
-            tempo_chain_id,
-            portal_block_hash: portal.block_hash,
-        },
-        actual_zone_chain_id,
-    ))
+    Ok(Discovery {
+        zone_id,
+        portal: portal_address,
+        portal_withdrawal_batch_index: portal.withdrawal_batch_index,
+        portal_tempo_block_number: portal.tempo_block_number,
+        tempo_chain_id,
+        portal_block_hash: portal.block_hash,
+    })
 }
 
 async fn read_portal_snapshot(
@@ -657,27 +737,6 @@ fn apply_portal_snapshot(discovery: &mut Discovery, snapshot: PortalSnapshot) {
     discovery.portal_withdrawal_batch_index = snapshot.withdrawal_batch_index;
     discovery.portal_tempo_block_number = snapshot.tempo_block_number;
     discovery.portal_block_hash = snapshot.block_hash;
-}
-
-async fn validate_private_zone(
-    private_zone: &DynProvider<TempoNetwork>,
-    discovery: &Discovery,
-) -> Result<()> {
-    // This first request authenticates with the discovered, fully scoped Zone
-    // and chain IDs before checking that both RPC endpoints expose the same Zone.
-    let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, private_zone.clone());
-    let portal = inbox
-        .tempoPortal()
-        .call()
-        .await
-        .context("read Tempo portal from private Zone RPC")?;
-    if portal != discovery.portal {
-        bail!(
-            "private Zone RPC points to Tempo portal {portal}, but the unrestricted Zone RPC points to {}",
-            discovery.portal,
-        );
-    }
-    Ok(())
 }
 
 async fn discover_counted_batch(
@@ -1287,16 +1346,73 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zone_prover::{ErrorCode, ProofBundle};
+    use zone_spf::{
+        BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
+    };
 
-    fn successful_proof_response(request_id: &str) -> serde_json::Value {
-        serde_json::json!({
-            "version": PROTOCOL_VERSION,
-            "requestId": request_id,
-            "status": "ok",
-            "output": { "withdrawalQueueHash": B256::ZERO },
-            "proofBundle": { "verifierConfig": "0x01", "proof": "0x1234" },
-            "futureField": { "preserved": true },
-        })
+    fn successful_proof_response(request_id: &str) -> VerifyResponse {
+        VerifyResponse::Ok {
+            version: PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            output: Box::new(BatchOutput {
+                next_zone_height: 0,
+                block_transition: BlockTransition {
+                    prevBlockHash: B256::ZERO,
+                    nextBlockHash: B256::ZERO,
+                },
+                deposit_queue_transition: DepositQueueTransition {
+                    prevProcessedHash: B256::ZERO,
+                    nextProcessedHash: B256::ZERO,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0,
+                },
+                token_enablement_transition: TokenEnablementTransition {
+                    prevProcessedTokenCount: 0,
+                    nextProcessedTokenCount: 0,
+                },
+                withdrawal_queue_hash: B256::ZERO,
+                last_batch_commitment: LastBatchCommitment {
+                    withdrawal_batch_index: 0,
+                },
+            }),
+            proof_bundle: ProofBundle {
+                verifier_config: Bytes::from_static(&[1]),
+                proof: Bytes::from_static(&[0x12, 0x34]),
+            },
+        }
+    }
+
+    fn empty_witness() -> BatchWitness {
+        let tempo_header = TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 2,
+                state_root: B256::ZERO,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        BatchWitness {
+            public_inputs: PublicInputs {
+                parent_chain_id: 42_431,
+                zone_id: 1,
+                tempo_block_number: 2,
+                anchor_block_number: 2,
+                anchor_block_hash: B256::ZERO,
+                expected_withdrawal_batch_index: 3,
+            },
+            parent_header: TempoHeader::default(),
+            zone_blocks: Vec::new(),
+            zone_state_witness: ZoneStateWitness {
+                node_pool: Vec::new(),
+                bytecodes: Vec::new(),
+            },
+            tempo_state_witness: TempoStateWitness {
+                initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(tempo_header)),
+                node_pool: Vec::new(),
+            },
+            tempo_ancestry_headers: Vec::new(),
+        }
     }
 
     #[test]
@@ -1336,46 +1452,49 @@ mod tests {
         let valid = successful_proof_response("test");
         validate_proof_response(&valid, "test").unwrap();
         assert!(validate_proof_response(&valid, "different").is_err());
-        for (pointer, value) in [
-            ("/version", serde_json::json!(PROTOCOL_VERSION + 1)),
-            ("/requestId", serde_json::Value::Null),
-            ("/status", serde_json::json!("unknown")),
-            ("/output", serde_json::Value::Null),
-            ("/proofBundle", serde_json::Value::Null),
-            ("/proofBundle/proof", serde_json::json!("0x")),
-            ("/proofBundle/proof", serde_json::json!("not hex")),
-            ("/proofBundle/verifierConfig", serde_json::json!("0x")),
-        ] {
-            let mut invalid = valid.clone();
-            *invalid.pointer_mut(pointer).unwrap() = value;
-            assert!(
-                validate_proof_response(&invalid, "test").is_err(),
-                "{pointer}"
-            );
+
+        let mut wrong_version = successful_proof_response("test");
+        let VerifyResponse::Ok { version, .. } = &mut wrong_version else {
+            unreachable!()
+        };
+        *version += 1;
+        assert!(validate_proof_response(&wrong_version, "test").is_err());
+
+        for clear_config in [false, true] {
+            let mut empty = successful_proof_response("test");
+            let VerifyResponse::Ok { proof_bundle, .. } = &mut empty else {
+                unreachable!()
+            };
+            if clear_config {
+                proof_bundle.verifier_config = Bytes::new();
+            } else {
+                proof_bundle.proof = Bytes::new();
+            }
+            assert!(validate_proof_response(&empty, "test").is_err());
         }
+
         let error = validate_proof_response(
-            &serde_json::json!({
-                "version": PROTOCOL_VERSION, "status": "error",
-                "code": "attestation_unavailable", "message": "NSM unavailable",
-            }),
+            &VerifyResponse::Error {
+                version: PROTOCOL_VERSION,
+                request_id: Some("test".into()),
+                code: ErrorCode::AttestationUnavailable,
+                message: "NSM unavailable".into(),
+            },
             "test",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("attestation_unavailable"));
+        assert!(error.to_string().contains("AttestationUnavailable"));
         assert!(error.to_string().contains("NSM unavailable"));
     }
 
     #[tokio::test]
-    async fn prove_preserves_witness_and_response_and_does_not_save_errors() {
+    async fn prove_transcodes_json_witness_and_does_not_save_errors() {
         let directory =
             std::env::temp_dir().join(format!("prover-cli-prove-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let input = directory.join("witness.json");
         let output = directory.join("proof.json");
-        let witness = serde_json::json!({
-            "publicInputs": { "zoneId": 2 }, "zoneBlocks": [],
-            "futureWitnessField": "preserved",
-        });
+        let witness = empty_witness();
         std::fs::write(&input, serde_json::to_vec(&witness).unwrap()).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = listener.local_addr().unwrap().to_string();
@@ -1384,19 +1503,20 @@ mod tests {
             for attempt in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
-                let request: serde_json::Value = connection.receive().await.unwrap().unwrap();
-                assert_eq!(request["version"], PROTOCOL_VERSION);
-                assert_eq!(request["witness"], witness);
+                let request: VerifyRequest = connection.receive().await.unwrap().unwrap();
+                assert_eq!(request.version, PROTOCOL_VERSION);
+                assert_eq!(request.witness, witness);
                 let response = if attempt == 0 {
-                    let response =
-                        successful_proof_response(request["requestId"].as_str().unwrap());
-                    success = Some(response.clone());
+                    let response = successful_proof_response(&request.request_id);
+                    success = Some(serde_json::to_value(&response).unwrap());
                     response
                 } else {
-                    serde_json::json!({
-                        "version": PROTOCOL_VERSION, "requestId": request["requestId"],
-                        "status": "error", "code": "verification_failed", "message": "bad witness",
-                    })
+                    VerifyResponse::Error {
+                        version: PROTOCOL_VERSION,
+                        request_id: Some(request.request_id),
+                        code: ErrorCode::VerificationFailed,
+                        message: "bad witness".into(),
+                    }
                 };
                 connection.send(response).await.unwrap();
             }
@@ -1417,7 +1537,7 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(error.to_string().contains("verification_failed"));
+        assert!(error.to_string().contains("VerificationFailed"));
         assert_eq!(std::fs::read(&output).unwrap(), saved);
         let response: serde_json::Value = serde_json::from_slice(&saved).unwrap();
         assert_eq!(response, server.await.unwrap());
@@ -1433,12 +1553,8 @@ mod tests {
             "generate-input",
             "--tempo-rpc-url",
             "http://localhost:8545",
-            "--zone-private-rpc-url",
-            "http://localhost:8544",
-            "--zone-unrestricted-rpc-url",
+            "--zone-rpc-url",
             "http://localhost:8546",
-            "--private-key",
-            "unused",
             "--chain",
             &genesis,
         ];

@@ -8,24 +8,15 @@ the enclave performs no RPC or filesystem access.
 
 The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` when `--use-tcp` is
 enabled. Each connection carries one request and one response, then closes. A frame consists of a
-four-byte, big-endian payload length followed by a UTF-8 JSON payload.
+four-byte, big-endian payload length followed by a CBOR payload.
 
-Requests use this envelope:
-
-```json
-{
-  "version": 1,
-  "requestId": "caller-selected-id",
-  "tempoChainId": 42431,
-  "witness": {}
-}
-```
-
-`witness` is the serde representation of `zone_spf::BatchWitness`. The prover accepts chain IDs
-compiled into Tempo plus custom genesis files configured by the enclave operator through a
-`--tempo-genesis` directory. A request cannot supply its own chain specification. Responses have
-`status: "ok"` with a `zone_spf::BatchOutput`, or `status: "error"` with a stable `code` and a
-diagnostic `message`. The requested `tempoChainId` must match the witness's `parentChainId`.
+Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `2`.
+The witness's byte-heavy fields are encoded as CBOR byte strings rather than human-readable hex.
+Decoding is schema-driven and rejects unknown, duplicate, or trailing request data. The prover
+accepts chain IDs compiled into Tempo plus custom genesis files configured by the enclave operator
+through a `--tempo-genesis` directory. A request cannot supply its own chain
+specification. Responses use the externally tagged `zone_prover::VerifyResponse`: `ok` includes a
+`zone_spf::BatchOutput`, while `error` includes a stable `code` and diagnostic `message`.
 
 After successful SPF execution, the enclave derives the canonical Zone batch digest and asks the
 Nitro Secure Module to place it in the signed attestation document's `user_data`. A successful
@@ -35,16 +26,15 @@ the NSM request fails.
 
 Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
 operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
-pass `--port` to change the selected transport's port. The maximum request payload defaults to 512
-MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. Logical JSON messages
-are streamed as fragments followed by an empty terminator frame. Each frame is limited to 1 MiB.
+pass `--port` to change the selected transport's port. The maximum request payload defaults to 2
+GiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. The host runner
+allocates 10 GiB to the enclave by default; override it with `ENCLAVE_MEMORY_MIB`.
 
 The enclave applies separate absolute deadlines to request reception and response transmission.
-`--request-timeout-secs` (`SPF_REQUEST_TIMEOUT_SECS`, default 5) covers reception of the complete
-logical message, including its terminator and JSON decoding. `--response-timeout-secs`
-(`SPF_RESPONSE_TIMEOUT_SECS`, default 5) covers serialization and transmission of every normal or
-error response. Values are whole seconds and must be greater than zero; progress does not reset a
-deadline. SPF execution itself has no timeout.
+`--request-timeout-secs` (`SPF_REQUEST_TIMEOUT_SECS`, default 5) covers reception and decoding of
+the complete CBOR request. `--response-timeout-secs` (`SPF_RESPONSE_TIMEOUT_SECS`, default 5)
+covers encoding and transmission of every normal or error response. Values are whole seconds and
+must be greater than zero; progress does not reset a deadline. SPF execution itself has no timeout.
 
 TCP mode is intended for development of framing, chain validation, and SPF error handling. The
 binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run

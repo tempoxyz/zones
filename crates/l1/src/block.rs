@@ -1,4 +1,9 @@
 use super::*;
+use rayon::prelude::*;
+use std::collections::{BTreeMap, btree_map::Entry};
+
+/// Avoid blocking and Rayon scheduling overhead for small deposit batches.
+const MIN_PARALLEL_DEPOSITS: usize = 10;
 
 /// An L1 block's header paired with the deposits found in that block.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -53,99 +58,42 @@ impl L1BlockDeposits {
         encryption_keys: &EncryptionKeyRing,
         portal_address: Address,
     ) -> eyre::Result<PreparedL1Block> {
-        use crate::precompiles::ecies;
-
         let start = std::time::Instant::now();
         let l1_block_number = self.header.inner.number;
-        let total_deposits = self.events.deposits.len();
-        let mut queued_deposits: Vec<abi::QueuedDeposit> = Vec::new();
-        let mut decryptions: Vec<abi::DecryptionData> = Vec::new();
+        let (total_deposits, deposits) = (self.events.deposits.len(), self.events.deposits);
 
-        for deposit in &self.events.deposits {
-            match deposit {
-                L1Deposit::WithdrawalBounceBack(_) => {
-                    queued_deposits.push(deposit.to_abi_queued_deposit())
-                }
-                L1Deposit::Deposit(d) => {
-                    let queued = deposit.to_abi_queued_deposit();
-                    let decryption_key = encryption_keys.key(d.key_index)?;
-
-                    // Attempt full ECIES decryption.
-                    let dec = ecies::decrypt_deposit(
-                        &decryption_key,
-                        &d.ephemeral_pubkey_x,
-                        d.ephemeral_pubkey_y_parity,
-                        &d.ciphertext,
-                        &d.nonce,
-                        &d.tag,
-                        portal_address,
-                        d.key_index,
-                        d.sender,
-                    );
-
-                    if let Some(dec) = dec {
-                        debug!(
-                            target: "zone::engine",
-                            l1_block = l1_block_number,
-                            sender = %d.sender,
-                            recipient = %dec.to,
-                            token = %d.token,
-                            amount = %d.amount,
-                            "Decrypted deposit"
-                        );
-
-                        let decryption = abi::DecryptionData {
-                            sharedSecret: dec.proof.shared_secret,
-                            sharedSecretYParity: dec.proof.shared_secret_y_parity,
-                            cpProof: dec.proof.cp_proof,
-                        };
-                        queued_deposits.push(queued);
-                        decryptions.push(decryption);
-                        continue;
-                    }
-
-                    // Full decryption failed — try ECDH proof for on-chain refund.
-                    let proof = ecies::compute_ecdh_proof(
-                        &decryption_key,
-                        &d.ephemeral_pubkey_x,
-                        d.ephemeral_pubkey_y_parity,
-                    );
-
-                    if let Some(proof) = proof {
-                        warn!(
-                            target: "zone::payload",
-                            sender = %d.sender,
-                            amount = %d.amount,
-                            "Encrypted deposit decryption failed, providing valid proof for on-chain refund"
-                        );
-                        let decryption = abi::DecryptionData {
-                            sharedSecret: proof.shared_secret,
-                            sharedSecretYParity: proof.shared_secret_y_parity,
-                            cpProof: proof.cp_proof,
-                        };
-                        queued_deposits.push(queued);
-                        decryptions.push(decryption);
-                        continue;
-                    }
-
-                    warn!(
-                        target: "zone::payload",
-                        sender = %d.sender,
-                        amount = %d.amount,
-                        "Encrypted deposit has invalid ephemeral pubkey, using zeroed DecryptionData"
-                    );
-                    let decryption = abi::DecryptionData {
-                        sharedSecret: B256::ZERO,
-                        sharedSecretYParity: 0x02,
-                        cpProof: abi::ChaumPedersenProof {
-                            s: B256::ZERO,
-                            c: B256::ZERO,
-                        },
-                    };
-                    queued_deposits.push(queued);
-                    decryptions.push(decryption);
+        // Resolve keys in deposit order before parallel work so missing-key errors remain stable.
+        let mut keys: BTreeMap<U256, k256::SecretKey> = BTreeMap::new();
+        let mut encrypted_deposits = 0;
+        for deposit in &deposits {
+            if let L1Deposit::Deposit(d) = deposit {
+                encrypted_deposits += 1;
+                if let Entry::Vacant(entry) = keys.entry(d.key_index) {
+                    entry.insert(encryption_keys.key(d.key_index)?);
                 }
             }
+        }
+
+        let prepared = if encrypted_deposits < MIN_PARALLEL_DEPOSITS {
+            deposits
+                .iter()
+                .map(|deposit| prepare_deposit(deposit, &keys, portal_address, l1_block_number))
+                .collect::<Vec<_>>()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                deposits
+                    .par_iter()
+                    .map(|deposit| prepare_deposit(deposit, &keys, portal_address, l1_block_number))
+                    .collect::<Vec<_>>()
+            })
+            .await?
+        };
+
+        let mut queued_deposits: Vec<abi::QueuedDeposit> = Vec::with_capacity(prepared.len());
+        let mut decryptions: Vec<abi::DecryptionData> = Vec::with_capacity(encrypted_deposits);
+        for (queued, decryption) in prepared {
+            queued_deposits.push(queued);
+            decryptions.extend(decryption);
         }
 
         let enabled_tokens: Vec<_> = self
@@ -197,4 +145,99 @@ pub struct PreparedL1Block {
     /// Such a block closes the settlement batch containing that prefix, and signals a batch boundary.
     #[serde(skip)]
     pub follows_checkpoint_blocks: bool,
+}
+
+/// ABI-encode a single queue entry and, for user deposits, derive the decryption data the on-chain
+/// verification expects.
+fn prepare_deposit(
+    deposit: &L1Deposit,
+    keys: &BTreeMap<U256, k256::SecretKey>,
+    portal_address: Address,
+    l1_block_number: u64,
+) -> (abi::QueuedDeposit, Option<abi::DecryptionData>) {
+    use crate::precompiles::ecies;
+
+    let queued = deposit.to_abi_queued_deposit();
+    let L1Deposit::Deposit(d) = deposit else {
+        return (queued, None);
+    };
+    let decryption_key = keys
+        .get(&d.key_index)
+        .expect("every deposit's key index is resolved before decryption");
+
+    // Attempt full ECIES decryption.
+    let dec = ecies::decrypt_deposit(
+        decryption_key,
+        &d.ephemeral_pubkey_x,
+        d.ephemeral_pubkey_y_parity,
+        &d.ciphertext,
+        &d.nonce,
+        &d.tag,
+        portal_address,
+        d.key_index,
+        d.sender,
+    );
+
+    if let Some(dec) = dec {
+        debug!(
+            target: "zone::engine",
+            l1_block = l1_block_number,
+            sender = %d.sender,
+            recipient = %dec.to,
+            token = %d.token,
+            amount = %d.amount,
+            "Decrypted deposit"
+        );
+
+        return (
+            queued,
+            Some(abi::DecryptionData {
+                sharedSecret: dec.proof.shared_secret,
+                sharedSecretYParity: dec.proof.shared_secret_y_parity,
+                cpProof: dec.proof.cp_proof,
+            }),
+        );
+    }
+
+    // Full decryption failed — try ECDH proof for on-chain refund.
+    let proof = ecies::compute_ecdh_proof(
+        decryption_key,
+        &d.ephemeral_pubkey_x,
+        d.ephemeral_pubkey_y_parity,
+    );
+
+    if let Some(proof) = proof {
+        warn!(
+            target: "zone::payload",
+            sender = %d.sender,
+            amount = %d.amount,
+            "Encrypted deposit decryption failed, providing valid proof for on-chain refund"
+        );
+        return (
+            queued,
+            Some(abi::DecryptionData {
+                sharedSecret: proof.shared_secret,
+                sharedSecretYParity: proof.shared_secret_y_parity,
+                cpProof: proof.cp_proof,
+            }),
+        );
+    }
+
+    warn!(
+        target: "zone::payload",
+        sender = %d.sender,
+        amount = %d.amount,
+        "Encrypted deposit has invalid ephemeral pubkey, using zeroed DecryptionData"
+    );
+    (
+        queued,
+        Some(abi::DecryptionData {
+            sharedSecret: B256::ZERO,
+            sharedSecretYParity: 0x02,
+            cpProof: abi::ChaumPedersenProof {
+                s: B256::ZERO,
+                c: B256::ZERO,
+            },
+        }),
+    )
 }
