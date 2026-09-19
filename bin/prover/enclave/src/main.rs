@@ -1,7 +1,7 @@
-use std::{io, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{io, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use alloy_genesis::Genesis;
-use clap::Parser;
+use clap::{Args, Parser};
 use tempo_chainspec::TempoChainSpec;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -59,6 +59,9 @@ struct Cli {
     /// Listen on TCP instead of AF_VSOCK.
     #[arg(long)]
     use_tcp: bool,
+
+    #[command(flatten)]
+    timeouts: Timeouts,
 }
 
 impl Cli {
@@ -66,12 +69,12 @@ impl Cli {
         let specs = self.load_trusted_chain_specs()?;
 
         if self.use_tcp {
-            return serve_tcp(self.port, self.max_request_bytes, specs).await;
+            return serve_tcp(self.port, self.max_request_bytes, specs, self.timeouts).await;
         }
 
         #[cfg(target_os = "linux")]
         {
-            linux::serve_vsock(self.port, self.max_request_bytes, specs).await
+            linux::serve_vsock(self.port, self.max_request_bytes, specs, self.timeouts).await
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -117,7 +120,32 @@ impl Cli {
     }
 }
 
-async fn serve_tcp(port: u32, maximum: usize, specs: TrustedChainSpecs) -> io::Result<()> {
+#[derive(Debug, Args)]
+struct Timeouts {
+    /// Deadline for receiving one complete logical request.
+    #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
+    request: Duration,
+    /// Deadline for writing one complete logical response.
+    #[arg(long = "response-timeout-secs", env = "SPF_RESPONSE_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
+    response: Duration,
+}
+
+fn non_zero_secs(value: &str) -> Result<Duration, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|error| format!("invalid duration: {error}"))?;
+    if seconds == 0 {
+        return Err("duration must be greater than zero".into());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+async fn serve_tcp(
+    port: u32,
+    maximum: usize,
+    specs: TrustedChainSpecs,
+    timeouts: Timeouts,
+) -> io::Result<()> {
     use tokio::net::TcpListener;
     use tracing::info;
 
@@ -131,6 +159,8 @@ async fn serve_tcp(port: u32, maximum: usize, specs: TrustedChainSpecs) -> io::R
     info!(
         port,
         max_request_bytes = maximum,
+        request_timeout_secs = timeouts.request.as_secs(),
+        response_timeout_secs = timeouts.response.as_secs(),
         "SPF TCP service listening"
     );
 
@@ -142,7 +172,7 @@ async fn serve_tcp(port: u32, maximum: usize, specs: TrustedChainSpecs) -> io::R
                 continue;
             }
         };
-        handle_connection(connection, maximum, &specs).await;
+        handle_connection(connection, maximum, &specs, &timeouts).await;
     }
 }
 
@@ -159,11 +189,14 @@ mod linux {
         port: u32,
         maximum: usize,
         specs: TrustedChainSpecs,
+        timeouts: Timeouts,
     ) -> io::Result<()> {
         let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))?;
         info!(
             port,
             max_request_bytes = maximum,
+            request_timeout_secs = timeouts.request.as_secs(),
+            response_timeout_secs = timeouts.response.as_secs(),
             "SPF enclave service listening"
         );
 
@@ -175,13 +208,17 @@ mod linux {
                     continue;
                 }
             };
-            handle_connection(connection, maximum, &specs).await;
+            handle_connection(connection, maximum, &specs, &timeouts).await;
         }
     }
 }
 
-async fn handle_connection<T>(stream: T, maximum: usize, specs: &TrustedChainSpecs)
-where
+async fn handle_connection<T>(
+    stream: T,
+    maximum: usize,
+    specs: &TrustedChainSpecs,
+    timeouts: &Timeouts,
+) where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use std::time::Instant;
@@ -189,32 +226,68 @@ where
     use tracing::{info, warn};
     let mut connection = ProverConnection::new(stream, maximum);
     let started = Instant::now();
-    let request: VerifyRequest = match connection.receive().await {
-        Ok(Some(request)) => request,
-        Err(error) => {
-            warn!(%error, "rejected SPF request frame");
-            if let Err(error) = connection.send(&request_error_response(&error)).await {
-                warn!(%error, "failed to write frame error response");
+    let request: VerifyRequest =
+        match tokio::time::timeout(timeouts.request, connection.receive()).await {
+            Err(_) => {
+                warn!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    limit_secs = timeouts.request.as_secs(),
+                    "SPF request receive timed out"
+                );
+                return;
             }
-            return;
-        }
-        Ok(None) => {
-            warn!("connection closed before sending an SPF request frame");
-            return;
-        }
-    };
+            Ok(Ok(Some(request))) => request,
+            Ok(Err(error)) => {
+                warn!(%error, "rejected SPF request frame");
+                timed_send(
+                    &mut connection,
+                    request_error_response(&error),
+                    timeouts.response,
+                )
+                .await;
+                return;
+            }
+            Ok(Ok(None)) => {
+                warn!("connection closed before sending an SPF request frame");
+                return;
+            }
+        };
     let request_bytes = connection.last_received_bytes().unwrap_or_default();
     let response = process_request(request, specs);
-    match connection.send(&response).await {
-        Ok(response_bytes) => {
-            info!(
-                request_bytes,
-                response_bytes,
-                elapsed_ms = started.elapsed().as_millis(),
-                "SPF request complete"
-            );
+    if let Some(response_bytes) = timed_send(&mut connection, response, timeouts.response).await {
+        info!(
+            request_bytes,
+            response_bytes,
+            elapsed_ms = started.elapsed().as_millis(),
+            "SPF request complete"
+        );
+    }
+}
+
+async fn timed_send<T>(
+    connection: &mut ProverConnection<T>,
+    response: VerifyResponse,
+    limit: Duration,
+) -> Option<usize>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tracing::warn;
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(limit, connection.send(response)).await {
+        Ok(Ok(bytes)) => Some(bytes),
+        Ok(Err(error)) => {
+            warn!(%error, "failed to write SPF response");
+            None
         }
-        Err(error) => warn!(%error, "failed to write SPF response"),
+        Err(_) => {
+            warn!(
+                elapsed_ms = started.elapsed().as_millis(),
+                limit_secs = limit.as_secs(),
+                "SPF response send timed out"
+            );
+            None
+        }
     }
 }
 
