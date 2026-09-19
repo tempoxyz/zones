@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+use std::{future::Future, io, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use alloy_genesis::Genesis;
 use clap::{Args, Parser};
@@ -226,35 +226,25 @@ async fn handle_connection<T>(
     use tracing::{info, warn};
     let mut connection = ProverConnection::new(stream, maximum);
     let started = Instant::now();
-    let request: VerifyRequest =
-        match tokio::time::timeout(timeouts.request, connection.receive()).await {
-            Err(_) => {
-                warn!(
-                    elapsed_ms = started.elapsed().as_millis(),
-                    limit_secs = timeouts.request.as_secs(),
-                    "SPF request receive timed out"
-                );
-                return;
-            }
-            Ok(Ok(Some(request))) => request,
-            Ok(Err(error)) => {
-                warn!(%error, "rejected SPF request frame");
-                timed_send(
-                    &mut connection,
-                    request_error_response(&error),
-                    timeouts.response,
-                )
-                .await;
-                return;
-            }
-            Ok(Ok(None)) => {
-                warn!("connection closed before sending an SPF request frame");
-                return;
-            }
-        };
+    let request: VerifyRequest = match timed(connection.receive(), timeouts.request).await {
+        Some(Ok(Some(request))) => request,
+        Some(Err(error)) => {
+            timed(
+                connection.send(request_error_response(&error)),
+                timeouts.response,
+            )
+            .await;
+            return;
+        }
+        Some(Ok(None)) => {
+            warn!("connection closed before sending an SPF request frame");
+            return;
+        }
+        None => return,
+    };
     let request_bytes = connection.last_received_bytes().unwrap_or_default();
     let response = process_request(request, specs);
-    if let Some(response_bytes) = timed_send(&mut connection, response, timeouts.response).await {
+    if let Some(Ok(response_bytes)) = timed(connection.send(response), timeouts.response).await {
         info!(
             request_bytes,
             response_bytes,
@@ -264,28 +254,19 @@ async fn handle_connection<T>(
     }
 }
 
-async fn timed_send<T>(
-    connection: &mut ProverConnection<T>,
-    response: VerifyResponse,
-    limit: Duration,
-) -> Option<usize>
+async fn timed<F, T, E>(future: F, limit: Duration) -> Option<Result<T, E>>
 where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
 {
-    use tracing::warn;
-    let started = std::time::Instant::now();
-    match tokio::time::timeout(limit, connection.send(response)).await {
-        Ok(Ok(bytes)) => Some(bytes),
+    match tokio::time::timeout(limit, future).await {
         Ok(Err(error)) => {
-            warn!(%error, "failed to write SPF response");
-            None
+            tracing::warn!(%error, "SPF transport failed");
+            Some(Err(error))
         }
+        Ok(result) => Some(result),
         Err(_) => {
-            warn!(
-                elapsed_ms = started.elapsed().as_millis(),
-                limit_secs = limit.as_secs(),
-                "SPF response send timed out"
-            );
+            tracing::warn!("SPF transport timed out");
             None
         }
     }
