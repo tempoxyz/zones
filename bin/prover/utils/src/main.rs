@@ -28,7 +28,8 @@ use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_precompiles::outbox;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProverConnection, VerifyRequest, VerifyResponse,
+    DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProofBundle, ProverConnection, VerifyRequest,
+    VerifyResponse,
 };
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
@@ -461,23 +462,23 @@ async fn prove(args: ProveArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_proof_response(response: &VerifyResponse, request_id: &str) -> Result<()> {
+fn validate_proof_response<'a>(
+    response: &'a VerifyResponse,
+    request_id: &str,
+) -> Result<(&'a BatchOutput, &'a ProofBundle)> {
     match response {
         VerifyResponse::Ok {
             version,
             request_id: response_id,
             proof_bundle,
+            output,
             ..
         } => {
             if *version != PROTOCOL_VERSION {
-                bail!(
-                    "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-                );
+                bail!("target prover response version {version}; expected {PROTOCOL_VERSION}");
             }
             if response_id != request_id {
-                bail!(
-                    "target prover response request ID {response_id:?} does not match {request_id:?}"
-                );
+                bail!("target prover response ID {response_id} does not match {request_id}");
             }
             if proof_bundle.verifier_config.is_empty() {
                 bail!("target prover returned empty proofBundle.verifierConfig");
@@ -485,6 +486,7 @@ fn validate_proof_response(response: &VerifyResponse, request_id: &str) -> Resul
             if proof_bundle.proof.is_empty() {
                 bail!("target prover returned empty proofBundle.proof");
             }
+            Ok((output, proof_bundle))
         }
         VerifyResponse::Error {
             version,
@@ -493,21 +495,16 @@ fn validate_proof_response(response: &VerifyResponse, request_id: &str) -> Resul
             message,
         } => {
             if *version != PROTOCOL_VERSION {
-                bail!(
-                    "target prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-                );
+                bail!("target prover response version {version}; expected {PROTOCOL_VERSION}");
             }
             if let Some(response_id) = response_id
                 && response_id != request_id
             {
-                bail!(
-                    "target prover error request ID {response_id:?} does not match {request_id:?}"
-                );
+                bail!("target prover response ID {response_id} does not match {request_id}");
             }
             bail!("target prover rejected request ({code:?}): {message}");
         }
     }
-    Ok(())
 }
 
 async fn exchange_with_prover(

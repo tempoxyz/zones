@@ -216,6 +216,21 @@ mod tests {
     }
 
     #[test]
+    fn response_rejects_deep_unknown_fields_without_traversing_them() {
+        let mut encoded = vec![0xa1, 0x65];
+        encoded.extend_from_slice(b"error");
+        encoded.extend_from_slice(&[0xa1, 0x66]);
+        encoded.extend_from_slice(b"nested");
+        encoded.extend(std::iter::repeat_n(0x81, 10_000));
+        encoded.push(0xf6);
+
+        assert!(matches!(
+            decode_exact::<VerifyResponse>(&encoded),
+            Err(ProverConnectionError::CborDecode(_))
+        ));
+    }
+
+    #[test]
     fn cbor_keeps_byte_payloads_binary() {
         let value = Bytes::from(vec![0xab; 1024]);
         let encoded = minicbor_serde::to_vec(&value).unwrap();

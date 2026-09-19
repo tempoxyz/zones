@@ -28,8 +28,9 @@ pub(super) async fn run(args: VerifyArgs) -> Result<()> {
     let witness: Value = serde_json::from_slice(&input).context("parse batch witness JSON")?;
     let response: VerifyResponse =
         serde_json::from_slice(&proof).context("parse proof response JSON")?;
-    validate_proof_response(&response, &format!("prove-{}", keccak256(&input)))?;
-    let response = serde_json::to_value(response).context("normalize proof response JSON")?;
+    let (output, proof_bundle) =
+        validate_proof_response(&response, &format!("prove-{}", keccak256(&input)))?;
+    let response = serde_json::json!({ "output": output, "proofBundle": proof_bundle });
     info!(
         witness_bytes = input.len(),
         proof_bytes = proof.len(),
