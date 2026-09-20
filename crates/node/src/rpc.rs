@@ -56,7 +56,7 @@ use tokio::{
 use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{IZoneInbox, ZONE_TOKEN_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
@@ -305,7 +305,7 @@ where
                     .execute_with_state_closure(&block, |statedb: &State<_>| {
                         witness = Some(
                             ExecutionWitnessRecord::new(statedb)
-                                .with_additional_state(block_hash_storage_targets(statedb))
+                                .with_additional_state(spf_storage_targets(statedb))
                                 .into_execution_witness(
                                     &statedb.database.database.0,
                                     eth_api.provider(),
@@ -405,26 +405,40 @@ async fn collect_tempo_witness(
     Ok((initial_header, nodes.into_values().collect()))
 }
 
-/// Build EIP-2935 history-contract storage targets for every BLOCKHASH value read during replay.
+/// Build storage targets for SPF reads not necessarily covered by execution.
 ///
-/// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
+/// Reth records BLOCKHASH reads in REVM's block-hash cache and normally proves them with ancestor
 /// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
 /// storage targets lets the SPF authenticate the same values against the parent state root.
-fn block_hash_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
-    let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
-    if block_hashes.is_empty() {
-        return HashedPostState::default();
-    }
+fn spf_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
+    // SPF always reads the token cursor, but pre-T13 execution never touches it. Include its
+    // absence proof explicitly; ExecutionWitnessRecord overrides this zero with any value
+    // recorded during execution.
+    let mut targets = HashedPostState::from_hashed_storage(
+        keccak256(ZONE_INBOX_ADDRESS),
+        HashedStorage::from_iter([(
+            keccak256(
+                zone_precompiles::inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT.to_be_bytes::<32>(),
+            ),
+            U256::ZERO,
+        )]),
+    );
 
     let mut history_storage = HashedStorage::default();
-    for (number, hash) in block_hashes {
+    for (number, hash) in state.block_hashes.iter() {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         history_storage.storage.insert(
             keccak256(slot.to_be_bytes::<32>()),
             U256::from_be_bytes(hash.0),
         );
     }
-    HashedPostState::from_hashed_storage(keccak256(HISTORY_STORAGE_ADDRESS), history_storage)
+    if !history_storage.storage.is_empty() {
+        targets.extend(HashedPostState::from_hashed_storage(
+            keccak256(HISTORY_STORAGE_ADDRESS),
+            history_storage,
+        ));
+    }
+    targets
 }
 
 fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
@@ -1592,7 +1606,7 @@ mod tests {
             .with_database(revm::database::EmptyDB::default())
             .build();
         state.block_hashes.insert(number, hash);
-        let targets = block_hash_storage_targets(&state);
+        let targets = spf_storage_targets(&state);
 
         let storage = targets
             .storages
