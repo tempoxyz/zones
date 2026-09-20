@@ -74,7 +74,7 @@ pub(crate) struct Metadata {
     pub(crate) identity: Identity,
     /// Last Zone block the checker has fully verified.
     pub(crate) verified_zone: BlockRef,
-    /// Last Tempo/L1 block imported by the verified Zone tip.
+    /// Last Tempo/L1 block accounted for by a full import. Checkpoint-only blocks retain it.
     pub(crate) imported_tempo: BlockRef,
     /// Latest canonical Zone tip observed, which may be ahead of `verified_zone`.
     pub(crate) observed_zone: BlockRef,

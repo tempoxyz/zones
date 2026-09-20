@@ -59,6 +59,15 @@ and authenticating the same evidence from the configured archival Tempo RPC. It
 does not re-execute Tempo. Zone post-state is read through Reth's exact-block
 storage provider.
 
+Checkpoint-only blocks must contain only `advanceTempoHeaders` and its successful
+`TempoBlockFinalized` event. They advance the verified Zone height and verify
+unchanged token supply, while retaining the last full import's accounting state
+and Tempo custody anchor. The next full import authenticates every Tempo block
+since that anchor and applies their Portal events in order before its Zone
+events. This includes deposits and token enablements deferred across any number
+of checkpoint-only blocks. The retained accounting anchor survives restarts;
+`imported_tempo_height` reports that anchor rather than header-only progress.
+
 ## Startup and recovery
 
 With `--checker.mode observe`, startup is self-contained:
