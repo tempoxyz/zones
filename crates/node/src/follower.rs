@@ -447,10 +447,7 @@ where
                 return true;
             }
         };
-        let peer_block = PendingPeerBlock {
-            block,
-            live_sender,
-        };
+        let peer_block = PendingPeerBlock { block, live_sender };
         if number <= best {
             match self.import_peer_block(peer_block).await {
                 Ok(PeerBlockImportOutcome::Cancelled) => return false,
