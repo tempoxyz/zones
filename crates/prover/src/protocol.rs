@@ -27,7 +27,7 @@ pub const NO_PROOF_FALLBACK_VERIFIER_HASH: B256 = B256::new(
 /// Each mode owns both the bytes passed to the on-chain verifier and the proof shape accepted for
 /// those bytes. Decoding rejects unknown and non-canonical configurations rather than treating
 /// them as fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum VerifierMode {
     /// Nitro verification using a non-empty attestation document.
     #[default]

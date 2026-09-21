@@ -56,7 +56,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
-use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle, VerifierMode};
+use zone_prover::{ProofBundle, VerifierMode};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
@@ -2590,7 +2590,7 @@ mod tests {
             ),
             tokenEnablementTransitionHash: B256::ZERO,
             withdrawalQueueHash: batch.withdrawal_queue_hash,
-            verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
+            verifierConfigHash: VerifierMode::NitroV1.config_hash(),
         };
         let certificate = SettlementCertificate {
             height: batch.zone_height,
@@ -2633,14 +2633,14 @@ mod tests {
         );
 
         let bundle = ProofBundle {
-            verifier_config: Bytes::from_static(NITRO_VERIFIER_CONFIG_V1),
+            verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
             proof: Bytes::from_static(&[0xaa, 0xbb]),
         };
 
         let (verifier_config, proof) =
             settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&bundle)).unwrap();
 
-        assert_eq!(verifier_config.as_ref(), NITRO_VERIFIER_CONFIG_V1);
+        assert_eq!(verifier_config.as_ref(), VerifierMode::NitroV1.config());
         assert_eq!(proof.as_ref(), [0xaa, 0xbb]);
     }
 
