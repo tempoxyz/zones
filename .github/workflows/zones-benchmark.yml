@@ -632,6 +632,7 @@ jobs:
         run: |
           set -euo pipefail
           node --test contrib/bench/prepare-tempo-runtimes.test.mjs
+          bash contrib/bench/generate-spf-batches.test.sh
           forge build --root crates/contracts --skip test --no-lint
           node contrib/bench/prepare-tempo-runtimes.mjs "$TEMPO_ROOT" crates/contracts/out
 
@@ -866,6 +867,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$ZONES_BENCH_SPF_OUTPUT")"
+          test ! -e "$ZONES_BENCH_SPF_OUTPUT"
           test -s "$ZONES_BENCH_SPF_RANGE"
           # shellcheck source=/dev/null
           source "$ZONES_BENCH_SPF_RANGE"
@@ -883,17 +885,19 @@ jobs:
           set +e
           samply "${samply_args[@]}" -- \
             taskset --cpu-list "$ZONES_BENCH_CPUSET" \
-              "$SPF_BIN" generate-input \
-              --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
-              --chain "$ZONES_BENCH_ZONE_GENESIS" \
-              --zone-rpc-url "$ZONE_RPC_URL" \
-              --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
-              --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
-              --output "$ZONES_BENCH_SPF_OUTPUT" \
+              bash contrib/bench/generate-spf-batches.sh \
+              "$ZONES_BENCH_SPF_FROM_BLOCK" "$ZONES_BENCH_SPF_TO_BLOCK" \
             > "$ZONES_BENCH_SPF_REPORT" \
             2> target/zones-benchmark/spf.log
           spf_status=$?
           set -e
+          # Samply may return success even when its child fails. The helper only
+          # publishes this manifest after validating every measured batch.
+          if (( spf_status == 0 )) && [[ ! -s "$ZONES_BENCH_SPF_OUTPUT" ]]; then
+            echo "SPF batch validation did not complete; see errors above" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          fi
           if (( spf_status == 0 )) && [[ ! -s "$ZONES_BENCH_SPF_PROFILE" ]]; then
             echo "Samply did not produce $ZONES_BENCH_SPF_PROFILE" \
               >> target/zones-benchmark/spf.log
@@ -908,14 +912,6 @@ jobs:
             spf_status=1
           elif [[ -n "$profile_url" ]]; then
             printf '%s\n' "$profile_url" > "$ZONES_BENCH_SPF_PROFILE_URL"
-          fi
-          if (( spf_status == 0 )) &&
-             [[ "$ZONES_BENCH_NEOBANK_PRESET" != encrypted-deposit ]] &&
-             ! grep -Eq '^  User transactions: +[1-9][0-9]*$' "$ZONES_BENCH_SPF_REPORT"
-          then
-            echo "selected SPF range contains no measured Zone user transactions" \
-              >> target/zones-benchmark/spf.log
-            spf_status=1
           fi
 
           {
@@ -1151,6 +1147,7 @@ jobs:
             target/zones-benchmark/spf.log
             target/zones-benchmark/spf-report.txt
             target/zones-benchmark/spf-range.env
+            target/zones-benchmark/spf-input-batches.*/
             target/zones-benchmark/topology/neobank-fixtures.json
             target/zones-benchmark/node-logs/
             target/zones-benchmark/invalid-block-diagnostics/
