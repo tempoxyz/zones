@@ -212,27 +212,33 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
     ))
 }
 
-fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
-    forge_deployed_bytecode_at(&format!("{contract}.sol"), contract)
-}
-
-fn forge_deployed_bytecode_at(
-    source: &str,
-    contract: &str,
-) -> eyre::Result<alloy_primitives::Bytes> {
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
-    let path = specs_dir.join(format!("{source}/{contract}.json"));
-    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in crates/contracts")
-    })?;
-    let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let hex_str = artifact["deployedBytecode"]["object"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?;
-    Ok(alloy_primitives::Bytes::from(
-        alloy_primitives::hex::decode(hex_str)?,
-    ))
+/// Compiled shared runtimes for testing contract changes before they are synced to Tempo.
+fn reference_zone_runtimes() -> eyre::Result<Vec<(Address, alloy_primitives::Bytes)>> {
+    use tempo_zone_contracts::{
+        ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+    };
+    [
+        (ZONE_PORTAL_IMPL_ADDRESS, "ZonePortal"),
+        (ZONE_VERIFIER_ADDRESS, "Verifier"),
+        (ZONE_MESSENGER_ADDRESS, "ZoneMessenger"),
+    ]
+    .into_iter()
+    .map(|(address, contract)| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../contracts/out/{contract}.sol/{contract}.json"));
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).wrap_err_with(|| {
+                format!(
+                    "read {}; run forge build --root crates/contracts",
+                    path.display()
+                )
+            })?)?;
+        let code = artifact["deployedBytecode"]["object"]
+            .as_str()
+            .ok_or_else(|| eyre::eyre!("missing deployed bytecode for {contract}"))?;
+        Ok((address, alloy_primitives::hex::decode(code)?.into()))
+    })
+    .collect()
 }
 
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
@@ -1163,8 +1169,8 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         let (mut genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
-        // Explicit Zone activation; L1 uses the branch's compiled portal in test genesis.
-        // This tests the flow, not Tempo's eventual coordinated runtime installation.
+        // Explicit Zone execution fork; the L1 fixture must separately install a
+        // compatible portal runtime and activate it through the admin transaction.
         genesis
             .config
             .extra_fields
@@ -2767,6 +2773,39 @@ impl L1TestNode {
     /// Start an L1 dev node with the default configuration (500ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
+    }
+
+    /// Run candidate Solidity runtimes before they are published in Tempo.
+    /// Use the normal L1 fork configuration and settlement path.
+    pub(crate) async fn start_with_reference_zone_runtimes() -> eyre::Result<Self> {
+        use reth_chainspec::EthChainSpec as _;
+        let runtimes = reference_zone_runtimes()?;
+        let node = Self::start_with(|config| {
+            let mut genesis = config.chain.genesis().clone();
+            for (address, code) in &runtimes {
+                genesis
+                    .alloc
+                    .get_mut(address)
+                    .expect("shared runtime allocated")
+                    .code = Some(code.clone());
+            }
+            config.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
+        })
+        .await?;
+        node.assert_reference_zone_runtimes().await?;
+        Ok(node)
+    }
+
+    /// Check after transactions too, so runtime replacement cannot go unnoticed.
+    pub(crate) async fn assert_reference_zone_runtimes(&self) -> eyre::Result<()> {
+        for (address, expected) in reference_zone_runtimes()? {
+            let actual = self.provider().get_code_at(address).await?;
+            eyre::ensure!(
+                actual == expected,
+                "candidate Zone runtime replaced at {address}"
+            );
+        }
+        Ok(())
     }
 
     /// Start in T12 with the legacy shared runtimes; normal block execution installs T13.

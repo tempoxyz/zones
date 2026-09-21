@@ -103,11 +103,10 @@ impl ZoneInbox {
         let deposits = decode_deposits(call.deposits)?;
         // TODO: Replace temporary T13 with the coordinated post-prover Tempo fork before merge.
         // Reject the whole transition before anchoring L1 or changing any inbox state.
-        if !self.storage.spec().is_t13()
-            && deposits
-                .iter()
-                .any(|entry| matches!(entry, DecodedQueuedDeposit::ForcedExit(_)))
-        {
+        let has_forced_exits = deposits
+            .iter()
+            .any(|entry| matches!(entry, DecodedQueuedDeposit::ForcedExit(_)));
+        if has_forced_exits && !self.storage.spec().is_t13() {
             return Err(ZonePrecompileError::MalformedCalldata);
         }
 
@@ -116,6 +115,14 @@ impl ZoneInbox {
         // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
         tempo_state.finalize_checkpoints(l1, &[call.header])?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
+
+        // Activation is authenticated at the imported L1 anchor, including historical replay.
+        if has_forced_exits {
+            let portal = crate::forced_exit_storage::ForcedExitPortalStorage::new(l1.portal());
+            if l1.read_l1(&portal.forced_exit_version)? != 1 {
+                return Err(ZonePrecompileError::MalformedCalldata);
+            }
+        }
 
         let has_token_enablements = !call.enabledTokens.is_empty();
         let enabled_token_count = call.enabledTokens.len();

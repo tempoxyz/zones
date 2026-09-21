@@ -17,6 +17,11 @@ fn set_spec(h: &mut Harness, spec: TempoHardfork) {
 fn active_harness() -> eyre::Result<Harness> {
     let mut h = Harness::new()?;
     set_spec(&mut h, TempoHardfork::T13);
+    h.l1.with_storage(1, || {
+        ForcedExitPortalStorage::new(PORTAL)
+            .forced_exit_version
+            .write(1)
+    })?;
     Ok(h)
 }
 
@@ -363,11 +368,7 @@ fn maximum_forced_exit_workload_fits_system_gas_budget() -> eyre::Result<()> {
     const REQUESTS: usize = 210 / 14; // ZonePortal.FORCED_EXIT_ADMISSION_WEIGHT
     let mut h = active_harness()?;
     let enabled_tokens = (1..=8).map(maximum_metadata_token).collect::<Vec<_>>();
-    h.set_token_enablement_hash(
-        enabled_tokens
-            .iter()
-            .fold(B256::ZERO, |hash, token| token.hash_with_previous(hash)),
-    );
+    h.set_token_enablements(&enabled_tokens);
     let mut requests = Vec::new();
     for id in 1..=REQUESTS {
         let signer = SigningKey::from_slice(&U256::from(id).to_be_bytes::<32>()).unwrap();
@@ -704,6 +705,55 @@ fn forced_requests_require_t13_even_when_no_withdrawal_would_be_created() -> eyr
         set_spec(&mut h, TempoHardfork::T13);
         assert!(execute(&mut h, vec![entry])?.is_success());
         assert_eq!(consumed(&mut h, 1)?, !invalid_payload);
+    }
+    Ok(())
+}
+
+#[test]
+fn forced_requests_use_activation_version_at_execution_anchor() -> eyre::Result<()> {
+    for version in [0, 1, 2, u64::MAX] {
+        for (balance, invalid_payload) in [(42, false), (0, false), (42, true)] {
+            let mut h = active_harness()?;
+            let mut portal = ForcedExitPortalStorage::new(PORTAL);
+            // Parent and later state disagree with the imported block deliberately.
+            h.l1.with_storage(0, || {
+                portal.forced_exit_version.write(u64::from(version != 1))
+            })?;
+            h.l1.with_storage(1, || portal.forced_exit_version.write(version))?;
+            h.l1.with_storage(2, || {
+                portal.forced_exit_version.write(u64::from(version != 1))
+            })?;
+            fund(&mut h, U256::from(balance))?;
+            let payload = if invalid_payload {
+                vec![0; 384]
+            } else {
+                signed_payload(&auth(1))
+            };
+            let entry = request(&mut h, 1, 1, &payload)?;
+            let logs_before = h.ctx.journaled_state.logs().to_vec();
+            let result = execute(&mut h, vec![entry])?;
+            assert!(h.l1.requested(1, &portal.forced_exit_version));
+            assert!(!h.l1.requested(0, &portal.forced_exit_version));
+            assert!(!h.l1.requested(2, &portal.forced_exit_version));
+            if version == 1 {
+                assert!(result.is_success());
+                assert_eq!(consumed(&mut h, 1)?, !invalid_payload);
+            } else {
+                assert!(result.is_revert());
+                assert_eq!(h.ctx.journaled_state.logs(), logs_before.as_slice());
+                assert!(!consumed(&mut h, 1)?);
+                assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::from(balance));
+                assert!(h.pending_withdrawals()?.is_empty());
+                assert!(!h.l1.requested(1, &portal.forced_exit_requests[1].token));
+                let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+                StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+                    assert_eq!(ZoneInbox::new().processed_deposit_number()?, 0);
+                    assert_eq!(ZoneInbox::new().processed_deposit_queue_hash()?, B256::ZERO);
+                    assert_eq!(TempoState::new().tempo_block_number()?, 0);
+                    Ok(())
+                })?;
+            }
+        }
     }
     Ok(())
 }

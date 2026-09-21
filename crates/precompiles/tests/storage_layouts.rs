@@ -51,6 +51,7 @@ fn zone_portal_slot_constants_match_solidity() {
 fn forced_exit_portal_extension_matches_solidity() {
     use zone_precompiles::forced_exit_storage::slots;
     let fields = [
+        ("forcedExitVersion", slots::FORCED_EXIT_VERSION),
         ("forcedExitCount", slots::FORCED_EXIT_COUNT),
         ("forcedExitRequests", slots::FORCED_EXIT_REQUESTS),
     ]
@@ -73,6 +74,7 @@ fn zone_inbox_layout_matches_solidity() {
         processed_deposit_number,
         withdrawal_bounce_backs,
         processed_token_enablement_hash,
+        processed_enabled_token_count,
         forced_exit_nonces
     )
     .into_iter()
