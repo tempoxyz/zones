@@ -585,8 +585,10 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Persist witnesses and require Nitro-attested SPF settlement, or run observational SPF validation
+    /// Require Nitro-attested SPF validation for settlement, or run observational SPF validation
     /// on an rpc_only follower.
+    ///
+    /// Implies enable_proof_persistence.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 

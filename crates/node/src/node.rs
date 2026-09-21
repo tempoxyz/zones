@@ -203,7 +203,9 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
-    /// Persist execution witnesses before canonicalization and require Nitro-attested SPF settlement.
+    /// Require SPF validation and a Nitro NSM attestation before settlement.
+    ///
+    /// Implies enable_proof_persistence.
     pub enable_prover: bool,
     /// Remote Nitro prover TCP address. Required for proof-gated settlement; when absent, the SPF
     /// runs in-process but settlement fails because no NSM attestation can be produced.
