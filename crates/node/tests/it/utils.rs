@@ -382,8 +382,6 @@ async fn handle_test_l1_rpc_request(
                         ))
                     })
                     .unwrap_or(serde_json::Value::Null)
-            } else if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
-                serde_json::json!(const_hex::encode_prefixed(B256::ZERO.abi_encode()))
             } else {
                 answer_portal_call(&input, &enabled_tokens)
                     .map(|data| serde_json::json!(const_hex::encode_prefixed(data)))
@@ -406,10 +404,14 @@ async fn handle_test_l1_rpc_request(
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-/// Answers a [`ZonePortal`] enabled-token view call against the mock registry, either issued
-/// directly or as an inner call of a Multicall3 `aggregate` batch.
+/// Answers a [`ZonePortal`] view call against the mock registry and genesis checkpoint, either
+/// issued directly or as an inner call of a Multicall3 `aggregate` batch.
 fn answer_portal_call(input: &[u8], enabled_tokens: &[Address]) -> Option<Vec<u8>> {
-    if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
+    if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
+        Some(B256::ZERO.abi_encode())
+    } else if input.starts_with(&ZonePortal::zoneHeightCall::SELECTOR) {
+        Some(U256::ZERO.abi_encode())
+    } else if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
         Some(U256::from(enabled_tokens.len()).abi_encode())
     } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
         let index = input.get(4..36).map(U256::from_be_slice)?.to::<u64>() as usize;
