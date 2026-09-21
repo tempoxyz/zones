@@ -232,6 +232,7 @@ aes-gcm = "0.10.3"
 base64 = "0.22.1"
 clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }
+keccak-const = "0.2.0"
 derive_more = { version = "2.0.0" }
 either = "1.15.0"
 eyre = "0.6.12"

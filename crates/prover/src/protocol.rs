@@ -1,5 +1,6 @@
 use alloy_primitives::{B256, Bytes, keccak256};
 use alloy_sol_types::{SolStruct as _, sol};
+use keccak_const::Keccak256;
 use serde::{Deserialize, Serialize};
 use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 use zone_spf::{BatchOutput, BatchWitness, PublicInputs};
@@ -9,8 +10,17 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Canonical verifier configuration for the first Nitro-backed verifier policy.
 pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
+/// Hash of [`NITRO_VERIFIER_CONFIG_V1`].
+pub const NITRO_VERIFIER_CONFIG_V1_HASH: B256 =
+    B256::new(Keccak256::new().update(NITRO_VERIFIER_CONFIG_V1).finalize());
 /// Canonical verifier configuration for temporary proofless fallback settlement.
 pub const NO_PROOF_FALLBACK_VERIFIER: &[u8] = &[2];
+/// Hash of [`NO_PROOF_FALLBACK_VERIFIER`].
+pub const NO_PROOF_FALLBACK_VERIFIER_HASH: B256 = B256::new(
+    Keccak256::new()
+        .update(NO_PROOF_FALLBACK_VERIFIER)
+        .finalize(),
+);
 
 /// Verifier configurations supported by T13 settlement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +39,11 @@ impl VerifierMode {
     }
 
     /// Hash committed by settlement attestations.
-    pub fn config_hash(self) -> B256 {
-        keccak256(self.config())
+    pub const fn config_hash(self) -> B256 {
+        match self {
+            Self::NitroV1 => NITRO_VERIFIER_CONFIG_V1_HASH,
+            Self::NoProof => NO_PROOF_FALLBACK_VERIFIER_HASH,
+        }
     }
 
     /// Decode an exact configuration. Unknown and non-canonical encodings are rejected.
@@ -44,10 +57,13 @@ impl VerifierMode {
 
     /// Decode the hash committed by a settlement attestation.
     pub fn from_config_hash(hash: B256) -> Result<Self, VerifierModeError> {
-        [Self::NitroV1, Self::NoProof]
-            .into_iter()
-            .find(|mode| mode.config_hash() == hash)
-            .ok_or(VerifierModeError::UnknownConfigHash)
+        if hash == NITRO_VERIFIER_CONFIG_V1_HASH {
+            Ok(Self::NitroV1)
+        } else if hash == NO_PROOF_FALLBACK_VERIFIER_HASH {
+            Ok(Self::NoProof)
+        } else {
+            Err(VerifierModeError::UnknownConfigHash)
+        }
     }
 
     /// Enforce the proof shape associated with this mode.
@@ -231,7 +247,15 @@ mod tests {
     #[test]
     fn verifier_config_is_versioned_and_non_empty() {
         assert_eq!(NITRO_VERIFIER_CONFIG_V1, [1]);
-        assert_ne!(keccak256(NITRO_VERIFIER_CONFIG_V1), keccak256([]));
+        assert_eq!(
+            NITRO_VERIFIER_CONFIG_V1_HASH,
+            keccak256(NITRO_VERIFIER_CONFIG_V1)
+        );
+        assert_eq!(
+            NO_PROOF_FALLBACK_VERIFIER_HASH,
+            keccak256(NO_PROOF_FALLBACK_VERIFIER)
+        );
+        assert_ne!(NITRO_VERIFIER_CONFIG_V1_HASH, keccak256([]));
     }
 
     #[test]
