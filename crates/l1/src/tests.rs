@@ -2673,9 +2673,11 @@ async fn finalized_backfill_imports_forced_requests_from_verified_receipts() {
     let provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
     asserter.push_success(&Some(header_response(header.clone())));
-    asserter.push_success(&Some(header_response(header)));
+    asserter.push_success(&Some(header_response(header.clone())));
     asserter.push_success(&Some(vec![receipt]));
-    subscriber.sync_finalized_once(&provider, 10).await.unwrap();
+    asserter.push_success(&Some(header_response(header)));
+    assert_eq!(subscriber.sync_to_finalized(&provider, 10).await.unwrap(), 11);
+    assert!(asserter.read_q().is_empty());
     let imported = queue.peek().unwrap();
     assert_eq!(imported.events.deposits.len(), 1);
     let L1Deposit::ForcedExit(request) = &imported.events.deposits[0] else {
