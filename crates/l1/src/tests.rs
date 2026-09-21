@@ -2515,11 +2515,11 @@ async fn forced_requests_survive_logs_restart_and_mixed_preparation() {
         fee: 0,
         tempo_refund_recipient: payer,
         key_index: U256::ZERO,
-        ephemeral_pubkey_x: ordinary.eph_pub_x,
-        ephemeral_pubkey_y_parity: ordinary.eph_pub_y_parity,
-        ciphertext: ordinary.ciphertext,
-        nonce: ordinary.nonce,
-        tag: ordinary.tag,
+        ephemeral_pubkey_x: ordinary.ephemeralPubkeyX,
+        ephemeral_pubkey_y_parity: ordinary.ephemeralPubkeyYParity,
+        ciphertext: ordinary.ciphertext.to_vec(),
+        nonce: ordinary.nonce.0,
+        tag: ordinary.tag.0,
     }));
     let block = L1BlockDeposits {
         header: seal(make_test_header(12)),
@@ -2676,7 +2676,10 @@ async fn finalized_backfill_imports_forced_requests_from_verified_receipts() {
     asserter.push_success(&Some(header_response(header.clone())));
     asserter.push_success(&Some(vec![receipt]));
     asserter.push_success(&Some(header_response(header)));
-    assert_eq!(subscriber.sync_to_finalized(&provider, 10).await.unwrap(), 11);
+    assert_eq!(
+        subscriber.sync_to_finalized(&provider, 10).await.unwrap(),
+        11
+    );
     assert!(asserter.read_q().is_empty());
     let imported = queue.peek().unwrap();
     assert_eq!(imported.events.deposits.len(), 1);
