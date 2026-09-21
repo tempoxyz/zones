@@ -1074,6 +1074,10 @@ mod tests {
         (U256::ZERO, values).abi_encode_params().into()
     }
 
+    fn abi_encode_portal_checkpoint(hash: B256, height: u64) -> Bytes {
+        abi_encode_multicall(vec![abi_encode_b256(hash), abi_encode_u64(height)])
+    }
+
     fn test_monitor(
         l1: Asserter,
         zone_provider: TestZoneProvider,
@@ -1269,6 +1273,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resync_rejects_zero_hash_at_nonzero_height_without_changing_state() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_portal_checkpoint(B256::ZERO, 42));
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.prev_processed_deposit_number = 7;
+        monitor.prev_processed_token_count = 2;
+        monitor.withdrawal_store.lock().add_withdrawal(
+            3,
+            abi::Withdrawal {
+                token: Address::repeat_byte(0x10),
+                senderTag: B256::repeat_byte(0x11),
+                to: Address::repeat_byte(0x12),
+                amount: 100,
+                memo: B256::ZERO,
+                gasLimit: 0,
+                fallbackNonce: 1,
+                callbackData: Default::default(),
+                encryptedSender: Default::default(),
+            },
+        );
+
+        let error = monitor.resync_from_portal().await.unwrap_err();
+
+        assert!(format!("{error:#}").contains(
+            "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height 42"
+        ));
+        assert_eq!(monitor.prev_zone_block_hash, B256::repeat_byte(0xbb));
+        assert_eq!(monitor.last_submitted_zone_block, 10);
+        assert_eq!(monitor.latest_observed_zone_block, 50);
+        assert_eq!(monitor.prev_processed_deposit_hash, B256::repeat_byte(0xaa));
+        assert_eq!(monitor.prev_processed_deposit_number, 7);
+        assert_eq!(monitor.prev_processed_token_count, 2);
+        assert_eq!(monitor.withdrawal_store.lock().batch_count(), 1);
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resync_accepts_zero_hash_at_zero_height() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_portal_checkpoint(B256::ZERO, 0));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(0),
+            abi_encode_u64(0),
+        ]));
+        l1.push_success(&abi_encode_portal_checkpoint(B256::ZERO, 0));
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+
+        assert_eq!(monitor.resync_from_portal().await.unwrap(), 0);
+
+        assert_eq!(monitor.prev_zone_block_hash, B256::ZERO);
+        assert_eq!(monitor.last_submitted_zone_block, 0);
+        assert_eq!(monitor.latest_observed_zone_block, 0);
+        assert_eq!(monitor.prev_processed_deposit_hash, B256::ZERO);
+        assert_eq!(monitor.prev_processed_deposit_number, 0);
+        assert_eq!(monitor.prev_processed_token_count, 0);
+        assert_eq!(monitor.withdrawal_store.lock().batch_count(), 0);
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
     async fn resync_uses_portal_confirmed_zone_block_for_processed_deposit_hash() {
         let l1 = Asserter::new();
         let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
@@ -1276,12 +1340,18 @@ mod tests {
         let confirmed_deposit_hash = B256::repeat_byte(0x33);
         let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
 
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         monitor.prev_processed_token_count = 99;
@@ -1343,7 +1413,10 @@ mod tests {
         let confirmed_deposit_hash = B256::repeat_byte(0x33);
         let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
 
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
         l1.push_failure_msg("head read failed");
         l1.push_failure_msg("tail read failed");
 
@@ -1396,12 +1469,12 @@ mod tests {
             },
         );
 
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(portal_hash, 42));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
-        l1.push_success(&abi_encode_b256(changed_portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(changed_portal_hash, 43));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let old_hash = monitor.prev_zone_block_hash;
@@ -1448,12 +1521,18 @@ mod tests {
         let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
 
         l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {
@@ -1503,12 +1582,18 @@ mod tests {
         let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
 
         l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(7),
             abi_encode_u64(7),
         ]));
-        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_portal_checkpoint(
+            portal_hash,
+            confirmed_zone_block,
+        ));
 
         let mut monitor = test_monitor(l1.clone(), zone);
         let batch_data = BatchData {

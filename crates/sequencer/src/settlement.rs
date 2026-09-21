@@ -128,9 +128,10 @@ pub struct PortalZoneAnchor {
 
 /// Read the L1 portal tip and resolve it against the local canonical Zone chain.
 ///
-/// A zero portal hash denotes genesis. A non-zero hash must be present locally; silently treating
-/// a missing hash as genesis could replay already-submitted history and construct an invalid
-/// transition from state that the portal has superseded.
+/// A zero portal hash denotes genesis only when the portal's Zone height is also zero. A non-zero
+/// hash must be present locally; silently treating an inconsistent checkpoint or a missing hash as
+/// genesis could replay already-submitted history and construct an invalid transition from state
+/// that the portal has superseded.
 pub async fn resolve_portal_zone_anchor<P>(
     zone_provider: &P,
     portal_address: Address,
@@ -139,13 +140,21 @@ pub async fn resolve_portal_zone_anchor<P>(
 where
     P: BlockNumReader,
 {
-    let block_hash = ZonePortal::new(portal_address, l1_provider)
-        .blockHash()
-        .call()
+    let portal = ZonePortal::new(portal_address, l1_provider);
+    // Read both fields from the same L1 state so a concurrent submission cannot mix checkpoints.
+    let (block_hash, zone_height) = l1_provider
+        .multicall()
+        .add(portal.blockHash())
+        .add(portal.zoneHeight())
+        .aggregate()
         .await
-        .wrap_err("failed to read ZonePortal block hash")?;
+        .wrap_err("failed to read ZonePortal checkpoint")?;
 
     let block_number = if block_hash.is_zero() {
+        eyre::ensure!(
+            zone_height.is_zero(),
+            "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height {zone_height}"
+        );
         0
     } else {
         zone_provider.block_number(block_hash)?.ok_or_eyre(format!(
@@ -2050,7 +2059,10 @@ mod tests {
         );
 
         let l1 = Asserter::new();
-        l1.push_success(&Bytes::copy_from_slice(portal_hash.as_slice()));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_word(portal_hash),
+            abi_word(U256::from(portal_height)),
+        ]));
 
         let anchor =
             resolve_portal_zone_anchor(&zone, Address::repeat_byte(0x11), &mock_l1(l1.clone()))
@@ -2065,7 +2077,10 @@ mod tests {
     #[tokio::test]
     async fn zero_portal_hash_resolves_to_genesis() {
         let l1 = Asserter::new();
-        l1.push_success(&Bytes::copy_from_slice(B256::ZERO.as_slice()));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_word(B256::ZERO),
+            abi_word(U256::ZERO),
+        ]));
 
         let anchor = resolve_portal_zone_anchor(
             &MockEthProvider::<TempoPrimitives>::new(),
@@ -2077,6 +2092,33 @@ mod tests {
 
         assert_eq!(anchor.block_hash, B256::ZERO);
         assert_eq!(anchor.block_number, 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_portal_hash_at_nonzero_height() {
+        for zone_height in [U256::from(1), U256::from(15_552_000), U256::MAX] {
+            let l1 = Asserter::new();
+            l1.push_success(&abi_encode_multicall(vec![
+                abi_word(B256::ZERO),
+                abi_word(zone_height),
+            ]));
+
+            let error = resolve_portal_zone_anchor(
+                &MockEthProvider::<TempoPrimitives>::new(),
+                Address::repeat_byte(0x11),
+                &mock_l1(l1.clone()),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height {zone_height}"
+                )
+            );
+            assert!(l1.read_q().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -2107,7 +2149,10 @@ mod tests {
     async fn rejects_noncanonical_portal_hash() {
         let portal_hash = B256::repeat_byte(0x42);
         let l1 = Asserter::new();
-        l1.push_success(&Bytes::copy_from_slice(portal_hash.as_slice()));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_word(portal_hash),
+            abi_word(U256::from(42)),
+        ]));
 
         let err = resolve_portal_zone_anchor(
             &MockEthProvider::<TempoPrimitives>::new(),
