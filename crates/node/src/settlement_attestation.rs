@@ -268,6 +268,8 @@ where
 }
 
 /// Build the settlement attestation at a batch boundary in the exact format ZonePortal expects.
+///
+/// `verifier_mode` determines the configuration hash signed by the sequencer quorum.
 pub(crate) async fn build_settlement_attestation<P>(
     provider: &P,
     number: u64,

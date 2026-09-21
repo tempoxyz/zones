@@ -244,6 +244,10 @@ impl Default for AttestationStore {
 
 impl AttestationStore {
     /// Insert the leader's proposal, replacing any different proposal at the same height.
+    ///
+    /// Re-inserting the same digest preserves follower signatures already collected for it. The
+    /// return value reports whether the signer was newly inserted, the resulting signature count,
+    /// and the exact proposal digest used for quorum collection.
     pub fn insert_settlement(
         &self,
         domain: AttestationDomain,
