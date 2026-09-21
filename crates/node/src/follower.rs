@@ -32,6 +32,7 @@ use zone_payload::{
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
 };
 use zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK;
+use zone_prover::VerifierMode;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
 use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
@@ -407,11 +408,13 @@ where
             height <= persisted_head,
             "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
         );
+        let verifier_mode = VerifierMode::from_config_hash(proposal.verifierConfigHash)?;
         let expected = build_settlement_attestation(
             &self.context.provider,
             height,
             &self.context.attestation,
             (proposal.anchorBlockNumber, proposal.anchorBlockHash),
+            verifier_mode,
         )
         .await?
         .ok_or_eyre("proposed block is not a batch boundary")?;

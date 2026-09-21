@@ -51,7 +51,7 @@ impl VerifierMode {
     }
 
     /// Enforce the proof shape associated with this mode.
-    pub fn validate_proof(self, proof: &[u8]) -> Result<(), VerifierModeError> {
+    pub fn validate_proof_shape(self, proof: &[u8]) -> Result<(), VerifierModeError> {
         match (self, proof.is_empty()) {
             (Self::NitroV1, true) => Err(VerifierModeError::InvalidProofShape),
             (Self::NoProof, false) => Err(VerifierModeError::InvalidProofShape),
@@ -242,14 +242,14 @@ mod tests {
         assert!(VerifierMode::from_config(&[1, 2]).is_err());
         assert!(VerifierMode::from_config(&[3]).is_err());
 
-        assert!(VerifierMode::NitroV1.validate_proof(&[42]).is_ok());
+        assert!(VerifierMode::NitroV1.validate_proof_shape(&[42]).is_ok());
         assert_eq!(
-            VerifierMode::NitroV1.validate_proof(&[]),
+            VerifierMode::NitroV1.validate_proof_shape(&[]),
             Err(VerifierModeError::InvalidProofShape)
         );
-        assert!(VerifierMode::NoProof.validate_proof(&[]).is_ok());
+        assert!(VerifierMode::NoProof.validate_proof_shape(&[]).is_ok());
         assert_eq!(
-            VerifierMode::NoProof.validate_proof(&[42]),
+            VerifierMode::NoProof.validate_proof_shape(&[42]),
             Err(VerifierModeError::InvalidProofShape)
         );
         assert_eq!(

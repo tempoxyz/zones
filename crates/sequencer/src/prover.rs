@@ -34,7 +34,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, ErrorCode, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
-    ProverConnection, VerifyRequest, VerifyResponse,
+    ProverConnection, VerifierMode, VerifyRequest, VerifyResponse,
 };
 use zone_rpc::ZoneDebugApi;
 use zone_spf::{
@@ -707,16 +707,14 @@ async fn verify_remotely(
 }
 
 fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
+    let mode = VerifierMode::from_config(&proof_bundle.verifier_config)?;
     ensure!(
-        proof_bundle.verifier_config.as_ref() == NITRO_VERIFIER_CONFIG_V1,
+        mode == VerifierMode::NitroV1,
         "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
         alloy_primitives::hex::encode(&proof_bundle.verifier_config),
         alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
     );
-    ensure!(
-        !proof_bundle.proof.is_empty(),
-        "remote prover returned an empty Nitro proof"
-    );
+    mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok(())
 }
 

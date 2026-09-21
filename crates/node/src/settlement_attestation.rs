@@ -22,7 +22,7 @@ use tempo_zone_contracts::{
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 use zone_p2p::P2pCommand;
-use zone_prover::NITRO_VERIFIER_CONFIG_V1;
+use zone_prover::VerifierMode;
 
 use zone_sequencer::{
     BatchAnchorConfig, SettlementAbi,
@@ -273,6 +273,7 @@ pub(crate) async fn build_settlement_attestation<P>(
     number: u64,
     context: &AttestationContext,
     anchor: (u64, B256),
+    verifier_mode: VerifierMode,
 ) -> eyre::Result<Option<SettlementAttestation>>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
@@ -343,7 +344,7 @@ where
         tokenEnablementTransitionHash: settlement_abi
             .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
-        verifierConfigHash: alloy_primitives::keccak256(NITRO_VERIFIER_CONFIG_V1),
+        verifierConfigHash: verifier_mode.config_hash(),
     }))
 }
 
@@ -655,6 +656,7 @@ where
             anchor.block_number(commitments.tempo_block_number),
             anchor.block_hash(),
         ),
+        VerifierMode::NitroV1,
     )
     .await?
     else {

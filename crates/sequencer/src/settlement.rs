@@ -56,7 +56,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
 use tokio_util::sync;
 use tracing::{info, instrument, warn};
-use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
+use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle, VerifierMode};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
@@ -837,7 +837,8 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            attestation.verifierConfigHash == keccak256(NITRO_VERIFIER_CONFIG_V1),
+            VerifierMode::from_config_hash(attestation.verifierConfigHash)?
+                == VerifierMode::NitroV1,
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -1462,16 +1463,14 @@ fn settlement_proof(proof_bundle: Option<&ProofBundle>) -> Result<(Bytes, Bytes)
     let Some(proof_bundle) = proof_bundle else {
         return Ok((Bytes::from_static(NITRO_VERIFIER_CONFIG_V1), Bytes::new()));
     };
+    let mode = VerifierMode::from_config(&proof_bundle.verifier_config)?;
     eyre::ensure!(
-        proof_bundle.verifier_config.as_ref() == NITRO_VERIFIER_CONFIG_V1,
+        mode == VerifierMode::NitroV1,
         "prover returned unsupported verifier config 0x{}; expected 0x{}",
         alloy_primitives::hex::encode(&proof_bundle.verifier_config),
         alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
     );
-    eyre::ensure!(
-        !proof_bundle.proof.is_empty(),
-        "prover returned an empty Nitro proof"
-    );
+    mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok((
         proof_bundle.verifier_config.clone(),
         proof_bundle.proof.clone(),

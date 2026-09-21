@@ -13,6 +13,7 @@ use tokio_util::sync;
 use tracing::{debug, info};
 use zone_l1::TempoStateExt as _;
 use zone_p2p::{BackfillCommand, BackfillRequest, P2pCommand, P2pEvent, P2pPeerId, PeerTip};
+use zone_prover::VerifierMode;
 use zone_sequencer::attestation::{AttestationStore, SignedSettlementAttestation};
 
 use eyre::{OptionExt as _, WrapErr as _};
@@ -433,6 +434,7 @@ where
         .address();
     store.precheck_follower_settlement(height, digest, leader, signer)?;
 
+    let verifier_mode = VerifierMode::from_config_hash(signed.attestation.verifierConfigHash)?;
     let expected = build_settlement_attestation(
         provider,
         height,
@@ -441,6 +443,7 @@ where
             signed.attestation.anchorBlockNumber,
             signed.attestation.anchorBlockHash,
         ),
+        verifier_mode,
     )
     .await?
     .ok_or_eyre("signed block is not a batch boundary")?;
