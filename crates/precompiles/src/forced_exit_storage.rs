@@ -25,7 +25,7 @@ pub struct ForcedExitPortalStorage {
     pub forced_exit_version: u64,
     pub forced_exit_count: u64,
     pub forced_exit_requests: Mapping<u64, ForcedExitAdmissionMetadata>,
-    _cumulative_extra_admission_weight: Mapping<u64, u64>,
+    _last_processed_forced_exit_id: u64,
 }
 
 impl ForcedExitPortalStorage {
@@ -63,10 +63,7 @@ mod tests {
                 .packed_offset(),
             Some(8)
         );
-        assert_eq!(
-            portal._cumulative_extra_admission_weight.slot(),
-            U256::from(30)
-        );
+        assert_eq!(portal._last_processed_forced_exit_id.slot(), U256::from(30));
         assert_eq!(portal.forced_exit_count.slot(), U256::from(28));
         assert_eq!(portal.forced_exit_requests.slot(), U256::from(29));
         assert_eq!(portal.forced_exit_version.slot(), U256::from(28));
