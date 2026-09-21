@@ -154,3 +154,11 @@ fork is stable. Retaining a deployment does not extend acceptance of its PCRs on
 
 Watch `tempo_zone_monitor_prover_hardfork_rebuild_total`, settlement lag, and the
 `Selected remote prover` log (endpoint, hardfork, Zone range) during the transition.
+
+`tempo_zone_prover_missing_hardfork_prover` is refreshed immediately and every 60 seconds for
+nodes with remote provers, including when idle, a standby, or busy proving a batch. It is `1` if
+the chainspec's current Tempo fork or any fork activating within the next 24 hours has no configured endpoint, and `0`
+otherwise. The check uses wall-clock time and the local chainspec, so it continues without L1 RPC
+or prover connectivity. It stays `1` after an unconfigured fork activates. Alert on a value of `1`
+and configure the missing endpoint before activation. The monitor runs for the node's lifetime,
+independently of prover workers.

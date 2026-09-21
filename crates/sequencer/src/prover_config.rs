@@ -3,16 +3,20 @@
 use std::{
     collections::BTreeMap,
     str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_provider::{DynProvider, Provider as _};
 use eyre::{Context as _, Result, ensure};
+use reth_metrics::metrics::Gauge;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoHardforks, hardfork::TempoHardfork};
+use zone_chainspec::ZoneChainSpec;
 
-/// Startup requires endpoints for forks activating within one day, inclusive.
+/// Startup and monitoring require endpoints for forks activating within one day, inclusive.
 const PROVER_UPGRADE_LOOKAHEAD_SECS: u64 = 24 * 60 * 60;
+const PROVER_UPGRADE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// One explicit hardfork-to-prover assignment, written as `T13=HOST:PORT`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,20 +93,63 @@ impl ProverAddresses {
         now: u64,
     ) -> Result<()> {
         let (_, active) = self.resolve(provider).await?;
-        let deadline = now.saturating_add(PROVER_UPGRADE_LOOKAHEAD_SECS);
-        for &fork in TempoHardfork::VARIANTS {
-            if fork <= active {
-                continue;
-            }
-            if let Some(activation) = chain_spec.tempo_fork_activation(fork).as_timestamp()
-                && activation <= deadline
-            {
-                self.address_for(fork).wrap_err_with(|| format!(
-                    "startup requires a prover for L1 hardfork {fork}, scheduled at {activation} within the next 24 hours (or overdue)"
-                ))?;
-            }
+        if let Some((fork, activation)) = self.missing_upcoming_hardfork(chain_spec, active, now) {
+            eyre::bail!(
+                "startup requires a prover for L1 hardfork {fork}, scheduled at {activation} within the next 24 hours (or overdue)"
+            );
         }
         Ok(())
+    }
+
+    fn missing_upcoming_hardfork(
+        &self,
+        chain_spec: &impl TempoHardforks,
+        active: TempoHardfork,
+        now: u64,
+    ) -> Option<(TempoHardfork, u64)> {
+        let deadline = now.saturating_add(PROVER_UPGRADE_LOOKAHEAD_SECS);
+        TempoHardfork::VARIANTS.iter().copied().find_map(|fork| {
+            let activation = chain_spec.tempo_fork_activation(fork).as_timestamp()?;
+            (fork > active && activation <= deadline && !self.0.contains_key(&fork))
+                .then_some((fork, activation))
+        })
+    }
+
+    fn record_upgrade_readiness(&self, chain_spec: &impl TempoHardforks, now: u64, gauge: &Gauge) {
+        let active = chain_spec.tempo_hardfork_at(now);
+        let missing = !self.0.contains_key(&active)
+            || self
+                .missing_upcoming_hardfork(chain_spec, active, now)
+                .is_some();
+        gauge.set(if missing { 1.0 } else { 0.0 });
+    }
+
+    /// Observe the schedule every minute, including while the node is idle or a standby.
+    /// Run for the node's lifetime, independently of individual prover workers.
+    pub async fn monitor_upgrade_readiness(&self, chain_spec: Arc<ZoneChainSpec>) {
+        let gauge = crate::metrics::ProverMetrics::default().missing_hardfork_prover;
+        self.monitor_upgrade_readiness_with_gauge(chain_spec, gauge)
+            .await;
+    }
+
+    async fn monitor_upgrade_readiness_with_gauge(
+        &self,
+        chain_spec: Arc<ZoneChainSpec>,
+        gauge: Gauge,
+    ) {
+        let mut interval = tokio::time::interval(PROVER_UPGRADE_CHECK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(now) => {
+                    self.record_upgrade_readiness(chain_spec.as_ref(), now.as_secs(), &gauge)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot check upcoming prover hardforks: system clock precedes Unix epoch")
+                }
+            }
+        }
     }
 
     fn address_for(&self, hardfork: TempoHardfork) -> Result<&str> {
@@ -144,6 +191,69 @@ mod tests {
     use super::*;
     use alloy_provider::ProviderBuilder;
     use alloy_transport::mock::Asserter;
+
+    #[derive(Default)]
+    struct RecordedGauge(std::sync::Mutex<Vec<f64>>);
+
+    impl reth_metrics::metrics::GaugeFn for RecordedGauge {
+        fn increment(&self, _: f64) {
+            panic!("readiness must set the gauge, not increment it");
+        }
+
+        fn decrement(&self, _: f64) {
+            panic!("readiness must set the gauge, not decrement it");
+        }
+
+        fn set(&self, value: f64) {
+            self.0.lock().unwrap().push(value);
+        }
+    }
+
+    #[test]
+    fn metric_detects_entry_into_the_window_and_remains_set_after_activation() {
+        let activation = 200_000;
+        let spec = scheduled_t13(activation);
+        let addresses = ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()])
+            .unwrap()
+            .unwrap();
+        let recorded = Arc::new(RecordedGauge::default());
+        let gauge = Gauge::from_arc(recorded.clone());
+        for now in [
+            activation - PROVER_UPGRADE_LOOKAHEAD_SECS - 1,
+            activation - PROVER_UPGRADE_LOOKAHEAD_SECS,
+            activation - 1,
+            activation,
+        ] {
+            addresses.record_upgrade_readiness(&spec, now, &gauge);
+        }
+        routed().record_upgrade_readiness(&spec, activation, &gauge);
+        assert_eq!(*recorded.0.lock().unwrap(), vec![0.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_is_refreshed_every_minute_without_prover_jobs() {
+        let addresses = routed();
+        let chain_spec = Arc::new(ZoneChainSpec {
+            inner: Arc::new(scheduled_t13(u64::MAX)),
+        });
+        let recorded = Arc::new(RecordedGauge::default());
+        let gauge = Gauge::from_arc(recorded.clone());
+        let task = tokio::spawn(async move {
+            addresses
+                .monitor_upgrade_readiness_with_gauge(chain_spec, gauge)
+                .await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(*recorded.0.lock().unwrap(), vec![0.0]);
+        tokio::time::advance(Duration::from_secs(59)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(recorded.0.lock().unwrap().len(), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(*recorded.0.lock().unwrap(), vec![0.0, 0.0]);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
 
     fn scheduled_t13(timestamp: u64) -> tempo_chainspec::TempoChainSpec {
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();

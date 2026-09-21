@@ -369,7 +369,7 @@ impl BatchSubmitter {
     pub(crate) async fn wait_for_prover_hardfork<T>(
         &self,
         expected: Option<TempoHardfork>,
-        preparation: impl std::future::Future<Output = Result<T, BatchSubmitError>>,
+        preparation: impl Future<Output = Result<T, BatchSubmitError>>,
     ) -> Result<T, BatchSubmitError> {
         tokio::pin!(preparation);
         let mut interval = tokio::time::interval(Duration::from_secs(1));

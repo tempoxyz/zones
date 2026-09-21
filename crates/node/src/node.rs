@@ -932,6 +932,20 @@ where
                     prover_addresses: config.prover_runtime.remote_addresses().cloned(),
                 });
 
+        let readiness_config = if rpc_only {
+            shadow_prover_config.as_ref()
+        } else {
+            prover_config.as_ref()
+        };
+        if let Some(config) = readiness_config
+            && let Some(addresses) = config.prover_addresses.clone()
+        {
+            let chain_spec = config.chain_spec.clone();
+            task_executor.spawn_critical_task("prover-upgrade-readiness", async move {
+                addresses.monitor_upgrade_readiness(chain_spec).await;
+            });
+        }
+
         if let (Some(runtime_config), Some(submissions)) =
             (shadow_prover_config, finalized_batch_submissions)
         {
