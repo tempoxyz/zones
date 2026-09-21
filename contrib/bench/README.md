@@ -40,14 +40,12 @@ they do not assert that a given Tempo revision implements T13.
 ## SPF batch validation
 
 The measured block range can overlap multiple submitted batches. CI uses
-`generate-input --block` to resolve and validate each complete batch, including
-the full batches at the range's edges. Pending submissions are retried for up to
+`tempo-zone-prover-utils generate-range` to resolve and validate each complete
+batch, including the full batches at the range's edges. Pending submissions are retried for up to
 120 seconds per batch; validation errors fail immediately.
 
 `spf-input.json` is a completion manifest referencing individual witnesses under
-`spf-input-batches.*/`. It is written only after all batches pass, so a successful
+`spf-input.batches/`. It is written only after all batches pass, so a successful
 Samply exit cannot hide a failed child process. User transaction counts include
-only blocks inside the measured range. Witnesses and per-batch logs are uploaded
+only blocks inside the measured range. Witnesses and the generation log are uploaded
 with the benchmark artifacts.
-
-Run the orchestration tests with `bash contrib/bench/generate-spf-batches.test.sh`.
