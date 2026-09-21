@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(
             encode_block_with_witness(bare.clone(), 0, B256::ZERO, None)
                 .unwrap()
-                .encode(false),
+                .encode(),
             bare
         );
         assert_eq!(

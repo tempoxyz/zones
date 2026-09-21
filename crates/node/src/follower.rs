@@ -100,7 +100,7 @@ impl BackfillProgress {
 /// backfilled blocks.
 #[derive(Debug)]
 struct PendingPeerBlock {
-    packet: PeerBlock,
+    block: PeerBlock,
     live_sender: Option<P2pPeerId>,
 }
 
@@ -448,7 +448,7 @@ where
             }
         };
         let peer_block = PendingPeerBlock {
-            packet: block,
+            block,
             live_sender,
         };
         if number <= best {
@@ -513,7 +513,7 @@ where
         &self,
         peer_block: PendingPeerBlock,
     ) -> eyre::Result<PeerBlockImportOutcome> {
-        let block = SealedBlock::seal_slow(peer_block.packet.block);
+        let block = SealedBlock::seal_slow(peer_block.block.block);
         let block_number = block.number();
         let hash = block.hash();
         let best_block = self.context.provider.best_block_number()?;
@@ -634,7 +634,7 @@ where
 
         // Bind the received witness to this block. Its contents are trusted here; execution
         // still goes through the normal engine, without an additional stateless replay.
-        if let Some(proof) = &peer_block.packet.witness {
+        if let Some(proof) = &peer_block.block.witness {
             eyre::ensure!(
                 proof.witness.block_number == block_number
                     && proof.witness.block_hash == hash
@@ -650,12 +650,12 @@ where
             eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
         }
 
-        // Peers may send plain blocks before learning our version. Preserve local collection
+        // Peers without a stored witness still send plain blocks. Preserve local collection
         // for them; supplied witnesses are persisted directly. Both paths precede canonicalization.
         if let Some(collector) = &self.context.proof_collector {
             self.stop
                 .run_until_cancelled(async {
-                    match peer_block.packet.witness {
+                    match peer_block.block.witness {
                         Some(proof) => collector.persist_received(proof).await,
                         None => collector
                             .collect_and_persist(block_number, hash)
@@ -1493,7 +1493,7 @@ mod tests {
 
     fn pending_block(number: u64) -> PendingPeerBlock {
         PendingPeerBlock {
-            packet: crate::replication::PeerBlock {
+            block: crate::replication::PeerBlock {
                 witness: None,
                 block: Block {
                     header: TempoHeader {
@@ -1536,7 +1536,7 @@ mod tests {
         let next = pending
             .take_next_after(98)
             .expect("the immediately next pending block must be available");
-        assert_eq!(next.packet.block.header.number(), 99);
+        assert_eq!(next.block.block.header.number(), 99);
         assert_eq!(pending.first_number(), Some(100));
     }
     #[test]

@@ -21,7 +21,7 @@ use crate::{
         MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL,
         SETTLEMENT_SIGNATURE_CHANNEL, TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
     },
-    protocol::{EncodedBlock, PeerBlockFormats},
+    protocol::EncodedBlock,
     routing::{RoutingMembership, RoutingPolicy},
 };
 
@@ -75,8 +75,6 @@ pub struct P2pConfig {
     listen: SocketAddr,
     bypass_ip_check: bool,
     leadership: LeadershipSchedule,
-    #[cfg(test)]
-    block_formats: Option<PeerBlockFormats>,
 }
 
 impl P2pConfig {
@@ -117,8 +115,6 @@ impl P2pConfig {
             listen,
             bypass_ip_check,
             leadership,
-            #[cfg(test)]
-            block_formats: Some(Default::default()),
         })
     }
 
@@ -205,7 +201,7 @@ fn validate_ip_check_configuration(
 /// Outbound protocol commands accepted by the dedicated P2P runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum P2pCommand {
-    /// Broadcast a block, including its witness only for peers that support it.
+    /// Broadcast a block and its optional witness to every peer.
     BroadcastBlock(EncodedBlock),
     /// Broadcast one ABI-encoded settlement proposal to all followers.
     BroadcastSettlementProposal(Vec<u8>),
@@ -388,10 +384,6 @@ fn run(
         .with_worker_threads(2)
         .with_catch_panics(true);
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
-        #[cfg(not(test))]
-        let formats = Some(PeerBlockFormats::default());
-        #[cfg(test)]
-        let formats = config.block_formats.clone();
         let local_ed25519_public_key = config.ed25519_public_key();
         let leadership = config.leadership();
         let (mut commonware, mut oracle, peers) = network::instantiate(
@@ -471,7 +463,6 @@ fn run(
                 transactions: transaction_sender,
             },
             command_rx,
-            formats.clone(),
         );
         tokio::pin!(command_loop);
 
@@ -503,7 +494,6 @@ fn run(
                 requests: backfill.requests,
                 responses: backfill.responses,
             },
-            formats,
         )
         .run();
         tokio::pin!(backfill_loop);
@@ -528,32 +518,12 @@ fn run(
     })
 }
 
-/// Encode once per format, choosing recipients using their advertised versions.
-fn block_recipients_by_format(
-    formats: Option<&PeerBlockFormats>,
-    recipients: &[PublicKey],
-    block: &EncodedBlock,
-) -> Vec<(Vec<PublicKey>, Vec<u8>)> {
-    let (upgraded, legacy): (Vec<_>, Vec<_>) = recipients.iter().cloned().partition(|peer| {
-        block.witness.is_some() && formats.is_some_and(|formats| formats.supports_witness(peer))
-    });
-    let mut groups = Vec::with_capacity(2);
-    if !legacy.is_empty() {
-        groups.push((legacy, block.encode(false)));
-    }
-    if !upgraded.is_empty() {
-        groups.push((upgraded, block.encode(true)));
-    }
-    groups
-}
-
 async fn run_commands(
     local_ed25519_public_key: PublicKey,
     membership: RoutingMembership,
     leadership: LeadershipSchedule,
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
-    formats: Option<PeerBlockFormats>,
 ) -> eyre::Result<()> {
     while let Some(command) = commands.recv().await {
         match command {
@@ -573,23 +543,17 @@ async fn run_commands(
                     continue;
                 }
 
-                if block.block.len() > MAX_MESSAGE_SIZE as usize {
-                    error!(target: "zone::p2p", block_size_bytes = block.block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
+                let block = block.encode();
+                if block.len() > MAX_MESSAGE_SIZE as usize {
+                    error!(target: "zone::p2p", block_size_bytes = block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
                     continue;
                 }
 
                 let admitted = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
-                        let mut admitted = Vec::new();
-                        for (peers, payload) in block_recipients_by_format(
-                            formats.as_ref(), &recipients, &block,
-                        ) {
-                            if payload.len() > MAX_MESSAGE_SIZE as usize {
-                                error!(target: "zone::p2p", size = payload.len(), "Witnessed block exceeds P2P limit");
-                                continue;
-                            }
-                            admitted.extend(senders.blocks.send(Recipients::Some(peers), payload, true));
-                        }
+                        let admitted = senders.blocks.send(
+                            Recipients::Some(recipients.clone()), block.clone(), true,
+                        );
                         if !admitted.is_empty() || recipients.is_empty() {
                             break admitted;
                         }
@@ -1028,7 +992,6 @@ mod tests {
         let input = manifest_with_standby(&identities, &addresses, 41, 3);
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
         let config = P2pConfig {
-            block_formats: Some(Default::default()),
             zone_id: 9,
             manifest: manifest.clone(),
             ed25519_identity: ed25519_identity(41),
@@ -1175,7 +1138,6 @@ mod tests {
                     .unwrap();
                 spawn_p2p(
                     P2pConfig {
-                        block_formats: (index != 2).then(Default::default),
                         zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
@@ -1219,45 +1181,33 @@ mod tests {
         }
         broadcaster.abort();
 
-        // Node 2 behaves like the old implementation: it ignores version frames.
+        // Witness envelopes are broadcast to every follower once witness collection is enabled.
         let witness = vec![0x01];
         let encoded = crate::EncodedBlock {
             block: block.clone(),
             witness: Some(witness.clone()),
         };
-        let witnessed_block = encoded.encode(true);
+        let witnessed_block = encoded.encode();
         let commands = handles[0].parts.as_ref().unwrap().commands.clone();
         let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(encoded));
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::BlockReceived {
-                    block: received, ..
-                }) = handles[1].events_mut().recv().await
-                {
-                    if received == witnessed_block {
-                        break;
+        for handle in handles.iter_mut().skip(1) {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        block: received, ..
+                    }) = handle.events_mut().recv().await
+                    {
+                        if received == witnessed_block {
+                            break;
+                        }
+                        // A previous plain broadcast may still be queued.
+                        assert_eq!(received, block);
                     }
-                    assert_eq!(received, block);
                 }
-            }
-        })
-        .await
-        .expect("upgraded follower did not receive witnessed blocks");
-        // Observe the legacy peer after the upgraded peer has advertised support.
-        let until = tokio::time::Instant::now() + Duration::from_millis(500);
-        let mut legacy_received = false;
-        while let Ok(Some(event)) =
-            tokio::time::timeout_at(until, handles[2].events_mut().recv()).await
-        {
-            if let P2pEvent::BlockReceived {
-                block: received, ..
-            } = event
-            {
-                assert_eq!(received, block);
-                legacy_received = true;
-            }
+            })
+            .await
+            .expect("follower did not receive witnessed blocks");
         }
-        assert!(legacy_received);
         broadcaster.abort();
 
         // A responder at the follower's head sends an empty page. Its completion must reach the
@@ -1409,7 +1359,7 @@ mod tests {
                                 block,
                                 witness: Some(witness.clone())
                             }
-                            .encode(true))
+                            .encode())
                         );
                         return;
                     }
@@ -1438,7 +1388,7 @@ mod tests {
             "completed backfill request accepted a replay"
         );
 
-        // Backfill must also choose the legacy encoding for a peer without a version advertisement.
+        // Backfill without a stored witness still uses plain blocks.
         handles[2]
             .parts
             .as_ref()
@@ -1461,7 +1411,7 @@ mod tests {
                 request_id: request.request_id,
                 block: crate::EncodedBlock {
                     block: block.clone(),
-                    witness: Some(witness),
+                    witness: None,
                 },
             })
             .await
@@ -1534,7 +1484,6 @@ mod tests {
                 leadership.record_applied_anchor(10);
                 spawn_p2p(
                     P2pConfig {
-                        block_formats: Some(Default::default()),
                         zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
@@ -1745,7 +1694,6 @@ mod tests {
                 leadership.publish(manifest.bootstrap_leadership()).unwrap();
                 spawn_p2p(
                     P2pConfig {
-                        block_formats: Some(Default::default()),
                         zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
@@ -1921,7 +1869,6 @@ mod tests {
             .map(|index| {
                 spawn_p2p(
                     P2pConfig {
-                        block_formats: Some(Default::default()),
                         zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: ed25519_identity(index as u64 + 51),
@@ -2021,7 +1968,6 @@ mod tests {
                 assert_eq!(role, crate::Role::Follower);
                 spawn_p2p(
                     P2pConfig {
-                        block_formats: Some(Default::default()),
                         zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
@@ -2112,7 +2058,6 @@ mod tests {
         let spawn_node = |index: usize| {
             spawn_p2p(
                 P2pConfig {
-                    block_formats: Some(Default::default()),
                     zone_id: 9,
                     manifest: manifest.clone(),
                     ed25519_identity: ed25519_identity(index as u64 + 61),
@@ -2200,7 +2145,6 @@ mod tests {
         for attempt in 0..10 {
             match spawn_p2p(
                 P2pConfig {
-                    block_formats: Some(Default::default()),
                     zone_id: 9,
                     manifest: manifest.clone(),
                     ed25519_identity: ed25519_identity(63),
@@ -2295,7 +2239,6 @@ mod tests {
             .map(|index| {
                 spawn_p2p(
                     P2pConfig {
-                        block_formats: Some(Default::default()),
                         zone_id: 9,
                         manifest: manifest.clone(),
                         ed25519_identity: ed25519_identity(index as u64 + 71),
@@ -2351,7 +2294,6 @@ mod tests {
 
         let mut leader = spawn_p2p(
             P2pConfig {
-                block_formats: Some(Default::default()),
                 zone_id: 9,
                 manifest: manifest.clone(),
                 ed25519_identity: ed25519_identity(71),
