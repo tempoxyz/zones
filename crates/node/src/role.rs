@@ -1012,8 +1012,10 @@ where
             });
             let provider = context.provider.clone();
             let commands = context.commands.clone();
+            let broadcast_proofs = collector.clone();
             tasks.spawn(async move {
-                broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
+                broadcast_persisted_blocks(provider, commands, broadcaster_rx, broadcast_proofs)
+                    .await;
                 TaskEnd::Ended("block-broadcast")
             });
 

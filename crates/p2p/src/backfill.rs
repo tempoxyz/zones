@@ -11,8 +11,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::{
-    LeadershipSchedule, P2pPeerId, PeerTip,
-    protocol::{RequestFrame, ResponseFrame},
+    EncodedBlock, LeadershipSchedule, P2pPeerId, PeerTip,
+    protocol::{
+        PeerBlockFormats, RequestFrame, ResponseFrame, VERSION_REFRESH, VersionFrame,
+        WITNESS_BLOCK_VERSION,
+    },
     routing::{RoutingMembership, RoutingPolicy},
 };
 
@@ -37,7 +40,7 @@ pub enum BackfillCommand {
     SendBlock {
         peer: P2pPeerId,
         request_id: u64,
-        block: Vec<u8>,
+        block: EncodedBlock,
     },
     /// Finish one response page and advertise the responder's snapshot tip.
     Complete {
@@ -217,6 +220,7 @@ pub(crate) struct BackfillCoordinator<Rq = CommonwareReceiver, Rs = CommonwareRe
     requests: mpsc::Sender<BackfillRequest>,
     responses: mpsc::Sender<BackfillResponse>,
     job: BackfillJob,
+    formats: Option<PeerBlockFormats>,
 }
 
 impl<Rq, Rs> BackfillCoordinator<Rq, Rs>
@@ -229,6 +233,7 @@ where
         membership: RoutingMembership,
         leadership: LeadershipSchedule,
         channels: BackfillRuntimeChannels<Rq, Rs>,
+        formats: Option<PeerBlockFormats>,
     ) -> Self {
         Self {
             local,
@@ -242,12 +247,20 @@ where
             requests: channels.requests,
             responses: channels.responses,
             job: BackfillJob::default(),
+            formats,
         }
     }
 
     pub(crate) async fn run(mut self) -> eyre::Result<()> {
+        let mut versions = tokio::time::interval(VERSION_REFRESH);
+        versions.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = versions.tick(), if self.formats.is_some() => {
+                    let peers = self.membership.other_peers(&self.local);
+                    let frame = VersionFrame { version: WITNESS_BLOCK_VERSION };
+                    let _ = self.response_sender.send(Recipients::Some(peers), frame.encode(), true);
+                }
                 command = self.commands.recv() => {
                     let command = command.ok_or_else(|| eyre::eyre!("backfill command channel closed unexpectedly"))?;
                     self.handle_command(command).await?;
@@ -279,6 +292,12 @@ where
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill block addressed to an unknown peer");
                     return Ok(());
                 }
+                // Select using the latest advertised peer version.
+                let block = block.encode(
+                    self.formats
+                        .as_ref()
+                        .is_some_and(|formats| formats.supports_witness(&peer)),
+                );
                 let frame = match (ResponseFrame::Block { request_id, block }).encode() {
                     Ok(frame) => frame,
                     Err(err) => {
@@ -409,6 +428,15 @@ where
     }
 
     async fn handle_response(&mut self, peer: PublicKey, bytes: &[u8]) -> eyre::Result<()> {
+        if let Some(frame) = VersionFrame::decode(bytes) {
+            if peer == self.local || !self.membership.contains(&peer) {
+                return Ok(());
+            }
+            if let Some(formats) = &self.formats {
+                formats.advertise(peer, frame.version);
+            }
+            return Ok(());
+        }
         let frame = match ResponseFrame::decode(bytes) {
             Ok(frame) => frame,
             Err(err) => {

@@ -1,11 +1,82 @@
-use alloy_primitives::B256;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::network::MAX_MESSAGE_SIZE;
+use alloy_primitives::B256;
+use parking_lot::Mutex;
+
+use crate::{P2pPeerId, network::MAX_MESSAGE_SIZE};
 
 const BLOCK_FRAME: u8 = 0;
 const COMPLETE_FRAME: u8 = 1;
 const REQUEST_LEN: usize = 16;
 const RESPONSE_HEADER_LEN: usize = 1 + std::mem::size_of::<u64>();
+
+/// A block's RLP bytes and optional CBOR-encoded witness, before per-peer wire encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedBlock {
+    pub block: Vec<u8>,
+    pub witness: Option<Vec<u8>>,
+}
+
+impl EncodedBlock {
+    /// Versioned prefix of the witnessed block envelope.
+    pub const WITNESS_PREFIX: &[u8] = b"ZWIT\x01";
+
+    /// Preserve legacy RLP unless the recipient supports witness envelopes.
+    pub fn encode(&self, include_witness: bool) -> Vec<u8> {
+        if let Some(witness) = self.witness.as_ref().filter(|_| include_witness) {
+            let mut encoded =
+                Vec::with_capacity(Self::WITNESS_PREFIX.len() + self.block.len() + witness.len());
+            encoded.extend_from_slice(Self::WITNESS_PREFIX);
+            encoded.extend_from_slice(&self.block);
+            encoded.extend_from_slice(witness);
+            encoded
+        } else {
+            self.block.clone()
+        }
+    }
+}
+
+// Optional version exchange on the existing backfill-response channel. Legacy nodes ignore
+// this unknown response tag. Keep the authenticated network namespace unchanged.
+const VERSION_FRAME: u8 = 2;
+pub(crate) const WITNESS_BLOCK_VERSION: u8 = 1;
+pub(crate) const VERSION_REFRESH: Duration = Duration::from_secs(2);
+
+/// Advertises the sender's highest supported block encoding version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VersionFrame {
+    pub version: u8,
+}
+
+impl VersionFrame {
+    pub(crate) fn encode(self) -> Vec<u8> {
+        vec![VERSION_FRAME, self.version]
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            [VERSION_FRAME, version] => Some(Self { version: *version }),
+            _ => None,
+        }
+    }
+}
+
+/// Last advertised version for each peer. Unannounced peers use legacy encoding.
+#[derive(Clone, Default)]
+pub(crate) struct PeerBlockFormats(Arc<Mutex<HashMap<P2pPeerId, u8>>>);
+
+impl PeerBlockFormats {
+    pub(crate) fn advertise(&self, peer: P2pPeerId, version: u8) {
+        self.0.lock().insert(peer, version);
+    }
+
+    pub(crate) fn supports_witness(&self, peer: &P2pPeerId) -> bool {
+        self.0
+            .lock()
+            .get(peer)
+            .is_some_and(|version| *version >= WITNESS_BLOCK_VERSION)
+    }
+}
 
 /// A peer's advertised canonical tip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +244,43 @@ mod tests {
         DecodeError, EncodeError, PeerTip, RESPONSE_HEADER_LEN, RequestFrame, ResponseFrame,
     };
     use crate::network::MAX_MESSAGE_SIZE;
+
+    #[test]
+    fn version_frames_are_ignored_by_legacy_response_decoder() {
+        for version in [0, 1, u8::MAX] {
+            let frame = super::VersionFrame { version };
+            let encoded = frame.encode();
+            assert_eq!(encoded, [2, version]);
+            assert_eq!(super::VersionFrame::decode(&encoded), Some(frame));
+            assert_eq!(
+                ResponseFrame::decode(&encoded),
+                Err(DecodeError::UnknownResponseTag(2))
+            );
+            for end in 0..encoded.len() {
+                assert!(super::VersionFrame::decode(&encoded[..end]).is_none());
+            }
+            let mut extra = encoded;
+            extra.push(0);
+            assert!(super::VersionFrame::decode(&extra).is_none());
+        }
+        assert!(super::VersionFrame::decode(&[3, 1]).is_none());
+    }
+
+    #[test]
+    fn advertised_version_updates_peer_support() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+        let peer = PrivateKey::from_seed(1).public_key();
+        let other = PrivateKey::from_seed(2).public_key();
+        let formats = super::PeerBlockFormats::default();
+        assert!(!formats.supports_witness(&peer));
+        formats.advertise(peer.clone(), 0);
+        assert!(!formats.supports_witness(&peer));
+        formats.advertise(peer.clone(), 1);
+        assert!(formats.supports_witness(&peer));
+        assert!(!formats.supports_witness(&other));
+        formats.advertise(peer.clone(), u8::MAX);
+        assert!(formats.supports_witness(&peer));
+    }
 
     fn tip() -> PeerTip {
         PeerTip {

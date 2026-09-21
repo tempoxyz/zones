@@ -1,7 +1,8 @@
 //! Node-side leader replication and role-neutral backfill serving.
 
-use alloy_consensus::BlockHeader as _;
-use alloy_primitives::B256;
+use alloy_consensus::{BlockHeader as _, Sealable as _};
+use alloy_primitives::{B256, Bytes};
+use alloy_rlp::Decodable as _;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_primitives_traits::SealedBlock;
@@ -12,8 +13,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
 use tracing::{debug, info};
 use zone_l1::TempoStateExt as _;
-use zone_p2p::{BackfillCommand, BackfillRequest, P2pCommand, P2pEvent, P2pPeerId, PeerTip};
-use zone_sequencer::attestation::{AttestationStore, SignedSettlementAttestation};
+use zone_p2p::{
+    BackfillCommand, BackfillRequest, EncodedBlock, P2pCommand, P2pEvent, P2pPeerId, PeerTip,
+};
+use zone_sequencer::{
+    ProofCollectorHandle, StoredBlockProof,
+    attestation::{AttestationStore, SignedSettlementAttestation},
+};
 
 use eyre::{OptionExt as _, WrapErr as _};
 
@@ -103,6 +109,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
     mut shutdown: oneshot::Receiver<BroadcasterShutdown>,
+    proofs: Option<ProofCollectorHandle>,
 ) where
     P: PersistedBlockSource,
 {
@@ -125,9 +132,15 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
         }
     };
 
-    if let Err(err) =
-        broadcast_persisted_range(&provider, &commands, &mut last_broadcast, startup_tip, None)
-            .await
+    if let Err(err) = broadcast_persisted_range(
+        &provider,
+        &commands,
+        &mut last_broadcast,
+        startup_tip,
+        None,
+        proofs.as_ref(),
+    )
+    .await
     {
         tracing::error!(target: "zone::p2p", %err, "Failed broadcasting persisted zone blocks");
         return;
@@ -144,6 +157,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
                             &commands,
                             &mut last_broadcast,
                             &mut persisted,
+                            proofs.as_ref(),
                         )
                         .await
                         {
@@ -164,6 +178,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
                                     &mut last_broadcast,
                                     persisted_head,
                                     None,
+                                    proofs.as_ref(),
                                 )
                                 .await
                                 {
@@ -203,6 +218,7 @@ pub(crate) async fn broadcast_persisted_blocks<P>(
             &mut last_broadcast,
             persisted_tip.number,
             Some(persisted_tip.hash),
+            proofs.as_ref(),
         )
         .await
         {
@@ -227,13 +243,22 @@ async fn drain_persisted_blocks_after_engine_stop<P>(
     commands: &mpsc::Sender<P2pCommand>,
     last_broadcast: &mut u64,
     persisted: &mut BoxStream<'static, PersistedTip>,
+    proofs: Option<&ProofCollectorHandle>,
 ) -> eyre::Result<()>
 where
     P: PersistedBlockSource,
 {
     let canonical = provider.canonical_block_number()?;
     let persisted_head = provider.last_block_number()?;
-    broadcast_persisted_range(provider, commands, last_broadcast, persisted_head, None).await?;
+    broadcast_persisted_range(
+        provider,
+        commands,
+        last_broadcast,
+        persisted_head,
+        None,
+        proofs,
+    )
+    .await?;
 
     while *last_broadcast < canonical {
         let persisted_tip = persisted.next().await.ok_or_else(|| {
@@ -252,6 +277,7 @@ where
             last_broadcast,
             persisted_tip.number,
             Some(persisted_tip.hash),
+            proofs,
         )
         .await?;
     }
@@ -266,6 +292,7 @@ async fn broadcast_persisted_range<P>(
     last_broadcast: &mut u64,
     tip_number: u64,
     expected_tip_hash: Option<B256>,
+    proofs: Option<&ProofCollectorHandle>,
 ) -> eyre::Result<()>
 where
     P: PersistedBlockSource,
@@ -282,14 +309,116 @@ where
                 "persisted zone block hash does not match notification at height {number}: expected={expected}, actual={hash}"
             );
         }
+        let block = encode_retained_block(block.encoded, number, hash, proofs)?;
         commands
-            .send(P2pCommand::BroadcastBlock(block.encoded))
+            .send(P2pCommand::BroadcastBlock(block))
             .await
             .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
         debug!(target: "zone::p2p", number, ?hash, "Queued persisted block for followers");
         *last_broadcast = number;
     }
     Ok(())
+}
+
+fn encode_retained_block(
+    block: Vec<u8>,
+    number: u64,
+    hash: B256,
+    proofs: Option<&ProofCollectorHandle>,
+) -> eyre::Result<EncodedBlock> {
+    let witness = proofs.and_then(|proofs| proofs.get(number, hash));
+    if let Some(proofs) = proofs {
+        eyre::ensure!(
+            witness.is_some() || !proofs.requires_witness(number),
+            "unsettled block {number} has no retained witness to replicate"
+        );
+    }
+    encode_peer_block(block, witness.as_deref())
+}
+
+/// A decoded block and the optional witness supplied by its peer.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PeerBlock {
+    pub block: Block,
+    pub witness: Option<StoredBlockProof>,
+}
+
+// Shared envelope for live blocks and backfill: magic/version, one RLP block, then witness CBOR.
+// Settled history and nodes without proof persistence keep using bare RLP blocks.
+const WITNESS_FRAME: &[u8] = EncodedBlock::WITNESS_PREFIX;
+
+fn encode_peer_block(
+    encoded_block: Vec<u8>,
+    witness: Option<&StoredBlockProof>,
+) -> eyre::Result<EncodedBlock> {
+    let witness = match witness {
+        Some(witness) => {
+            let mut encoded = Vec::new();
+            let proof = &witness.witness;
+            // Version 1 CBOR tuple: format, height, hash, parent, execution witness,
+            // initial Tempo header RLP, Tempo proof nodes. ExecutionWitness uses its Serde impl.
+            // TempoHeader's flattened JSON Serde representation cannot round-trip binary hashes.
+            ciborium::into_writer(
+                &(
+                    witness.format_version,
+                    proof.block_number,
+                    proof.block_hash,
+                    proof.parent_hash,
+                    &proof.execution_witness,
+                    Bytes::from(alloy_rlp::encode(&proof.initial_tempo_header)),
+                    &proof.tempo_state,
+                ),
+                &mut encoded,
+            )?;
+            Some(encoded)
+        }
+        None => None,
+    };
+    Ok(EncodedBlock {
+        block: encoded_block,
+        witness,
+    })
+}
+
+pub(crate) fn decode_peer_block(encoded: &[u8]) -> eyre::Result<PeerBlock> {
+    let witnessed = encoded.starts_with(WITNESS_FRAME);
+    let mut input = if witnessed {
+        &encoded[WITNESS_FRAME.len()..]
+    } else {
+        encoded
+    };
+    let block = Block::decode(&mut input)
+        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
+    let witness = if witnessed {
+        let (
+            format_version,
+            block_number,
+            block_hash,
+            parent_hash,
+            execution_witness,
+            initial_tempo_header_rlp,
+            tempo_state,
+        ): (_, _, _, _, _, Bytes, _) = ciborium::from_reader(&mut input)?;
+        Some(StoredBlockProof {
+            format_version,
+            witness: zone_rpc::types::ZoneExecutionWitness {
+                block_number,
+                block_hash,
+                parent_hash,
+                execution_witness,
+                initial_tempo_header: alloy_rlp::decode_exact(&initial_tempo_header_rlp)?,
+                tempo_state,
+            },
+        })
+    } else {
+        None
+    };
+    eyre::ensure!(
+        input.is_empty(),
+        "encoded zone block has {} trailing bytes",
+        input.len()
+    );
+    Ok(PeerBlock { block, witness })
 }
 
 const BACKFILL_PAGE_SIZE: u64 = 64;
@@ -304,6 +433,7 @@ fn serve_backfill_page<P>(
     peer: zone_p2p::P2pPeerId,
     request_id: u64,
     start: u64,
+    proofs: Option<&ProofCollectorHandle>,
 ) -> eyre::Result<()>
 where
     P: BlockNumReader
@@ -317,11 +447,17 @@ where
         let block = provider.block_by_number(number)?.ok_or_else(|| {
             eyre::eyre!("persisted canonical block {number} is missing while serving backfill")
         })?;
+        let block = encode_retained_block(
+            alloy_rlp::encode(&block),
+            number,
+            block.header.hash_slow(),
+            proofs,
+        )?;
         commands
             .blocking_send(BackfillCommand::SendBlock {
                 peer: peer.clone(),
                 request_id,
-                block: alloy_rlp::encode(block),
+                block,
             })
             .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
     }
@@ -358,6 +494,7 @@ pub(crate) async fn serve_backfill_requests<P>(
     provider: P,
     commands: mpsc::Sender<BackfillCommand>,
     mut requests: mpsc::Receiver<BackfillRequest>,
+    proofs: Option<ProofCollectorHandle>,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -378,8 +515,16 @@ pub(crate) async fn serve_backfill_requests<P>(
     {
         let page_provider = provider.clone();
         let page_commands = commands.clone();
+        let page_proofs = proofs.clone();
         let page = tokio::task::spawn_blocking(move || {
-            serve_backfill_page(&page_provider, &page_commands, peer, request_id, start)
+            serve_backfill_page(
+                &page_provider,
+                &page_commands,
+                peer,
+                request_id,
+                start,
+                page_proofs.as_ref(),
+            )
         })
         .await;
         let result = match page {
@@ -522,8 +667,9 @@ mod tests {
     use tokio::sync::{oneshot, watch};
 
     use super::{
-        BroadcasterShutdown, EncodedPersistedBlock, PersistedBlockSource, PersistedTip,
-        broadcast_persisted_blocks,
+        Block, BroadcasterShutdown, EncodedPersistedBlock, PersistedBlockSource, PersistedTip,
+        StoredBlockProof, WITNESS_FRAME, broadcast_persisted_blocks, decode_peer_block,
+        encode_peer_block,
     };
     use alloy_primitives::B256;
     use zone_p2p::P2pCommand;
@@ -611,6 +757,101 @@ mod tests {
         }
     }
 
+    #[test]
+    fn witness_envelope_round_trips_cbor_and_bare_blocks() {
+        let block = Block::default();
+        let bare = alloy_rlp::encode(&block);
+        assert_eq!(
+            encode_peer_block(bare.clone(), None).unwrap().encode(false),
+            bare
+        );
+        assert_eq!(
+            decode_peer_block(&bare).unwrap(),
+            super::PeerBlock {
+                block: block.clone(),
+                witness: None
+            }
+        );
+        let mut proof = StoredBlockProof {
+            format_version: 2,
+            witness: Default::default(),
+        };
+        proof.witness.block_number = 42;
+        proof.witness.block_hash = B256::repeat_byte(0x11);
+        proof.witness.parent_hash = B256::repeat_byte(0x22);
+        proof.witness.initial_tempo_header.inner.number = 100;
+        proof.witness.initial_tempo_header.inner.state_root = B256::repeat_byte(0x33);
+        let nodes = vec![alloy_primitives::Bytes::from(vec![0, 0x80, 0xff])];
+        proof.witness.execution_witness.state = nodes.clone();
+        proof.witness.execution_witness.codes = nodes.clone();
+        proof.witness.execution_witness.keys = nodes.clone();
+        proof.witness.execution_witness.headers = nodes.clone();
+        proof.witness.tempo_state = nodes;
+        let encoded = encode_peer_block(bare.clone(), Some(&proof))
+            .unwrap()
+            .encode(true);
+        assert_eq!(
+            decode_peer_block(&encoded).unwrap(),
+            super::PeerBlock {
+                block,
+                witness: Some(proof)
+            }
+        );
+
+        // Witness preimages and the RLP header must use CBOR byte strings, not hex strings.
+        let value: ciborium::Value =
+            ciborium::from_reader(&encoded[WITNESS_FRAME.len() + bare.len()..]).unwrap();
+        let fields = value.as_array().unwrap();
+        assert_eq!(fields.len(), 7);
+        let execution = fields[4].as_map().unwrap();
+        for name in ["state", "codes", "keys", "headers"] {
+            let (_, list) = execution
+                .iter()
+                .find(|(key, _)| key.as_text() == Some(name))
+                .unwrap();
+            assert_eq!(
+                list.as_array().unwrap()[0].as_bytes().unwrap(),
+                &[0, 0x80, 0xff]
+            );
+        }
+        assert!(fields[5].as_bytes().is_some());
+        assert_eq!(
+            fields[6].as_array().unwrap()[0].as_bytes().unwrap(),
+            &[0, 0x80, 0xff]
+        );
+    }
+
+    #[test]
+    fn witness_envelope_rejects_truncation_trailing_data_and_unknown_formats() {
+        let bare = alloy_rlp::encode(Block::default());
+        let proof = StoredBlockProof {
+            format_version: 2,
+            witness: Default::default(),
+        };
+        let encoded = encode_peer_block(bare.clone(), Some(&proof))
+            .unwrap()
+            .encode(true);
+        for len in WITNESS_FRAME.len()..encoded.len() {
+            assert!(
+                decode_peer_block(&encoded[..len]).is_err(),
+                "accepted prefix of length {len}"
+            );
+        }
+        for mut trailing in [bare.clone(), encoded.clone()] {
+            trailing.push(0);
+            assert!(decode_peer_block(&trailing).is_err());
+        }
+        let mut unknown_version = encoded;
+        unknown_version[4] = 2;
+        assert!(decode_peer_block(&unknown_version).is_err());
+
+        // The unreleased JSON draft is not accepted as a CBOR witness.
+        let mut json = WITNESS_FRAME.to_vec();
+        json.extend_from_slice(&bare);
+        serde_json::to_writer(&mut json, &proof).unwrap();
+        assert!(decode_peer_block(&json).is_err());
+    }
+
     #[tokio::test]
     async fn broadcasts_block_persisted_during_startup_reconciliation_once() {
         let source = StartupRaceSource {
@@ -623,11 +864,14 @@ mod tests {
         let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
         let (_shutdown, shutdown_rx) = oneshot::channel();
 
-        broadcast_persisted_blocks(source, commands, shutdown_rx).await;
+        broadcast_persisted_blocks(source, commands, shutdown_rx, None).await;
 
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
+            Some(P2pCommand::BroadcastBlock(zone_p2p::EncodedBlock {
+                block: vec![1],
+                witness: None
+            }))
         );
         assert_eq!(command_rx.recv().await, None);
     }
@@ -652,13 +896,16 @@ mod tests {
             .send(BroadcasterShutdown::Stop)
             .expect("the broadcaster must retain the shutdown receiver");
 
-        broadcast_persisted_blocks(source, commands, shutdown_rx).await;
+        broadcast_persisted_blocks(source, commands, shutdown_rx, None).await;
 
         // Block 1 is durable and must be flushed; block 2 exists only in memory and would be
         // lost on restart, stranding any follower that imported it.
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
+            Some(P2pCommand::BroadcastBlock(zone_p2p::EncodedBlock {
+                block: vec![1],
+                witness: None
+            }))
         );
         assert_eq!(
             command_rx.recv().await,
@@ -683,7 +930,12 @@ mod tests {
         };
         let (commands, mut command_rx) = tokio::sync::mpsc::channel(4);
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(broadcast_persisted_blocks(source, commands, shutdown_rx));
+        let task = tokio::spawn(broadcast_persisted_blocks(
+            source,
+            commands,
+            shutdown_rx,
+            None,
+        ));
 
         shutdown
             .send(BroadcasterShutdown::Drain)
@@ -692,7 +944,10 @@ mod tests {
         // The durable prefix goes out immediately.
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![1]))
+            Some(P2pCommand::BroadcastBlock(zone_p2p::EncodedBlock {
+                block: vec![1],
+                witness: None
+            }))
         );
         // The canonical tail must not, until it persists.
         assert!(
@@ -712,7 +967,10 @@ mod tests {
 
         assert_eq!(
             command_rx.recv().await,
-            Some(P2pCommand::BroadcastBlock(vec![2]))
+            Some(P2pCommand::BroadcastBlock(zone_p2p::EncodedBlock {
+                block: vec![2],
+                witness: None
+            }))
         );
         task.await.expect("the broadcaster task must not panic");
         assert_eq!(command_rx.recv().await, None);

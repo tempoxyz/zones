@@ -966,6 +966,7 @@ where
                     provider.clone(),
                     backfill_commands.clone(),
                     backfill_requests_rx,
+                    proof_collector.clone(),
                 ),
             );
             let sequencer = match self.sequencer_config.take() {

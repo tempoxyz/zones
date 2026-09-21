@@ -82,12 +82,38 @@ impl ProofCollectorHandle {
                 number,
                 hash,
                 response,
+                supplied: None,
             })
             .await
             .context("proof collector stopped")?;
         result
             .await
             .context("proof collector stopped before persistence")?
+    }
+
+    /// Persist a received witness without recollecting it. The caller must bind its metadata
+    /// to the imported block; this does not validate witness contents or completeness.
+    pub async fn persist_received(&self, proof: StoredBlockProof) -> Result<()> {
+        proof.validate()?;
+        let (response, result) = oneshot::channel();
+        self.requests
+            .send(CollectRequest {
+                number: proof.witness.block_number,
+                hash: proof.witness.block_hash,
+                response,
+                supplied: Some(proof),
+            })
+            .await
+            .context("proof collector stopped")?;
+        result
+            .await
+            .context("proof collector stopped before persistence")??;
+        Ok(())
+    }
+
+    /// Whether an imported block still needs a durable witness for future settlement.
+    pub fn requires_witness(&self, number: u64) -> bool {
+        number > self.store.state.read().pruned_through
     }
 
     /// Fill any restart or upgrade gaps before allowing a proving node to advance.
@@ -107,7 +133,7 @@ impl ProofCollectorHandle {
     }
 
     /// Return a retained witness for this exact block without waiting for collection.
-    pub(crate) fn get(&self, number: u64, hash: B256) -> Option<Arc<StoredBlockProof>> {
+    pub fn get(&self, number: u64, hash: B256) -> Option<Arc<StoredBlockProof>> {
         let state = self.store.state.read();
         if number <= state.pruned_through {
             return None;
@@ -143,7 +169,10 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
                     let Some(request) = request else {
                         return;
                     };
-                    let result = self.collect_and_persist(request.number, request.hash).await;
+                    let result = match request.supplied {
+                        Some(proof) => self.persist(proof).await,
+                        None => self.collect_and_persist(request.number, request.hash).await,
+                    };
                     let _ = request.response.send(result);
                     continue;
                 }
@@ -210,6 +239,19 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
             proof.witness.block_number == number,
             "witness height does not match Zone block {number}"
         );
+        self.persist(proof).await
+    }
+
+    async fn persist(&self, proof: StoredBlockProof) -> Result<Option<Arc<StoredBlockProof>>> {
+        let number = proof.witness.block_number;
+        let block_hash = proof.witness.block_hash;
+        if number <= self.store.state.read().pruned_through {
+            return Ok(None);
+        }
+        // Retrying an already persisted witness must not unlink its durable file first.
+        if self.store.contains(number, block_hash) {
+            return Ok(self.store.state.read().proofs.get(&number).cloned());
+        }
         let store = self.store.clone();
         let proof = tokio::task::spawn_blocking(move || {
             store.remove_files(number..=number)?;
@@ -486,6 +528,7 @@ struct CollectRequest {
     number: u64,
     hash: B256,
     response: oneshot::Sender<Result<Option<Arc<StoredBlockProof>>>>,
+    supplied: Option<StoredBlockProof>,
 }
 
 fn sync_directory(directory: &Path) -> Result<()> {
