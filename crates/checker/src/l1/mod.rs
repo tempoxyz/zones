@@ -94,48 +94,67 @@ impl L1BlockEvidence {
     }
 }
 
-/// Fetch every Tempo block in `(parent, expected]`, authenticating the complete parent chain.
-pub(crate) async fn collect_l1_range_at(
-    provider: &DynProvider<TempoNetwork>,
-    tracker: &L1BlockTracker,
-    portal: Address,
+/// In-memory range acquisition progress retained across transient RPC failures.
+pub(crate) struct L1RangeCollector {
     parent: BlockNumHash,
-    expected: BlockNumHash,
-) -> Result<L1BlockEvidence, L1ReadError> {
-    if expected.number <= parent.number {
-        return Err(finding(eyre::eyre!(
-            "Tempo full import must advance its accounting anchor"
-        )));
+    cursor: BlockNumHash,
+    blocks: Vec<L1BlockEvidence>,
+}
+
+impl L1RangeCollector {
+    pub(crate) fn new(parent: BlockNumHash, expected: BlockNumHash) -> Result<Self, L1ReadError> {
+        if expected.number <= parent.number {
+            return Err(finding(eyre::eyre!(
+                "Tempo full import must advance its accounting anchor"
+            )));
+        }
+        Ok(Self {
+            parent,
+            cursor: expected,
+            blocks: Vec::new(),
+        })
     }
-    // Walk backwards from the Zone-authenticated tip so every requested hash is bound to it.
-    let mut cursor = expected;
-    let mut blocks = Vec::new();
-    while cursor.number > parent.number {
-        let (previous, evidence) =
-            if let Some(evidence) = tracker.authenticated_portal_logs(cursor).map_err(finding)? {
-                let previous = BlockNumHash::new(cursor.number - 1, evidence.parent_hash);
+
+    /// Resume authenticating `(parent, expected]`, returning evidence in chain order.
+    /// After an unavailable read, retry on the same collector to retain completed blocks.
+    /// A successful result consumes the evidence; the caller must not reuse the collector.
+    pub(crate) async fn collect(
+        &mut self,
+        provider: &DynProvider<TempoNetwork>,
+        tracker: &L1BlockTracker,
+        portal: Address,
+    ) -> Result<L1BlockEvidence, L1ReadError> {
+        // Walk backwards from the Zone-authenticated tip so every requested hash is bound to it.
+        while self.cursor.number > self.parent.number {
+            let (previous, evidence) = if let Some(evidence) = tracker
+                .authenticated_portal_logs(self.cursor)
+                .map_err(finding)?
+            {
+                let previous = BlockNumHash::new(self.cursor.number - 1, evidence.parent_hash);
                 (
                     previous,
                     collect_tracked_l1_block_evidence(portal, previous, evidence)?,
                 )
             } else {
-                fetch_l1_block_at(provider, portal, cursor).await?
+                fetch_l1_block_at(provider, portal, self.cursor).await?
             };
-        blocks.push(evidence);
-        cursor = previous;
+            // Advance only after this block's header and evidence are authenticated.
+            self.blocks.push(evidence);
+            self.cursor = previous;
+        }
+        if self.cursor != self.parent {
+            return Err(finding(eyre::eyre!(
+                "Tempo history does not extend the previous accounting anchor"
+            )));
+        }
+        Ok(L1BlockEvidence {
+            events: std::mem::take(&mut self.blocks)
+                .into_iter()
+                .rev()
+                .flat_map(|block| block.events)
+                .collect(),
+        })
     }
-    if cursor != parent {
-        return Err(finding(eyre::eyre!(
-            "Tempo history does not extend the previous accounting anchor"
-        )));
-    }
-    Ok(L1BlockEvidence {
-        events: blocks
-            .into_iter()
-            .rev()
-            .flat_map(|block| block.events)
-            .collect(),
-    })
 }
 
 fn collect_tracked_l1_block_evidence(
@@ -381,7 +400,9 @@ mod tests {
         tracker
             .record_with_portal_evidence(tip, B256::with_last_byte(102), Default::default(), vec![])
             .unwrap();
-        let evidence = collect_l1_range_at(&provider, &tracker, portal, parent, tip)
+        let evidence = L1RangeCollector::new(parent, tip)
+            .unwrap()
+            .collect(&provider, &tracker, portal)
             .await
             .unwrap();
         let mut state = State::default();
@@ -394,11 +415,14 @@ mod tests {
 
         let wrong_parent = BlockNumHash::new(parent.number, B256::ZERO);
         assert!(matches!(
-            collect_l1_range_at(&provider, &tracker, portal, wrong_parent, tip).await,
+            L1RangeCollector::new(wrong_parent, tip)
+                .unwrap()
+                .collect(&provider, &tracker, portal)
+                .await,
             Err(L1ReadError::Finding(_))
         ));
         assert!(matches!(
-            collect_l1_range_at(&provider, &tracker, portal, tip, tip).await,
+            L1RangeCollector::new(tip, tip),
             Err(L1ReadError::Finding(_))
         ));
     }
@@ -410,9 +434,64 @@ mod tests {
             .connect_mocked_client(asserter.clone())
             .erased();
         let parent = BlockNumHash::new(100, B256::with_last_byte(100));
+        let (tip, responses) = archival_range_responses(parent);
+        for block in responses.into_iter().rev() {
+            asserter.push_success(&block);
+            asserter.push_success(&Vec::<TempoTransactionReceipt>::new());
+        }
+        let evidence = L1RangeCollector::new(parent, tip)
+            .unwrap()
+            .collect(&provider, &L1BlockTracker::default(), Address::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(evidence.portal_events().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_range_retries_only_the_incomplete_rpc_block() {
+        for fail_receipts in [false, true] {
+            let asserter = alloy_transport::mock::Asserter::new();
+            let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(asserter.clone())
+                .erased();
+            let parent = BlockNumHash::new(100, B256::with_last_byte(100));
+            let (tip, responses) = archival_range_responses(parent);
+            let receipts = Vec::<TempoTransactionReceipt>::new();
+            // Authenticate block 103, then fail either the header or receipts read for 102.
+            asserter.push_success(&responses[2]);
+            asserter.push_success(&receipts);
+            if fail_receipts {
+                asserter.push_success(&responses[1]);
+            }
+            asserter.push_success(&serde_json::Value::Null);
+            let tracker = L1BlockTracker::default();
+            let mut collector = L1RangeCollector::new(parent, tip).unwrap();
+            assert!(matches!(
+                collector.collect(&provider, &tracker, Address::ZERO).await,
+                Err(L1ReadError::Unavailable(_))
+            ));
+            assert_eq!(collector.cursor.number, 102);
+            assert_eq!(collector.blocks.len(), 1);
+            assert!(asserter.read_q().is_empty());
+
+            // Only supply the remaining blocks: refetching 103 would fail hash validation.
+            for block in responses[..2].iter().rev() {
+                asserter.push_success(block);
+                asserter.push_success(&receipts);
+            }
+            let evidence = collector
+                .collect(&provider, &tracker, Address::ZERO)
+                .await
+                .unwrap();
+            assert_eq!(evidence.portal_events().count(), 0);
+            assert!(asserter.read_q().is_empty());
+        }
+    }
+
+    fn archival_range_responses(parent: BlockNumHash) -> (BlockNumHash, Vec<serde_json::Value>) {
         let mut tip = parent;
         let mut responses = Vec::new();
-        for number in 101..=103 {
+        for number in parent.number + 1..=parent.number + 3 {
             let header = TempoHeader {
                 inner: Header {
                     number,
@@ -436,20 +515,7 @@ mod tests {
             block["uncles"] = serde_json::json!([]);
             responses.push(block);
         }
-        for block in responses.into_iter().rev() {
-            asserter.push_success(&block);
-            asserter.push_success(&Vec::<TempoTransactionReceipt>::new());
-        }
-        let evidence = collect_l1_range_at(
-            &provider,
-            &L1BlockTracker::default(),
-            Address::ZERO,
-            parent,
-            tip,
-        )
-        .await
-        .unwrap();
-        assert_eq!(evidence.portal_events().count(), 0);
+        (tip, responses)
     }
 
     #[test]
