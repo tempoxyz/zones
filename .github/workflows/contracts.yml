@@ -109,7 +109,8 @@ jobs:
         working-directory: crates/contracts
         run: forge build --skip test
 
-      # Exclude all test helpers too: their imports would pull the runtimes back in.
+      # Exclude all test helpers too: their imports would pull the runtimes back in. Protocol-
+      # installed runtimes have a separate 64 KiB budget in PortalRuntime.t.sol.
       - name: Check sizes of normally deployed contracts
         working-directory: crates/contracts
         run: |
@@ -238,6 +239,8 @@ jobs:
         working-directory: crates/contracts
         run: |
           "$GITHUB_WORKSPACE/foundry/target/release/forge" build --skip test
+          # Protocol-installed runtimes are excluded here and have a separate 64 KiB budget in
+          # PortalRuntime.t.sol.
           "$GITHUB_WORKSPACE/foundry/target/release/forge" build --sizes --skip 'test/**' \
             src/runtime/tempo/ZonePortal.sol \
             src/runtime/tempo/ZoneMessenger.sol \

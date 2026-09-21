@@ -1555,6 +1555,12 @@ contract ZonePortalTest is BaseTest {
         _activateSequencerSet(otherPortal, signers, 2);
         _expectInvalidQuorumCertificate(otherPortal, signers[0], batch, validSignatures);
 
+        // Isolate the EIP-712 verifyingContract binding: every attestation field is unchanged,
+        // but signatures collected for the other Portal cannot be used on this Portal.
+        bytes[] memory otherPortalDomainSignatures =
+            _quorumSignatures(_attestationDigestFor(otherPortal, block.chainid, attestation));
+        _expectInvalidQuorumCertificate(portal, signers[0], batch, otherPortalDomainSignatures);
+
         // A certificate collected before a signer-set update cannot settle after it. Keep A and B
         // registered so this is a version regression rather than merely an unregistered-signer one.
         address[] memory rotatedSigners = new address[](3);

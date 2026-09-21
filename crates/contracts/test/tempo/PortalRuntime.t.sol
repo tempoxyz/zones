@@ -2,10 +2,34 @@
 pragma solidity ^0.8.13;
 
 import { ZONE_PORTAL_IMPL_ADDRESS } from "../../src/runtime/interfaces/IZone.sol";
+import { Verifier } from "../../src/runtime/tempo/Verifier.sol";
+import { ZoneMessenger } from "../../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { PortalRuntimeTest } from "../PortalRuntimeTest.sol";
 
 contract PortalRuntimeTestCase is PortalRuntimeTest {
+
+    /// @dev Protocol-installed runtimes bypass EIP-170, but retain a generous safety budget to
+    ///      catch accidental bytecode growth. This is a Tempo policy limit, not an EVM limit.
+    uint256 internal constant MAX_PROTOCOL_RUNTIME_SIZE = 64 * 1024;
+
+    function test_protocolInstalledRuntimesStayWithinSizeBudget() public view {
+        assertLe(
+            vm.getDeployedCode("ZonePortal.sol:ZonePortal").length,
+            MAX_PROTOCOL_RUNTIME_SIZE,
+            "ZonePortal runtime exceeds 64 KiB"
+        );
+        assertLe(
+            vm.getDeployedCode("ZoneMessenger.sol:ZoneMessenger").length,
+            MAX_PROTOCOL_RUNTIME_SIZE,
+            "ZoneMessenger runtime exceeds 64 KiB"
+        );
+        assertLe(
+            vm.getDeployedCode("Verifier.sol:Verifier").length,
+            MAX_PROTOCOL_RUNTIME_SIZE,
+            "Verifier runtime exceeds 64 KiB"
+        );
+    }
 
     function test_installsExactArtifactAndNativeProxy() public {
         ZonePortal portal = _newPortalProxy(1);
