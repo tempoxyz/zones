@@ -109,11 +109,14 @@ jobs:
         working-directory: crates/contracts
         run: forge build --skip test
 
-      - name: Check deployment sizes and report protocol runtimes
+      # Exclude all test helpers too: their imports would pull the runtimes back in.
+      - name: Check sizes of normally deployed contracts
         working-directory: crates/contracts
         run: |
-          python3 -m unittest discover -s scripts -p 'test_*.py'
-          python3 scripts/check_sizes.py
+          forge build --sizes --skip 'test/**' \
+            src/runtime/tempo/ZonePortal.sol \
+            src/runtime/tempo/ZoneMessenger.sol \
+            src/runtime/tempo/Verifier.sol
 
   lint:
     permissions:
@@ -235,7 +238,10 @@ jobs:
         working-directory: crates/contracts
         run: |
           "$GITHUB_WORKSPACE/foundry/target/release/forge" build --skip test
-          python3 scripts/check_sizes.py
+          "$GITHUB_WORKSPACE/foundry/target/release/forge" build --sizes --skip 'test/**' \
+            src/runtime/tempo/ZonePortal.sol \
+            src/runtime/tempo/ZoneMessenger.sol \
+            src/runtime/tempo/Verifier.sol
 
       - name: Run Forge tests (zone specs)
         working-directory: crates/contracts
