@@ -213,6 +213,7 @@ impl ZoneEngine {
         fee_recipient: Address,
         encryption_keys: EncryptionKeyRing,
         portal_address: Address,
+        proof_collector: Option<ProofCollectorHandle>,
     ) -> Self {
         Self {
             chain_spec,
@@ -225,19 +226,13 @@ impl ZoneEngine {
             encryption_keys,
             portal_address,
             production_permit: None,
-            proof_collector: None,
+            proof_collector,
         }
     }
 
     /// Enforce the per-anchor leadership permit before every advance.
     pub fn with_production_permit(mut self, permit: ProductionPermit) -> Self {
         self.production_permit = Some(permit);
-        self
-    }
-
-    /// Require a durable proof sidecar before canonicalizing each produced block.
-    pub fn with_proof_collector(mut self, collector: ProofCollectorHandle) -> Self {
-        self.proof_collector = Some(collector);
         self
     }
 

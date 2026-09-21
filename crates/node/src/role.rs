@@ -993,10 +993,6 @@ where
             // Canonical head writer: the engine with the per-anchor production permit.
             let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
-            let engine = match &collector {
-                Some(collector) => engine.with_proof_collector(collector.clone()),
-                None => engine,
-            };
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
             tasks.spawn(async move {
@@ -1131,6 +1127,7 @@ where
         sequencer.config.sequencer_signer.address(),
         context.encryption_keys.clone(),
         context.portal_address,
+        sequencer.proof_collector.clone(),
     )
     .with_production_permit(ProductionPermit::new(
         context.schedule.clone(),

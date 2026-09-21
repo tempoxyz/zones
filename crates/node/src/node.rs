@@ -1037,11 +1037,8 @@ where
                     .clone()
                     .expect("sequencer mode configures deposit decryption keys"),
                 self.portal_address,
+                proof_collector.clone(),
             );
-            let engine = match &proof_collector {
-                Some(collector) => engine.with_proof_collector(collector.clone()),
-                None => engine,
-            };
             task_executor.spawn_critical_task("zone-engine", engine.run());
 
             Self::launch_sequencer_tasks(

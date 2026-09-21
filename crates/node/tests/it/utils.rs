@@ -1469,6 +1469,7 @@ impl ZoneTestNode {
                 sequencer_signer.address(),
                 deposit_decryption_keys,
                 portal_address,
+                None,
             );
             node_handle
                 .node
