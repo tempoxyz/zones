@@ -1,7 +1,7 @@
-//! Append-only admission storage extension to Tempo's portal view.
+//! Admission storage extension to Tempo's portal view.
 //!
 //! Tempo's pinned view ends at the T13 token cursor (slot 28). Keep its existing definition
-//! authoritative for legacy fields; this view only describes the TIP-1012 extension. Reads
+//! authoritative for legacy fields; this view mirrors its final packed fields before TIP-1012. Reads
 //! must use `L1State::read_l1`, just like other authenticated portal reads.
 //!
 //! TODO: Move these fields into Tempo's existing portal storage definition when we update
@@ -18,10 +18,14 @@ pub struct ForcedExitAdmissionMetadata {
 
 #[contract]
 pub struct ForcedExitPortalStorage {
-    /// Preserve all legacy fields and the complete T13 slot, including its unused bytes.
-    _legacy: [U256; 29],
+    /// Preserve established slots, then mirror the prover fields at the start of slot 28.
+    _legacy: [U256; 28],
+    _last_processed_enabled_token_count: u64,
+    _token_enablement_cursor_initialized: bool,
+    pub forced_exit_version: u64,
     pub forced_exit_count: u64,
     pub forced_exit_requests: Mapping<u64, ForcedExitAdmissionMetadata>,
+    _cumulative_extra_admission_weight: Mapping<u64, u64>,
 }
 
 impl ForcedExitPortalStorage {
@@ -37,12 +41,14 @@ mod tests {
     #[test]
     fn appended_slots_match_solidity_layout() {
         let portal = ForcedExitPortalStorage::new(Address::repeat_byte(1));
-        assert_eq!(portal.forced_exit_count.slot(), U256::from(29));
-        assert_eq!(portal.forced_exit_requests.slot(), U256::from(30));
+        assert_eq!(portal.forced_exit_count.slot(), U256::from(28));
+        assert_eq!(portal.forced_exit_requests.slot(), U256::from(29));
+        assert_eq!(portal.forced_exit_version.slot(), U256::from(28));
+        assert_eq!(portal.forced_exit_version.ctx().packed_offset(), Some(9));
         // Mapping keys use standard Solidity ABI words; the value packs address + uint64.
         let mut key = [0u8; 64];
         key[31] = 1;
-        key[63] = 30;
+        key[63] = 29;
         assert_eq!(
             portal.forced_exit_requests[1].as_slot().slot(),
             U256::from_be_bytes(alloy_primitives::keccak256(key).0)
@@ -50,6 +56,6 @@ mod tests {
         let value = &portal.forced_exit_requests[1];
         assert_eq!(value.token.slot(), value.deposit_number.slot());
         assert_eq!(value.deposit_number.ctx().packed_offset(), Some(20));
-        assert_eq!(portal.forced_exit_count.ctx().packed_offset(), None);
+        assert_eq!(portal.forced_exit_count.ctx().packed_offset(), Some(17));
     }
 }

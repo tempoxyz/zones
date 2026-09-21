@@ -316,6 +316,10 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 //   slot 25: _tokensEnabledInCurrentBlock (uint64) + pauseExpiry (uint64) [packed]
 //   slot 26: tokenEnablementHash (bytes32)
 //   slot 27: abdicationEffectiveAt (mapping(Capability => uint64))
+//   slot 28: lastProcessedEnabledTokenCount (uint64) + tokenEnablementCursorInitialized (bool)
+//            + forcedExitVersion (uint64) + forcedExitCount (uint64) [packed]
+//   slot 29: forcedExitRequests (mapping(uint64 => ForcedExitMetadata))
+//   slot 30: _cumulativeExtraAdmissionWeight (mapping(uint64 => uint64))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -463,8 +467,14 @@ interface IZonePortal {
 
     event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
 
-    /// @notice Supported payload format. Always returns 1.
-    function forcedExitVersion() external pure returns (uint64);
+    /// @notice Activation version: 0 is available for activation; 1 enables forced exits.
+    function forcedExitVersion() external view returns (uint64);
+
+    /// @notice Irreversibly activate version 1. Only the portal admin may call this once.
+    /// @dev Activate only after Zone execution and proving infrastructure support forced exits.
+    function activateForcedExits() external;
+
+    event ForcedExitsActivated(uint64 version);
     function forcedExitCount() external view returns (uint64);
     function forcedExitRequests(uint64 requestId)
         external
@@ -473,7 +483,7 @@ interface IZonePortal {
     function FORCED_EXIT_COMPENSATION() external view returns (uint128);
 
     /// @notice Queue an encrypted root authorization; processing is performed by the Zone.
-    /// @dev Requires an unpaused portal, an eligible fee payer, an enabled
+    /// @dev Requires activated forced exits, an unpaused portal, an eligible fee payer, an enabled
     ///      token, a valid bounded envelope/key, and shared public inbox capacity.
     ///      Collects 100_000 base units from msg.sender and immediately pays the portal admin.
     function requestForcedExit(
@@ -625,6 +635,8 @@ interface IZonePortal {
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidForcedExitCiphertextLength(uint256 actual);
+    error ForcedExitsNotActivated();
+    error ForcedExitsAlreadyActivated();
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);

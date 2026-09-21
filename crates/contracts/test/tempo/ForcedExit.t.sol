@@ -24,12 +24,21 @@ import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 /// Internal queue access exists only in the test fixture, never the portal ABI.
 contract ForcedExitPortalHarness is ZonePortal {
 
+    function seedTestLegacyQueue(uint64 count, uint64 processed) external {
+        depositCount = count;
+        lastProcessedDepositNumber = processed;
+    }
+
+    function confirmTestDeposits(uint64 number) external {
+        lastProcessedDepositNumber = number;
+    }
+
     function enqueueTestBounceBack(address token) external {
         _recordDeposit(
             DepositQueueLib.enqueue(
                 currentDepositQueueHash, WithdrawalBounceBackDeposit(token, address(1), 1)
             ),
-            MAX_DEPOSITS_PER_TEMPO_BLOCK
+            MAX_UNPROCESSED_DEPOSITS
         );
     }
 
@@ -50,6 +59,12 @@ contract ForcedExitTest is BaseTest {
         pathUSD.mint(alice, 1000e6);
         pathUSD.mint(address(zoneGateway), 10e6);
         vm.stopPrank();
+        initializePortal();
+        vm.prank(admin);
+        portal.activateForcedExits();
+    }
+
+    function initializePortal() internal {
         portal = new ForcedExitPortalHarness();
         address[] memory sequencers = new address[](1);
         sequencers[0] = sequencer;
@@ -104,28 +119,40 @@ contract ForcedExitTest is BaseTest {
         assertEq(number, 0);
     }
 
-    function test_runtimeSupportsVersionOneWithoutStorageActivation() public {
-        ZonePortal production = new ZonePortal();
-        assertEq(production.forcedExitVersion(), 1);
+    function test_activationDefaultsToZeroAndBlocksAdmission() public {
+        initializePortal();
+        assertEq(new ZonePortal().forcedExitVersion(), 0);
+        assertEq(portal.forcedExitVersion(), 0);
+        uint256 balance = pathUSD.balanceOf(alice);
+        uint256 adminBalance = pathUSD.balanceOf(admin);
+        vm.expectRevert(IZonePortal.ForcedExitsNotActivated.selector);
+        request(384);
+        assertUnchanged(balance, adminBalance);
+        vm.prank(admin);
+        vm.expectEmit(address(portal));
+        emit IZonePortal.ForcedExitsActivated(1);
+        portal.activateForcedExits();
         assertEq(portal.forcedExitVersion(), 1);
-        assertEq(vm.load(address(portal), bytes32(uint256(29))), bytes32(0));
         (uint64 id, uint64 number) = request(384);
         assertEq(id, 1);
         assertEq(number, 1);
-        assertEq(portal.forcedExitVersion(), 1);
     }
 
-    function test_appendedStoragePreservesT13Slot() public {
-        bytes32 sentinel = keccak256("T13 token cursor and padding");
-        vm.store(address(portal), bytes32(uint256(28)), sentinel);
-        request(384);
-        assertEq(vm.load(address(portal), bytes32(uint256(28))), sentinel);
-        assertEq(vm.load(address(portal), bytes32(uint256(29))), bytes32(uint256(1)));
-        bytes32 metadataSlot = keccak256(abi.encode(uint64(1), uint256(30)));
-        assertEq(
-            vm.load(address(portal), metadataSlot),
-            bytes32(uint256(uint160(address(pathUSD))) | (uint256(1) << 160))
-        );
+    function test_activationIsAdminOnlyAndOneWay() public {
+        initializePortal();
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.activateForcedExits();
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.activateForcedExits();
+        assertEq(portal.forcedExitVersion(), 0);
+        vm.prank(admin);
+        portal.activateForcedExits();
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.ForcedExitsAlreadyActivated.selector);
+        portal.activateForcedExits();
+        assertEq(portal.forcedExitVersion(), 1);
     }
 
     function test_feeIdentityQueueAndReconstructibleEvent() public {
@@ -286,6 +313,44 @@ contract ForcedExitTest is BaseTest {
         assertEq(id, 1);
     }
 
+    function test_portalReceivePolicyBlockedPreservesExistingBacking() public {
+        // Seed backing through an ordinary deposit before blocking incoming compensation.
+        vm.prank(alice);
+        portal.depositEncrypted(address(pathUSD), 10e6, 0, _depositPayload(alice, 0), alice);
+        uint256 backing = pathUSD.balanceOf(address(portal));
+        assertGe(backing, FEE);
+        bytes32 queueHash = portal.currentDepositQueueHash();
+        uint64 depositCount = portal.depositCount();
+        uint256 balance = pathUSD.balanceOf(alice);
+        uint256 adminBalance = pathUSD.balanceOf(admin);
+        uint256 guardBalance = pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
+
+        // Model the blocked-recipient state, independent of how it was configured.
+        vm.prank(address(portal));
+        registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+        vm.expectRevert(IZonePortal.CallbackRejected.selector);
+        request(384);
+        assertEq(pathUSD.balanceOf(alice), balance);
+        assertEq(pathUSD.balanceOf(admin), adminBalance);
+        assertEq(pathUSD.balanceOf(address(portal)), backing);
+        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalance);
+        assertEq(portal.depositCount(), depositCount);
+        assertEq(portal.currentDepositQueueHash(), queueHash);
+        assertEq(portal.forcedExitCount(), 0);
+        (address token, uint64 number) = portal.forcedExitRequests(1);
+        assertEq(token, address(0));
+        assertEq(number, 0);
+
+        vm.prank(address(portal));
+        registry.setReceivePolicy(ALLOW_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+        (uint64 id, uint64 admittedNumber) = request(384);
+        assertEq(id, 1);
+        assertEq(admittedNumber, depositCount + 1);
+        assertEq(pathUSD.balanceOf(alice), balance - FEE);
+        assertEq(pathUSD.balanceOf(admin), adminBalance + FEE);
+        assertEq(pathUSD.balanceOf(address(portal)), backing);
+    }
+
     function test_adminReceivePolicyBlockedRollsBackAdmission() public {
         vm.prank(admin);
         registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
@@ -318,8 +383,49 @@ contract ForcedExitTest is BaseTest {
         assertUnchanged(balance, adminBalance);
     }
 
+    function test_packedActivationAndRequestsPreserveProverFields() public {
+        initializePortal();
+        uint256 cursor = uint256(7) | (uint256(1) << 64);
+        vm.store(address(portal), bytes32(uint256(28)), bytes32(cursor));
+        vm.prank(admin);
+        portal.activateForcedExits();
+        request(384);
+        assertEq(portal.lastProcessedEnabledTokenCount(), 7);
+        assertTrue(portal.tokenEnablementCursorInitialized());
+        assertEq(portal.forcedExitVersion(), 1);
+        assertEq(portal.forcedExitCount(), 1);
+        assertEq(
+            uint256(vm.load(address(portal), bytes32(uint256(28)))),
+            cursor | (uint256(1) << 72) | (uint256(1) << 136)
+        );
+        bytes32 metadataSlot = keccak256(abi.encode(uint64(1), uint256(29)));
+        assertEq(
+            uint256(vm.load(address(portal), metadataSlot)),
+            uint256(uint160(address(pathUSD))) | (uint256(1) << 160)
+        );
+    }
+
+    function test_legacyOutstandingQueueNeedsNoWeightMigration() public {
+        // An upgraded portal has no extra-weight checkpoints for existing deposits.
+        portal.seedTestLegacyQueue(300, 100);
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS() - 20;
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+        );
+        request(384);
+        portal.confirmTestDeposits(104);
+        (, uint64 number) = request(384);
+        assertEq(number, 301);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+        );
+        request(384);
+        portal.confirmTestDeposits(301);
+        request(384);
+    }
+
     function test_sharedCapacityRetainsBounceBackReserve() public {
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK() - 20;
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS() - 20;
         vm.prank(alice);
         portal.depositEncrypted(address(pathUSD), 1e6, 0, _depositPayload(alice, 0), alice);
         uint64 weight = portal.FORCED_EXIT_ADMISSION_WEIGHT();
@@ -352,8 +458,23 @@ contract ForcedExitTest is BaseTest {
         }
         assertEq(portal.depositCount(), requests + ordinary + 20);
         vm.roll(block.number + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+        );
+        request(384);
+        // Processing one ordinary and one forced entry frees 15 units, but
+        // the 20 reserved units still prevent another public admission.
+        portal.confirmTestDeposits(2);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+        );
+        request(384);
+        portal.confirmTestDeposits(4);
         request(384);
         assertEq(portal.forcedExitCount(), requests + 1);
+        portal.confirmTestDeposits(portal.depositCount());
+        request(384);
+        assertEq(portal.forcedExitCount(), requests + 2);
     }
 
 }

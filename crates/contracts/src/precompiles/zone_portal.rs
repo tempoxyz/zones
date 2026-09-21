@@ -130,7 +130,8 @@ crate::sol! {
 
         function requestForcedExit(address token, uint256 keyIndex, DepositPayload encrypted)
             external returns (uint64 requestId, uint64 depositNumber);
-        function forcedExitVersion() external pure returns (uint64);
+        function forcedExitVersion() external view returns (uint64);
+        function activateForcedExits() external;
         function forcedExitCount() external view returns (uint64);
         function forcedExitRequests(uint64 requestId) external view returns (address token, uint64 depositNumber);
         function FORCED_EXIT_COMPENSATION() external view returns (uint128);
@@ -141,6 +142,7 @@ crate::sol! {
         }
 
         // -- Events --
+        event ForcedExitsActivated(uint64 version);
         event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
 
         event DepositMade(
@@ -284,6 +286,8 @@ crate::sol! {
         error InvalidEphemeralPubkey();
         error InvalidCiphertextLength(uint256 actual, uint256 expected);
         error InvalidForcedExitCiphertextLength(uint256 actual);
+        error ForcedExitsNotActivated();
+        error ForcedExitsAlreadyActivated();
         error InvalidProofOfPossession();
         error DepositTooSmall();
         error TokenEnablementBlockCapacityExceeded(uint64 maximum);

@@ -63,7 +63,7 @@ contract ZonePortal is IZonePortal {
     ///      Re-measure the mixed workload before increasing this limit.
     uint64 public constant FORCED_EXIT_ADMISSION_WEIGHT = 14;
 
-    /// @notice Maximum admission units that may be consumed by this portal in one Tempo block.
+    /// @notice Maximum outstanding admission units in this portal.
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
     ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
     ///      below the buffered 200,000,000 gas ceiling.
@@ -249,10 +249,18 @@ contract ZonePortal is IZonePortal {
     /// @notice Whether the T13 token cursor has been authenticated by an operational batch.
     bool public tokenEnablementCursorInitialized;
 
-    uint184 private _reservedT13TokenCursorPadding;
+    /// @inheritdoc IZonePortal
+    uint64 public forcedExitVersion;
 
+    /// @notice Number of admitted forced-exit requests; distinct from the shared queue count.
     uint64 public forcedExitCount;
     mapping(uint64 requestId => ForcedExitMetadata) public forcedExitRequests;
+
+    /// @dev Prefix sum of admission weight above the one unit already counted per queue entry.
+    ///      Ordinary deposits/bounce-backs add 0; forced exits add 13 (weight 14 minus 1).
+    ///      Subtract the processed prefix to obtain the extra weight still outstanding.
+    ///      Pre-upgrade entries have weight 1, so their default-zero prefixes need no migration.
+    mapping(uint64 depositNumber => uint64) private _cumulativeExtraAdmissionWeight;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -324,44 +332,28 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier onlySequencer() {
-        _checkSequencer();
+        if (!isSequencer(msg.sender)) revert NotSequencer();
         _;
     }
 
     modifier onlySequencerOrAdmin() {
-        _checkSequencerOrAdmin();
+        if (msg.sender != admin && !isSequencer(msg.sender)) revert NotSequencer();
         _;
     }
 
     modifier onlyAdmin() {
-        _checkAdmin();
+        if (msg.sender != admin) revert NotAdmin();
         _;
     }
 
     modifier whenNotPaused() {
-        _checkNotPaused();
+        if (paused()) revert PortalIsPaused();
         _;
     }
 
     modifier onlySelf() {
         if (msg.sender != address(this)) revert NotSelf();
         _;
-    }
-
-    function _checkSequencer() internal view {
-        if (!isSequencer(msg.sender)) revert NotSequencer();
-    }
-
-    function _checkSequencerOrAdmin() internal view {
-        if (msg.sender != admin && !isSequencer(msg.sender)) revert NotSequencer();
-    }
-
-    function _checkAdmin() internal view {
-        if (msg.sender != admin) revert NotAdmin();
-    }
-
-    function _checkNotPaused() internal view {
-        if (paused()) revert PortalIsPaused();
     }
 
     modifier nonReentrantWithdrawal() {
@@ -981,17 +973,14 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
-        uint64 currentBlock = uint64(block.number);
-        if (_depositCountBlock != currentBlock) {
-            _depositCountBlock = currentBlock;
-            _depositsInCurrentBlock = 0;
-        }
-        if (_depositsInCurrentBlock + weight > maximum) {
+        uint64 cumulativeExtraWeight = _cumulativeExtraAdmissionWeight[depositCount] + weight - 1;
+        uint64 outstandingEntries = depositCount - lastProcessedDepositNumber + 1;
+        uint64 outstandingExtraWeight =
+            cumulativeExtraWeight - _cumulativeExtraAdmissionWeight[lastProcessedDepositNumber];
+        if (outstandingEntries + outstandingExtraWeight > maximum) {
             revert DepositBlockCapacityExceeded(maximum);
         }
-        unchecked {
-            _depositsInCurrentBlock += weight;
-        }
+        _cumulativeExtraAdmissionWeight[depositCount + 1] = cumulativeExtraWeight;
 
         currentDepositQueueHash = newCurrentDepositQueueHash;
         thisDeposit = ++depositCount;
@@ -1037,10 +1026,10 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
-    /// @notice Supported forced-exit payload format.
-    /// @dev Tempo activates admission by installing this runtime at the coordinated hard fork.
-    function forcedExitVersion() external pure returns (uint64) {
-        return 1;
+    function activateForcedExits() external onlyAdmin {
+        if (forcedExitVersion != 0) revert ForcedExitsAlreadyActivated();
+        forcedExitVersion = 1;
+        emit ForcedExitsActivated(1);
     }
 
     /// @inheritdoc IZonePortal
@@ -1053,6 +1042,7 @@ contract ZonePortal is IZonePortal {
         whenNotPaused
         returns (uint64 requestId, uint64 depositNumber)
     {
+        if (forcedExitVersion != 1) revert ForcedExitsNotActivated();
         _requireAllowedDepositor(msg.sender);
 
         // Enabled tokens have already passed the native TIP-20 factory validation. TIP-20
@@ -1065,7 +1055,10 @@ contract ZonePortal is IZonePortal {
         }
         _validateEncryptionKey(keyIndex);
 
-        // Require direct admin delivery; receive-policy diversion must not admit a request.
+        // Require direct receipt before paying the admin from the portal's balance.
+        // A diverted inbound transfer must not spend existing deposit backing.
+        (bool authorized,) = TIP403_REGISTRY.validateReceivePolicy(token, msg.sender, address(this));
+        if (!authorized) revert CallbackRejected();
         ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION);
         if (!_tryTransfer(token, admin, FORCED_EXIT_COMPENSATION)) revert CallbackRejected();
 
@@ -1084,7 +1077,7 @@ contract ZonePortal is IZonePortal {
         // the same ordered inbox queue.
         depositNumber = _recordDeposit(
             DepositQueueLib.enqueueForcedExit(currentDepositQueueHash, entry),
-            MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE,
+            MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE,
             FORCED_EXIT_ADMISSION_WEIGHT
         );
         forcedExitRequests[requestId] = ForcedExitMetadata(token, depositNumber);
