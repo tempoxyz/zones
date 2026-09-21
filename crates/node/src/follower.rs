@@ -436,10 +436,10 @@ where
 
     async fn process_follower_block(
         &mut self,
-        packet: PeerBlock,
+        block: PeerBlock,
         live_sender: Option<P2pPeerId>,
     ) -> bool {
-        let number = packet.block.header.number();
+        let number = block.block.header.number();
         let best = match self.context.provider.best_block_number() {
             Ok(best) => best,
             Err(err) => {
@@ -448,7 +448,7 @@ where
             }
         };
         let peer_block = PendingPeerBlock {
-            packet,
+            packet: block,
             live_sender,
         };
         if number <= best {

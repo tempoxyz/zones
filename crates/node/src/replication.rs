@@ -25,6 +25,13 @@ use eyre::{OptionExt as _, WrapErr as _};
 
 use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
 
+/// A decoded block and the optional witness supplied by its peer.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PeerBlock {
+    pub block: Block,
+    pub witness: Option<StoredBlockProof>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PersistedTip {
     number: u64,
@@ -309,7 +316,7 @@ where
                 "persisted zone block hash does not match notification at height {number}: expected={expected}, actual={hash}"
             );
         }
-        let block = encode_retained_block(block.encoded, number, hash, proofs)?;
+        let block = encode_block_with_witness(block.encoded, number, hash, proofs)?;
         commands
             .send(P2pCommand::BroadcastBlock(block))
             .await
@@ -320,44 +327,29 @@ where
     Ok(())
 }
 
-fn encode_retained_block(
+fn encode_block_with_witness(
     block: Vec<u8>,
     number: u64,
     hash: B256,
     proofs: Option<&ProofCollectorHandle>,
 ) -> eyre::Result<EncodedBlock> {
-    let witness = proofs.and_then(|proofs| proofs.get(number, hash));
-    if let Some(proofs) = proofs {
+    let witness = if let Some(proofs) = proofs {
+        let witness = proofs.get(number, hash);
         eyre::ensure!(
             witness.is_some() || !proofs.requires_witness(number),
             "unsettled block {number} has no retained witness to replicate"
         );
-    }
-    encode_peer_block(block, witness.as_deref())
-}
-
-/// A decoded block and the optional witness supplied by its peer.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PeerBlock {
-    pub block: Block,
-    pub witness: Option<StoredBlockProof>,
-}
-
-// Shared envelope for live blocks and backfill: magic/version, one RLP block, then witness CBOR.
-// Settled history and nodes without proof persistence keep using bare RLP blocks.
-const WITNESS_FRAME: &[u8] = EncodedBlock::WITNESS_PREFIX;
-
-fn encode_peer_block(
-    encoded_block: Vec<u8>,
-    witness: Option<&StoredBlockProof>,
-) -> eyre::Result<EncodedBlock> {
+        witness
+    } else {
+        None
+    };
     let witness = match witness {
         Some(witness) => {
             let mut encoded = Vec::new();
             let proof = &witness.witness;
             // Version 1 CBOR tuple: format, height, hash, parent, execution witness,
             // initial Tempo header RLP, Tempo proof nodes. ExecutionWitness uses its Serde impl.
-            // TempoHeader's flattened JSON Serde representation cannot round-trip binary hashes.
+            // Serde flatten loses binary mode, so the inner header's U256 expects hex instead of bytes.
             ciborium::into_writer(
                 &(
                     witness.format_version,
@@ -374,16 +366,15 @@ fn encode_peer_block(
         }
         None => None,
     };
-    Ok(EncodedBlock {
-        block: encoded_block,
-        witness,
-    })
+    Ok(EncodedBlock { block, witness })
 }
 
+// Shared envelope for live blocks and backfill: magic/version, one RLP block, then witness CBOR.
+// Settled history and nodes without proof persistence keep using bare RLP blocks.
 pub(crate) fn decode_peer_block(encoded: &[u8]) -> eyre::Result<PeerBlock> {
-    let witnessed = encoded.starts_with(WITNESS_FRAME);
+    let witnessed = encoded.starts_with(EncodedBlock::WITNESS_PREFIX);
     let mut input = if witnessed {
-        &encoded[WITNESS_FRAME.len()..]
+        &encoded[EncodedBlock::WITNESS_PREFIX.len()..]
     } else {
         encoded
     };
@@ -447,7 +438,7 @@ where
         let block = provider.block_by_number(number)?.ok_or_else(|| {
             eyre::eyre!("persisted canonical block {number} is missing while serving backfill")
         })?;
-        let block = encode_retained_block(
+        let block = encode_block_with_witness(
             alloy_rlp::encode(&block),
             number,
             block.header.hash_slow(),
@@ -668,11 +659,10 @@ mod tests {
 
     use super::{
         Block, BroadcasterShutdown, EncodedPersistedBlock, PersistedBlockSource, PersistedTip,
-        StoredBlockProof, WITNESS_FRAME, broadcast_persisted_blocks, decode_peer_block,
-        encode_peer_block,
+        StoredBlockProof, broadcast_persisted_blocks, decode_peer_block, encode_block_with_witness,
     };
     use alloy_primitives::B256;
-    use zone_p2p::P2pCommand;
+    use zone_p2p::{EncodedBlock, P2pCommand};
 
     #[derive(Clone)]
     struct StartupRaceSource {
@@ -757,12 +747,34 @@ mod tests {
         }
     }
 
+    fn witness_envelope(block: Vec<u8>, proof: &StoredBlockProof) -> Vec<u8> {
+        let witness = &proof.witness;
+        let mut encoded = EncodedBlock::WITNESS_PREFIX.to_vec();
+        encoded.extend_from_slice(&block);
+        ciborium::into_writer(
+            &(
+                proof.format_version,
+                witness.block_number,
+                witness.block_hash,
+                witness.parent_hash,
+                &witness.execution_witness,
+                alloy_primitives::Bytes::from(alloy_rlp::encode(&witness.initial_tempo_header)),
+                &witness.tempo_state,
+            ),
+            &mut encoded,
+        )
+        .unwrap();
+        encoded
+    }
+
     #[test]
-    fn witness_envelope_round_trips_cbor_and_bare_blocks() {
+    fn witness_envelope_decodes_cbor_and_bare_blocks() {
         let block = Block::default();
         let bare = alloy_rlp::encode(&block);
         assert_eq!(
-            encode_peer_block(bare.clone(), None).unwrap().encode(false),
+            encode_block_with_witness(bare.clone(), 0, B256::ZERO, None)
+                .unwrap()
+                .encode(false),
             bare
         );
         assert_eq!(
@@ -787,9 +799,7 @@ mod tests {
         proof.witness.execution_witness.keys = nodes.clone();
         proof.witness.execution_witness.headers = nodes.clone();
         proof.witness.tempo_state = nodes;
-        let encoded = encode_peer_block(bare.clone(), Some(&proof))
-            .unwrap()
-            .encode(true);
+        let encoded = witness_envelope(bare.clone(), &proof);
         assert_eq!(
             decode_peer_block(&encoded).unwrap(),
             super::PeerBlock {
@@ -800,7 +810,8 @@ mod tests {
 
         // Witness preimages and the RLP header must use CBOR byte strings, not hex strings.
         let value: ciborium::Value =
-            ciborium::from_reader(&encoded[WITNESS_FRAME.len() + bare.len()..]).unwrap();
+            ciborium::from_reader(&encoded[EncodedBlock::WITNESS_PREFIX.len() + bare.len()..])
+                .unwrap();
         let fields = value.as_array().unwrap();
         assert_eq!(fields.len(), 7);
         let execution = fields[4].as_map().unwrap();
@@ -828,10 +839,8 @@ mod tests {
             format_version: 2,
             witness: Default::default(),
         };
-        let encoded = encode_peer_block(bare.clone(), Some(&proof))
-            .unwrap()
-            .encode(true);
-        for len in WITNESS_FRAME.len()..encoded.len() {
+        let encoded = witness_envelope(bare.clone(), &proof);
+        for len in EncodedBlock::WITNESS_PREFIX.len()..encoded.len() {
             assert!(
                 decode_peer_block(&encoded[..len]).is_err(),
                 "accepted prefix of length {len}"
@@ -846,7 +855,7 @@ mod tests {
         assert!(decode_peer_block(&unknown_version).is_err());
 
         // The unreleased JSON draft is not accepted as a CBOR witness.
-        let mut json = WITNESS_FRAME.to_vec();
+        let mut json = EncodedBlock::WITNESS_PREFIX.to_vec();
         json.extend_from_slice(&bare);
         serde_json::to_writer(&mut json, &proof).unwrap();
         assert!(decode_peer_block(&json).is_err());
