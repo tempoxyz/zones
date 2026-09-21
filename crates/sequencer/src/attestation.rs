@@ -11,6 +11,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{Eip712Domain, SolStruct as _, SolValue as _, eip712_domain, sol};
 use eyre::WrapErr as _;
 use tokio::sync::{Notify, watch};
+use zone_prover::VerifierMode;
 
 use crate::settlement::BatchAnchor;
 
@@ -21,6 +22,7 @@ type SettlementSignatures =
 struct AttestationState {
     settlements: SettlementSignatures,
     prepared_anchors: BTreeMap<u64, BatchAnchor>,
+    verifier_mode: VerifierMode,
 }
 
 sol! {
@@ -403,6 +405,24 @@ impl AttestationStore {
         }
     }
 
+    /// Select the verifier mode for this store, discarding stale signatures.
+    pub fn set_verifier_mode(&self, mode: VerifierMode) {
+        let mut state = self.state.write().expect("attestation store lock poisoned");
+        if state.verifier_mode != mode {
+            state.verifier_mode = mode;
+            state.settlements.clear();
+            self.settlement_changed.notify_one();
+        }
+    }
+
+    /// Return the verifier mode selected for this store.
+    pub fn verifier_mode(&self) -> VerifierMode {
+        self.state
+            .read()
+            .expect("attestation store lock poisoned")
+            .verifier_mode
+    }
+
     /// Return the monitor-owned anchor for a Zone height.
     pub fn prepared_anchor(&self, height: u64) -> Option<BatchAnchor> {
         self.state
@@ -661,6 +681,26 @@ mod tests {
 
         store.remove_submitted(10);
         assert!(store.settlement_at(10, 1).is_none());
+    }
+
+    #[test]
+    fn verifier_mode_is_sticky_for_the_store_lifetime() {
+        let store = AttestationStore::default();
+        assert_eq!(store.verifier_mode(), VerifierMode::NitroV1);
+
+        store
+            .state
+            .write()
+            .unwrap()
+            .settlements
+            .insert(10, BTreeMap::new());
+        store.set_verifier_mode(VerifierMode::NoProof);
+        assert_eq!(store.verifier_mode(), VerifierMode::NoProof);
+        assert!(store.state.read().unwrap().settlements.is_empty());
+
+        // Confirming a height does not reset the manually selected mode.
+        store.remove_submitted(10);
+        assert_eq!(store.verifier_mode(), VerifierMode::NoProof);
     }
 
     #[test]

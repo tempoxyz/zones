@@ -658,7 +658,7 @@ where
             anchor.block_number(commitments.tempo_block_number),
             anchor.block_hash(),
         ),
-        VerifierMode::NitroV1,
+        context.store.verifier_mode(),
     )
     .await?
     else {

@@ -30,6 +30,7 @@ pub const NO_PROOF_FALLBACK_VERIFIER_HASH: B256 = B256::new(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifierMode {
     /// Nitro verification using a non-empty attestation document.
+    #[default]
     NitroV1,
     /// Temporary fallback verification requiring an empty proof.
     NoProof,

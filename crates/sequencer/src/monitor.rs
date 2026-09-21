@@ -32,19 +32,17 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
-use zone_prover::ProofBundle;
-
-use alloy_sol_types::{ContractError, SolInterface as _};
+use zone_prover::{ProofBundle, VerifierMode};
 
 use crate::{
     AttestationStore, ZoneSequencerProvider,
-    abi::{self, NO_QUEUE_INDEX, ZonePortal},
+    abi::{self, NO_QUEUE_INDEX},
     prover::SettlementProver,
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
-        PreparedBatch, WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch,
-        fetch_finalized_batch_boundaries, read_zone_block_snapshot,
+        PreparedBatch, WithdrawalPage, ZoneBlockSnapshot, decode_portal_revert,
+        fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -57,6 +55,9 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Backoff before rebuilding the monitor after a start or run failure.
 const RESTART_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Verifier mode activated after an invalid proof is rejected.
+const FALLBACK_VERIFIER_MODE: Option<VerifierMode> = Some(VerifierMode::NoProof);
 
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
@@ -141,6 +142,8 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     latest_observed_zone_block: u64,
     /// Backpressured SPF and Nitro attestation worker required before configured settlement.
     settlement_prover: Option<SettlementProver>,
+    /// Sticky verifier mode shared with settlement attestation workers.
+    verifier_mode: VerifierMode,
 }
 
 struct PortalResyncSnapshot {
@@ -187,6 +190,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         repair_notify: Arc<Notify>,
         settlement_prover: Option<SettlementProver>,
     ) -> Result<Self> {
+        let verifier_mode = config
+            .attestation_store
+            .as_ref()
+            .map_or(VerifierMode::NitroV1, AttestationStore::verifier_mode);
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let mut batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
@@ -246,6 +253,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             prev_zone_block_hash,
             latest_observed_zone_block: last_submitted_zone_block,
             settlement_prover,
+            verifier_mode,
         };
 
         // Restore pending withdrawal data from zone L2 events so the
@@ -320,6 +328,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         {
             Ok(_) => self.record_observed_zone_block(latest_zone_block),
             Err(BatchSubmitError::Cancelled) => {}
+            Err(BatchSubmitError::InvalidProof) => {
+                error!(
+                    from = scan_from,
+                    to = latest_zone_block,
+                    "Verifier rejected batch proof"
+                );
+            }
             Err(BatchSubmitError::PortalAdvanced) => {
                 unreachable!("portal advancement is reconciled by submit_batch_with_retry")
             }
@@ -548,12 +563,16 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
-        let proof_bundle = if let Some(prover) = &self.settlement_prover {
-            Some(
-                prover
-                    .prove(from, last_zone_block, prepared.clone())
-                    .await?,
-            )
+        let proof_bundle = if self.verifier_mode == VerifierMode::NitroV1 {
+            if let Some(prover) = &self.settlement_prover {
+                Some(
+                    prover
+                        .prove(from, last_zone_block, prepared.clone())
+                        .await?,
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -641,7 +660,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(prepared, proof_bundle, shutdown)
+                .submit_batch(prepared, proof_bundle, self.verifier_mode, shutdown)
                 .await
             {
                 Ok(event) => {
@@ -712,6 +731,23 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
                     return Ok(());
                 }
+                Err(BatchSubmitError::InvalidProof)
+                    if self.verifier_mode == VerifierMode::NitroV1 =>
+                {
+                    let Some(fallback) = FALLBACK_VERIFIER_MODE else {
+                        return Err(BatchSubmitError::InvalidProof);
+                    };
+                    self.verifier_mode = fallback;
+                    if let Some(store) = &self.config.attestation_store {
+                        store.set_verifier_mode(fallback);
+                    }
+                    warn!(
+                        ?fallback,
+                        "Nitro verifier rejected proof; activating sticky fallback"
+                    );
+                    continue;
+                }
+                Err(BatchSubmitError::InvalidProof) => return Err(BatchSubmitError::InvalidProof),
                 Err(BatchSubmitError::Cancelled) => return Err(BatchSubmitError::Cancelled),
                 Err(BatchSubmitError::PortalAdvanced) => {
                     self.metrics
@@ -750,7 +786,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         delay *= 2;
                     } else {
                         self.metrics.batch_submit_failure_total.increment(1);
-                        let revert_reason = decode_portal_revert(&e);
+                        let revert_reason = decode_portal_revert(&e).map(|error| error.to_string());
                         error!(
                             error = %e,
                             revert_reason,
@@ -987,15 +1023,6 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
 /// Extracts hex-encoded revert data from the error's display string and decodes
 /// it using alloy's `ContractError`, which handles standard `Revert(string)`,
 /// `Panic(uint256)`, and ZonePortal custom errors (`NotSequencer`, etc.).
-fn decode_portal_revert(err: &eyre::Report) -> Option<String> {
-    let msg = format!("{err}");
-    let start = msg.find("data: \"0x")? + "data: \"".len();
-    let end = msg[start..].find('"')? + start;
-    let bytes = alloy_primitives::hex::decode(&msg[start..end]).ok()?;
-    let error = ContractError::<ZonePortal::ZonePortalErrors>::abi_decode(&bytes).ok()?;
-    Some(error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,6 +1131,7 @@ mod tests {
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             latest_observed_zone_block: 50,
             settlement_prover: None,
+            verifier_mode: VerifierMode::NitroV1,
         }
     }
 
@@ -1197,8 +1225,18 @@ mod tests {
         let submission_shutdown = shutdown.clone();
         let prepared = prepared(batch_data.clone());
         let submission = tokio::spawn(async move {
+            let proof = ProofBundle {
+                verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+                proof: Bytes::from_static(&[1]),
+            };
             monitor
-                .submit_batch_with_retry(&prepared, None, 71, Vec::new(), &submission_shutdown)
+                .submit_batch_with_retry(
+                    &prepared,
+                    Some(&proof),
+                    71,
+                    Vec::new(),
+                    &submission_shutdown,
+                )
                 .await
         });
 

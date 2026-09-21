@@ -45,7 +45,7 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolCall, SolEvent, SolValue};
+use alloy_sol_types::{ContractError, SolCall, SolEvent, SolInterface as _, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
@@ -63,6 +63,7 @@ use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 #[derive(Debug)]
 pub enum BatchSubmitError {
     Cancelled,
+    InvalidProof,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
     Other(eyre::Report),
@@ -78,6 +79,7 @@ impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
+            Self::InvalidProof => formatter.write_str("Nitro verifier rejected the proof"),
             Self::PortalAdvanced => {
                 formatter.write_str("portal advanced while waiting for settlement quorum")
             }
@@ -351,11 +353,13 @@ impl BatchSubmitter {
         &self,
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
+        verifier_mode: VerifierMode,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
-        let (verifier_config, proof) = settlement_proof(proof_bundle)?;
+        let (verifier_config, proof) =
+            settlement_proof(settlement_abi, verifier_mode, proof_bundle)?;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -378,6 +382,7 @@ impl BatchSubmitter {
             .await?;
         self.validate_submission_metadata(batch, metadata)?;
         let certificate = if let Some(store) = &self.attestation_store {
+            store.set_verifier_mode(verifier_mode);
             let threshold = metadata.sequencer_threshold as usize;
             info!(
                 zone_height = batch.zone_height,
@@ -398,6 +403,7 @@ impl BatchSubmitter {
                 settlement_abi,
                 batch.zone_height,
                 metadata,
+                verifier_mode,
                 &certificate,
             ) {
                 Ok(()) => {}
@@ -517,6 +523,10 @@ impl BatchSubmitter {
                 if anchors_to_current_tip {
                     submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
                 }
+                submission
+                    .call()
+                    .await
+                    .map_err(|error| classify_submission_revert(error.into()))?;
                 tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
             }
         }
@@ -766,6 +776,7 @@ impl BatchSubmitter {
         settlement_abi: SettlementAbi,
         zone_height: u64,
         metadata: PortalSubmissionMetadata,
+        verifier_mode: VerifierMode,
         certificate: &SettlementCertificate,
     ) -> Result<()> {
         let batch = &prepared.batch;
@@ -837,7 +848,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            VerifierMode::try_from(attestation.verifierConfigHash)? == VerifierMode::NitroV1,
+            VerifierMode::try_from(attestation.verifierConfigHash)? == verifier_mode,
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -1458,22 +1469,41 @@ struct SettlementAttestationInput<'a> {
     verifier_config: &'a Bytes,
 }
 
-fn settlement_proof(proof_bundle: Option<&ProofBundle>) -> Result<(Bytes, Bytes)> {
-    let Some(proof_bundle) = proof_bundle else {
-        return Ok((Bytes::from_static(NITRO_VERIFIER_CONFIG_V1), Bytes::new()));
+pub(crate) fn decode_portal_revert(
+    error: &eyre::Report,
+) -> Option<ContractError<ZonePortal::ZonePortalErrors>> {
+    let message = error.to_string();
+    let data = message.split_once("data: \"")?.1.split_once('"')?.0;
+    ContractError::abi_decode(&alloy_primitives::hex::decode(data).ok()?).ok()
+}
+
+fn classify_submission_revert(error: eyre::Report) -> BatchSubmitError {
+    match decode_portal_revert(&error) {
+        Some(ContractError::CustomError(ZonePortal::ZonePortalErrors::InvalidProof(_))) => {
+            BatchSubmitError::InvalidProof
+        }
+        _ => BatchSubmitError::Other(error),
+    }
+}
+
+fn settlement_proof(
+    settlement_abi: SettlementAbi,
+    verifier_mode: VerifierMode,
+    proof_bundle: Option<&ProofBundle>,
+) -> Result<(Bytes, Bytes)> {
+    let proof = if let Some(bundle) = proof_bundle {
+        eyre::ensure!(
+            VerifierMode::try_from(bundle.verifier_config.as_ref())? == verifier_mode,
+            "proof bundle verifier mode does not match requested mode"
+        );
+        bundle.proof.clone()
+    } else {
+        Bytes::new()
     };
-    let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
-    eyre::ensure!(
-        mode == VerifierMode::NitroV1,
-        "prover returned unsupported verifier config 0x{}; expected 0x{}",
-        alloy_primitives::hex::encode(&proof_bundle.verifier_config),
-        alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
-    );
-    mode.validate_proof_shape(&proof_bundle.proof)?;
-    Ok((
-        proof_bundle.verifier_config.clone(),
-        proof_bundle.proof.clone(),
-    ))
+    if settlement_abi == SettlementAbi::T13 || proof_bundle.is_some() {
+        verifier_mode.validate_proof_shape(&proof)?;
+    }
+    Ok((Bytes::from_static(verifier_mode.config()), proof))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2575,6 +2605,7 @@ mod tests {
                 SettlementAbi::Legacy,
                 batch.zone_height,
                 metadata,
+                VerifierMode::NitroV1,
                 &certificate,
             )
             .unwrap_err();
@@ -2586,13 +2617,28 @@ mod tests {
     }
 
     #[test]
-    fn settlement_proof_uses_attested_bundle_bytes() {
+    fn settlement_proof_enforces_verifier_mode_shape() {
+        let (config, proof) =
+            settlement_proof(SettlementAbi::T13, VerifierMode::NoProof, None).unwrap();
+        assert_eq!(config.as_ref(), VerifierMode::NoProof.config());
+        assert!(proof.is_empty());
+        assert!(settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, None).is_err());
+
+        let mismatched = ProofBundle {
+            verifier_config: Bytes::from_static(VerifierMode::NoProof.config()),
+            proof: Bytes::new(),
+        };
+        assert!(
+            settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&mismatched)).is_err()
+        );
+
         let bundle = ProofBundle {
             verifier_config: Bytes::from_static(NITRO_VERIFIER_CONFIG_V1),
             proof: Bytes::from_static(&[0xaa, 0xbb]),
         };
 
-        let (verifier_config, proof) = settlement_proof(Some(&bundle)).unwrap();
+        let (verifier_config, proof) =
+            settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&bundle)).unwrap();
 
         assert_eq!(verifier_config.as_ref(), NITRO_VERIFIER_CONFIG_V1);
         assert_eq!(proof.as_ref(), [0xaa, 0xbb]);
