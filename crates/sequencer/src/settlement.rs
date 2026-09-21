@@ -837,8 +837,7 @@ impl BatchSubmitter {
             "certificate withdrawal queue hash changed"
         );
         eyre::ensure!(
-            VerifierMode::from_config_hash(attestation.verifierConfigHash)?
-                == VerifierMode::NitroV1,
+            VerifierMode::try_from(attestation.verifierConfigHash)? == VerifierMode::NitroV1,
             "certificate verifier config changed"
         );
         eyre::ensure!(
@@ -1463,7 +1462,7 @@ fn settlement_proof(proof_bundle: Option<&ProofBundle>) -> Result<(Bytes, Bytes)
     let Some(proof_bundle) = proof_bundle else {
         return Ok((Bytes::from_static(NITRO_VERIFIER_CONFIG_V1), Bytes::new()));
     };
-    let mode = VerifierMode::from_config(&proof_bundle.verifier_config)?;
+    let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
     eyre::ensure!(
         mode == VerifierMode::NitroV1,
         "prover returned unsupported verifier config 0x{}; expected 0x{}",

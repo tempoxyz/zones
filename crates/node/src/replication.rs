@@ -434,7 +434,7 @@ where
         .address();
     store.precheck_follower_settlement(height, digest, leader, signer)?;
 
-    let verifier_mode = VerifierMode::from_config_hash(signed.attestation.verifierConfigHash)?;
+    let verifier_mode = VerifierMode::try_from(signed.attestation.verifierConfigHash)?;
     let expected = build_settlement_attestation(
         provider,
         height,

@@ -46,32 +46,38 @@ impl VerifierMode {
         }
     }
 
-    /// Decode an exact configuration. Unknown and non-canonical encodings are rejected.
-    pub fn from_config(config: &[u8]) -> Result<Self, VerifierModeError> {
-        match config {
-            NITRO_VERIFIER_CONFIG_V1 => Ok(Self::NitroV1),
-            NO_PROOF_FALLBACK_VERIFIER => Ok(Self::NoProof),
-            _ => Err(VerifierModeError::UnknownConfig),
-        }
-    }
-
-    /// Decode the hash committed by a settlement attestation.
-    pub fn from_config_hash(hash: B256) -> Result<Self, VerifierModeError> {
-        if hash == NITRO_VERIFIER_CONFIG_V1_HASH {
-            Ok(Self::NitroV1)
-        } else if hash == NO_PROOF_FALLBACK_VERIFIER_HASH {
-            Ok(Self::NoProof)
-        } else {
-            Err(VerifierModeError::UnknownConfigHash)
-        }
-    }
-
     /// Enforce the proof shape associated with this mode.
     pub fn validate_proof_shape(self, proof: &[u8]) -> Result<(), VerifierModeError> {
         match (self, proof.is_empty()) {
             (Self::NitroV1, true) => Err(VerifierModeError::InvalidProofShape),
             (Self::NoProof, false) => Err(VerifierModeError::InvalidProofShape),
             _ => Ok(()),
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for VerifierMode {
+    type Error = VerifierModeError;
+
+    /// Decode an exact configuration. Unknown and non-canonical encodings are rejected.
+    fn try_from(config: &[u8]) -> Result<Self, Self::Error> {
+        match config {
+            NITRO_VERIFIER_CONFIG_V1 => Ok(Self::NitroV1),
+            NO_PROOF_FALLBACK_VERIFIER => Ok(Self::NoProof),
+            _ => Err(VerifierModeError::UnknownConfig),
+        }
+    }
+}
+
+impl TryFrom<B256> for VerifierMode {
+    type Error = VerifierModeError;
+
+    /// Decode the hash committed by a settlement attestation.
+    fn try_from(hash: B256) -> Result<Self, Self::Error> {
+        match hash {
+            NITRO_VERIFIER_CONFIG_V1_HASH => Ok(Self::NitroV1),
+            NO_PROOF_FALLBACK_VERIFIER_HASH => Ok(Self::NoProof),
+            _ => Err(VerifierModeError::UnknownConfigHash),
         }
     }
 }
@@ -260,11 +266,11 @@ mod tests {
 
     #[test]
     fn verifier_modes_enforce_canonical_config_and_proof_shape() {
-        assert_eq!(VerifierMode::from_config(&[1]), Ok(VerifierMode::NitroV1));
-        assert_eq!(VerifierMode::from_config(&[2]), Ok(VerifierMode::NoProof));
-        assert!(VerifierMode::from_config(&[]).is_err());
-        assert!(VerifierMode::from_config(&[1, 2]).is_err());
-        assert!(VerifierMode::from_config(&[3]).is_err());
+        assert_eq!(VerifierMode::try_from(&[1][..]), Ok(VerifierMode::NitroV1));
+        assert_eq!(VerifierMode::try_from(&[2][..]), Ok(VerifierMode::NoProof));
+        assert!(VerifierMode::try_from(&[][..]).is_err());
+        assert!(VerifierMode::try_from(&[1, 2][..]).is_err());
+        assert!(VerifierMode::try_from(&[3][..]).is_err());
 
         assert!(VerifierMode::NitroV1.validate_proof_shape(&[42]).is_ok());
         assert_eq!(
@@ -277,7 +283,7 @@ mod tests {
             Err(VerifierModeError::InvalidProofShape)
         );
         assert_eq!(
-            VerifierMode::from_config_hash(VerifierMode::NoProof.config_hash()),
+            VerifierMode::try_from(VerifierMode::NoProof.config_hash()),
             Ok(VerifierMode::NoProof)
         );
     }

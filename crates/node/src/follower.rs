@@ -408,7 +408,7 @@ where
             height <= persisted_head,
             "settlement proposal at height {height} is not durable; persisted head is {persisted_head}"
         );
-        let verifier_mode = VerifierMode::from_config_hash(proposal.verifierConfigHash)?;
+        let verifier_mode = VerifierMode::try_from(proposal.verifierConfigHash)?;
         let expected = build_settlement_attestation(
             &self.context.provider,
             height,

@@ -707,7 +707,7 @@ async fn verify_remotely(
 }
 
 fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
-    let mode = VerifierMode::from_config(&proof_bundle.verifier_config)?;
+    let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
     ensure!(
         mode == VerifierMode::NitroV1,
         "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
