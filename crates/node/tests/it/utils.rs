@@ -197,6 +197,15 @@ alloy_sol_types::sol! {
 ///
 /// Requires `forge build` to have been run in `crates/contracts`.
 pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    forge_artifact_bytecode(contract, "bytecode")
+}
+
+/// Load deployed runtime code, not the constructor, from the current checkout's artifacts.
+pub(crate) fn forge_runtime_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    forge_artifact_bytecode(contract, "deployedBytecode")
+}
+
+fn forge_artifact_bytecode(contract: &str, field: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
@@ -204,16 +213,24 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
         format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let hex_str = artifact["bytecode"]["object"]
+    let hex_str = artifact[field]["object"]
         .as_str()
-        .ok_or_else(|| eyre::eyre!("missing bytecode in {contract} artifact"))?;
-    Ok(alloy_primitives::Bytes::from(
-        alloy_primitives::hex::decode(hex_str)?,
-    ))
+        .ok_or_else(|| eyre::eyre!("missing {field} in {contract} artifact"))?;
+    let code = alloy_primitives::Bytes::from(alloy_primitives::hex::decode(hex_str)?);
+    eyre::ensure!(!code.is_empty(), "empty {field} in {contract} artifact");
+    Ok(code)
 }
 
-fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    for account in t13_zone_factory_state(owner) {
+fn install_native_zone_factory(
+    genesis: &mut Genesis,
+    owner: Address,
+    runtimes: &tempo_evm::T13ZoneRuntimes,
+) -> eyre::Result<()> {
+    let [factory, mut portal, mut verifier, mut messenger] = t13_zone_factory_state(owner);
+    portal.code = runtimes.portal.clone();
+    verifier.code = runtimes.verifier.clone();
+    messenger.code = runtimes.messenger.clone();
+    for account in [factory, portal, verifier, messenger] {
         let storage = account.storage.map(|(slot, value)| {
             BTreeMap::from([(
                 B256::from(slot.to_be_bytes()),
@@ -2775,12 +2792,23 @@ impl L1TestNode {
     pub(crate) async fn start_with(
         f: impl FnOnce(&mut NodeConfig<TempoChainSpec>),
     ) -> eyre::Result<Self> {
-        let tasks = Runtime::test();
+        let runtimes = tempo_evm::T13ZoneRuntimes {
+            portal: forge_runtime_bytecode("ZonePortal")?,
+            verifier: forge_runtime_bytecode("Verifier")?,
+            messenger: forge_runtime_bytecode("ZoneMessenger")?,
+        };
+        Self::start_with_runtimes(runtimes, f).await
+    }
 
-        let genesis: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
-        let mut genesis = serde_json::from_value(genesis)?;
-        install_native_zone_factory(&mut genesis, l1_dev_signer().address())?;
+    /// Explicit runtimes let fixture regression tests distinguish local from pinned code,
+    /// even when the current Solidity build happens to match Tempo's bundled artifacts.
+    pub(crate) async fn start_with_runtimes(
+        runtimes: tempo_evm::T13ZoneRuntimes,
+        f: impl FnOnce(&mut NodeConfig<TempoChainSpec>),
+    ) -> eyre::Result<Self> {
+        let tasks = Runtime::test();
+        let mut genesis = serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
+        install_native_zone_factory(&mut genesis, l1_dev_signer().address(), &runtimes)?;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
@@ -2804,11 +2832,15 @@ impl L1TestNode {
 
         f(&mut node_config);
 
-        let node_handle = NodeBuilder::new(node_config)
+        let mut builder = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
-            .node(tempo_node::node::TempoNode::default())
-            .launch_with_debug_capabilities()
-            .await?;
+            .node(tempo_node::node::TempoNode::default());
+        // T13 installs shared runtimes on every block. Genesis alone is insufficient:
+        // payload building, validation and replay must all use the same local code.
+        builder.components_builder = builder
+            .components_builder
+            .map_executor(|executor| executor.with_t13_zone_runtimes(runtimes));
+        let node_handle = builder.launch_with_debug_capabilities().await?;
 
         let http_url = node_handle
             .node

@@ -9,6 +9,7 @@ mod handoff_e2e;
 mod hardfork_e2e;
 mod hardfork_settlement_e2e;
 mod l1_e2e;
+mod l1_runtime_e2e;
 mod network_chaos_e2e;
 mod network_chaos_p2p_e2e;
 mod precompiles;

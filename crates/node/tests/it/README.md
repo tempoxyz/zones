@@ -73,6 +73,18 @@ Starts an in-process Tempo L1 dev node via `L1TestNode::start()`, then connects
 a zone node via `ZoneTestNode::start_from_l1()`. The `L1Subscriber` receives
 real blocks over WebSocket.
 
+Run `forge build --root crates/contracts --no-lint` before the Rust integration tests.
+`L1TestNode` loads `ZonePortal`, `Verifier`, and `ZoneMessenger` deployed bytecode from
+those artifacts into both genesis and the test L1's T13 runtime-installation hook.
+Missing or empty artifacts fail startup; there is no fallback to Tempo's pinned code.
+`start_with_t13()` intentionally keeps Tempo's legacy runtimes before activation and
+installs the locally compiled runtimes from T13 onward. Production nodes retain the
+pinned Tempo runtimes.
+
+The `l1_runtime_e2e` tests cover genesis, subsequent blocks, and the T13 transition;
+sentinel runtimes ensure the override test remains meaningful when local and pinned
+artifacts happen to be identical.
+
 **Genesis patching in `start_from_l1()`:**
 
 The zone's `TempoState` genesis must be anchored to the L1's current state.
