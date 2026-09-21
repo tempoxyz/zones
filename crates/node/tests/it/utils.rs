@@ -221,15 +221,11 @@ fn forge_artifact_bytecode(contract: &str, field: &str) -> eyre::Result<alloy_pr
     Ok(code)
 }
 
-fn install_native_zone_factory(
-    genesis: &mut Genesis,
-    owner: Address,
-    runtimes: &tempo_evm::T13ZoneRuntimes,
-) -> eyre::Result<()> {
+fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
     let [factory, mut portal, mut verifier, mut messenger] = t13_zone_factory_state(owner);
-    portal.code = runtimes.portal.clone();
-    verifier.code = runtimes.verifier.clone();
-    messenger.code = runtimes.messenger.clone();
+    portal.code = forge_runtime_bytecode("ZonePortal")?;
+    verifier.code = forge_runtime_bytecode("Verifier")?;
+    messenger.code = forge_runtime_bytecode("ZoneMessenger")?;
     for account in [factory, portal, verifier, messenger] {
         let storage = account.storage.map(|(slot, value)| {
             BTreeMap::from([(
@@ -2792,23 +2788,9 @@ impl L1TestNode {
     pub(crate) async fn start_with(
         f: impl FnOnce(&mut NodeConfig<TempoChainSpec>),
     ) -> eyre::Result<Self> {
-        let runtimes = tempo_evm::T13ZoneRuntimes {
-            portal: forge_runtime_bytecode("ZonePortal")?,
-            verifier: forge_runtime_bytecode("Verifier")?,
-            messenger: forge_runtime_bytecode("ZoneMessenger")?,
-        };
-        Self::start_with_runtimes(runtimes, f).await
-    }
-
-    /// Explicit runtimes let fixture regression tests distinguish local from pinned code,
-    /// even when the current Solidity build happens to match Tempo's bundled artifacts.
-    pub(crate) async fn start_with_runtimes(
-        runtimes: tempo_evm::T13ZoneRuntimes,
-        f: impl FnOnce(&mut NodeConfig<TempoChainSpec>),
-    ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let mut genesis = serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
-        install_native_zone_factory(&mut genesis, l1_dev_signer().address(), &runtimes)?;
+        install_native_zone_factory(&mut genesis, l1_dev_signer().address())?;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
@@ -2832,15 +2814,13 @@ impl L1TestNode {
 
         f(&mut node_config);
 
-        let mut builder = NodeBuilder::new(node_config)
+        // T13 is active at genesis, so Tempo preserves the local runtime allocations.
+        // Fixtures starting before T13 still exercise the pinned protocol upgrade.
+        let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
-            .node(tempo_node::node::TempoNode::default());
-        // T13 installs shared runtimes on every block. Genesis alone is insufficient:
-        // payload building, validation and replay must all use the same local code.
-        builder.components_builder = builder
-            .components_builder
-            .map_executor(|executor| executor.with_t13_zone_runtimes(runtimes));
-        let node_handle = builder.launch_with_debug_capabilities().await?;
+            .node(tempo_node::node::TempoNode::default())
+            .launch_with_debug_capabilities()
+            .await?;
 
         let http_url = node_handle
             .node

@@ -75,11 +75,12 @@ real blocks over WebSocket.
 
 Run `forge build --root crates/contracts --no-lint` before the Rust integration tests.
 `L1TestNode` loads `ZonePortal`, `Verifier`, and `ZoneMessenger` deployed bytecode from
-those artifacts into both genesis and the test L1's T13 runtime-installation hook.
+those artifacts into genesis. Since T13 is active at genesis, Tempo skips its T13
+runtime replacement and preserves the local bytecode on subsequent blocks.
 Missing or empty artifacts fail startup; there is no fallback to Tempo's pinned code.
 `start_with_t13()` intentionally keeps Tempo's legacy runtimes before activation and
-installs the locally compiled runtimes from T13 onward. Production nodes retain the
-pinned Tempo runtimes.
+exercises the normal upgrade to pinned T13 runtimes. Only chains where T13 is already
+active at the genesis timestamp skip that upgrade.
 
 The `l1_runtime_e2e` tests cover genesis, subsequent blocks, and the T13 transition;
 sentinel runtimes ensure the override test remains meaningful when local and pinned
