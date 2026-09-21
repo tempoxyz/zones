@@ -824,7 +824,7 @@ where
         let portal_address = self.portal_address;
         let debug_l1_provider = l1_provider.clone();
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
-        let data_dir = ctx.config.datadir().data_dir().to_path_buf();
+        let datadir = ctx.config.datadir().data_dir().to_path_buf();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -856,7 +856,7 @@ where
         let proof_collector =
             if persist_before_canonicalization || finalized_batch_submissions.is_some() {
                 let proof_collector_config = ProofCollectorConfig {
-                    directory: data_dir.join("proofs"),
+                    directory: datadir.join("proofs"),
                     debug_api: Arc::new(NodeZoneDebugApi::new(
                         handle.eth_handlers().api.clone(),
                         l1_provider.clone(),
