@@ -705,7 +705,7 @@ jobs:
             trap 'rm -f -- "$temporary"' EXIT
             chmod 600 "$temporary"
             mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '
-              select(.success != false) | (.data.mnemonic // .mnemonic)
+              select(.success == true) | .data.mnemonic
               | strings | select(length > 0 and . != "null")
             ')"
             printf '%s\n' "$mnemonic" > "$temporary"
