@@ -667,7 +667,7 @@ where
     let signed =
         SignedSettlementAttestation::sign(attestation.clone(), context.domain, signer_key)?;
     let signer = signed.recover_signer(context.domain)?;
-    let (_, signatures) = context
+    let (_, signatures, digest) = context
         .store
         .insert_settlement(context.domain, signer, signed);
     commands
@@ -676,7 +676,7 @@ where
         ))
         .await
         .wrap_err("P2P command channel closed")?;
-    info!(target: "zone::p2p", height = number, %signer, signatures, "Signed and broadcast settlement proposal");
+    info!(target: "zone::p2p", height = number, %digest, %signer, signatures, "Signed and broadcast settlement proposal");
     Ok(true)
 }
 

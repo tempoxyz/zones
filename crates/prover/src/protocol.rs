@@ -9,6 +9,66 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Canonical verifier configuration for the first Nitro-backed verifier policy.
 pub const NITRO_VERIFIER_CONFIG_V1: &[u8] = &[1];
+/// Canonical verifier configuration for temporary proofless fallback settlement.
+pub const NO_PROOF_FALLBACK_VERIFIER: &[u8] = &[2];
+
+/// Verifier configurations supported by T13 settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierMode {
+    NitroV1,
+    NoProof,
+}
+
+impl VerifierMode {
+    /// Exact bytes passed to the on-chain verifier.
+    pub const fn config(self) -> &'static [u8] {
+        match self {
+            Self::NitroV1 => NITRO_VERIFIER_CONFIG_V1,
+            Self::NoProof => NO_PROOF_FALLBACK_VERIFIER,
+        }
+    }
+
+    /// Hash committed by settlement attestations.
+    pub fn config_hash(self) -> B256 {
+        keccak256(self.config())
+    }
+
+    /// Decode an exact configuration. Unknown and non-canonical encodings are rejected.
+    pub fn from_config(config: &[u8]) -> Result<Self, VerifierModeError> {
+        match config {
+            NITRO_VERIFIER_CONFIG_V1 => Ok(Self::NitroV1),
+            NO_PROOF_FALLBACK_VERIFIER => Ok(Self::NoProof),
+            _ => Err(VerifierModeError::UnknownConfig),
+        }
+    }
+
+    /// Decode the hash committed by a settlement attestation.
+    pub fn from_config_hash(hash: B256) -> Result<Self, VerifierModeError> {
+        [Self::NitroV1, Self::NoProof]
+            .into_iter()
+            .find(|mode| mode.config_hash() == hash)
+            .ok_or(VerifierModeError::UnknownConfigHash)
+    }
+
+    /// Enforce the proof shape associated with this mode.
+    pub fn validate_proof(self, proof: &[u8]) -> Result<(), VerifierModeError> {
+        match (self, proof.is_empty()) {
+            (Self::NitroV1, true) => Err(VerifierModeError::InvalidProofShape),
+            (Self::NoProof, false) => Err(VerifierModeError::InvalidProofShape),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum VerifierModeError {
+    #[error("unknown verifier configuration")]
+    UnknownConfig,
+    #[error("unknown verifier configuration hash")]
+    UnknownConfigHash,
+    #[error("proof shape does not match verifier configuration")]
+    InvalidProofShape,
+}
 
 sol! {
     /// Data placed in the Nitro attestation document's `user_data` field.
@@ -172,6 +232,30 @@ mod tests {
     fn verifier_config_is_versioned_and_non_empty() {
         assert_eq!(NITRO_VERIFIER_CONFIG_V1, [1]);
         assert_ne!(keccak256(NITRO_VERIFIER_CONFIG_V1), keccak256([]));
+    }
+
+    #[test]
+    fn verifier_modes_enforce_canonical_config_and_proof_shape() {
+        assert_eq!(VerifierMode::from_config(&[1]), Ok(VerifierMode::NitroV1));
+        assert_eq!(VerifierMode::from_config(&[2]), Ok(VerifierMode::NoProof));
+        assert!(VerifierMode::from_config(&[]).is_err());
+        assert!(VerifierMode::from_config(&[1, 2]).is_err());
+        assert!(VerifierMode::from_config(&[3]).is_err());
+
+        assert!(VerifierMode::NitroV1.validate_proof(&[42]).is_ok());
+        assert_eq!(
+            VerifierMode::NitroV1.validate_proof(&[]),
+            Err(VerifierModeError::InvalidProofShape)
+        );
+        assert!(VerifierMode::NoProof.validate_proof(&[]).is_ok());
+        assert_eq!(
+            VerifierMode::NoProof.validate_proof(&[42]),
+            Err(VerifierModeError::InvalidProofShape)
+        );
+        assert_eq!(
+            VerifierMode::from_config_hash(VerifierMode::NoProof.config_hash()),
+            Ok(VerifierMode::NoProof)
+        );
     }
 
     #[test]

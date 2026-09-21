@@ -7,8 +7,9 @@ mod protocol;
 pub use chainspec::{TrustedChainSpecError, TrustedChainSpecs};
 pub use connection::{ProverConnection, ProverConnectionError, request_error_response};
 pub use protocol::{
-    ErrorCode, NITRO_VERIFIER_CONFIG_V1, NitroBatchAttestation, PROTOCOL_VERSION, ProofBundle,
-    VerifyRequest, VerifyResponse, nitro_batch_attestation_hash,
+    ErrorCode, NITRO_VERIFIER_CONFIG_V1, NO_PROOF_FALLBACK_VERIFIER, NitroBatchAttestation,
+    PROTOCOL_VERSION, ProofBundle, VerifierMode, VerifierModeError, VerifyRequest, VerifyResponse,
+    nitro_batch_attestation_hash,
 };
 
 /// Allows large batch witnesses containing trie proofs and bytecode pools while bounding the

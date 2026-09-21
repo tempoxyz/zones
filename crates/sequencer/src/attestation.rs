@@ -243,13 +243,13 @@ impl Default for AttestationStore {
 }
 
 impl AttestationStore {
-    /// Insert one settlement signature per recovered signer and statement digest.
+    /// Insert the leader's proposal, replacing any different proposal at the same height.
     pub fn insert_settlement(
         &self,
         domain: AttestationDomain,
         signer: Address,
         signed: SignedSettlementAttestation,
-    ) -> (bool, usize) {
+    ) -> (bool, usize, B256) {
         let height = signed
             .attestation
             .zoneHeight
@@ -260,12 +260,9 @@ impl AttestationStore {
         let (inserted, signature_count) = {
             let mut state = self.state.write().expect("attestation store lock poisoned");
 
-            let signatures = state
-                .settlements
-                .entry(height)
-                .or_default()
-                .entry(digest)
-                .or_default();
+            let proposals = state.settlements.entry(height).or_default();
+            proposals.retain(|existing_digest, _| *existing_digest == digest);
+            let signatures = proposals.entry(digest).or_default();
             let inserted = signatures.insert(signer, signed).is_none();
             (inserted, signatures.len())
         };
@@ -274,7 +271,7 @@ impl AttestationStore {
         // races between its store check and awaiting the notification.
         self.settlement_changed.notify_one();
 
-        (inserted, signature_count)
+        (inserted, signature_count, digest)
     }
 
     /// Check that a follower signature belongs to an active leader proposal and is new.
@@ -334,8 +331,8 @@ impl AttestationStore {
         Ok(signature_count)
     }
 
-    /// Wait until any statement at `height` has at least `quorum` distinct signatures, or return
-    /// `None` when the leader generation is cancelled.
+    /// Wait until the active leader proposal at `height` has at least `quorum` distinct signatures,
+    /// or return `None` when the leader generation is cancelled.
     pub async fn wait_for_settlement(
         &self,
         height: u64,
@@ -348,7 +345,8 @@ impl AttestationStore {
             certificate = async {
                 loop {
                     let notified = self.settlement_changed.notified();
-                    if let Some(certificate) = self.settlement_at(height, quorum) {
+                    let certificate = self.settlement_at(height, quorum);
+                    if let Some(certificate) = certificate {
                         break certificate;
                     }
                     notified.await;
@@ -357,14 +355,14 @@ impl AttestationStore {
         }
     }
 
-    /// Get the settlement certificate at the zone block height
+    /// Get the settlement certificate for the active proposal at the zone block height.
     fn settlement_at(&self, height: u64, quorum: usize) -> Option<SettlementCertificate> {
         let state = self.state.read().expect("attestation store lock poisoned");
         let (digest, signatures) = state
             .settlements
             .get(&height)?
-            .iter()
-            .find(|(_, signatures)| signatures.len() >= quorum)?;
+            .first_key_value()
+            .filter(|(_, signatures)| signatures.len() >= quorum)?;
         let attestation = signatures.values().next()?.attestation.clone();
 
         Some(SettlementCertificate {
@@ -379,7 +377,7 @@ impl AttestationStore {
         })
     }
 
-    /// Remove one unusable certificate without discarding other anchor candidates.
+    /// Remove an unusable proposal.
     pub fn remove_settlement(&self, height: u64, digest: B256) {
         let mut state = self.state.write().expect("attestation store lock poisoned");
         if let Some(by_digest) = state.settlements.get_mut(&height) {
@@ -521,9 +519,10 @@ mod tests {
         assert_eq!(decoded.recover_signer(domain).unwrap(), signer.address());
 
         let store = AttestationStore::default();
+        let expected_digest = domain.settlement_digest(&decoded.attestation);
         assert_eq!(
             store.insert_settlement(domain, signer.address(), signed),
-            (true, 1)
+            (true, 1, expected_digest)
         );
     }
 
@@ -635,6 +634,7 @@ mod tests {
             SignedSettlementAttestation::sign(attestation.clone(), domain(), &signer_a).unwrap(),
         );
 
+        let expected_digest = domain().settlement_digest(&attestation);
         let waiting = {
             let store = store.clone();
             tokio::spawn(async move {
@@ -653,6 +653,7 @@ mod tests {
         );
         let certificate = waiting.await.unwrap().unwrap();
         assert_eq!(certificate.signatures.len(), 2);
+        assert_eq!(certificate.digest, expected_digest);
 
         store.remove_submitted(10);
         assert!(store.settlement_at(10, 1).is_none());
