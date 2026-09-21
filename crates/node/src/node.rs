@@ -104,9 +104,10 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, SettlementProverConfig, ShadowProverConfig,
-    WithdrawalBatchLimits, ZoneSequencerConfig, attestation::AttestationDomain,
-    spawn_shadow_prover, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
+    SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
+    attestation::AttestationDomain, spawn_proof_collector, spawn_shadow_prover,
+    spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -185,6 +186,9 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
+    /// Exercise witness persistence without requiring a remote prover in integration fixtures.
+    #[cfg(feature = "test-utils")]
+    pub enable_proof_persistence: bool,
     /// Shared sequencer signer used for block production and encryption.
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
@@ -199,11 +203,20 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
-    /// Require SPF validation and a Nitro NSM attestation before settlement.
+    /// Persist execution witnesses before canonicalization and require Nitro-attested SPF settlement.
     pub enable_prover: bool,
     /// Remote Nitro prover TCP address. Required for proof-gated settlement; when absent, the SPF
     /// runs in-process but settlement fails because no NSM attestation can be produced.
     pub prover_address: Option<String>,
+}
+
+impl ZoneSequencerAddOnsConfig {
+    fn requires_proof_persistence(&self) -> bool {
+        let enabled = self.enable_prover;
+        #[cfg(feature = "test-utils")]
+        let enabled = enabled || self.enable_proof_persistence;
+        enabled
+    }
 }
 
 /// Execution mode for the detached shadow prover.
@@ -782,11 +795,6 @@ where
                 .await?,
             )
         } else {
-            if let Some(ref config) = self.sequencer_config {
-                // Legacy single-sequencer mode keeps the static engine.
-                let sequencer_addr = config.sequencer_signer.address();
-                self.spawn_zone_engine(&ctx, sequencer_addr)?;
-            }
             None
         };
 
@@ -814,6 +822,7 @@ where
         let portal_address = self.portal_address;
         let debug_l1_provider = l1_provider.clone();
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
+        let data_dir = ctx.config.datadir().data_dir().to_path_buf();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -837,6 +846,43 @@ where
                 Ok(())
             })
             .await?;
+
+        let persist_before_canonicalization = self
+            .sequencer_config
+            .as_ref()
+            .is_some_and(ZoneSequencerAddOnsConfig::requires_proof_persistence);
+        let proof_collector =
+            if persist_before_canonicalization || finalized_batch_submissions.is_some() {
+                let proof_collector_config = ProofCollectorConfig {
+                    directory: data_dir.join("proofs"),
+                    debug_api: Arc::new(NodeZoneDebugApi::new(
+                        handle.eth_handlers().api.clone(),
+                        l1_provider.clone(),
+                    )),
+                    portal_address: self.portal_address,
+                    l1_provider: l1_provider.clone(),
+                };
+                let (collector, collector_task) = spawn_proof_collector(
+                    proof_collector_config,
+                    provider.clone(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await?;
+                task_executor.spawn_critical_task("zone-proof-collector", async move {
+                    collector_task.await.expect("proof collector task failed");
+                });
+                Some(collector)
+            } else {
+                None
+            };
+        // Repair a pre-existing canonical tail before admitting new blocks or starting settlement.
+        if persist_before_canonicalization {
+            proof_collector
+                .as_ref()
+                .expect("proof collector enabled")
+                .collect_canonical_tail(&provider)
+                .await?;
+        }
         let prover_config = self
             .sequencer_config
             .as_ref()
@@ -872,7 +918,12 @@ where
         if let (Some(runtime_config), Some(submissions)) =
             (shadow_prover_config, finalized_batch_submissions)
         {
-            let prover = spawn_shadow_prover(runtime_config, provider.clone(), l1_provider.clone());
+            let prover = spawn_shadow_prover(
+                runtime_config,
+                proof_collector.clone(),
+                provider.clone(),
+                l1_provider.clone(),
+            );
             task_executor.spawn_critical_task(
                 "rpc-follower-shadow-prover",
                 RpcFollowerShadowProver::new(
@@ -927,6 +978,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    proof_collector.clone(),
                     prover_config.clone(),
                 )?),
                 None => None,
@@ -968,6 +1020,27 @@ where
             );
         } else if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
+            let last_header = provider
+                .sealed_header(provider.best_block_number()?)?
+                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let engine = ZoneEngine::new(
+                provider.chain_spec(),
+                engine_handle,
+                payload_builder,
+                self.deposit_queue.clone(),
+                self.l1_block_tracker.clone(),
+                last_header,
+                sequencer_addr,
+                self.encryption_keys
+                    .clone()
+                    .expect("sequencer mode configures deposit decryption keys"),
+                self.portal_address,
+            );
+            let engine = match &proof_collector {
+                Some(collector) => engine.with_proof_collector(collector.clone()),
+                None => engine,
+            };
+            task_executor.spawn_critical_task("zone-engine", engine.run());
 
             Self::launch_sequencer_tasks(
                 config,
@@ -979,6 +1052,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                proof_collector,
                 prover_config,
             )
             .await?;
@@ -1394,6 +1468,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
+        proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
@@ -1411,6 +1486,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            proof_collector,
             prover_config,
         })
     }
@@ -1534,36 +1610,6 @@ where
         Ok(())
     }
 
-    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
-    fn spawn_zone_engine(
-        &self,
-        ctx: &AddOnsContext<'_, N>,
-        fee_recipient: Address,
-    ) -> eyre::Result<()> {
-        let provider = ctx.node.provider();
-        let last_header = provider
-            .sealed_header(provider.best_block_number()?)?
-            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-        let engine = ZoneEngine::new(
-            provider.chain_spec(),
-            ctx.beacon_engine_handle.clone(),
-            ctx.node.payload_builder_handle().clone(),
-            self.deposit_queue.clone(),
-            self.l1_block_tracker.clone(),
-            last_header,
-            fee_recipient,
-            self.encryption_keys
-                .clone()
-                .expect("sequencer mode configures deposit decryption keys"),
-            self.portal_address,
-        );
-        ctx.node
-            .task_executor()
-            .spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned");
-        Ok(())
-    }
-
     /// Launch the redacted RPC server.
     async fn launch_redacted_rpc(
         config: ZoneRedactedRpcConfig,
@@ -1615,6 +1661,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
+        proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
@@ -1638,13 +1685,14 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            proof_collector,
             prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
-        // Critical task — node shuts down if either exits.
+        // Critical task — node shuts down if any sequencer child exits.
         task_executor.spawn_critical_task("zone-monitor", async move {
             tokio::select! {
                 res = seq_handle.withdrawal_handle => {

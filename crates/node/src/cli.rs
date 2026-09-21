@@ -288,6 +288,8 @@ async fn configure_sequencing(
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
+            #[cfg(feature = "test-utils")]
+            enable_proof_persistence: false,
             sequencer_signer,
             // `None` on an rpc-only node: it holds no individual key, and it is never the
             // scheduled leader, so it never submits an L1 settlement transaction.
@@ -583,7 +585,7 @@ pub struct ZoneArgs {
     )]
     pub checker_mode: zone_checker::CheckerMode,
 
-    /// Require Nitro-attested SPF validation for settlement, or run observational SPF validation
+    /// Persist witnesses and require Nitro-attested SPF settlement, or run observational SPF validation
     /// on an rpc_only follower.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
