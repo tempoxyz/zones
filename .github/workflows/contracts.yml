@@ -60,7 +60,7 @@ jobs:
 
       - name: Build Solidity artifacts
         working-directory: crates/contracts
-        run: forge build --sizes
+        run: forge build --skip test
 
       - name: Check Solidity and Rust ABIs
         run: cargo run -p tempo-xtask -- check-abi
@@ -107,7 +107,13 @@ jobs:
 
       - name: Run Forge build
         working-directory: crates/contracts
-        run: forge build --sizes
+        run: forge build --skip test
+
+      - name: Check deployment sizes and report protocol runtimes
+        working-directory: crates/contracts
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 scripts/check_sizes.py
 
   lint:
     permissions:
@@ -224,6 +230,12 @@ jobs:
             crates/contracts/cache
             crates/contracts/out
           key: tempo-forge-specs-v1-${{ runner.os }}-${{ steps.foundry-ref.outputs.sha }}-${{ env.TEMPO_FOUNDRY_REF }}-${{ steps.contracts-key.outputs.tree }}
+
+      - name: Build and check deployment sizes with Tempo-capable Forge
+        working-directory: crates/contracts
+        run: |
+          "$GITHUB_WORKSPACE/foundry/target/release/forge" build --skip test
+          python3 scripts/check_sizes.py
 
       - name: Run Forge tests (zone specs)
         working-directory: crates/contracts

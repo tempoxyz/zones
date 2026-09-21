@@ -1019,4 +1019,4 @@ docs-specs-test:
 [group('docs')]
 [doc('Build Solidity contracts')]
 docs-specs-build:
-    cd crates/contracts && forge build --sizes
+    cd crates/contracts && forge build --skip test && python3 scripts/check_sizes.py

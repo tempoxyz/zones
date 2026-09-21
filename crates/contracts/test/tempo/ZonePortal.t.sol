@@ -42,9 +42,9 @@ import {
 import { ZoneMessenger } from "../../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/runtime/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { PortalRuntimeTest } from "../PortalRuntimeTest.sol";
 import { MockRevertingReceiver } from "../mocks/MockCallbackReceivers.sol";
 import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
-import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
 /// @notice Mock withdrawal receiver that accepts funds
@@ -230,15 +230,14 @@ contract ZonePortalInitializationForwarder {
 
 }
 
-contract ZonePortalProxyStorageTest is Test {
+contract ZonePortalProxyStorageTest is PortalRuntimeTest {
 
     function _emptyAddresses() internal pure returns (address[] memory values) {
         values = new address[](0);
     }
 
     function test_initialize_revertsOnImplementationAddress() public {
-        ZonePortal implementation = new ZonePortal();
-        vm.etch(ZONE_PORTAL_IMPL_ADDRESS, address(implementation).code);
+        _installPortalRuntime();
 
         address[] memory sequencers = new address[](1);
         sequencers[0] = makeAddr("sequencer");
@@ -263,16 +262,7 @@ contract ZonePortalProxyStorageTest is Test {
     }
 
     function test_initialize_rejectsMessengerAsAllowedAccount() public {
-        ZonePortal implementation = new ZonePortal();
-        address proxy = makeAddr("portal proxy");
-        vm.etch(
-            proxy,
-            abi.encodePacked(
-                hex"363d3d373d3d3d363d73",
-                address(implementation),
-                hex"5af43d82803e903d91602b57fd5bf3"
-            )
-        );
+        address proxy = address(_newPortalProxy(1));
 
         address portalMessenger = makeAddr("messenger");
         address[] memory allowedAccounts = new address[](1);
@@ -322,16 +312,8 @@ contract ZonePortalProxyStorageTest is Test {
         vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
         );
-        ZonePortal implementation = new ZonePortal();
-        assertNotEq(address(this), ZONE_FACTORY_ADDRESS, "logic deployer must differ from factory");
-
-        address proxyA = makeAddr("portal proxy A");
-        address proxyB = makeAddr("portal proxy B");
-        bytes memory runtime = abi.encodePacked(
-            hex"363d3d373d3d3d363d73", address(implementation), hex"5af43d82803e903d91602b57fd5bf3"
-        );
-        vm.etch(proxyA, runtime);
-        vm.etch(proxyB, runtime);
+        address proxyA = address(_newPortalProxy(1));
+        address proxyB = address(_newPortalProxy(2));
         ZonePortalInitializationForwarder forwarder = new ZonePortalInitializationForwarder();
         vm.etch(ZONE_FACTORY_ADDRESS, address(forwarder).code);
 
@@ -446,7 +428,7 @@ contract ZonePortalProxyStorageTest is Test {
             2
         );
 
-        ZonePortal portal = new ZonePortal();
+        ZonePortal portal = _newPortalProxy(1);
         address[] memory sequencers = new address[](1);
         sequencers[0] = makeAddr("sequencer");
         vm.prank(ZONE_FACTORY_ADDRESS);
@@ -1568,7 +1550,7 @@ contract ZonePortalTest is BaseTest {
         address[] memory initialSequencers = new address[](1);
         initialSequencers[0] = sequencer;
         ZonePortal otherPortal = _createZonePortal(
-            testZoneId, address(pathUSD), admin, initialSequencers, 1, "https://quorum.example"
+            testZoneId + 1, address(pathUSD), admin, initialSequencers, 1, "https://quorum.example"
         );
         _activateSequencerSet(otherPortal, signers, 2);
         _expectInvalidQuorumCertificate(otherPortal, signers[0], batch, validSignatures);
