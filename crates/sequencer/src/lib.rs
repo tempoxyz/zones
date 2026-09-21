@@ -38,7 +38,7 @@ pub use encryption_key::{
 };
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use proofs::{
-    ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, spawn_proof_collector,
+    ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, create_proof_collector,
 };
 pub use prover::{
     SHADOW_PROVER_QUEUE_CAPACITY, SettlementProverConfig, ShadowProofAnchor, ShadowProver,

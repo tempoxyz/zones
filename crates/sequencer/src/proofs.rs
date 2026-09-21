@@ -19,21 +19,23 @@ use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use zone_rpc::{ZoneDebugApi, types::ZoneExecutionWitness};
 
 use crate::ZoneSequencerProvider;
 
-const FORMAT_VERSION: u32 = 2;
+// Persisted files survive upgrades; reject incompatible witness formats explicitly.
+const FORMAT_VERSION: u32 = 1;
 const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Load unsettled witnesses and start the proof collector.
-pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
+/// Load unsettled witnesses and return the proof collector handle and worker future.
+pub async fn create_proof_collector<P: ZoneSequencerProvider>(
     config: ProofCollectorConfig,
     provider: P,
-    shutdown: CancellationToken,
-) -> Result<(ProofCollectorHandle, tokio::task::JoinHandle<()>)> {
+) -> Result<(
+    ProofCollectorHandle,
+    impl Future<Output = ()> + Send + 'static,
+)> {
     let directory = config.directory.clone();
     let finalized_zone_height = config.finalized_zone_height().await?;
     let store = Arc::new(
@@ -52,10 +54,7 @@ pub async fn spawn_proof_collector<P: ZoneSequencerProvider>(
         store,
         requests: requests_tx,
     };
-    let task = tokio::spawn(async move {
-        shutdown.run_until_cancelled(collector.run()).await;
-    });
-    Ok((handle, task))
+    Ok((handle, collector.run()))
 }
 
 /// Collection and retained-witness access shared with block import and both prover modes.

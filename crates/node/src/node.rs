@@ -106,7 +106,7 @@ use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
     SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
-    attestation::AttestationDomain, spawn_proof_collector, spawn_shadow_prover,
+    attestation::AttestationDomain, create_proof_collector, spawn_shadow_prover,
     spawn_zone_sequencer,
 };
 
@@ -864,15 +864,10 @@ where
                     portal_address: self.portal_address,
                     l1_provider: l1_provider.clone(),
                 };
-                let (collector, collector_task) = spawn_proof_collector(
-                    proof_collector_config,
-                    provider.clone(),
-                    tokio_util::sync::CancellationToken::new(),
-                )
-                .await?;
-                task_executor.spawn_critical_task("zone-proof-collector", async move {
-                    collector_task.await.expect("proof collector task failed");
-                });
+                // The collector serves every role and stops only with the node.
+                let (collector, collector_task) =
+                    create_proof_collector(proof_collector_config, provider.clone()).await?;
+                task_executor.spawn_critical_task("zone-proof-collector", collector_task);
                 Some(collector)
             } else {
                 None

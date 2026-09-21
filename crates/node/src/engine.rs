@@ -429,16 +429,7 @@ impl ZoneEngine {
                 })?;
         }
 
-        // Canonicalize the new head — FCU-with-attrs above only set the
-        // *previous* head as canonical; this bare FCU makes the just-built
-        // block the EL's canonical head.
-        let forkchoice = ForkchoiceState::same_hash(header.hash());
-        let result = self.to_engine.fork_choice_updated(forkchoice, None).await?;
-        if !result.is_valid() {
-            eyre::bail!("Invalid post-newPayload fork choice update {forkchoice:?}: {result:?}");
-        }
-
-        // Consume the L1 input only after witness persistence and canonicalization succeed.
+        // Consume the L1 input only after witness persistence succeeds.
         if checkpoint_only {
             self.deposit_queue.defer_through(l1_num_hash)?;
         } else {
@@ -449,6 +440,13 @@ impl ZoneEngine {
             permit.record_applied_anchor(l1_num_hash.number);
         }
         self.last_header = header;
+
+        // Canonicalize the new head — FCU-with-attrs above only set the
+        // *previous* head as canonical; this bare FCU makes the just-built
+        // block the EL's canonical head.
+        if let Err(e) = self.update_forkchoice_state().await {
+            error!(target: "zone::engine", "Error sending post-newPayload FCU: {:?}", e);
+        }
 
         Ok(())
     }
