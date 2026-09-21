@@ -682,22 +682,40 @@ jobs:
             echo "::error::runner-local benchmark mnemonic must not be a symbolic link"
             exit 1
           fi
-          if [ ! -s "$mnemonic_file" ]; then
+          validate_mnemonic() {
+            local file="$1" phrase
+            if [ "$(awk 'END { print NR }' "$file")" != 1 ]; then
+              echo "::error::runner-local benchmark mnemonic must contain exactly one line"
+              return 1
+            fi
+            phrase="$(tr -d '\r\n' < "$file")"
+            if [ -z "$phrase" ] || [ "$phrase" = "null" ] || [ "$phrase" = "test test test test test test test test test test test junk" ]; then
+              echo "::error::runner-local benchmark mnemonic is empty, null, or public"
+              return 1
+            fi
+            # Invalid-word errors can include secret material; report only a generic error.
+            if ! cast wallet address --mnemonic "$file" --mnemonic-index 0 >/dev/null 2>&1; then
+              echo "::error::runner-local benchmark mnemonic failed wallet derivation"
+              return 1
+            fi
+          }
+          # Repair only the known jq-null sentinel; never rotate another existing identity.
+          if [ ! -s "$mnemonic_file" ] || [ "$(< "$mnemonic_file")" = null ]; then
             temporary="$(mktemp "$identity_root/.mnemonic.XXXXXX")"
+            trap 'rm -f -- "$temporary"' EXIT
             chmod 600 "$temporary"
-            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '
+              select(.success != false) | (.data.mnemonic // .mnemonic)
+              | strings | select(length > 0 and . != "null")
+            ')"
             printf '%s\n' "$mnemonic" > "$temporary"
+            validate_mnemonic "$temporary"
             mv -f -- "$temporary" "$mnemonic_file"
+            trap - EXIT
           else
+            chmod 600 "$mnemonic_file"
+            validate_mnemonic "$mnemonic_file"
             mnemonic="$(tr -d '\r\n' < "$mnemonic_file")"
-          fi
-          if [ "$(awk 'END { print NR }' "$mnemonic_file")" != 1 ]; then
-            echo "::error::runner-local benchmark mnemonic must contain exactly one line"
-            exit 1
-          fi
-          if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
-            echo "::error::runner-local benchmark mnemonic is empty or public"
-            exit 1
           fi
           chmod 600 "$mnemonic_file"
           echo "::add-mask::$mnemonic"
