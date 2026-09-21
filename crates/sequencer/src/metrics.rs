@@ -171,6 +171,9 @@ pub(crate) struct ZoneMonitorMetrics {
     /// Retry attempts for batch submissions.
     pub batch_submit_retry_total: Counter,
 
+    /// Settlement attempts rebuilt because the live L1 prover hardfork changed.
+    pub prover_hardfork_rebuild_total: Counter,
+
     /// Number of times local monitor state was resynced from the portal.
     pub resync_from_portal_total: Counter,
 

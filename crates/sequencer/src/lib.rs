@@ -27,6 +27,7 @@ pub mod monitor;
 pub mod nonce_keys;
 mod proofs;
 mod prover;
+mod prover_config;
 mod rpc;
 pub mod settlement;
 mod settlement_manager;
@@ -44,6 +45,7 @@ pub use prover::{
     SHADOW_PROVER_QUEUE_CAPACITY, SettlementProverConfig, ShadowProofAnchor, ShadowProver,
     ShadowProverConfig, spawn_shadow_prover,
 };
+pub use prover_config::{HardforkProverAddress, ProverAddresses};
 pub use settlement::{
     BatchAnchor, BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatch,
     SettlementAbi, resolve_portal_zone_anchor,

@@ -33,6 +33,7 @@ use crate::{
         ZonePortal,
     },
     attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
+    prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_eips::BlockHashOrNumber;
@@ -62,6 +63,11 @@ pub enum BatchSubmitError {
     Cancelled,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
+    /// The attestation was generated using a prover selected under a different L1 policy.
+    ProverHardforkChanged {
+        proved: TempoHardfork,
+        current: TempoHardfork,
+    },
     Other(eyre::Report),
 }
 
@@ -79,6 +85,10 @@ impl fmt::Display for BatchSubmitError {
                 formatter.write_str("portal already committed the batch height")
             }
             Self::PreparedAnchorInvalid(error) => error.fmt(formatter),
+            Self::ProverHardforkChanged { proved, current } => write!(
+                formatter,
+                "prover hardfork changed from {proved} to {current}; regenerate the proof"
+            ),
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -91,7 +101,6 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
-/// How often a quorum wait rechecks whether another leader has advanced the portal.
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
@@ -339,7 +348,59 @@ impl BatchSubmitter {
         proof_bundle: Option<&ProofBundle>,
         certificate: Option<&SettlementCertificate>,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
-        let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
+        self.submit_batch_for_hardfork(prepared, proof_bundle, certificate, None)
+            .await
+    }
+
+    async fn validate_live_prover_hardfork(
+        &self,
+        expected: Option<TempoHardfork>,
+    ) -> std::result::Result<(), BatchSubmitError> {
+        if let Some(proved) = expected {
+            let current = active_l1_hardfork(&self.l1_provider).await?;
+            if proved != current {
+                return Err(BatchSubmitError::ProverHardforkChanged { proved, current });
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop certificate preparation if the completed proof's hardfork becomes stale.
+    pub(crate) async fn wait_for_prover_hardfork<T>(
+        &self,
+        expected: Option<TempoHardfork>,
+        preparation: impl std::future::Future<Output = Result<T, BatchSubmitError>>,
+    ) -> Result<T, BatchSubmitError> {
+        tokio::pin!(preparation);
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                result = &mut preparation => return result,
+                _ = interval.tick(), if expected.is_some() => {
+                    self.validate_live_prover_hardfork(expected).await?;
+                }
+            }
+        }
+    }
+
+    /// Submit an attestation only while its locally selected prover policy is still active.
+    pub(crate) async fn submit_batch_for_hardfork(
+        &self,
+        prepared: &PreparedBatch,
+        proof_bundle: Option<&ProofBundle>,
+        certificate: Option<&SettlementCertificate>,
+        prover_hardfork: Option<TempoHardfork>,
+    ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
+        let active = active_l1_hardfork(&self.l1_provider).await?;
+        if let Some(proved) = prover_hardfork
+            && proved != active
+        {
+            return Err(BatchSubmitError::ProverHardforkChanged {
+                proved,
+                current: active,
+            });
+        }
+        let settlement_abi = SettlementAbi::from_hardfork(active);
         let batch = &prepared.batch;
         let (verifier_config, proof) = settlement_proof(proof_bundle)?;
         let block_transition = BlockTransition {
@@ -433,6 +494,9 @@ impl BatchSubmitter {
             "Submitting batch to ZonePortal on L1"
         );
 
+        // Quorum collection and nonce lookup can cross activation. Never knowingly broadcast
+        // an attestation selected under the retired policy. Inclusion races are handled by retry.
+        self.validate_live_prover_hardfork(prover_hardfork).await?;
         let receipt = match settlement_abi {
             SettlementAbi::Legacy => {
                 let mut submission = self
@@ -1200,7 +1264,7 @@ pub struct WithdrawalPage {
     pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
-/// Settlement ABI selected by the fork rules of the batch's imported Tempo block.
+/// Settlement ABI selected by the live L1 hardfork at submission time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementAbi {
     /// Pre-T13 selector and EIP-712 statement.
@@ -1212,11 +1276,15 @@ pub enum SettlementAbi {
 impl SettlementAbi {
     /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
     pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
-        let t13_active = provider
-            .is_hardfork_active(TempoHardfork::T13)
-            .await
-            .wrap_err("failed reading the live Tempo L1 hardfork")?;
-        Ok(if t13_active { Self::T13 } else { Self::Legacy })
+        Ok(Self::from_hardfork(active_l1_hardfork(provider).await?))
+    }
+
+    fn from_hardfork(hardfork: TempoHardfork) -> Self {
+        if hardfork >= TempoHardfork::T13 {
+            Self::T13
+        } else {
+            Self::Legacy
+        }
     }
 
     /// Hash the token transition exactly as the selected settlement statement expects.
@@ -1918,6 +1986,69 @@ mod tests {
             SettlementAbi::from_l1(&mock_l1(t13)).await.unwrap(),
             SettlementAbi::T13
         );
+    }
+
+    #[tokio::test]
+    async fn stale_prover_policy_is_rejected_before_submission() {
+        // This also covers reorgs: a T13 proof cannot be sent while T12 is active again.
+        for (proved, active) in [(TempoHardfork::T12, "T13"), (TempoHardfork::T13, "T12")] {
+            let l1 = Asserter::new();
+            l1.push_success(&serde_json::json!({ "active": active }));
+            let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+            let error = submitter
+                .submit_batch_for_hardfork(&test_prepared_batch(120, 100), None, None, Some(proved))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                BatchSubmitError::ProverHardforkChanged { .. }
+            ));
+            assert!(l1.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn prover_policy_is_rechecked_after_waiting() {
+        let l1 = Asserter::new();
+        for active in ["T12", "T13"] {
+            l1.push_success(&serde_json::json!({ "active": active }));
+        }
+        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+        submitter
+            .validate_live_prover_hardfork(Some(TempoHardfork::T12))
+            .await
+            .unwrap();
+        assert!(matches!(
+            submitter
+                .validate_live_prover_hardfork(Some(TempoHardfork::T12))
+                .await,
+            Err(BatchSubmitError::ProverHardforkChanged {
+                proved: TempoHardfork::T12,
+                current: TempoHardfork::T13
+            })
+        ));
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn quorum_wait_exits_when_prover_hardfork_changes() {
+        let l1 = Asserter::new();
+        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            submitter.wait_for_prover_hardfork(
+                Some(TempoHardfork::T12),
+                std::future::pending::<Result<(), BatchSubmitError>>(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(BatchSubmitError::ProverHardforkChanged { .. })
+        ));
+        assert!(l1.read_q().is_empty());
     }
 
     #[test]

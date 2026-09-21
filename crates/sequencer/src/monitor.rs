@@ -32,7 +32,6 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
-use zone_prover::ProofBundle;
 
 use alloy_sol_types::{ContractError, SolInterface as _};
 
@@ -40,7 +39,7 @@ use crate::{
     SettlementManager, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX, ZonePortal},
     attestation::SettlementCertificate,
-    prover::SettlementProver,
+    prover::{SettlementProof, SettlementProver},
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -330,6 +329,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     "Prepared anchor invalidation escaped the rebuild loop; retrying on the next monitor tick"
                 );
             }
+            Err(BatchSubmitError::ProverHardforkChanged { .. }) => {
+                unreachable!("prover hardfork changes are handled by the rebuild loop")
+            }
             Err(BatchSubmitError::Other(error)) => {
                 error!(
                     from = scan_from,
@@ -506,6 +508,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         };
 
         loop {
+            if shutdown.is_cancelled() {
+                return Err(BatchSubmitError::Cancelled);
+            }
             let prepared = self
                 .batch_submitter
                 .prepare_batch(batch_data.clone())
@@ -544,6 +549,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                     return Ok(());
                 }
+                Err(BatchSubmitError::ProverHardforkChanged { proved, current }) => {
+                    self.metrics.prover_hardfork_rebuild_total.increment(1);
+                    warn!(%proved, %current, zone_from = from, zone_to = to,
+                        "L1 prover policy changed; rebuilding the settlement attempt");
+                }
                 result => return result,
             }
         }
@@ -573,7 +583,23 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 None => Ok(None),
             }
         };
-        let preparation = async { tokio::try_join!(proof, settlement) };
+        let preparation = async {
+            tokio::pin!(proof, settlement);
+            tokio::select! {
+                proof_bundle = &mut proof => {
+                    let proof_bundle = proof_bundle?;
+                    let certificate = self.batch_submitter.wait_for_prover_hardfork(
+                        proof_bundle.as_ref().map(|proof| proof.hardfork),
+                        settlement,
+                    ).await?;
+                    Ok::<_, BatchSubmitError>((proof_bundle, certificate))
+                }
+                certificate = &mut settlement => {
+                    let certificate = certificate?;
+                    Ok((proof.await?, certificate))
+                }
+            }
+        };
         let (proof_bundle, certificate) = tokio::select! {
             biased;
             () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
@@ -607,7 +633,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     async fn submit_batch_with_retry(
         &mut self,
         prepared: &PreparedBatch,
-        proof_bundle: Option<&ProofBundle>,
+        proof_bundle: Option<&SettlementProof>,
         certificate: Option<&SettlementCertificate>,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
@@ -663,7 +689,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(prepared, proof_bundle, certificate)
+                .submit_batch_for_hardfork(
+                    prepared,
+                    proof_bundle.map(|proof| &proof.bundle),
+                    certificate,
+                    proof_bundle.map(|proof| proof.hardfork),
+                )
                 .await
             {
                 Ok(event) => {
@@ -754,7 +785,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                     return Ok(());
                 }
-                Err(error @ BatchSubmitError::PreparedAnchorInvalid(_)) => return Err(error),
+                Err(
+                    error @ (BatchSubmitError::PreparedAnchorInvalid(_)
+                    | BatchSubmitError::ProverHardforkChanged { .. }),
+                ) => return Err(error),
                 Err(BatchSubmitError::Other(e)) => {
                     self.metrics
                         .batch_submit_latency_seconds
@@ -1173,6 +1207,54 @@ mod tests {
             l1.read_q().is_empty(),
             "submitBatch must not issue any L1 request after proving fails"
         );
+    }
+
+    #[tokio::test]
+    async fn submission_retry_returns_stale_proof_for_rebuilding() {
+        use tempo_chainspec::hardfork::TempoHardfork;
+        use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
+
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        let batch = BatchData {
+            zone_height: 20,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0xbb),
+            next_block_hash: B256::repeat_byte(0xcc),
+            prev_processed_deposit_hash: B256::ZERO,
+            next_processed_deposit_hash: B256::ZERO,
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 1,
+        };
+        // The first attempt fails after selecting the ABI. Before retry, L1 activates T13.
+        l1.push_success(&abi_encode_b256(batch.prev_block_hash));
+        l1.push_success(&serde_json::json!({ "active": "T12" }));
+        l1.push_failure_msg("submission metadata temporarily unavailable");
+        l1.push_success(&abi_encode_b256(batch.prev_block_hash));
+        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        let proof = SettlementProof {
+            bundle: ProofBundle {
+                verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
+                proof: vec![1].into(),
+            },
+            hardfork: TempoHardfork::T12,
+        };
+        let error = monitor
+            .submit_batch_with_retry(&prepared(batch), Some(&proof), None, 20, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BatchSubmitError::ProverHardforkChanged {
+                proved: TempoHardfork::T12,
+                current: TempoHardfork::T13,
+            }
+        ));
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]

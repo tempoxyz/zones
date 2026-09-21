@@ -687,7 +687,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key-file` | (required for sequencing) | Owner-readable file or FIFO containing the sequencer private key |
 | `--sequencer.enable-prover` | false | Run detached SPF validation; supported by sequencers and `rpc_only` P2P followers |
-| `--sequencer.prover-address` | (optional) | Remote prover `HOST:PORT`; without it the SPF executes in-process |
+| `--sequencer.prover-address` | (optional) | Repeatable `HARDFORK=HOST:PORT` assignment selected by the live L1 fork; startup requires current and next-24-hour forks; missing forks stop proving |
 | `--deposit-decryption-keys-file` | (optional) | File containing additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
 | `--zone.poll-interval-secs` | 1 | Fallback interval for reconciling the canonical Zone head when no native notification arrives |
@@ -706,7 +706,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `SEQUENCER_KEY` | For short-lived tooling | Sequencer private key for `just create-zone` and xtasks; not accepted by the node |
 | `SEQUENCER_KEY_FILE` | For sequencing | Owner-readable file or FIFO containing the sequencer private key |
 | `SEQUENCER_ENABLE_PROVER` | No | Enable detached SPF validation, including on an `rpc_only` P2P follower |
-| `SEQUENCER_PROVER_ADDRESS` | No | Remote prover `HOST:PORT` used when detached SPF validation is enabled |
+| `SEQUENCER_PROVER_ADDRESS` | No | Comma-separated `HARDFORK=HOST:PORT` assignments; see the [prover upgrade runbook](../bin/prover/enclave/README.md#upgrading-across-an-l1-hardfork) |
 | `DEPOSIT_DECRYPTION_KEYS_FILE` | During encryption-key rotation | Additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `ADMIN_KEY` | For portal governance | Portal admin private key for `enableToken` / deposit pause controls. `SEQUENCER_KEY` only works for legacy zones where admin == sequencer. |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
