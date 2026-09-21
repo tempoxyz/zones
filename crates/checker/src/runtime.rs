@@ -19,7 +19,7 @@ use crate::{
     AttemptError, CheckerConfig,
     accounting::effects,
     bootstrap,
-    l1::{L1ReadError, classify_rpc_error, collect_l1_range_at, portal_balances},
+    l1::{L1RangeCollector, L1ReadError, classify_rpc_error, portal_balances},
     l2::{AccountingStateError, collect_l2_block_evidence, read_accounting_state},
     persistence::{AppliedStatus, BlockRef, CandidateTransition, Finding, Snapshot, Status, Store},
     telemetry::{self, CheckerMetrics},
@@ -533,15 +533,12 @@ async fn collect_l1_range_with_retry(
     backoff: &mut Backoff,
 ) -> Result<crate::l1::L1BlockEvidence, BlockError> {
     let VerificationContext { config, metrics } = context;
+    let mut collector = L1RangeCollector::new(parent, expected)
+        .map_err(|error| classify_block_l1_error(error, zone))?;
     loop {
-        match collect_l1_range_at(
-            l1,
-            &config.l1_block_tracker,
-            config.portal_address,
-            parent,
-            expected,
-        )
-        .await
+        match collector
+            .collect(l1, &config.l1_block_tracker, config.portal_address)
+            .await
         {
             Ok(block) => return Ok(block),
             Err(L1ReadError::Unavailable(error)) => {
