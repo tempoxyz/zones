@@ -19,7 +19,7 @@ use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
-use tempo_zone_contracts::{IZoneOutbox, LegacyTempoAdvanced, TempoAdvanced};
+use tempo_zone_contracts::{IZoneOutbox, TempoAdvanced};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, L1StorageReader};
@@ -279,15 +279,13 @@ where
                 .receipts()
                 .iter()
                 .flat_map(|receipt| receipt.logs())
-                .filter(|log| log.address == ZONE_INBOX_ADDRESS)
-                .any(|log| match log.topics().first() {
-                    Some(&TempoAdvanced::SIGNATURE_HASH) => TempoAdvanced::decode_log(log)
-                        .is_ok_and(|event| !event.depositsProcessed.is_zero()),
-                    Some(&LegacyTempoAdvanced::SIGNATURE_HASH) => {
-                        LegacyTempoAdvanced::decode_log(log)
-                            .is_ok_and(|event| !event.depositsProcessed.is_zero())
-                    }
-                    _ => false,
+                .filter(|log| {
+                    log.address == ZONE_INBOX_ADDRESS
+                        && log.topics().first() == Some(&TempoAdvanced::SIGNATURE_HASH)
+                })
+                .any(|log| {
+                    TempoAdvanced::decode_log(log)
+                        .is_ok_and(|event| !event.depositsProcessed.is_zero())
                 });
         if processed_deposit && self.phase != ZoneBlockPhase::WithdrawalsFinalized {
             return Err(BlockValidationError::msg(
@@ -656,14 +654,6 @@ mod tests {
                 1,
                 Executing,
                 false,
-                TempoHardfork::T13,
-                true,
-            ),
-            (
-                ZONE_INBOX_ADDRESS,
-                1,
-                Executing,
-                true,
                 TempoHardfork::T13,
                 true,
             ),
