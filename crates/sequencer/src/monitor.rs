@@ -658,6 +658,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             }
 
             let submit_started = std::time::Instant::now();
+            // Drop the stale `NitroV1` proof when retrying in fallback `NoProof` mode.
+            let proof_bundle = proof_bundle.filter(|_| self.verifier_mode == VerifierMode::NitroV1);
             match self
                 .batch_submitter
                 .submit_batch(prepared, proof_bundle, self.verifier_mode, shutdown)
