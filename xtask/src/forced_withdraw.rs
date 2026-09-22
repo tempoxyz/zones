@@ -9,8 +9,8 @@ use alloy::{
 };
 use eyre::{WrapErr as _, ensure, eyre};
 use k256::elliptic_curve::rand_core::{OsRng, RngCore};
-use std::time::Duration;
-use tempo_alloy::TempoNetwork;
+use std::{num::NonZeroU64, time::Duration};
+use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tempo_contracts::precompiles::ITIP20;
 use tempo_zone_contracts::{
     ForcedExitAuthorization, ZONE_FACTORY_ADDRESS, ZoneFactory, ZonePortal,
@@ -32,7 +32,9 @@ pub(crate) struct ForcedWithdraw {
     /// Account root secp256k1 key; access keys cannot authorize forced withdrawals.
     #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
-    /// Optional separate L1 transaction signer and compensation payer.
+    /// Optional separate L1 signer/payer. Defaults to the authorizing account, exposing
+    /// its address as the public L1 payer. A separate payer reduces this linkage;
+    /// the recipient also defaults to the authorizing account.
     #[arg(long, env = "FEE_PAYER_PRIVATE_KEY", hide_env_values = true)]
     fee_payer_private_key: Option<String>,
     #[arg(long, default_value_t = tempo_precompiles::PATH_USD_ADDRESS)]
@@ -241,6 +243,10 @@ impl ForcedWithdraw {
         );
         let pending = portal
             .requestForcedExit(self.token, key_index, encrypted)
+            .valid_before(
+                NonZeroU64::new(auth.admitBefore)
+                    .ok_or_else(|| eyre!("invalid admission deadline"))?,
+            )
             .send()
             .await
             .wrap_err("failed to submit forced withdrawal")?;
@@ -430,6 +436,7 @@ mod rpc_tests {
         registry_zone_id: u32,
         version: u64,
         compensation: u128,
+        allowance: U256,
     }
 
     impl Default for Scenario {
@@ -440,6 +447,7 @@ mod rpc_tests {
                 registry_zone_id: ZONE_ID,
                 version: 1,
                 compensation: exithatch::FORCED_EXIT_COMPENSATION,
+                allowance: U256::ZERO,
             }
         }
     }
@@ -513,6 +521,21 @@ mod rpc_tests {
                         .abi_encode_params()
                 }
             } else if to == PORTAL {
+                if selector == ZonePortal::encryptionKeyAtBlockCall::SELECTOR {
+                    let secret = k256::SecretKey::from_slice(&[3; 32]).unwrap();
+                    let (x, parity) = zone_precompiles::ecies::compressed_x_and_parity(
+                        secret.public_key().as_affine(),
+                    );
+                    return Ok(Bytes::from(
+                        ZonePortal::encryptionKeyAtBlockCall::abi_encode_returns(
+                            &ZonePortal::encryptionKeyAtBlockReturn {
+                                x,
+                                yParity: parity,
+                                keyIndex: U256::ZERO,
+                            },
+                        ),
+                    ));
+                }
                 assert_eq!(params[1], serde_json::to_value(block).unwrap());
                 if selector == ZonePortal::zoneIdCall::SELECTOR {
                     ZONE_ID.abi_encode()
@@ -537,13 +560,14 @@ mod rpc_tests {
                     U256::from(1_000_000_000u64).abi_encode()
                 } else {
                     assert_eq!(selector, ITIP20::allowanceCall::SELECTOR);
-                    U256::ZERO.abi_encode()
+                    scenario.allowance.abi_encode()
                 }
             };
             Ok::<_, ErrorObjectOwned>(Bytes::from(output))
         })
         .unwrap();
         for (method, value) in [
+            ("eth_blockNumber", json!("0x64")),
             ("eth_chainId", json!("0x539")),
             ("eth_getTransactionCount", json!("0x0")),
             ("eth_estimateGas", json!("0x100000")),
@@ -583,7 +607,7 @@ mod rpc_tests {
             token: tempo_precompiles::PATH_USD_ADDRESS,
             to: None,
             nonce: Some(U256::ONE),
-            admit_before: None,
+            admit_before: Some(1600),
             approve,
             wait_for_processing: false,
             timeout_secs: 1,
@@ -659,6 +683,27 @@ mod rpc_tests {
             assert!(error.contains(expected), "{error}");
             assert!(observed.transactions.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn admission_transaction_expires_at_authorization_deadline() {
+        let (error, observed) = run(
+            Scenario {
+                allowance: U256::MAX,
+                ..Default::default()
+            },
+            false,
+        )
+        .await;
+        assert!(
+            error.contains("stop after recording transaction"),
+            "{error}"
+        );
+        assert_eq!(observed.transactions.len(), 1);
+        let tx =
+            tempo_primitives::TempoTxEnvelope::decode_2718(&mut observed.transactions[0].as_ref())
+                .unwrap();
+        assert_eq!(tx.valid_before(), Some(1600));
     }
 
     #[tokio::test]
