@@ -37,7 +37,7 @@ use zone_prover::{ProofBundle, VerifierMode};
 use crate::{
     AttestationStore, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX},
-    prover::SettlementProver,
+    prover::{ProverFailure, SettlementProver},
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -562,6 +562,16 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
+    fn activate_fallback(&mut self, trigger: &'static str) -> Option<VerifierMode> {
+        let fallback = FALLBACK_VERIFIER_MODE?;
+        self.verifier_mode = fallback;
+        if let Some(store) = &self.config.attestation_store {
+            store.set_verifier_mode(fallback);
+        }
+        warn!(?fallback, trigger, "Activating sticky verifier fallback");
+        Some(fallback)
+    }
+
     async fn prove_and_submit_batch(
         &mut self,
         from: u64,
@@ -572,11 +582,16 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     ) -> std::result::Result<(), BatchSubmitError> {
         let proof_bundle = if self.verifier_mode == VerifierMode::NitroV1 {
             if let Some(prover) = &self.settlement_prover {
-                Some(
-                    prover
-                        .prove(from, last_zone_block, prepared.clone())
-                        .await?,
-                )
+                match prover.prove(from, last_zone_block, prepared.clone()).await {
+                    Ok(proof) => Some(proof),
+                    Err(error) if ProverFailure::is_unavailable(&error) => {
+                        if self.activate_fallback("prover_unavailable").is_none() {
+                            return Err(error.into());
+                        }
+                        None
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             } else {
                 None
             }
@@ -752,18 +767,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 Err(BatchSubmitError::InvalidProof)
                     if self.verifier_mode == VerifierMode::NitroV1 =>
                 {
-                    let Some(fallback) = FALLBACK_VERIFIER_MODE else {
+                    if self.activate_fallback("verifier_rejection").is_none() {
                         return Err(BatchSubmitError::InvalidProof);
-                    };
-                    self.verifier_mode = fallback;
-                    simulate = false;
-                    if let Some(store) = &self.config.attestation_store {
-                        store.set_verifier_mode(fallback);
                     }
-                    warn!(
-                        ?fallback,
-                        "Nitro verifier rejected proof; activating sticky fallback"
-                    );
+                    simulate = false;
                     continue;
                 }
                 Err(BatchSubmitError::InvalidProof) => return Err(BatchSubmitError::InvalidProof),
@@ -1173,12 +1180,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prover_unavailability_activates_configured_fallback() {
+        let l1 = Asserter::new();
+        let store = AttestationStore::default();
+        let mut monitor = test_monitor(l1, TestZoneProvider::new());
+        monitor.config.attestation_store = Some(store.clone());
+
+        assert_eq!(
+            monitor.activate_fallback("prover_unavailable"),
+            Some(VerifierMode::NoProof)
+        );
+        assert_eq!(monitor.verifier_mode, VerifierMode::NoProof);
+        assert_eq!(store.verifier_mode(), VerifierMode::NoProof);
+    }
+
     #[tokio::test]
     async fn attestation_failure_prevents_submit_batch() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
         monitor.settlement_prover = Some(SettlementProver::failing(
-            "remote prover rejected request (AttestationUnavailable): NSM unavailable",
+            "remote prover returned an invalid proof bundle",
         ));
         let batch_data = BatchData {
             zone_height: 20,
@@ -1207,7 +1229,8 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("AttestationUnavailable"));
+        assert!(error.to_string().contains("invalid proof bundle"));
+        assert_eq!(monitor.verifier_mode, VerifierMode::NitroV1);
         assert!(
             l1.read_q().is_empty(),
             "submitBatch must not issue any L1 request after proving fails"

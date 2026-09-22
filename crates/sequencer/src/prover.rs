@@ -53,12 +53,26 @@ const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
 
-/// Typed error context for an SPF rejection or a mismatch in its output.
-/// Errors without this context mean validation could not complete and must not
-/// count as a rejected candidate (for example, when the remote prover restarts).
-#[derive(Debug, thiserror::Error)]
-#[error("prover validation failed")]
-struct ValidationFailure;
+/// Failure categories that determine whether proofless fallback is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ProverFailure {
+    /// The proof or validated output is incorrect and must not trigger fallback.
+    #[error("prover validation failed")]
+    Validation,
+    /// Proving infrastructure could not produce a result and may trigger fallback.
+    #[error("settlement proof unavailable")]
+    Unavailable,
+}
+
+impl ProverFailure {
+    pub(crate) fn is_invalid(error: &eyre::Report) -> bool {
+        error.downcast_ref() == Some(&Self::Validation)
+    }
+
+    pub(crate) fn is_unavailable(error: &eyre::Report) -> bool {
+        error.downcast_ref() == Some(&Self::Unavailable)
+    }
+}
 
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
@@ -310,7 +324,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
                     );
                     Ok(proof_bundle)
                 }
-                Err(err) if err.is::<ValidationFailure>() => {
+                Err(err) if ProverFailure::is_invalid(&err) => {
                     metrics.validation_failure_total.increment(1);
                     error!(
                         target: "zone::sequencer::prover",
@@ -371,10 +385,8 @@ impl SettlementProver {
                 response: Some(response),
             })
             .await
-            .map_err(|_| eyre::eyre!("settlement prover worker is unavailable"))?;
-        receiver
-            .await
-            .map_err(|_| eyre::eyre!("settlement prover worker dropped its response"))?
+            .map_err(|_| ProverFailure::Unavailable)?;
+        receiver.await.map_err(|_| ProverFailure::Unavailable)?
     }
 
     #[cfg(test)]
@@ -572,7 +584,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
             .await
             .context("SPF worker panicked")?
             .context("SPF rejected generated witness")
-            .context(ValidationFailure)?;
+            .context(ProverFailure::Validation)?;
         (output, None)
     };
     metrics
@@ -580,7 +592,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .record(started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    compare_output(&output, batch, batch.prev_block_hash).context(ValidationFailure)?;
+    compare_output(&output, batch, batch.prev_block_hash).context(ProverFailure::Validation)?;
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -634,7 +646,9 @@ async fn verify_remotely(
     metrics
         .spf_remote_connect_duration_seconds
         .record(started.elapsed().as_secs_f64());
-    let stream = stream.wrap_err_with(|| format!("connect to remote prover at {address}"))?;
+    let stream = stream
+        .wrap_err_with(|| format!("connect to remote prover at {address}"))
+        .context(ProverFailure::Unavailable)?;
 
     let first_read_at = Arc::new(OnceLock::new());
     let stream = FirstReadTimed {
@@ -649,7 +663,9 @@ async fn verify_remotely(
     metrics
         .spf_remote_request_send_duration_seconds
         .record(started.elapsed().as_secs_f64());
-    send_result.wrap_err_with(|| format!("send request to remote prover at {address}"))?;
+    send_result
+        .wrap_err_with(|| format!("send request to remote prover at {address}"))
+        .context(ProverFailure::Unavailable)?;
 
     let response_started = Instant::now();
     let response_result = connection.receive();
@@ -673,8 +689,12 @@ async fn verify_remotely(
         );
     }
     let response: VerifyResponse = response_result
-        .wrap_err_with(|| format!("read response from remote prover at {address}"))?
-        .ok_or_else(|| eyre::eyre!("remote prover closed the connection without a response"))?;
+        .wrap_err_with(|| format!("read response from remote prover at {address}"))
+        .context(ProverFailure::Unavailable)?
+        .ok_or_else(|| {
+            eyre::eyre!("remote prover closed the connection without a response")
+                .wrap_err(ProverFailure::Unavailable)
+        })?;
 
     match response {
         VerifyResponse::Ok {
@@ -711,10 +731,12 @@ async fn verify_remotely(
                 );
             }
             let error = eyre::eyre!("remote prover rejected request ({code:?}): {message}");
-            Err(if code == ErrorCode::VerificationFailed {
-                error.wrap_err(ValidationFailure)
-            } else {
-                error
+            Err(match code {
+                ErrorCode::VerificationFailed => error.wrap_err(ProverFailure::Validation),
+                ErrorCode::AttestationUnavailable | ErrorCode::InternalError => {
+                    error.wrap_err(ProverFailure::Unavailable)
+                }
+                _ => error,
             })
         }
     }

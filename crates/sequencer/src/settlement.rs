@@ -475,6 +475,7 @@ impl BatchSubmitter {
             recent_tempo_block_number,
             current_l1_block,
             anchors_to_current_tip,
+            ?verifier_mode,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
             nonce,
