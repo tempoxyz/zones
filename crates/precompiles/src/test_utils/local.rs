@@ -65,7 +65,6 @@ pub(crate) fn test_storage_provider(
 pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
     ZonePrecompileEnv::new(
         &ctx.cfg,
-        zone_hardfork::ZoneHardfork::Z0,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
     )
