@@ -50,7 +50,10 @@ jobs:
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
-          submodules: true
+      - name: Initialize Earn public dependencies
+        working-directory: earn
+        # PropAMM is private and only needed by Earn's integration tests.
+        run: git submodule update --init lib/forge-std lib/openzeppelin-contracts lib/openzeppelin-contracts-upgradeable
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@bce53819ffa60fcdf8f0f349686d807e5a66a71b # 2026-09-21T21-56-41Z-bce53819
         with:
           toolchain: stable

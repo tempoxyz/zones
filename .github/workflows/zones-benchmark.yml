@@ -540,7 +540,11 @@ jobs:
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
-          submodules: true
+
+      - name: Initialize Earn public dependencies
+        working-directory: earn
+        # PropAMM is private and only needed by Earn's integration tests.
+        run: git submodule update --init lib/forge-std lib/openzeppelin-contracts lib/openzeppelin-contracts-upgradeable
 
       - name: Prepare persistent topology control path
         env:
