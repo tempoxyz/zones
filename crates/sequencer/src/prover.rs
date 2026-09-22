@@ -436,38 +436,38 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .record(started.elapsed().as_secs_f64());
 
     // Local observer policy must never gate settlement jobs or alter L1 fork dispatch.
-    if matches!(job.anchor, ProverAnchor::Finalized(_)) {
-        if let Some(verifier) = &context.config.shadow_proof_verifier {
-            let started = Instant::now();
-            let result = async {
-                let bundle = proof_bundle
-                    .clone()
-                    .ok_or_eyre("shadow proof verification requires a remote Nitro proof")?;
-                // A newly generated attestation needs the current verification time, not the
-                // historical batch/anchor time. Never accept time supplied by the prover.
-                let timestamp = context
-                    .l1_provider
-                    .get_header_by_number(BlockNumberOrTag::Latest)
-                    .await?
-                    .ok_or_eyre("missing current Tempo header for Nitro verification")?
-                    .timestamp();
-                let verifier = verifier.clone();
-                let output = output.clone();
-                tokio::task::spawn_blocking(move || {
-                    verifier.verify(&public_inputs, &output, &bundle, timestamp)
-                })
-                .await
-                .context("Nitro verification worker panicked")?
-                .map_err(eyre::Report::new)
-            }
-            .await;
-            metrics
-                .proof_verification_duration_seconds
-                .record(started.elapsed().as_secs_f64());
-            record_proof_verification(result, metrics)?;
-            info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
-                "Shadow Nitro proof verified against pinned enclave measurements");
+    if matches!(job.anchor, ProverAnchor::Finalized(_))
+        && let Some(verifier) = &context.config.shadow_proof_verifier
+    {
+        let started = Instant::now();
+        let result = async {
+            let bundle = proof_bundle
+                .clone()
+                .ok_or_eyre("shadow proof verification requires a remote Nitro proof")?;
+            // A newly generated attestation needs the current verification time, not the
+            // historical batch/anchor time. Never accept time supplied by the prover.
+            let timestamp = context
+                .l1_provider
+                .get_header_by_number(BlockNumberOrTag::Latest)
+                .await?
+                .ok_or_eyre("missing current Tempo header for Nitro verification")?
+                .timestamp();
+            let verifier = verifier.clone();
+            let output = output.clone();
+            tokio::task::spawn_blocking(move || {
+                verifier.verify(&public_inputs, &output, &bundle, timestamp)
+            })
+            .await
+            .context("Nitro verification worker panicked")?
+            .map_err(eyre::Report::new)
         }
+        .await;
+        metrics
+            .proof_verification_duration_seconds
+            .record(started.elapsed().as_secs_f64());
+        record_proof_verification(result, metrics)?;
+        info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
+                "Shadow Nitro proof verified against pinned enclave measurements");
     }
 
     if job.response.is_some() && proof_bundle.is_none() {

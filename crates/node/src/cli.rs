@@ -725,7 +725,13 @@ mod tests {
 
     #[test]
     fn shadow_verification_requires_remote_proving_and_complete_measurements() {
-        let common = ["tempo-zone", "--l1.rpc-url", "ws://localhost:8546"];
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x5ad0000000000000000000000000000000000002",
+        ];
         let pcr = "11".repeat(48);
         let pcrs = format!("{pcr},{pcr},{pcr}");
         assert!(
