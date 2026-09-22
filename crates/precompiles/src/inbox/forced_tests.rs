@@ -145,6 +145,32 @@ fn consumed(h: &mut Harness, nonce: u64) -> eyre::Result<bool> {
 }
 
 #[test]
+fn forced_exit_accepts_earlier_admission_but_rejects_future_height() -> eyre::Result<()> {
+    for admission_block in [0, 2] {
+        let mut h = active_harness()?;
+        fund(&mut h, U256::from(42))?;
+        let (mut queued, proof) = request(&mut h, 1, 1, &signed_payload(&auth(1)))?;
+        let mut entry = ForcedExit::abi_decode(&queued.depositData)?;
+        // The harness imports block 1. Earlier admission models deferred portal work.
+        entry.requestedAtBlock = admission_block;
+        queued.depositData = entry.abi_encode().into();
+        let result = execute(&mut h, vec![(queued, proof)])?;
+        if admission_block == 0 {
+            assert!(result.is_success(), "{result:?}");
+            assert!(consumed(&mut h, 1)?);
+            assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::ZERO);
+            assert_eq!(h.pending_withdrawals()?.len(), 1);
+        } else {
+            assert!(result.is_revert());
+            assert!(!consumed(&mut h, 1)?);
+            assert_eq!(h.balance(PATH_USD_ADDRESS, ROOT)?, U256::from(42));
+            assert!(h.pending_withdrawals()?.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn l1_token_pause_rejects_admitted_requests_without_blocking_inbox() -> eyre::Result<()> {
     for paused in [true, false] {
         let mut h = active_harness()?;
