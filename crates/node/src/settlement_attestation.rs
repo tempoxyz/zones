@@ -242,9 +242,9 @@ where
 }
 
 /// Get the previous batch's (i.e the last block in the previous batch) block_hash,
-/// deposit_hash, processed_deposit_number, and processed_token_count. These values
-/// are used to identify the previous batch while submitting the current batch.
-fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64, u64)>
+/// deposit_hash, processed_deposit_number, processed_token_count, and withdrawal batch index.
+/// These values identify the transition independently of L1 submission progress.
+fn previous_batch<P>(provider: &P, number: u64) -> eyre::Result<(B256, B256, u64, u64, u64)>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
@@ -259,15 +259,21 @@ where
                 commitments.processed_deposit_hash,
                 commitments.processed_deposit_number,
                 commitments.processed_token_count,
+                commitments
+                    .withdrawal
+                    .expect("boundary commitments include withdrawal finalization")
+                    .1,
             ));
         }
     }
     // A fresh ZonePortal has not accepted any zone tip yet, so its blockHash is zero. The first
     // batch must extend that on-chain value rather than the local zone genesis hash.
-    Ok((B256::ZERO, B256::ZERO, 0, 0))
+    Ok((B256::ZERO, B256::ZERO, 0, 0, 0))
 }
 
-/// Build the settlement attestation at a batch boundary in the exact format ZonePortal expects.
+/// Certify a zone batch transition independently of whether its predecessor has landed on L1.
+/// Live signer/verifier configuration and L1 anchors still apply; portal position is enforced
+/// when submitting the batch, not when collecting signatures for it.
 pub(crate) async fn build_settlement_attestation<P>(
     provider: &P,
     number: u64,
@@ -287,29 +293,31 @@ where
         .sealed_header(number)?
         .ok_or_eyre(format!("missing batch-tip header {number}"))?
         .hash();
-    let (previous_tip, previous_deposit_hash, previous_deposit_number, previous_token_count) =
-        previous_batch(provider, number)?;
+    let (
+        previous_tip,
+        previous_deposit_hash,
+        previous_deposit_number,
+        previous_token_count,
+        previous_batch_index,
+    ) = previous_batch(provider, number)?;
+    let expected_batch_index = previous_batch_index
+        .checked_add(1)
+        .ok_or_eyre("previous zone withdrawal batch index overflow")?;
+    eyre::ensure!(
+        withdrawal_batch_index == expected_batch_index,
+        "zone withdrawal batch index {withdrawal_batch_index} does not follow previous zone batch index {previous_batch_index}"
+    );
     let settlement_abi = SettlementAbi::from_l1(&context.l1_provider).await?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
-    let (set_version, portal_batch_index, verifier, portal_tip) = context
+    let (set_version, verifier) = context
         .l1_provider
         .multicall()
         .add(portal.sequencerSetVersion())
-        .add(portal.withdrawalBatchIndex())
         .add(portal.verifier())
-        .add(portal.blockHash())
         .aggregate()
         .await?;
     validate_sequencer_set_version(context.pinned_sequencer_set_version, set_version)?;
-    eyre::ensure!(
-        portal_tip == previous_tip,
-        "proposal does not extend the portal batch tip"
-    );
-    eyre::ensure!(
-        withdrawal_batch_index == portal_batch_index.saturating_add(1),
-        "zone withdrawal batch index {withdrawal_batch_index} does not follow portal index {portal_batch_index}"
-    );
 
     let (anchor_block_number, anchor_block_hash) = anchor;
     validate_settlement_anchor(
@@ -835,11 +843,169 @@ mod tests {
         let commitments = block_commitments(&provider, 4).unwrap().unwrap();
         assert_eq!(commitments.processed_token_count, 15);
         let previous = previous_batch(&provider, 4).unwrap();
-        assert_eq!(previous, (first_boundary_hash, first_deposit_hash, 7, 0));
+        assert_eq!(previous, (first_boundary_hash, first_deposit_hash, 7, 0, 1));
         assert_eq!(
             SettlementAbi::T13.token_transition_hash(previous.3, commitments.processed_token_count),
             alloy_primitives::keccak256((0_u64, 15_u64).abi_encode())
         );
+    }
+
+    fn attestation_fixture(
+        indices: [u64; 2],
+    ) -> (
+        MockEthProvider<TempoPrimitives>,
+        AttestationContext,
+        Asserter,
+        TempoHeader,
+    ) {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+        let mut l1_header = TempoHeader::default();
+        l1_header.inner.number = 104;
+        for (number, index) in (1_u64..).zip(indices) {
+            let mut header = TempoHeader::default();
+            header.inner.number = number;
+            provider.add_header(header.hash_slow(), header);
+            provider.add_receipts(
+                number,
+                vec![TempoReceipt {
+                    tx_type: TempoTxType::Legacy,
+                    success: true,
+                    cumulative_gas_used: 0,
+                    logs: vec![
+                        Log {
+                            address: ZONE_INBOX_ADDRESS,
+                            data: TempoAdvanced {
+                                tempoBlockHash: l1_header.hash_slow(),
+                                tempoBlockNumber: 104,
+                                depositsProcessed: U256::from(10),
+                                newProcessedDepositQueueHash: B256::repeat_byte(number as u8),
+                                lastProcessedDepositNumber: number * 10,
+                                lastProcessedEnabledTokenCount: number * 3,
+                            }
+                            .encode_log_data(),
+                        },
+                        Log {
+                            address: ZONE_OUTBOX_ADDRESS,
+                            data: IZoneOutbox::BatchFinalized {
+                                withdrawalQueueHash: B256::repeat_byte((number + 10) as u8),
+                                withdrawalBatchIndex: index,
+                            }
+                            .encode_log_data(),
+                        },
+                    ],
+                }],
+            );
+        }
+        let l1 = Asserter::new();
+        let context = AttestationContext::new(
+            AttestationDomain {
+                l1_chain_id: 42431,
+                portal_address: alloy_primitives::Address::repeat_byte(7),
+                zone_id: 7,
+            },
+            Some(1),
+            None,
+            HashMap::new(),
+            AttestationStore::default(),
+            ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect_mocked_client(l1.clone())
+                .erased(),
+            BatchAnchorConfig::default(),
+        );
+        (provider, context, l1, l1_header)
+    }
+
+    #[tokio::test]
+    async fn settlement_builds_successive_batches_without_portal_progress() {
+        let (provider, context, l1, l1_header) = attestation_fixture([1, 2]);
+        let verifier = alloy_primitives::Address::repeat_byte(8);
+        let mut previous_tip = B256::ZERO;
+        let mut previous_deposit = B256::ZERO;
+        for number in 1_u64..=2 {
+            l1.push_success(&serde_json::json!({ "active": "T13" }));
+            // The only portal values supplied are signing configuration. Neither the submitted
+            // zone tip nor the submitted batch index is read, even for the second boundary.
+            let metadata: Vec<Bytes> =
+                vec![1_u64.abi_encode().into(), verifier.abi_encode().into()];
+            l1.push_success(&Bytes::from((U256::ZERO, metadata).abi_encode_params()));
+            l1.push_success(&104_u64);
+            let header = tempo_alloy::rpc::TempoHeaderResponse {
+                inner: alloy_rpc_types_eth::Header {
+                    hash: l1_header.hash_slow(),
+                    inner: l1_header.clone(),
+                    total_difficulty: None,
+                    size: None,
+                },
+                timestamp_millis: 0,
+            };
+            l1.push_success(&header);
+            l1.push_success(&header);
+
+            let attestation = build_settlement_attestation(
+                &provider,
+                number,
+                &context,
+                (104, l1_header.hash_slow()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let next_tip = provider.sealed_header(number).unwrap().unwrap().hash();
+            let next_deposit = B256::repeat_byte(number as u8);
+            assert_eq!(attestation.zoneHeight, U256::from(number));
+            assert_eq!(attestation.withdrawalBatchIndex, U256::from(number));
+            assert_eq!(attestation.sequencerSetVersion, 1);
+            assert_eq!(attestation.verifier, verifier);
+            assert_eq!(
+                attestation.blockTransitionHash,
+                alloy_primitives::keccak256((previous_tip, next_tip).abi_encode())
+            );
+            assert_eq!(
+                attestation.depositQueueTransitionHash,
+                alloy_primitives::keccak256(
+                    (
+                        previous_deposit,
+                        next_deposit,
+                        (number - 1) * 10,
+                        number * 10
+                    )
+                        .abi_encode()
+                )
+            );
+            assert_eq!(
+                attestation.tokenEnablementTransitionHash,
+                SettlementAbi::T13.token_transition_hash((number - 1) * 3, number * 3)
+            );
+            assert_eq!(*context.store.subscribe_submitted_height().borrow(), 0);
+            assert!(l1.read_q().is_empty());
+            previous_tip = next_tip;
+            previous_deposit = next_deposit;
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_rejects_nonconsecutive_zone_batch_indices() {
+        for (indices, number, expected_error) in [
+            ([2, 3], 1, "does not follow previous zone batch index 0"),
+            ([1, 3], 2, "does not follow previous zone batch index 1"),
+            ([1, 1], 2, "does not follow previous zone batch index 1"),
+            (
+                [u64::MAX, 0],
+                2,
+                "previous zone withdrawal batch index overflow",
+            ),
+        ] {
+            let (provider, context, _, l1_header) = attestation_fixture(indices);
+            let error = build_settlement_attestation(
+                &provider,
+                number,
+                &context,
+                (104, l1_header.hash_slow()),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error}");
+        }
     }
 
     fn test_manifest() -> ZoneManifest {
