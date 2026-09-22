@@ -61,7 +61,7 @@ pub async fn create_proof_collector<P: ZoneSequencerProvider>(
 #[derive(Clone, Debug)]
 pub struct ProofCollectorHandle {
     store: Arc<ProofStore>,
-    requests: mpsc::Sender<CollectRequest>,
+    requests: mpsc::Sender<ProofRequest>,
 }
 
 impl ProofCollectorHandle {
@@ -78,11 +78,10 @@ impl ProofCollectorHandle {
     ) -> Result<Option<Arc<StoredBlockProof>>> {
         let (response, result) = oneshot::channel();
         self.requests
-            .send(CollectRequest {
+            .send(ProofRequest::Collect {
                 number,
                 hash,
                 response,
-                supplied: None,
             })
             .await
             .context("proof collector stopped")?;
@@ -97,18 +96,15 @@ impl ProofCollectorHandle {
         proof.validate()?;
         let (response, result) = oneshot::channel();
         self.requests
-            .send(CollectRequest {
-                number: proof.witness.block_number,
-                hash: proof.witness.block_hash,
+            .send(ProofRequest::Persist {
+                proof: Box::new(proof),
                 response,
-                supplied: Some(proof),
             })
             .await
             .context("proof collector stopped")?;
         result
             .await
-            .context("proof collector stopped before persistence")??;
-        Ok(())
+            .context("proof collector stopped before persistence")?
     }
 
     /// Whether an imported block still needs a durable witness for future settlement.
@@ -150,7 +146,7 @@ struct ProofCollector<P> {
     config: ProofCollectorConfig,
     provider: P,
     store: Arc<ProofStore>,
-    requests: mpsc::Receiver<CollectRequest>,
+    requests: mpsc::Receiver<ProofRequest>,
 }
 
 impl<P: ZoneSequencerProvider> ProofCollector<P> {
@@ -169,11 +165,16 @@ impl<P: ZoneSequencerProvider> ProofCollector<P> {
                     let Some(request) = request else {
                         return;
                     };
-                    let result = match request.supplied {
-                        Some(proof) => self.persist(proof).await,
-                        None => self.collect_and_persist(request.number, request.hash).await,
-                    };
-                    let _ = request.response.send(result);
+                    match request {
+                        ProofRequest::Collect { number, hash, response } => {
+                            let result = self.collect_and_persist(number, hash).await;
+                            let _ = response.send(result);
+                        }
+                        ProofRequest::Persist { proof, response } => {
+                            let result = self.persist(*proof).await.map(|_| ());
+                            let _ = response.send(result);
+                        }
+                    }
                     continue;
                 }
                 _ = fallback.tick() => {}
@@ -524,11 +525,16 @@ impl StoredBlockProof {
     }
 }
 
-struct CollectRequest {
-    number: u64,
-    hash: B256,
-    response: oneshot::Sender<Result<Option<Arc<StoredBlockProof>>>>,
-    supplied: Option<StoredBlockProof>,
+enum ProofRequest {
+    Collect {
+        number: u64,
+        hash: B256,
+        response: oneshot::Sender<Result<Option<Arc<StoredBlockProof>>>>,
+    },
+    Persist {
+        proof: Box<StoredBlockProof>,
+        response: oneshot::Sender<Result<()>>,
+    },
 }
 
 fn sync_directory(directory: &Path) -> Result<()> {
@@ -790,24 +796,30 @@ mod tests {
         for outcome in 0..3 {
             let directory = tempfile::tempdir().unwrap();
             let store = Arc::new(ProofStore::open(directory.path().to_path_buf(), 0).unwrap());
-            let (requests, mut receiver) = mpsc::channel::<CollectRequest>(1);
+            let (requests, mut receiver) = mpsc::channel::<ProofRequest>(1);
             let handle = ProofCollectorHandle { store, requests };
             let waiter = handle.collect_and_persist(1, B256::ZERO);
             tokio::pin!(waiter);
             let responder = async {
-                let request = receiver.recv().await.unwrap();
-                assert_eq!(request.hash, B256::ZERO);
+                let ProofRequest::Collect {
+                    number,
+                    hash,
+                    response,
+                } = receiver.recv().await.unwrap()
+                else {
+                    panic!("expected a collection request");
+                };
+                assert_eq!(number, 1);
+                assert_eq!(hash, B256::ZERO);
                 // Completion depends only on the response, not background readiness.
                 match outcome {
                     0 => {
-                        request
-                            .response
+                        response
                             .send(Ok(Some(Arc::new(proof(1, B256::ZERO)))))
                             .unwrap();
                     }
                     1 => {
-                        request
-                            .response
+                        response
                             .send(Err(std::io::Error::from(
                                 std::io::ErrorKind::PermissionDenied,
                             )
