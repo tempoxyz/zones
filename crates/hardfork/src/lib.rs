@@ -111,5 +111,7 @@ zone_hardfork!(
         Z0,
         /// The first independently scheduled Zone transition.
         Z1,
+        /// Require same-block batch finalization after processing deposits.
+        Z2,
     }
 );
