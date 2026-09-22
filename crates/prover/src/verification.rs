@@ -3,7 +3,12 @@
 use std::str::FromStr;
 
 use alloy_primitives::{FixedBytes, U256};
-use tempo_zone_verifier::{ApprovedPcrs, IZoneVerifier, portal_address};
+use tempo_shadow_precompiles::{
+    error::TempoPrecompileError,
+    storage::{PrecompileStorageProvider, StorageCtx, hashmap::HashMapStorageProvider},
+    zone_factory::portal_address,
+    zone_verifier::{IZoneVerifier, ZoneVerifier},
+};
 use zone_spf::{BatchOutput, PublicInputs};
 
 use crate::ProofBundle;
@@ -13,7 +18,7 @@ use crate::ProofBundle;
 /// These measurements must come from the approved EIF build, never from a prover response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShadowProofVerifier {
-    pcrs: ApprovedPcrs,
+    pcrs: [[u8; 48]; 3],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -22,8 +27,8 @@ pub enum ShadowProofVerificationError {
     InvalidMeasurements,
     #[error("zero/debug enclave PCR measurements are not permitted")]
     DebugMeasurements,
-    #[error("Nitro verification exceeded its local gas budget")]
-    GasBudgetExceeded,
+    #[error("Nitro verification failed: {0}")]
+    Verification(#[from] TempoPrecompileError),
 }
 
 impl FromStr for ShadowProofVerifier {
@@ -59,20 +64,14 @@ impl ShadowProofVerifier {
         timestamp: u64,
     ) -> Result<bool, ShadowProofVerificationError> {
         let call = verifier_call(inputs, output, bundle);
-        let mut gas_remaining = 30_000_000u64;
-        tempo_zone_verifier::verify(
-            inputs.parent_chain_id,
-            timestamp,
-            portal_address(inputs.zone_id),
-            &call,
-            Some(self.pcrs),
-            |gas| {
-                gas_remaining = gas_remaining
-                    .checked_sub(gas)
-                    .ok_or(ShadowProofVerificationError::GasBudgetExceeded)?;
-                Ok(())
-            },
-        )
+        let mut storage = HashMapStorageProvider::new(inputs.parent_chain_id);
+        storage.set_timestamp(U256::from(timestamp));
+        // Reserve all but the observer's budget from the provider's initial gas allowance.
+        storage.deduct_gas(storage.gas_limit() - 30_000_000)?;
+        StorageCtx::enter(&mut storage, || {
+            ZoneVerifier::new().verify_with_pcrs(portal_address(inputs.zone_id), call, self.pcrs)
+        })
+        .map_err(Into::into)
     }
 }
 
@@ -137,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_binds_the_same_commitment_as_the_enclave_and_rejects_fake_proof() {
+    fn verifier_maps_batch_inputs_and_rejects_fake_proof() {
         let inputs = PublicInputs {
             parent_chain_id: 4217,
             zone_id: 2,
@@ -172,10 +171,50 @@ mod tests {
             proof: Bytes::from_static(&[1, 2, 3]),
         };
         let call = verifier_call(&inputs, &output, &bundle);
+        assert_eq!(call.zoneId, inputs.zone_id);
+        assert_eq!(call.tempoBlockNumber, inputs.tempo_block_number);
+        assert_eq!(call.anchorBlockNumber, inputs.anchor_block_number);
+        assert_eq!(call.anchorBlockHash, inputs.anchor_block_hash);
         assert_eq!(
-            tempo_zone_verifier::batch_commitment(inputs.parent_chain_id, &call),
-            crate::nitro_batch_attestation_hash(&inputs, &output)
+            call.expectedWithdrawalBatchIndex,
+            inputs.expected_withdrawal_batch_index
         );
+        assert_eq!(call.nextZoneHeight, U256::from(output.next_zone_height));
+        assert_eq!(
+            call.blockTransition.prevBlockHash,
+            output.block_transition.prevBlockHash
+        );
+        assert_eq!(
+            call.blockTransition.nextBlockHash,
+            output.block_transition.nextBlockHash
+        );
+        assert_eq!(
+            call.depositQueueTransition.prevProcessedHash,
+            output.deposit_queue_transition.prevProcessedHash
+        );
+        assert_eq!(
+            call.depositQueueTransition.nextProcessedHash,
+            output.deposit_queue_transition.nextProcessedHash
+        );
+        assert_eq!(
+            call.depositQueueTransition.prevDepositNumber,
+            output.deposit_queue_transition.prevDepositNumber
+        );
+        assert_eq!(
+            call.depositQueueTransition.nextDepositNumber,
+            output.deposit_queue_transition.nextDepositNumber
+        );
+        assert_eq!(
+            call.tokenEnablementTransition.prevProcessedTokenCount,
+            output.token_enablement_transition.prevProcessedTokenCount
+        );
+        assert_eq!(
+            call.tokenEnablementTransition.nextProcessedTokenCount,
+            output.token_enablement_transition.nextProcessedTokenCount
+        );
+        assert_eq!(call.withdrawalQueueHash, output.withdrawal_queue_hash);
+        assert_eq!(call.verifierConfig, bundle.verifier_config);
+        assert_eq!(call.proof, bundle.proof);
         let pcr = "11".repeat(48);
         let verifier: ShadowProofVerifier = format!("{pcr},{pcr},{pcr}").parse().unwrap();
         assert!(

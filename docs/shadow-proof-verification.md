@@ -1,7 +1,7 @@
 # Shadow Nitro proof verification
 
 RPC followers can authenticate the Nitro proofs returned by a remote prover before T13.
-This uses the same `tempo-zone-verifier` implementation as Tempo's native ZoneVerifier,
+This calls `ZoneVerifier::verify_with_pcrs` directly in `tempo-precompiles`,
 without making an L1 `eth_call` or enabling proof-gated settlement. The legacy Solidity
 verifier may return `true` without checking a proof, so it is not a substitute for this check.
 
