@@ -1176,6 +1176,28 @@ fn forced_withdrawal_policy_and_fatal_failures_leave_no_partial_state() -> eyre:
 }
 
 #[test]
+fn forced_withdrawal_rejects_l1_paused_token_when_l2_is_unpaused() -> eyre::Result<()> {
+    let mut h = Harness::new()?;
+    h.ctx.cfg.spec = TempoHardfork::T13;
+    let slot = {
+        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<_> {
+            let token = TIP20Token::from_address(h.token)?;
+            assert!(!token.paused()?);
+            Ok(token.paused.slot())
+        })?
+    };
+    h.l1.insert(h.token, slot, ANCHOR, U256::ONE);
+    assert_eq!(
+        h.forced(ZONE_INBOX_ADDRESS, 1_000_000),
+        Err(ForcedWithdrawalError::PolicyRejected)
+    );
+    assert_eq!(h.balance_of(ALICE)?, U256::from(1_000_000));
+    assert!(h.pending()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn forced_withdrawal_enforces_native_pause_sender_and_receive_policies() -> eyre::Result<()> {
     use tempo_contracts::precompiles::{IRolesAuth, ITIP403Registry};
     use tempo_precompiles::{RECEIVE_POLICY_GUARD_ADDRESS, tip403_registry::TIP403Registry};
