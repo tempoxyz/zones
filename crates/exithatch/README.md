@@ -48,6 +48,11 @@ by this implementation.
 It needs only L1 RPC. Its optional `--wait-for-processing` confirms settled inbox
 progress, not successful payout.
 
+By default, the authorizing account also pays the L1 admission fee, exposing its
+address as the public fee payer. Use `--fee-payer-private-key` for a separate payer
+to reduce that linkage. This does not guarantee anonymity: `--to` also defaults
+to the authorizing account, and L1 delivery reveals the recipient and amount.
+
 ## Code
 
 - [Codec and authorization](src/lib.rs)
