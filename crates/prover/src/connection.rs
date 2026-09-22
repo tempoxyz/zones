@@ -39,12 +39,11 @@ where
         &mut self,
         message: T,
     ) -> Result<usize, ProverConnectionError> {
-        let payload = join_worker(
-            tokio::task::spawn_blocking(move || {
-                minicbor_serde::to_vec(message).map_err(ProverConnectionError::CborEncode)
-            })
-            .await,
-        )??;
+        let payload = tokio::task::spawn_blocking(move || {
+            minicbor_serde::to_vec(message).map_err(ProverConnectionError::CborEncode)
+        })
+        .await
+        .map_err(|_| ProverConnectionError::WorkerPanic)??;
         let bytes = payload.len();
         self.inner
             .send(payload.into())
@@ -63,7 +62,10 @@ where
         };
         let payload = payload.map_err(|error| classify_io_error(error, self.maximum))?;
         self.last_received_bytes = Some(payload.len());
-        join_worker(tokio::task::spawn_blocking(move || decode_exact(&payload)).await)?.map(Some)
+        tokio::task::spawn_blocking(move || decode_exact(&payload))
+            .await
+            .map_err(|_| ProverConnectionError::WorkerPanic)?
+            .map(Some)
     }
 }
 
@@ -83,10 +85,6 @@ pub enum ProverConnectionError {
     Io(#[source] io::Error),
     #[error("CBOR worker panicked")]
     WorkerPanic,
-}
-
-fn join_worker<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, ProverConnectionError> {
-    result.map_err(|_| ProverConnectionError::WorkerPanic)
 }
 
 /// Decodes one schema-driven CBOR value and requires it to consume the complete frame.
