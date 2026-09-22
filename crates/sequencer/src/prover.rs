@@ -42,7 +42,10 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
-use crate::{BatchAnchor, BatchData, PreparedBatch, ZoneSequencerProvider, metrics::ProverMetrics};
+use crate::{
+    BatchAnchor, BatchData, PreparedBatch, ZoneSequencerProvider, metrics::ProverMetrics,
+    proofs::ProofCollectorHandle,
+};
 
 /// Number of candidates allowed to wait behind the active validation.
 const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
@@ -191,6 +194,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for FirstReadTimed<T> {
 
 pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
     config: SettlementProverConfig,
+    proofs: ProofCollectorHandle,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 ) -> SettlementProver {
@@ -200,6 +204,7 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
             zone_provider,
             l1_provider,
             SETTLEMENT_PROVER_QUEUE_CAPACITY,
+            Some(proofs),
         ),
     }
 }
@@ -207,6 +212,7 @@ pub(crate) fn spawn_settlement_prover<P: ZoneSequencerProvider>(
 /// Spawn observational validation for finalized RPC-follower submissions.
 pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
     config: ShadowProverConfig,
+    proofs: Option<ProofCollectorHandle>,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
 ) -> ShadowProver {
@@ -216,6 +222,7 @@ pub fn spawn_shadow_prover<P: ZoneSequencerProvider>(
             zone_provider,
             l1_provider,
             SHADOW_PROVER_QUEUE_CAPACITY,
+            proofs,
         ),
     }
 }
@@ -225,6 +232,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
     queue_capacity: usize,
+    proofs: Option<ProofCollectorHandle>,
 ) -> mpsc::Sender<ProverJob> {
     info!(
         target: "zone::sequencer::prover",
@@ -247,7 +255,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
                 .queue_duration_seconds
                 .record(job.enqueued_at.elapsed().as_secs_f64());
             let started = Instant::now();
-            let result = validate_candidate(&context, &job, &metrics).await;
+            let result = validate_candidate(&context, &job, proofs.as_ref(), &metrics).await;
             metrics
                 .validation_duration_seconds
                 .record(started.elapsed().as_secs_f64());
@@ -409,6 +417,7 @@ impl ShadowProver {
 async fn validate_candidate<P: ZoneSequencerProvider>(
     context: &ProverContext<P>,
     job: &ProverJob,
+    proofs: Option<&ProofCollectorHandle>,
     metrics: &ProverMetrics,
 ) -> Result<(ValidationStats, Option<ProofBundle>)> {
     let batch = &job.batch;
@@ -451,8 +460,14 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     }
 
     let started = Instant::now();
-    let (zone_state_witness, tempo_state_witness) =
-        zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
+    let (zone_state_witness, tempo_state_witness) = zone_witnesses(
+        context.config.debug_api.as_ref(),
+        proofs,
+        &zone_inputs,
+        expected_next_hash,
+        job.response.is_some(),
+    )
+    .await?;
     metrics
         .zone_witness_duration_seconds
         .record(started.elapsed().as_secs_f64());
@@ -918,24 +933,62 @@ fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
 
 async fn zone_witnesses(
     debug_api: &dyn ZoneDebugApi,
-    from: u64,
-    to: u64,
+    proofs: Option<&ProofCollectorHandle>,
+    inputs: &ZoneInputs,
+    tip_hash: B256,
+    require_persistence: bool,
 ) -> Result<(ZoneStateWitness, TempoStateWitness)> {
-    let results = stream::iter(from..=to)
-        .map(|number| async move {
+    let from = inputs
+        .blocks
+        .first()
+        .ok_or_eyre("empty witness range")?
+        .number;
+    // The next block's parent (or the validated batch tip) identifies each block.
+    let blocks = inputs
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let hash = inputs
+                .blocks
+                .get(index + 1)
+                .map_or(tip_hash, |next| next.parent_hash);
+            (block.number, hash)
+        })
+        .collect::<Vec<_>>();
+    let results = stream::iter(blocks)
+        .map(|(number, hash)| async move {
             let started = Instant::now();
             debug!(
                 target: "zone::sequencer::prover",
                 zone_block = number,
                 "Requesting Zone execution witness"
             );
-            let witness = debug_api
-                .zone_execution_witness(BlockNumberOrTag::Number(number))
-                .await
-                .map_err(|error| eyre::eyre!(error.to_string()))
-                .wrap_err_with(|| format!("debug_zoneExecutionWitness for Zone block {number}"))?;
-            // Historical BLOCKHASH reads are authenticated by EIP-2935 storage
-            // proofs in the state witness, regardless of ancestor header count.
+            let witness = if require_persistence {
+                // Settlement must never bypass durability, including on a cache miss after restart.
+                proofs
+                    .ok_or_eyre("settlement prover requires a proof collector")?
+                    .collect_and_persist(number, hash)
+                    .await?
+                    .ok_or_eyre("settlement witness range has already finalized")?
+                    .witness
+                    .clone()
+            } else if let Some(proof) = proofs.and_then(|proofs| proofs.get(number, hash)) {
+                proof.witness.clone()
+            } else {
+                // Shadow jobs run after finalization, when their retained inputs may be pruned.
+                debug_api
+                    .zone_execution_witness(hash.into())
+                    .await
+                    .map_err(|error| eyre::eyre!(error.to_string()))
+                    .wrap_err_with(|| {
+                        format!("debug_zoneExecutionWitness for Zone block {number}")
+                    })?
+            };
+            ensure!(
+                witness.block_number == number && witness.block_hash == hash,
+                "execution witness does not match Zone block {number} ({hash})"
+            );
             debug!(
                 target: "zone::sequencer::prover",
                 zone_block = number,
@@ -1227,9 +1280,9 @@ mod tests {
     impl ZoneDebugApi for StubDebugApi {
         async fn zone_execution_witness(
             &self,
-            block: BlockNumberOrTag,
+            block: alloy_eips::BlockId,
         ) -> jsonrpsee::core::RpcResult<ZoneExecutionWitness> {
-            assert_eq!(block, BlockNumberOrTag::Number(3));
+            assert_eq!(block, alloy_eips::BlockId::from(self.0.block_hash));
             Ok(self.0.clone())
         }
     }
@@ -1240,7 +1293,11 @@ mod tests {
         let state_node = Bytes::from_static(&[0xc0]);
         let code = Bytes::from_static(&[0x00]);
         let tempo_node = Bytes::from_static(&[0xc1, 0x80]);
-        let mut witness = ZoneExecutionWitness::default();
+        let mut witness = ZoneExecutionWitness {
+            block_number: 3,
+            block_hash: B256::repeat_byte(3),
+            ..Default::default()
+        };
         let (first, first_hash) = ancestry_header(1, B256::ZERO);
         let (second, _) = ancestry_header(2, first_hash);
         witness.execution_witness.headers = vec![first, second];
@@ -1250,9 +1307,21 @@ mod tests {
         let initial_tempo_header_rlp =
             Bytes::from(alloy_rlp::encode(&witness.initial_tempo_header));
 
-        let (state, tempo_state) = zone_witnesses(&StubDebugApi(witness), 3, 3)
-            .await
-            .expect("ancestor headers must not prevent witness collection");
+        let inputs = ZoneInputs {
+            parent_header: TempoHeader::default(),
+            blocks: vec![zone_block(3, false)],
+            initial_tempo_number: 0,
+            initial_tempo_hash: B256::ZERO,
+        };
+        let (state, tempo_state) = zone_witnesses(
+            &StubDebugApi(witness),
+            None,
+            &inputs,
+            B256::repeat_byte(3),
+            false,
+        )
+        .await
+        .expect("ancestor headers must not prevent witness collection");
 
         assert_eq!(state.node_pool, vec![state_node]);
         assert_eq!(state.bytecodes, vec![code]);
@@ -1261,6 +1330,32 @@ mod tests {
             tempo_state.initial_tempo_header_rlp,
             initial_tempo_header_rlp
         );
+    }
+
+    #[tokio::test]
+    async fn zone_witnesses_requires_collector_for_settlement() {
+        let inputs = ZoneInputs {
+            parent_header: TempoHeader::default(),
+            blocks: vec![zone_block(3, false)],
+            initial_tempo_number: 0,
+            initial_tempo_hash: B256::ZERO,
+        };
+        // A usable RPC witness must not bypass the settlement persistence requirement.
+        let witness = ZoneExecutionWitness {
+            block_number: 3,
+            block_hash: B256::repeat_byte(3),
+            ..Default::default()
+        };
+        let error = zone_witnesses(
+            &StubDebugApi(witness),
+            None,
+            &inputs,
+            B256::repeat_byte(3),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("requires a proof collector"));
     }
 
     fn ancestry_header(number: u64, parent_hash: B256) -> (Bytes, B256) {

@@ -112,10 +112,12 @@ pub struct RoleStatus {
 /// Shared handle to the live [`RoleStatus`].
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
-/// Leader-only background task dependencies (batch submission, withdrawal processing).
+/// Dependencies used by leader tasks; the proof collector itself is node-owned.
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
+    /// Node-owned collector shared across all role generations.
+    pub proof_collector: Option<zone_sequencer::ProofCollectorHandle>,
     pub prover_config: Option<SettlementProverConfig>,
 }
 
@@ -324,7 +326,7 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
+/// Supervise the long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
 /// generation stop, however, both children retain the graceful shutdown window needed to finish
@@ -895,6 +897,10 @@ where
                 attestation: context.attestation.clone(),
                 schedule: context.schedule.clone(),
                 peer_tips: context.peer_tips.clone(),
+                proof_collector: context
+                    .sequencer
+                    .as_ref()
+                    .and_then(|sequencer| sequencer.proof_collector.clone()),
             };
             let sync_p2p = BlockSyncP2p {
                 events: sync_rx,
@@ -985,6 +991,7 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
+            let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
@@ -1070,6 +1077,7 @@ where
                     sequencer_config,
                     signer,
                     zone_provider,
+                    collector,
                     prover_config,
                     sequencer_token.clone(),
                 )
@@ -1119,6 +1127,7 @@ where
         sequencer.config.sequencer_signer.address(),
         context.encryption_keys.clone(),
         context.portal_address,
+        sequencer.proof_collector.clone(),
     )
     .with_production_permit(ProductionPermit::new(
         context.schedule.clone(),
