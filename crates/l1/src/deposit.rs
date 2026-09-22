@@ -148,9 +148,7 @@ impl L1Deposit {
     /// Compute the next hash chain value: `keccak256(abi.encode(deposit, prevHash))`.
     pub fn hash_chain(&self, prev_hash: B256) -> B256 {
         match self {
-            Self::ForcedExit(d) => keccak256(
-                (abi::DepositType::ForcedExit, d.entry.clone(), prev_hash).abi_encode_params(),
-            ),
+            Self::ForcedExit(d) => exithatch::request_queue_hash(&d.entry, prev_hash),
             Self::WithdrawalBounceBack(d) => keccak256(
                 (
                     abi::DepositType::WithdrawalBounceBack,

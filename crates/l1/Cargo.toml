@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 # zones
+exithatch.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true }

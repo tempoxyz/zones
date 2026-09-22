@@ -92,6 +92,10 @@ impl ZoneOutbox {
         if !token.is_initialized()? {
             return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
         }
+        // Token pause policy is authenticated at the imported Tempo anchor.
+        if l1.read_l1(&token.paused)? {
+            return Err(ForcedWithdrawalError::PolicyRejected);
+        }
         let amount256 = U256::from(amount);
         if token.balance_of(ITIP20::balanceOfCall { account })? != amount256 {
             // Balance was checked by the inbox immediately before this call. Drift is fatal.

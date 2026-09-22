@@ -13901,6 +13901,7 @@ dependencies = [
  "alloy-transport",
  "const-hex",
  "derive_more",
+ "exithatch",
  "eyre",
  "futures",
  "k256",
