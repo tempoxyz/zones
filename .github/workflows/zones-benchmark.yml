@@ -540,7 +540,14 @@ jobs:
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
-          submodules: true
+      - name: Check out Earn contract dependencies
+        # Earn's private propamm submodule is not needed by the contract-only build.
+        run: |
+          git -C earn config submodule.lib/propamm.update none
+          git -C earn submodule update --init --depth 1 -- \
+            lib/forge-std \
+            lib/openzeppelin-contracts \
+            lib/openzeppelin-contracts-upgradeable
 
       - name: Prepare persistent topology control path
         env:
