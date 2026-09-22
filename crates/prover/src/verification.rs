@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use alloy_primitives::FixedBytes;
+use alloy_primitives::{FixedBytes, U256};
 use tempo_zone_verifier::{ApprovedPcrs, IZoneVerifier, portal_address};
 use zone_spf::{BatchOutput, PublicInputs};
 
@@ -87,7 +87,7 @@ fn verifier_call(
         anchorBlockNumber: inputs.anchor_block_number,
         anchorBlockHash: inputs.anchor_block_hash,
         expectedWithdrawalBatchIndex: inputs.expected_withdrawal_batch_index,
-        nextZoneHeight: output.next_zone_height.into(),
+        nextZoneHeight: U256::from(output.next_zone_height),
         blockTransition: IZoneVerifier::BlockTransition {
             prevBlockHash: output.block_transition.prevBlockHash,
             nextBlockHash: output.block_transition.nextBlockHash,
