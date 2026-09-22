@@ -132,6 +132,8 @@ crate::sol! {
             external returns (uint64 requestId, uint64 depositNumber);
         function forcedExitVersion() external view returns (uint64);
         function activateForcedExits() external;
+        /// Remaining weighted admission units, including the withdrawal reserve.
+        function remainingDepositCapacity() external view returns (uint64);
         function forcedExitCount() external view returns (uint64);
         function forcedExitRequests(uint64 requestId) external view returns (address token, uint64 depositNumber);
         function FORCED_EXIT_COMPENSATION() external view returns (uint128);

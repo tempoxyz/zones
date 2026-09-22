@@ -20,7 +20,7 @@ use tempo_primitives::{
     TempoSignature,
     transaction::{Call, PrimitiveSignature},
 };
-use tempo_zone_contracts::{DepositPayload, ZonePortal};
+use tempo_zone_contracts::ZonePortal;
 use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
@@ -293,7 +293,7 @@ impl SpamDeposits {
         enc_setup: &(B256, u8, U256),
     ) -> eyre::Result<Vec<u8>> {
         let &(pub_x, y_parity, key_index) = enc_setup;
-        let encrypted = encrypt_deposit(
+        let payload = encrypt_deposit(
             &pub_x,
             y_parity,
             recipient,
@@ -303,14 +303,6 @@ impl SpamDeposits {
             key_index,
         )
         .ok_or_else(|| eyre!("ECIES encryption failed"))?;
-
-        let payload = DepositPayload {
-            ephemeralPubkeyX: encrypted.eph_pub_x,
-            ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
-            ciphertext: Bytes::from(encrypted.ciphertext),
-            nonce: encrypted.nonce.into(),
-            tag: encrypted.tag.into(),
-        };
 
         Ok(ZonePortal::depositCall {
             token: self.token,

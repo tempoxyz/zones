@@ -10,7 +10,10 @@ use exithatch::{
 };
 use rand::{CryptoRng, RngCore};
 
-use ::aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+use ::aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, AeadInPlace},
+};
 use alloy_primitives::{Address, B256, U256};
 use k256::{
     AffinePoint, ProjectivePoint, PublicKey, Scalar, SecretKey,
@@ -163,22 +166,6 @@ pub fn decrypt_deposit(
     let memo = B256::from_slice(&plaintext[20..52]);
 
     Some(DecryptedDeposit { proof, to, memo })
-}
-
-/// Result of client-side ECIES encryption for a deposit.
-///
-/// Contains all fields needed to call `ZonePortal.deposit`.
-pub struct EncryptedDepositArgs {
-    /// Ephemeral public key x-coordinate.
-    pub eph_pub_x: B256,
-    /// Ephemeral public key y-parity (0x02 or 0x03).
-    pub eph_pub_y_parity: u8,
-    /// AES-256-GCM ciphertext.
-    pub ciphertext: Vec<u8>,
-    /// AES-256-GCM nonce.
-    pub nonce: [u8; 12],
-    /// AES-256-GCM authentication tag.
-    pub tag: [u8; 16],
 }
 
 /// Encrypt `(sender, tx_hash)` for authenticated withdrawals.
@@ -488,15 +475,17 @@ pub fn encrypt_payload<R: CryptoRng + RngCore>(
     let mut nonce = [0u8; 12];
     rng.fill_bytes(&mut nonce);
     let cipher = Aes256Gcm::new((&key).into());
-    let encrypted = cipher.encrypt(Nonce::from_slice(&nonce), plaintext).ok()?;
-    let (ciphertext, tag) = encrypted.split_at(encrypted.len() - 16);
+    let mut ciphertext = plaintext.to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &[], &mut ciphertext)
+        .ok()?;
 
     Some(DepositPayload {
         ephemeralPubkeyX: x,
         ephemeralPubkeyYParity: encoded.as_bytes()[0],
-        ciphertext: ciphertext.to_vec().into(),
+        ciphertext: ciphertext.into(),
         nonce: nonce.into(),
-        tag: <[u8; 16]>::try_from(tag).ok()?.into(),
+        tag: <[u8; 16]>::from(tag).into(),
     })
 }
 
@@ -517,8 +506,8 @@ pub fn encrypt_deposit(
     sender: Address,
     portal_address: Address,
     key_index: alloy_primitives::U256,
-) -> Option<EncryptedDepositArgs> {
-    let payload = encrypt_payload(
+) -> Option<DepositPayload> {
+    encrypt_payload(
         seq_pub_x,
         seq_pub_y_parity,
         &build_plaintext(&to, &memo),
@@ -529,14 +518,7 @@ pub fn encrypt_deposit(
         },
         &mut rand::thread_rng(),
         None,
-    )?;
-    Some(EncryptedDepositArgs {
-        eph_pub_x: payload.ephemeralPubkeyX,
-        eph_pub_y_parity: payload.ephemeralPubkeyYParity,
-        ciphertext: payload.ciphertext.to_vec(),
-        nonce: payload.nonce.0,
-        tag: payload.tag.0,
-    })
+    )
 }
 
 /// Generate a Chaum-Pedersen proof that `sharedSecret = privSeq * ephemeralPub`.
@@ -1238,8 +1220,8 @@ mod tests {
 
         let dec = super::decrypt_deposit(
             &seq_key,
-            &enc.eph_pub_x,
-            enc.eph_pub_y_parity,
+            &enc.ephemeralPubkeyX,
+            enc.ephemeralPubkeyYParity,
             &enc.ciphertext,
             &enc.nonce,
             &enc.tag,

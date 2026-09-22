@@ -319,7 +319,7 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 //   slot 28: lastProcessedEnabledTokenCount (uint64) + tokenEnablementCursorInitialized (bool)
 //            + forcedExitVersion (uint64) + forcedExitCount (uint64) [packed]
 //   slot 29: forcedExitRequests (mapping(uint64 => ForcedExitMetadata))
-//   slot 30: _cumulativeExtraAdmissionWeight (mapping(uint64 => uint64))
+//   slot 30: _lastProcessedForcedExitId (uint64)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -475,6 +475,10 @@ interface IZonePortal {
     function activateForcedExits() external;
 
     event ForcedExitsActivated(uint64 version);
+    /// @notice Remaining weighted admission units, including the withdrawal reserve.
+    /// @dev Each withdrawal may require one unit for a callback deposit or bounce-back.
+    function remainingDepositCapacity() external view returns (uint64);
+
     function forcedExitCount() external view returns (uint64);
     function forcedExitRequests(uint64 requestId)
         external

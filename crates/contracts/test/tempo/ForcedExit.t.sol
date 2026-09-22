@@ -2,12 +2,16 @@
 pragma solidity ^0.8.13;
 
 import {
+    BlockTransition,
     DepositPayload,
+    DepositQueueTransition,
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
     ForcedExit,
     ForcedExitMetadata,
+    IVerifier,
     IZonePortal,
+    Withdrawal,
     WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
@@ -30,7 +34,7 @@ contract ForcedExitPortalHarness is ZonePortal {
     }
 
     function confirmTestDeposits(uint64 number) external {
-        lastProcessedDepositNumber = number;
+        _confirmDeposits(number);
     }
 
     function enqueueTestBounceBack(address token) external {
@@ -406,7 +410,7 @@ contract ForcedExitTest is BaseTest {
     }
 
     function test_legacyOutstandingQueueNeedsNoWeightMigration() public {
-        // An upgraded portal has no extra-weight checkpoints for existing deposits.
+        // An upgraded portal has zero forced requests; existing deposits still cost one unit.
         portal.seedTestLegacyQueue(300, 100);
         uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS() - 20;
         vm.expectRevert(
@@ -475,6 +479,146 @@ contract ForcedExitTest is BaseTest {
         portal.confirmTestDeposits(portal.depositCount());
         request(384);
         assertEq(portal.forcedExitCount(), requests + 2);
+    }
+
+    function settle(uint64 number, bytes32 withdrawalHash) internal {
+        vm.mockCall(
+            ZONE_VERIFIER_ADDRESS,
+            abi.encodeWithSelector(IVerifier.verify.selector),
+            abi.encode(true)
+        );
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition(portal.blockHash(), keccak256(abi.encode(block.number))),
+            DepositQueueTransition(
+                bytes32(0),
+                portal.currentDepositQueueHash(),
+                portal.lastProcessedDepositNumber(),
+                number
+            ),
+            withdrawalHash,
+            "",
+            ""
+        );
+    }
+
+    function test_weightedWithdrawalPreflightAndSettlementRecovery() public {
+        for (uint256 i; i < 15; ++i) {
+            request(384);
+        }
+        assertEq(portal.remainingDepositCapacity(), 20);
+        for (uint256 i; i < 19; ++i) {
+            portal.enqueueTestBounceBack(address(pathUSD));
+        }
+        assertEq(portal.depositCount(), 34);
+        assertEq(portal.remainingDepositCapacity(), 1);
+
+        // A revoked/unlisted recipient forces both withdrawals to bounce back.
+        Withdrawal memory withdrawal =
+            Withdrawal(address(pathUSD), bytes32(0), address(0xdead), 1, bytes32(0), 0, 1, "", "");
+        Withdrawal[] memory withdrawals = new Withdrawal[](2);
+        withdrawals[0] = withdrawal;
+        withdrawals[1] = withdrawal;
+        bytes32 suffix = keccak256(abi.encode(withdrawal, bytes32(0)));
+        bytes32 root = keccak256(abi.encode(withdrawal, suffix));
+        settle(0, root);
+        bytes32 depositsBefore = portal.currentDepositQueueHash();
+        // Previously passed the entry-count preflight and failed on the second bounce-back.
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, uint64(230))
+        );
+        portal.processWithdrawals(withdrawals, bytes32(0));
+        assertEq(portal.withdrawalQueueSlot(0), root);
+        assertEq(portal.currentDepositQueueHash(), depositsBefore);
+        assertEq(portal.depositCount(), 34);
+
+        // Capacity must be rejected before queue validation or delivery starts.
+        Withdrawal[] memory invalidWithdrawals = new Withdrawal[](2);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, uint64(230))
+        );
+        portal.processWithdrawals(invalidWithdrawals, bytes32(0));
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), suffix);
+        assertEq(portal.remainingDepositCapacity(), 0);
+        assertEq(portal.withdrawalQueueSlot(0), suffix);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, uint64(230))
+        );
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        // Real submitBatch updates both cursors; processing a forced entry frees 14 units.
+        settle(1, bytes32(0));
+        assertEq(portal.remainingDepositCapacity(), 14);
+        assertEq(uint256(vm.load(address(portal), bytes32(uint256(30)))), 1);
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+        assertEq(portal.remainingDepositCapacity(), 13);
+        assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
+        settle(portal.depositCount(), bytes32(0));
+        assertEq(portal.remainingDepositCapacity(), 230);
+        assertEq(uint256(vm.load(address(portal), bytes32(uint256(30)))), 15);
+        // Admission identity remains available for authenticated historical reads.
+        (, uint64 depositNumber) = portal.forcedExitRequests(15);
+        assertEq(depositNumber, 15);
+        request(384);
+        assertEq(portal.remainingDepositCapacity(), 216);
+    }
+
+    function testFuzz_mixedPrefixesReleaseExactlyTheirAdmissionWeight(uint8 rawForced) public {
+        uint64 forced = uint64(bound(rawForced, 0, 14));
+        for (uint64 i; i < forced; ++i) {
+            portal.enqueueTestBounceBack(address(pathUSD));
+            request(384);
+        }
+        uint64 used = forced * 15;
+        assertEq(portal.remainingDepositCapacity(), 230 - used);
+        for (uint64 number = 1; number <= forced * 2; ++number) {
+            portal.confirmTestDeposits(number);
+            used -= number % 2 == 0 ? 14 : 1;
+            assertEq(portal.remainingDepositCapacity(), 230 - used);
+            // A repeated cursor must not release the same forced request twice.
+            portal.confirmTestDeposits(number);
+            assertEq(portal.remainingDepositCapacity(), 230 - used);
+            assertEq(uint256(vm.load(address(portal), bytes32(uint256(30)))), number / 2);
+        }
+        request(384);
+        assertEq(portal.remainingDepositCapacity(), 216);
+    }
+
+    function test_ordinaryDepositsDoNotWriteForcedExitAccounting() public {
+        // Seed token backing and queue state so each measured deposit updates nonzero slots.
+        vm.prank(alice);
+        portal.depositEncrypted(address(pathUSD), 1e6, 0, _depositPayload(alice, 0), alice);
+        // Exercise no forced requests, a pending request, then a fully processed request.
+        string[3] memory labels = [
+            "deposit before forced exits",
+            "deposit with pending forced exit",
+            "deposit after settled forced exit"
+        ];
+        for (uint256 phase; phase < 3; ++phase) {
+            if (phase == 1) request(384);
+            if (phase == 2) settle(portal.depositCount(), bytes32(0));
+            vm.cool(address(portal));
+            vm.cool(address(pathUSD));
+            vm.record();
+            vm.prank(alice);
+            portal.depositEncrypted(address(pathUSD), 1e6, 0, _depositPayload(alice, 0), alice);
+            emit log_named_uint(labels[phase], vm.lastCallGas().gasTotalUsed);
+            (, bytes32[] memory writes) = vm.accesses(address(portal));
+            for (uint256 i; i < writes.length; ++i) {
+                // No counter at slot 30 and no per-entry checkpoint mapping writes.
+                assertLt(uint256(writes[i]), 30);
+            }
+            vm.record();
+            portal.enqueueTestBounceBack(address(pathUSD));
+            (, writes) = vm.accesses(address(portal));
+            for (uint256 i; i < writes.length; ++i) {
+                assertLt(uint256(writes[i]), 30);
+            }
+        }
     }
 
 }

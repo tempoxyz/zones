@@ -1178,11 +1178,11 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
             fee: 0,
             tempo_refund_recipient: sender,
             key_index: U256::ZERO,
-            ephemeral_pubkey_x: encrypted.eph_pub_x,
-            ephemeral_pubkey_y_parity: encrypted.eph_pub_y_parity,
-            ciphertext: encrypted.ciphertext,
-            nonce: encrypted.nonce,
-            tag: encrypted.tag,
+            ephemeral_pubkey_x: encrypted.ephemeralPubkeyX,
+            ephemeral_pubkey_y_parity: encrypted.ephemeralPubkeyYParity,
+            ciphertext: encrypted.ciphertext.to_vec(),
+            nonce: encrypted.nonce.0,
+            tag: encrypted.tag.0,
         })]),
     };
 
@@ -1249,8 +1249,8 @@ async fn deposits_select_the_private_key_by_portal_index() {
         .unwrap();
         let decrypted = crate::precompiles::ecies::decrypt_deposit(
             &key,
-            &encrypted.eph_pub_x,
-            encrypted.eph_pub_y_parity,
+            &encrypted.ephemeralPubkeyX,
+            encrypted.ephemeralPubkeyYParity,
             &encrypted.ciphertext,
             &encrypted.nonce,
             &encrypted.tag,
@@ -1267,11 +1267,11 @@ async fn deposits_select_the_private_key_by_portal_index() {
             fee: 0,
             tempo_refund_recipient: sender,
             key_index,
-            ephemeral_pubkey_x: encrypted.eph_pub_x,
-            ephemeral_pubkey_y_parity: encrypted.eph_pub_y_parity,
-            ciphertext: encrypted.ciphertext,
-            nonce: encrypted.nonce,
-            tag: encrypted.tag,
+            ephemeral_pubkey_x: encrypted.ephemeralPubkeyX,
+            ephemeral_pubkey_y_parity: encrypted.ephemeralPubkeyYParity,
+            ciphertext: encrypted.ciphertext.to_vec(),
+            nonce: encrypted.nonce.0,
+            tag: encrypted.tag.0,
         }));
     }
 

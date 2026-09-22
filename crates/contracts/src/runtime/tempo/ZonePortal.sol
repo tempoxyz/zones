@@ -256,11 +256,9 @@ contract ZonePortal is IZonePortal {
     uint64 public forcedExitCount;
     mapping(uint64 requestId => ForcedExitMetadata) public forcedExitRequests;
 
-    /// @dev Prefix sum of admission weight above the one unit already counted per queue entry.
-    ///      Ordinary deposits/bounce-backs add 0; forced exits add 13 (weight 14 minus 1).
-    ///      Subtract the processed prefix to obtain the extra weight still outstanding.
-    ///      Pre-upgrade entries have weight 1, so their default-zero prefixes need no migration.
-    mapping(uint64 depositNumber => uint64) private _cumulativeExtraAdmissionWeight;
+    /// @dev Forced-request prefix confirmed by settlement's shared deposit cursor.
+    ///      Reuses forcedExitRequests to release weight without per-deposit checkpoints.
+    uint64 private _lastProcessedForcedExitId;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -973,17 +971,38 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
-        uint64 cumulativeExtraWeight = _cumulativeExtraAdmissionWeight[depositCount] + weight - 1;
-        uint64 outstandingEntries = depositCount - lastProcessedDepositNumber + 1;
-        uint64 outstandingExtraWeight =
-            cumulativeExtraWeight - _cumulativeExtraAdmissionWeight[lastProcessedDepositNumber];
-        if (outstandingEntries + outstandingExtraWeight > maximum) {
+        if (_outstandingDepositWeight() + weight > maximum) {
             revert DepositBlockCapacityExceeded(maximum);
         }
-        _cumulativeExtraAdmissionWeight[depositCount + 1] = cumulativeExtraWeight;
 
         currentDepositQueueHash = newCurrentDepositQueueHash;
         thisDeposit = ++depositCount;
+    }
+
+    function _outstandingDepositWeight() internal view returns (uint256) {
+        return uint256(depositCount - lastProcessedDepositNumber)
+            + uint256(forcedExitCount - _lastProcessedForcedExitId)
+            * (FORCED_EXIT_ADMISSION_WEIGHT - 1);
+    }
+
+    /// @inheritdoc IZonePortal
+    function remainingDepositCapacity() public view returns (uint64) {
+        uint256 used = _outstandingDepositWeight();
+        return used >= MAX_UNPROCESSED_DEPOSITS ? 0 : uint64(MAX_UNPROCESSED_DEPOSITS - used);
+    }
+
+    /// @dev Only called after settlement authenticates the new shared queue cursor.
+    ///      Admission bounds the pending forced-request prefix to at most 15 records.
+    function _confirmDeposits(uint64 number) internal {
+        uint64 processed = _lastProcessedForcedExitId;
+        uint64 admitted = forcedExitCount;
+        while (processed < admitted && forcedExitRequests[processed + 1].depositNumber <= number) {
+            ++processed;
+        }
+        if (processed != _lastProcessedForcedExitId) {
+            _lastProcessedForcedExitId = processed;
+        }
+        lastProcessedDepositNumber = number;
     }
 
     /// @notice Alias for `depositEncrypted`.
@@ -1062,7 +1081,7 @@ contract ZonePortal is IZonePortal {
         ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION);
         if (!_tryTransfer(token, admin, FORCED_EXIT_COMPENSATION)) revert CallbackRejected();
 
-        requestId = ++forcedExitCount;
+        requestId = forcedExitCount + 1;
         ForcedExit memory entry = ForcedExit({
             requestId: requestId,
             token: token,
@@ -1080,6 +1099,7 @@ contract ZonePortal is IZonePortal {
             MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_PROCESSING_DEPOSIT_RESERVE,
             FORCED_EXIT_ADMISSION_WEIGHT
         );
+        forcedExitCount = requestId;
         forcedExitRequests[requestId] = ForcedExitMetadata(token, depositNumber);
 
         emit ForcedExitRequested(depositNumber, entry);
@@ -1199,11 +1219,7 @@ contract ZonePortal is IZonePortal {
         whenNotPaused
         nonReentrantWithdrawal
     {
-        uint256 unprocessed = depositCount - lastProcessedDepositNumber;
-        if (
-            unprocessed > MAX_UNPROCESSED_DEPOSITS
-                || withdrawals.length > MAX_UNPROCESSED_DEPOSITS - unprocessed
-        ) {
+        if (withdrawals.length > remainingDepositCapacity()) {
             revert DepositBlockCapacityExceeded(MAX_UNPROCESSED_DEPOSITS);
         }
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
@@ -1522,7 +1538,7 @@ contract ZonePortal is IZonePortal {
         withdrawalBatchIndex++;
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
-        lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
+        _confirmDeposits(depositQueueTransition.nextDepositNumber);
         if (
             tokenEnablementCursorInitialized
                 || tokenEnablementTransition.nextProcessedTokenCount != 0

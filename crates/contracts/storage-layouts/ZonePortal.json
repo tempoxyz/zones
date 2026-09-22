@@ -371,10 +371,10 @@
     {
       "astId": 6025,
       "contract": "src/runtime/tempo/ZonePortal.sol:ZonePortal",
-      "label": "_cumulativeExtraAdmissionWeight",
+      "label": "_lastProcessedForcedExitId",
       "offset": 0,
       "slot": "30",
-      "type": "t_mapping(t_uint64,t_uint64)"
+      "type": "t_uint64"
     }
   ],
   "types": {
@@ -463,13 +463,6 @@
       "label": "mapping(uint64 => struct ForcedExitMetadata)",
       "numberOfBytes": "32",
       "value": "t_struct(ForcedExitMetadata)3170_storage"
-    },
-    "t_mapping(t_uint64,t_uint64)": {
-      "encoding": "mapping",
-      "key": "t_uint64",
-      "label": "mapping(uint64 => uint64)",
-      "numberOfBytes": "32",
-      "value": "t_uint64"
     },
     "t_string_storage": {
       "encoding": "bytes",
