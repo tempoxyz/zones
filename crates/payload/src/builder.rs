@@ -672,7 +672,6 @@ fn should_finalize_withdrawal_batch(
     has_processed_deposits: bool,
 ) -> bool {
     has_pending_withdrawals
-        // Settlement acknowledges processed deposits and reopens the portal's deposit capacity.
         || has_processed_deposits
         || block_number.is_multiple_of(interval_blocks)
         || follows_checkpoint_blocks
