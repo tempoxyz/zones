@@ -335,6 +335,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     "Verifier rejected batch proof"
                 );
             }
+            Err(BatchSubmitError::SubmissionReverted) => {
+                error!(
+                    from = scan_from,
+                    to = latest_zone_block,
+                    "Batch submission reverted on L1"
+                );
+            }
             Err(BatchSubmitError::PortalAdvanced) => {
                 unreachable!("portal advancement is reconciled by submit_batch_with_retry")
             }
@@ -597,10 +604,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// - Signals the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
-    /// On failure (after [`MAX_RETRIES`] attempts with [`INITIAL_RETRY_DELAY`]
-    /// doubling each time): resyncs the local submission anchor from the
-    /// portal-confirmed zone block so the next poll starts from accepted
-    /// on-chain state.
+    /// After a mined revert, the next attempt simulates the call to classify the error:
+    /// `InvalidProof` activates the configured verifier fallback, while `StaleBlockTransition`
+    /// resyncs the portal anchor. Other failures use normal retry and backoff handling.
+    ///
+    /// After [`MAX_RETRIES`] attempts, resyncs the local submission anchor from the
+    /// portal-confirmed zone block so the next poll starts from accepted on-chain state.
     async fn submit_batch_with_retry(
         &mut self,
         prepared: &PreparedBatch,
@@ -611,6 +620,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     ) -> std::result::Result<(), BatchSubmitError> {
         let batch_data = &prepared.batch;
         let mut delay = INITIAL_RETRY_DELAY;
+        let mut simulate = false;
 
         for attempt in 1..=MAX_RETRIES {
             // Reconcile before every attempt. A prior submitBatch may have landed even when its
@@ -662,7 +672,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let proof_bundle = proof_bundle.filter(|_| self.verifier_mode == VerifierMode::NitroV1);
             match self
                 .batch_submitter
-                .submit_batch(prepared, proof_bundle, self.verifier_mode, shutdown)
+                .submit_batch(
+                    prepared,
+                    proof_bundle,
+                    self.verifier_mode,
+                    simulate,
+                    shutdown,
+                )
                 .await
             {
                 Ok(event) => {
@@ -740,6 +756,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         return Err(BatchSubmitError::InvalidProof);
                     };
                     self.verifier_mode = fallback;
+                    simulate = false;
                     if let Some(store) = &self.config.attestation_store {
                         store.set_verifier_mode(fallback);
                     }
@@ -750,6 +767,16 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     continue;
                 }
                 Err(BatchSubmitError::InvalidProof) => return Err(BatchSubmitError::InvalidProof),
+                Err(BatchSubmitError::SubmissionReverted) => {
+                    simulate = true;
+                    self.metrics.batch_submit_retry_total.increment(1);
+                    warn!(
+                        attempt,
+                        max_retries = MAX_RETRIES,
+                        "Batch submission reverted. Replaying call to classify error."
+                    );
+                    continue;
+                }
                 Err(BatchSubmitError::Cancelled) => return Err(BatchSubmitError::Cancelled),
                 Err(BatchSubmitError::PortalAdvanced) => {
                     self.metrics

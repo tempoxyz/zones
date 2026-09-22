@@ -224,6 +224,7 @@ crate::sol! {
         error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
+        error StaleBlockTransition();
         error InvalidTempoBlockNumber();
         error NotFactory();
         error NotSelf();
@@ -708,6 +709,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
+            Self::StaleBlockTransition(_) => f.write_str("StaleBlockTransition"),
             Self::InvalidTokenEnablementTransition(_) => {
                 f.write_str("InvalidTokenEnablementTransition")
             }

@@ -553,6 +553,8 @@ interface IZonePortal {
     error MustDelegateCall();
     error NotPendingAdmin();
     error InvalidProof();
+    /// @notice The submitted transition does not extend the portal's current block hash.
+    error StaleBlockTransition();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
     error TransferFailed();

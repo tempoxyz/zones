@@ -124,6 +124,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
             &submitter.prepare_batch(legacy).await?,
             None,
             zone_prover::VerifierMode::NitroV1,
+            false,
             &CancellationToken::new(),
         )
         .await
@@ -266,6 +267,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
             &prepared,
             None,
             zone_prover::VerifierMode::NitroV1,
+            false,
             &CancellationToken::new(),
         )
         .await
@@ -290,6 +292,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
                 &prepared,
                 None,
                 zone_prover::VerifierMode::NitroV1,
+                false,
                 &CancellationToken::new(),
             )
             .await

@@ -1326,7 +1326,7 @@ contract ZonePortal is IZonePortal {
         onlySequencer
     {
         if (blockTransition.prevBlockHash != blockHash) {
-            revert InvalidProof();
+            revert StaleBlockTransition();
         }
 
         // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)

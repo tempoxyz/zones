@@ -64,6 +64,7 @@ use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 pub enum BatchSubmitError {
     Cancelled,
     InvalidProof,
+    SubmissionReverted,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
     Other(eyre::Report),
@@ -80,6 +81,7 @@ impl fmt::Display for BatchSubmitError {
         match self {
             Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
             Self::InvalidProof => formatter.write_str("Nitro verifier rejected the proof"),
+            Self::SubmissionReverted => formatter.write_str("batch submission reverted on L1"),
             Self::PortalAdvanced => {
                 formatter.write_str("portal advanced while waiting for settlement quorum")
             }
@@ -339,7 +341,8 @@ impl BatchSubmitter {
     /// prover's Nitro attestation; the pre-T11 unconfigured path keeps `proof` empty.
     ///
     /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
-    /// settlement quorum is cancelled when the leader generation shuts down.
+    /// settlement quorum is cancelled when the leader generation shuts down. `simulate` replays
+    /// the call before sending so a previous T13 submission revert can be classified.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = prepared.batch.tempo_block_number,
@@ -354,6 +357,7 @@ impl BatchSubmitter {
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
         verifier_mode: VerifierMode,
+        simulate: bool,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
@@ -523,10 +527,12 @@ impl BatchSubmitter {
                 if anchors_to_current_tip {
                     submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
                 }
-                submission
-                    .call()
-                    .await
-                    .map_err(|error| classify_submission_revert(error.into()))?;
+                if simulate {
+                    submission
+                        .call()
+                        .await
+                        .map_err(|error| classify_submission_revert(error.into()))?;
+                }
                 tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
             }
         }
@@ -535,6 +541,10 @@ impl BatchSubmitter {
 
         let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
+            if settlement_abi == SettlementAbi::T13 {
+                warn!(%tx_hash, "submitBatch was included but reverted on L1");
+                return Err(BatchSubmitError::SubmissionReverted);
+            }
             return Err(
                 eyre::eyre!("submitBatch tx {tx_hash} was included but reverted on L1").into(),
             );
@@ -1481,6 +1491,9 @@ fn classify_submission_revert(error: eyre::Report) -> BatchSubmitError {
     match decode_portal_revert(&error) {
         Some(ContractError::CustomError(ZonePortal::ZonePortalErrors::InvalidProof(_))) => {
             BatchSubmitError::InvalidProof
+        }
+        Some(ContractError::CustomError(ZonePortal::ZonePortalErrors::StaleBlockTransition(_))) => {
+            BatchSubmitError::PortalAdvanced
         }
         _ => BatchSubmitError::Other(error),
     }

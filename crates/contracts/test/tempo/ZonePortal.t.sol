@@ -2968,7 +2968,7 @@ contract ZonePortalTest is BaseTest {
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
-        vm.expectRevert(IZonePortal.InvalidProof.selector);
+        vm.expectRevert(IZonePortal.StaleBlockTransition.selector);
         _submitBatch(
             portal,
             uint64(block.number - 1),
