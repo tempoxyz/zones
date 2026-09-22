@@ -25,6 +25,7 @@ mod encryption_key;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
+mod proofs;
 mod prover;
 mod rpc;
 pub mod settlement;
@@ -36,6 +37,9 @@ pub use encryption_key::{
     register_encryption_key,
 };
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
+pub use proofs::{
+    ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, create_proof_collector,
+};
 pub use prover::{
     SHADOW_PROVER_QUEUE_CAPACITY, SettlementProverConfig, ShadowProofAnchor, ShadowProver,
     ShadowProverConfig, spawn_shadow_prover,
@@ -136,7 +140,8 @@ pub struct ZoneSequencerHandle {
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for each pending withdrawal.
 /// - **Settlement prover** — when `prover_config` is set, settlement waits for a successful SPF
-///   execution and Nitro NSM attestation before submitting the batch.
+///   execution and Nitro NSM attestation before submitting the batch. A proof collector is
+///   required and every unsettled input must be persisted before proving.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
@@ -147,6 +152,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
+    proof_collector: Option<ProofCollectorHandle>,
     prover_config: Option<SettlementProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
@@ -161,7 +167,12 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     .await
     .expect("valid L1 RPC URL");
     let settlement_prover = prover_config.map(|prover_config| {
-        prover::spawn_settlement_prover(prover_config, zone_provider.clone(), l1_provider.clone())
+        prover::spawn_settlement_prover(
+            prover_config,
+            proof_collector.expect("settlement prover requires a proof collector"),
+            zone_provider.clone(),
+            l1_provider.clone(),
+        )
     });
     let sequencer_address = signer.address();
 

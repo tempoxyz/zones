@@ -198,6 +198,8 @@ pub(crate) struct FollowerBlockSyncContext<P> {
     pub(crate) attestation: AttestationContext,
     pub(crate) schedule: LeadershipSchedule,
     pub(crate) peer_tips: PeerTipRegistry,
+    /// Required for unsettled imports on nodes that may later produce settlement proofs.
+    pub(crate) proof_collector: Option<zone_sequencer::ProofCollectorHandle>,
 }
 
 /// Live P2P and backfill channels owned by one follower sync generation.
@@ -644,6 +646,20 @@ where
         let status = self.context.engine.new_payload(payload).await?;
         if !status.is_valid() {
             eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
+        }
+
+        // Preserve all inputs needed by a future leader before admitting this unsettled block.
+        // Already-settled backfill needs no retained witness.
+        if let Some(collector) = &self.context.proof_collector {
+            self.stop
+                .run_until_cancelled(collector.collect_and_persist(block_number, hash))
+                .await
+                .ok_or_else(|| {
+                    eyre::eyre!("follower stopped while waiting for witness persistence")
+                })?
+                .wrap_err_with(|| {
+                    format!("persist witness before importing Zone block {block_number}")
+                })?;
         }
 
         // 5. Forkchoice
