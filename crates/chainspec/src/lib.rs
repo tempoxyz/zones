@@ -86,21 +86,20 @@ impl ZoneChainSpec {
 }
 
 fn insert_zone_fork_activations(spec: &mut TempoChainSpec) {
+    let z1_time = spec
+        .genesis()
+        .config
+        .extra_fields
+        .get("z1Time")
+        .and_then(parse_activation_timestamp);
+
     spec.inner
         .hardforks
         .insert(ZoneHardfork::Z0, ForkCondition::Timestamp(0));
-    for (fork, field) in [(ZoneHardfork::Z1, "z1Time"), (ZoneHardfork::Z2, "z2Time")] {
-        if let Some(timestamp) = spec
-            .genesis()
-            .config
-            .extra_fields
-            .get(field)
-            .and_then(parse_activation_timestamp)
-        {
-            spec.inner
-                .hardforks
-                .insert(fork, ForkCondition::Timestamp(timestamp));
-        }
+    if let Some(timestamp) = z1_time {
+        spec.inner
+            .hardforks
+            .insert(ZoneHardfork::Z1, ForkCondition::Timestamp(timestamp));
     }
 }
 
@@ -348,10 +347,6 @@ mod tests {
             ForkCondition::Never
         );
         assert_eq!(zone.zone_hardfork_at(u64::MAX), ZoneHardfork::Z0);
-        assert_eq!(
-            zone.zone_fork_activation(ZoneHardfork::Z2),
-            ForkCondition::Never
-        );
     }
 
     #[test]
@@ -367,30 +362,6 @@ mod tests {
 
         assert_eq!(zone.zone_hardfork_at(99), ZoneHardfork::Z0);
         assert_eq!(zone.zone_hardfork_at(100), ZoneHardfork::Z1);
-        assert_eq!(zone.zone_hardfork_at(u64::MAX), ZoneHardfork::Z1);
-    }
-
-    #[test]
-    fn parses_z2_timestamp_and_activates_at_boundary() {
-        let mut genesis = DEV.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 5).unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("z1Time".into(), 50)
-            .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("z2Time".into(), 100)
-            .unwrap();
-        let zone = ZoneChainSpec::from_genesis(genesis).unwrap();
-
-        assert_eq!(zone.zone_hardfork_at(49), ZoneHardfork::Z0);
-        assert_eq!(zone.zone_hardfork_at(50), ZoneHardfork::Z1);
-        assert_eq!(zone.zone_hardfork_at(99), ZoneHardfork::Z1);
-        assert_eq!(zone.zone_hardfork_at(100), ZoneHardfork::Z2);
-        assert_eq!(zone.zone_hardfork_at(u64::MAX), ZoneHardfork::Z2);
     }
 
     #[test]

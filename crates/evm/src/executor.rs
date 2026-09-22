@@ -160,7 +160,7 @@ where
 /// Simplified block executor for zone nodes.
 ///
 /// Enforces the successful block-opening `advanceTempo` system transaction and same-block
-/// finalization of requested withdrawals and Z2 processed deposits, then delegates ordinary
+/// finalization of requested withdrawals and T13 processed deposits, then delegates ordinary
 /// execution to [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or
 /// end-of-block metadata requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
@@ -273,7 +273,7 @@ where
             .into());
         }
 
-        let processed_deposit = self.inner.evm.zone_hardfork().is_z2()
+        let processed_deposit = self.inner.evm.cfg_env().spec.is_t13()
             && self
                 .inner
                 .receipts()
@@ -634,35 +634,45 @@ mod tests {
     fn processed_deposits_require_same_block_finalization() {
         use ZoneBlockPhase::{Executing, WithdrawalsFinalized};
 
-        for (address, deposits, phase, legacy, activation, timestamp, must_reject) in [
-            (ZONE_INBOX_ADDRESS, 1, Executing, false, None, 100, false),
+        for (address, deposits, phase, legacy, spec, must_reject) in [
             (
                 ZONE_INBOX_ADDRESS,
                 1,
                 Executing,
                 false,
-                Some(100),
-                99,
+                TempoHardfork::T12,
                 false,
             ),
-            (ZONE_INBOX_ADDRESS, 1, Executing, true, Some(100), 99, false),
+            (
+                ZONE_INBOX_ADDRESS,
+                1,
+                Executing,
+                true,
+                TempoHardfork::T12,
+                false,
+            ),
             (
                 ZONE_INBOX_ADDRESS,
                 1,
                 Executing,
                 false,
-                Some(100),
-                100,
+                TempoHardfork::T13,
                 true,
             ),
-            (ZONE_INBOX_ADDRESS, 1, Executing, true, Some(100), 100, true),
+            (
+                ZONE_INBOX_ADDRESS,
+                1,
+                Executing,
+                true,
+                TempoHardfork::T13,
+                true,
+            ),
             (
                 ZONE_INBOX_ADDRESS,
                 0,
                 Executing,
                 false,
-                Some(100),
-                100,
+                TempoHardfork::T13,
                 false,
             ),
             (
@@ -670,32 +680,26 @@ mod tests {
                 1,
                 WithdrawalsFinalized,
                 false,
-                Some(100),
-                100,
+                TempoHardfork::T13,
                 false,
             ),
-            (Address::ZERO, 1, Executing, false, Some(100), 100, false),
+            (
+                Address::ZERO,
+                1,
+                Executing,
+                false,
+                TempoHardfork::T13,
+                false,
+            ),
         ] {
             let mut zone_genesis = DEV.genesis().clone();
             zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
-            zone_genesis
-                .config
-                .extra_fields
-                .insert_value("z1Time".into(), 0)
-                .unwrap();
-            if let Some(activation) = activation {
-                zone_genesis
-                    .config
-                    .extra_fields
-                    .insert_value("z2Time".into(), activation)
-                    .unwrap();
-            }
             let chain_spec =
                 std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
             let factory =
                 ZoneEvmFactory::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
             let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> = EvmEnv::default();
-            env.block_env.inner.timestamp = U256::from(timestamp);
+            env.cfg_env.spec = spec;
             let evm = factory.create_evm(CacheDB::new(EmptyDB::default()), env);
             let ctx = TempoBlockExecutionCtx {
                 inner: EthBlockExecutionCtx {
@@ -755,7 +759,7 @@ mod tests {
             } else {
                 assert!(
                     result.is_ok(),
-                    "unexpected rejection: address={address}, deposits={deposits}, phase={phase:?}, legacy={legacy}, activation={activation:?}, timestamp={timestamp}"
+                    "unexpected rejection: address={address}, deposits={deposits}, phase={phase:?}, legacy={legacy}, spec={spec:?}"
                 );
             }
         }
