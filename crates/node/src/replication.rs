@@ -1,7 +1,7 @@
 //! Node-side leader replication and role-neutral backfill serving.
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::B256;
 use alloy_rlp::Decodable as _;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
@@ -343,29 +343,7 @@ fn encode_block_with_witness(
     } else {
         None
     };
-    let witness = match witness {
-        Some(witness) => {
-            let mut encoded = Vec::new();
-            let proof = &witness.witness;
-            // Version 1 CBOR tuple: format, height, hash, parent, execution witness,
-            // initial Tempo header RLP, Tempo proof nodes. ExecutionWitness uses its Serde impl.
-            // Serde flatten loses binary mode, so the inner header's U256 expects hex instead of bytes.
-            ciborium::into_writer(
-                &(
-                    witness.format_version,
-                    proof.block_number,
-                    proof.block_hash,
-                    proof.parent_hash,
-                    &proof.execution_witness,
-                    Bytes::from(alloy_rlp::encode(&proof.initial_tempo_header)),
-                    &proof.tempo_state,
-                ),
-                &mut encoded,
-            )?;
-            Some(encoded)
-        }
-        None => None,
-    };
+    let witness = witness.as_deref().map(minicbor_serde::to_vec).transpose()?;
     Ok(EncodedBlock { block, witness })
 }
 
@@ -381,26 +359,10 @@ pub(crate) fn decode_peer_block(encoded: &[u8]) -> eyre::Result<PeerBlock> {
     let block = Block::decode(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
     let witness = if witnessed {
-        let (
-            format_version,
-            block_number,
-            block_hash,
-            parent_hash,
-            execution_witness,
-            initial_tempo_header_rlp,
-            tempo_state,
-        ): (_, _, _, _, _, Bytes, _) = ciborium::from_reader(&mut input)?;
-        Some(StoredBlockProof {
-            format_version,
-            witness: zone_rpc::types::ZoneExecutionWitness {
-                block_number,
-                block_hash,
-                parent_hash,
-                execution_witness,
-                initial_tempo_header: alloy_rlp::decode_exact(&initial_tempo_header_rlp)?,
-                tempo_state,
-            },
-        })
+        let mut deserializer = minicbor_serde::Deserializer::from(minicbor::Decoder::new(input));
+        let proof = serde::Deserialize::deserialize(&mut deserializer)?;
+        input = &input[deserializer.decoder().position()..];
+        Some(proof)
     } else {
         None
     };
@@ -748,23 +710,29 @@ mod tests {
     }
 
     fn witness_envelope(block: Vec<u8>, proof: &StoredBlockProof) -> Vec<u8> {
-        let witness = &proof.witness;
-        let mut encoded = EncodedBlock::WITNESS_PREFIX.to_vec();
-        encoded.extend_from_slice(&block);
-        ciborium::into_writer(
-            &(
-                proof.format_version,
-                witness.block_number,
-                witness.block_hash,
-                witness.parent_hash,
-                &witness.execution_witness,
-                alloy_primitives::Bytes::from(alloy_rlp::encode(&witness.initial_tempo_header)),
-                &witness.tempo_state,
-            ),
-            &mut encoded,
-        )
-        .unwrap();
-        encoded
+        EncodedBlock {
+            block,
+            witness: Some(minicbor_serde::to_vec(proof).unwrap()),
+        }
+        .encode()
+    }
+
+    fn cbor_field<'a>(encoded: &'a [u8], field: &str) -> &'a [u8] {
+        let mut decoder = minicbor::Decoder::new(encoded);
+        let length = decoder.map().unwrap();
+        let mut index = 0;
+        while length.is_none_or(|length| index < length)
+            && decoder.datatype().unwrap() != minicbor::data::Type::Break
+        {
+            let name = decoder.str().unwrap();
+            let start = decoder.position();
+            decoder.skip().unwrap();
+            if name == field {
+                return &encoded[start..decoder.position()];
+            }
+            index += 1;
+        }
+        panic!("missing CBOR field {field}");
     }
 
     #[test]
@@ -804,31 +772,34 @@ mod tests {
             decode_peer_block(&encoded).unwrap(),
             super::PeerBlock {
                 block,
-                witness: Some(proof)
+                witness: Some(proof.clone())
             }
         );
 
         // Witness preimages and the RLP header must use CBOR byte strings, not hex strings.
-        let value: ciborium::Value =
-            ciborium::from_reader(&encoded[EncodedBlock::WITNESS_PREFIX.len() + bare.len()..])
-                .unwrap();
-        let fields = value.as_array().unwrap();
-        assert_eq!(fields.len(), 7);
-        let execution = fields[4].as_map().unwrap();
-        for name in ["state", "codes", "keys", "headers"] {
-            let (_, list) = execution
-                .iter()
-                .find(|(key, _)| key.as_text() == Some(name))
-                .unwrap();
-            assert_eq!(
-                list.as_array().unwrap()[0].as_bytes().unwrap(),
-                &[0, 0x80, 0xff]
-            );
+        let encoded_proof = &encoded[EncodedBlock::WITNESS_PREFIX.len() + bare.len()..];
+        let witness = cbor_field(encoded_proof, "witness");
+        for name in ["state", "codes", "keys", "headers", "tempo_state"] {
+            let mut decoder = minicbor::Decoder::new(cbor_field(witness, name));
+            assert_eq!(decoder.array().unwrap(), Some(1));
+            assert_eq!(decoder.bytes().unwrap(), &[0, 0x80, 0xff]);
         }
-        assert!(fields[5].as_bytes().is_some());
+        let mut decoder = minicbor::Decoder::new(cbor_field(witness, "initial_tempo_header"));
         assert_eq!(
-            fields[6].as_array().unwrap()[0].as_bytes().unwrap(),
-            &[0, 0x80, 0xff]
+            decoder.bytes().unwrap(),
+            alloy_rlp::encode(&proof.witness.initial_tempo_header)
+        );
+
+        // The shared header adapter must preserve the existing RPC and proof-store JSON shape.
+        let json = serde_json::to_value(&proof).unwrap();
+        assert_eq!(
+            json["witness"]["initial_tempo_header"],
+            serde_json::to_value(&proof.witness.initial_tempo_header).unwrap()
+        );
+        assert_eq!(json["witness"]["state"][0], "0x0080ff");
+        assert_eq!(
+            serde_json::from_value::<StoredBlockProof>(json).unwrap(),
+            proof
         );
     }
 

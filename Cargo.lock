@@ -13955,7 +13955,6 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "base64 0.22.1",
- "ciborium",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -13965,6 +13964,8 @@ dependencies = [
  "jsonrpsee",
  "k256",
  "metrics",
+ "minicbor",
+ "minicbor-serde",
  "p256 0.13.2",
  "rand 0.8.7",
  "reqwest",
@@ -14132,6 +14133,8 @@ name = "zone-primitives"
 version = "0.3.1"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
+ "serde",
  "tempo-hardfork",
  "thiserror 2.0.18",
 ]
