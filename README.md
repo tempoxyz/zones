@@ -79,6 +79,16 @@ The `deploy-zone` command generates admin and sequencer keypairs, funds them on 
 just zone-up my-zone
 ```
 
+Nodes derive the L1 portal address locally from the zone ID encoded in the genesis
+chain ID, using Tempo's deterministic `ZoneFactory` address scheme. All node
+services, including the checker, use that derived address; no factory RPC call or
+`L1_PORTAL_ADDRESS` configuration is needed. Re-execution and other CLI commands
+using `L1_HTTP_RPC_URL` also derive the address from their chain specification.
+The node's deprecated `--l1.portal-address` flag and `L1_PORTAL_ADDRESS` environment
+variable remain accepted as consistency checks and must match the derived address
+when supplied. Legacy portals deployed from an EOA are not supported by this node
+startup path.
+
 ### Depositing into a Zone
 
 ```bash
