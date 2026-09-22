@@ -562,13 +562,22 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    fn activate_fallback(&mut self, trigger: &'static str) -> Option<VerifierMode> {
-        let fallback = FALLBACK_VERIFIER_MODE?;
-        self.verifier_mode = fallback;
+    fn set_attestation_mode(&self, mode: VerifierMode) {
         if let Some(store) = &self.config.attestation_store {
-            store.set_verifier_mode(fallback);
+            store.set_verifier_mode(mode);
         }
-        warn!(?fallback, trigger, "Activating sticky verifier fallback");
+    }
+
+    fn activate_fallback(&mut self, persist: bool) -> Option<VerifierMode> {
+        let fallback = FALLBACK_VERIFIER_MODE?;
+        let trigger = if persist {
+            self.verifier_mode = fallback;
+            "verifier_rejection"
+        } else {
+            "prover_unavailable"
+        };
+        self.set_attestation_mode(fallback);
+        warn!(?fallback, trigger, "Activating verifier fallback");
         Some(fallback)
     }
 
@@ -580,32 +589,33 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
-        let proof_bundle = if self.verifier_mode == VerifierMode::NitroV1 {
-            if let Some(prover) = &self.settlement_prover {
-                match prover.prove(from, last_zone_block, prepared.clone()).await {
-                    Ok(proof) => Some(proof),
-                    Err(error) if ProverFailure::is_unavailable(&error) => {
-                        if self.activate_fallback("prover_unavailable").is_none() {
-                            return Err(error.into());
-                        }
-                        None
-                    }
-                    Err(error) => return Err(error.into()),
+        let mut attempt_mode = self.verifier_mode;
+        let proof_bundle = if let (VerifierMode::NitroV1, Some(prover)) =
+            (attempt_mode, self.settlement_prover.as_ref())
+        {
+            match prover.prove(from, last_zone_block, prepared.clone()).await {
+                Ok(proof) => Some(proof),
+                Err(error) if ProverFailure::is_unavailable(&error) => {
+                    attempt_mode = self.activate_fallback(false).ok_or(error)?;
+                    None
                 }
-            } else {
-                None
+                Err(error) => return Err(error.into()),
             }
         } else {
             None
         };
-        self.submit_batch_with_retry(
-            prepared,
-            proof_bundle.as_ref(),
-            last_zone_block,
-            withdrawals,
-            shutdown,
-        )
-        .await
+        let result = self
+            .submit_batch_with_retry(
+                prepared,
+                proof_bundle.as_ref(),
+                attempt_mode,
+                last_zone_block,
+                withdrawals,
+                shutdown,
+            )
+            .await;
+        self.set_attestation_mode(self.verifier_mode);
+        result
     }
 
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
@@ -629,6 +639,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         &mut self,
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
+        mut verifier_mode: VerifierMode,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
@@ -684,16 +695,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
             let submit_started = std::time::Instant::now();
             // Drop the stale `NitroV1` proof when retrying in fallback `NoProof` mode.
-            let proof_bundle = proof_bundle.filter(|_| self.verifier_mode == VerifierMode::NitroV1);
+            let proof_bundle = proof_bundle.filter(|_| verifier_mode == VerifierMode::NitroV1);
             match self
                 .batch_submitter
-                .submit_batch(
-                    prepared,
-                    proof_bundle,
-                    self.verifier_mode,
-                    simulate,
-                    shutdown,
-                )
+                .submit_batch(prepared, proof_bundle, verifier_mode, simulate, shutdown)
                 .await
             {
                 Ok(event) => {
@@ -764,12 +769,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
                     return Ok(());
                 }
-                Err(BatchSubmitError::InvalidProof)
-                    if self.verifier_mode == VerifierMode::NitroV1 =>
-                {
-                    if self.activate_fallback("verifier_rejection").is_none() {
+                Err(BatchSubmitError::InvalidProof) if verifier_mode == VerifierMode::NitroV1 => {
+                    let Some(fallback) = self.activate_fallback(true) else {
                         return Err(BatchSubmitError::InvalidProof);
-                    }
+                    };
+                    verifier_mode = fallback;
                     simulate = false;
                     continue;
                 }
@@ -1180,29 +1184,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prover_unavailability_activates_configured_fallback() {
-        let l1 = Asserter::new();
-        let store = AttestationStore::default();
-        let mut monitor = test_monitor(l1, TestZoneProvider::new());
-        monitor.config.attestation_store = Some(store.clone());
-
-        assert_eq!(
-            monitor.activate_fallback("prover_unavailable"),
-            Some(VerifierMode::NoProof)
-        );
-        assert_eq!(monitor.verifier_mode, VerifierMode::NoProof);
-        assert_eq!(store.verifier_mode(), VerifierMode::NoProof);
-    }
-
-    #[tokio::test]
-    async fn attestation_failure_prevents_submit_batch() {
-        let l1 = Asserter::new();
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover = Some(SettlementProver::failing(
-            "remote prover returned an invalid proof bundle",
-        ));
-        let batch_data = BatchData {
+    fn test_batch_data() -> BatchData {
+        BatchData {
             zone_height: 20,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0xbb),
@@ -1215,10 +1198,31 @@ mod tests {
             next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 1,
-        };
-        let prepared = prepared(batch_data);
+        }
+    }
 
-        let error = monitor
+    #[test]
+    fn sticky_fallback_updates_monitor_and_store() {
+        let l1 = Asserter::new();
+        let store = AttestationStore::default();
+        let mut monitor = test_monitor(l1, TestZoneProvider::new());
+        monitor.config.attestation_store = Some(store.clone());
+
+        assert_eq!(monitor.activate_fallback(true), Some(VerifierMode::NoProof));
+        assert_eq!(monitor.verifier_mode, VerifierMode::NoProof);
+        assert_eq!(store.verifier_mode(), VerifierMode::NoProof);
+    }
+
+    #[tokio::test]
+    async fn prover_unavailability_uses_transient_fallback() {
+        let l1 = Asserter::new();
+        let store = AttestationStore::default();
+        let mut monitor = test_monitor(l1, TestZoneProvider::new());
+        monitor.config.attestation_store = Some(store.clone());
+        monitor.settlement_prover = Some(SettlementProver::failing(ProverFailure::Unavailable));
+        let prepared = prepared(test_batch_data());
+
+        monitor
             .prove_and_submit_batch(
                 11,
                 &prepared,
@@ -1229,7 +1233,28 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("invalid proof bundle"));
+        assert_eq!(monitor.verifier_mode, VerifierMode::NitroV1);
+        assert_eq!(store.verifier_mode(), VerifierMode::NitroV1);
+    }
+
+    #[tokio::test]
+    async fn validation_failure_prevents_submit_batch() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover = Some(SettlementProver::failing(ProverFailure::Validation));
+        let prepared = prepared(test_batch_data());
+
+        monitor
+            .prove_and_submit_batch(
+                11,
+                &prepared,
+                20,
+                Vec::new(),
+                &sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
         assert_eq!(monitor.verifier_mode, VerifierMode::NitroV1);
         assert!(
             l1.read_q().is_empty(),
@@ -1285,6 +1310,7 @@ mod tests {
                 .submit_batch_with_retry(
                     &prepared,
                     Some(&proof),
+                    VerifierMode::NitroV1,
                     71,
                     Vec::new(),
                     &submission_shutdown,
@@ -1565,6 +1591,7 @@ mod tests {
             .submit_batch_with_retry(
                 &prepared(batch_data.clone()),
                 None,
+                VerifierMode::NitroV1,
                 20,
                 Vec::new(),
                 &sync::CancellationToken::new(),
@@ -1620,6 +1647,7 @@ mod tests {
             .submit_batch_with_retry(
                 &prepared(batch_data),
                 None,
+                VerifierMode::NitroV1,
                 pending_boundary,
                 Vec::new(),
                 &sync::CancellationToken::new(),
@@ -1666,6 +1694,7 @@ mod tests {
             .submit_batch_with_retry(
                 &prepared(batch_data),
                 None,
+                VerifierMode::NitroV1,
                 20,
                 Vec::new(),
                 &sync::CancellationToken::new(),
