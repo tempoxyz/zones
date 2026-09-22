@@ -123,10 +123,10 @@ impl Cli {
 #[derive(Debug, Args)]
 struct Timeouts {
     /// Deadline for receiving one complete logical request.
-    #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
+    #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "300", value_parser = non_zero_secs)]
     request: Duration,
     /// Deadline for writing one complete logical response.
-    #[arg(long = "response-timeout-secs", env = "SPF_RESPONSE_TIMEOUT_SECS", default_value = "5", value_parser = non_zero_secs)]
+    #[arg(long = "response-timeout-secs", env = "SPF_RESPONSE_TIMEOUT_SECS", default_value = "300", value_parser = non_zero_secs)]
     response: Duration,
 }
 

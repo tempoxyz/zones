@@ -31,10 +31,12 @@ GiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. Th
 allocates 10 GiB to the enclave by default; override it with `ENCLAVE_MEMORY_MIB`.
 
 The enclave applies separate absolute deadlines to request reception and response transmission.
-`--request-timeout-secs` (`SPF_REQUEST_TIMEOUT_SECS`, default 5) covers reception and decoding of
-the complete CBOR request. `--response-timeout-secs` (`SPF_RESPONSE_TIMEOUT_SECS`, default 5)
-covers encoding and transmission of every normal or error response. Values are whole seconds and
-must be greater than zero; progress does not reset a deadline. SPF execution itself has no timeout.
+`--request-timeout-secs` (`SPF_REQUEST_TIMEOUT_SECS`, default 300) covers reception and decoding of
+the complete CBOR request. `--response-timeout-secs` (`SPF_RESPONSE_TIMEOUT_SECS`, default 300)
+covers encoding and transmission of every normal or error response. The generous five-minute
+defaults accommodate multi-GiB payloads while still recovering from crashed clients. Values are
+whole seconds and must be greater than zero; progress does not reset a deadline. SPF execution
+itself has no timeout.
 
 TCP mode is intended for development of framing, chain validation, and SPF error handling. The
 binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
