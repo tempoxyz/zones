@@ -124,6 +124,7 @@ tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "1f3b3a3dee82e53
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "1f3b3a3dee82e53fdf76c0a8a65655a14c0d20e6", default-features = false }
 
 # zones
+tempo-zone-verifier = { git = "https://github.com/tempoxyz/tempo", rev = "2c8b5302eca141ac96f8ea82bca100c7a20691e5" }
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-chainspec = { path = "crates/chainspec" }
 zone-evm = { path = "crates/evm" }

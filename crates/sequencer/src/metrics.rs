@@ -50,6 +50,15 @@ pub(crate) struct ProverMetrics {
     /// Time spent comparing SPF output with the finalized batch candidate.
     pub(crate) output_validation_duration_seconds: Histogram,
 
+    /// Time spent independently verifying a shadow Nitro proof, including the L1 time lookup.
+    pub(crate) proof_verification_duration_seconds: Histogram,
+    /// Shadow Nitro proofs authenticated against explicitly pinned PCR measurements.
+    pub(crate) proof_verification_success_total: Counter,
+    /// Shadow Nitro proofs rejected by the native verifier logic.
+    pub(crate) proof_verification_failure_total: Counter,
+    /// Shadow proof verification attempts interrupted by RPC, budget, or worker errors.
+    pub(crate) proof_verification_error_total: Counter,
+
     /// Number of prover attempts that failed, regardless of whether validation rejected
     /// the candidate or an operational error prevented completion.
     pub(crate) failure_total: Counter,

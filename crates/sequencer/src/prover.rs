@@ -34,7 +34,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
-    ProverConnection, VerifierMode, VerifyRequest, VerifyResponse,
+    ProverConnection, ShadowProofVerifier, VerifierMode, VerifyRequest, VerifyResponse,
 };
 use zone_rpc::ZoneDebugApi;
 use zone_spf::{
@@ -67,6 +67,8 @@ pub struct SettlementProverConfig {
     /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
     /// Settlement requires a remote NSM attestation; shadow validation does not.
     pub prover_address: Option<String>,
+    /// Optional local Nitro verification policy for finalized shadow jobs only.
+    pub shadow_proof_verifier: Option<ShadowProofVerifier>,
 }
 
 impl fmt::Debug for SettlementProverConfig {
@@ -78,6 +80,7 @@ impl fmt::Debug for SettlementProverConfig {
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
             .field("prover_address", &self.prover_address)
+            .field("shadow_proof_verifier", &self.shadow_proof_verifier)
             .finish()
     }
 }
@@ -231,6 +234,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
         prover_address = ?config.prover_address,
+        shadow_proof_verification = config.shadow_proof_verifier.is_some(),
         queue_capacity,
         "Prover enabled"
     );
@@ -405,6 +409,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     metrics: &ProverMetrics,
 ) -> Result<(ValidationStats, Option<ProofBundle>)> {
     let (witness, stats) = build_witness(context, job, proofs, metrics).await?;
+    let public_inputs = witness.public_inputs.clone();
     let batch = &job.batch;
 
     let started = Instant::now();
@@ -429,6 +434,41 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     metrics
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
+
+    // Local observer policy must never gate settlement jobs or alter L1 fork dispatch.
+    if matches!(job.anchor, ProverAnchor::Finalized(_)) {
+        if let Some(verifier) = &context.config.shadow_proof_verifier {
+            let started = Instant::now();
+            let result = async {
+                let bundle = proof_bundle
+                    .clone()
+                    .ok_or_eyre("shadow proof verification requires a remote Nitro proof")?;
+                // A newly generated attestation needs the current verification time, not the
+                // historical batch/anchor time. Never accept time supplied by the prover.
+                let timestamp = context
+                    .l1_provider
+                    .get_header_by_number(BlockNumberOrTag::Latest)
+                    .await?
+                    .ok_or_eyre("missing current Tempo header for Nitro verification")?
+                    .timestamp();
+                let verifier = verifier.clone();
+                let output = output.clone();
+                tokio::task::spawn_blocking(move || {
+                    verifier.verify(&public_inputs, &output, &bundle, timestamp)
+                })
+                .await
+                .context("Nitro verification worker panicked")?
+                .map_err(eyre::Report::new)
+            }
+            .await;
+            metrics
+                .proof_verification_duration_seconds
+                .record(started.elapsed().as_secs_f64());
+            record_proof_verification(result, metrics)?;
+            info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
+                "Shadow Nitro proof verified against pinned enclave measurements");
+        }
+    }
 
     if job.response.is_some() && proof_bundle.is_none() {
         return Err(eyre::eyre!(
@@ -587,6 +627,24 @@ async fn build_witness<P: ZoneSequencerProvider>(
     };
 
     Ok((witness, stats))
+}
+
+fn record_proof_verification(result: Result<bool>, metrics: &ProverMetrics) -> Result<()> {
+    match result {
+        Ok(true) => {
+            metrics.proof_verification_success_total.increment(1);
+            Ok(())
+        }
+        Ok(false) => {
+            metrics.proof_verification_failure_total.increment(1);
+            Err(eyre::eyre!("native Nitro verifier rejected shadow proof")
+                .wrap_err(ValidationFailure))
+        }
+        Err(error) => {
+            metrics.proof_verification_error_total.increment(1);
+            Err(error.wrap_err("could not verify shadow Nitro proof"))
+        }
+    }
 }
 
 /// Require an L1-settled range to close exactly one withdrawal snapshot at its final block.
@@ -1272,6 +1330,17 @@ mod tests {
     use zone_spf::{
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
     };
+
+    #[test]
+    fn rejected_proofs_are_validation_failures_and_transport_errors_are_not() {
+        let metrics = ProverMetrics::default();
+        assert!(record_proof_verification(Ok(true), &metrics).is_ok());
+        let rejected = record_proof_verification(Ok(false), &metrics).unwrap_err();
+        assert!(rejected.is::<ValidationFailure>());
+        let unavailable =
+            record_proof_verification(Err(eyre::eyre!("L1 unavailable")), &metrics).unwrap_err();
+        assert!(!unavailable.is::<ValidationFailure>());
+    }
 
     struct StubDebugApi(ZoneExecutionWitness);
 
