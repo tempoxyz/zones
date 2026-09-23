@@ -23,7 +23,6 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, SolValue, abi::AbiDecoderConfig};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
-    dispatch::ABI_DECODER_MEMORY_LIMIT,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
@@ -442,9 +441,7 @@ impl DecodedQueuedDeposit {
 
 fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
     // Nested deposits must match their canonical L1 event encoding on every hardfork.
-    let config = AbiDecoderConfig::new()
-        .memory_limit(ABI_DECODER_MEMORY_LIMIT)
-        .strict(true);
+    let config = AbiDecoderConfig::new().strict(true);
 
     deposits
         .into_iter()
