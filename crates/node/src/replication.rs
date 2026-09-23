@@ -7,23 +7,14 @@ use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_primitives_traits::SealedBlock;
 use reth_provider::HeaderProvider;
-use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, BlockReader, StateProviderFactory};
 use tempo_primitives::{Block, TempoHeader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync;
-use tracing::{debug, info};
+use tracing::debug;
 use zone_l1::TempoStateExt as _;
-use zone_p2p::{
-    BackfillCommand, BackfillRequest, EncodedBlock, P2pCommand, P2pEvent, P2pPeerId, PeerTip,
-};
-use zone_sequencer::{
-    ProofCollectorHandle, StoredBlockProof,
-    attestation::{AttestationStore, SignedSettlementAttestation},
-};
-
-use eyre::{OptionExt as _, WrapErr as _};
-
-use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
+use zone_p2p::{BackfillCommand, BackfillRequest, EncodedBlock, P2pCommand, P2pEvent, PeerTip};
+use zone_sequencer::{ProofCollectorHandle, SettlementManager, StoredBlockProof};
 
 /// A decoded block and the optional witness supplied by its peer.
 #[derive(Debug, PartialEq, Eq)]
@@ -497,76 +488,11 @@ pub(crate) async fn serve_backfill_requests<P>(
 /// writer. Backfill requests are served by the process-lifetime
 /// [`serve_backfill_requests`] task, never by role generations. The loop exits
 /// when `stop` fires.
-async fn store_follower_settlement_signature<P>(
-    provider: &P,
-    follower: &P2pPeerId,
-    signature: &[u8],
-    attestation: &AttestationContext,
-    store: &AttestationStore,
-) -> eyre::Result<(u64, alloy_primitives::Address, usize)>
-where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
-{
-    let signed = SignedSettlementAttestation::decode(signature)?;
-    let signer = signed.recover_signer(attestation.domain)?;
-    let expected_signer = attestation
-        .addresses
-        .get(follower)
-        .copied()
-        .ok_or_eyre("unknown follower identity")?;
-    eyre::ensure!(
-        signer == expected_signer,
-        "settlement signer does not match authenticated peer"
-    );
-    let height: u64 = signed
-        .attestation
-        .zoneHeight
-        .try_into()
-        .wrap_err("settlement height does not fit in u64")?;
-    let digest = attestation.domain.settlement_digest(&signed.attestation);
-    let leader = attestation
-        .signer
-        .as_ref()
-        .ok_or_eyre("leader has no settlement signer")?
-        .address();
-    store.precheck_follower_settlement(height, digest, leader, signer)?;
-
-    let expected = build_settlement_attestation(
-        provider,
-        height,
-        attestation,
-        (
-            signed.attestation.anchorBlockNumber,
-            signed.attestation.anchorBlockHash,
-        ),
-    )
-    .await?
-    .ok_or_eyre("signed block is not a batch boundary")?;
-    eyre::ensure!(
-        signed.attestation == expected,
-        "settlement signature does not match leader state"
-    );
-    let signatures =
-        store.insert_follower_settlement(attestation.domain, leader, signer, signed)?;
-    Ok((height, signer, signatures))
-}
-
-pub(crate) async fn collect_follower_settlement_signatures<P>(
-    provider: P,
+pub(crate) async fn collect_follower_settlement_signatures(
     mut events: mpsc::Receiver<P2pEvent>,
-    attestation: AttestationContext,
+    settlements: SettlementManager,
     stop: sync::CancellationToken,
-) where
-    P: BlockNumReader
-        + BlockReader<Block = Block>
-        + HeaderProvider<Header = TempoHeader>
-        + StateProviderFactory
-        + ReceiptProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
+) {
     loop {
         tokio::select! {
             biased;
@@ -582,18 +508,8 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                 match event {
                     P2pEvent::Started { .. } => {}
                     P2pEvent::SettlementSignatureReceived { follower, signature } => {
-                        let result = async {
-                            store_follower_settlement_signature(
-                                &provider,
-                                &follower,
-                                &signature,
-                                &attestation,
-                                &attestation.store,
-                            ).await
-                        }.await;
-                        match result {
-                            Ok((height, signer, signatures)) => info!(target: "zone::p2p", %follower, %signer, height, signatures, "Stored follower settlement signature"),
-                            Err(err) => tracing::warn!(target: "zone::p2p", %follower, %err, "Rejected follower settlement signature"),
+                        if let Err(err) = settlements.add_signature(follower.clone(), &signature) {
+                            tracing::warn!(target: "zone::p2p", %follower, %err, "Rejected follower settlement signature");
                         }
                     }
                     P2pEvent::BlockReceived { .. }

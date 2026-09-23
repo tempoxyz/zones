@@ -719,16 +719,20 @@ fn validate_live_block_sender(
     };
     match schedule.leader_for(anchor_number) {
         Some(record) if &record.leader == sender => Ok(()),
-        Some(record) => eyre::bail!(
-            "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
-             the schedule assigns that anchor to {} (epoch {})",
-            record.leader,
-            record.epoch,
-        ),
-        None => eyre::bail!(
-            "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
-             record governs",
-        ),
+        Some(record) => {
+            eyre::bail!(
+                "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
+                 the schedule assigns that anchor to {} (epoch {})",
+                record.leader,
+                record.epoch,
+            );
+        }
+        None => {
+            eyre::bail!(
+                "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
+                 record governs",
+            );
+        }
     }
 }
 
@@ -961,7 +965,7 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
         eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
     })?;
     let TempoTxEnvelope::Legacy(signed) = first_tx else {
-        eyre::bail!("first transaction in peer block is not a legacy system transaction")
+        eyre::bail!("first transaction in peer block is not a legacy system transaction");
     };
     eyre::ensure!(
         first_tx.is_system_tx(),

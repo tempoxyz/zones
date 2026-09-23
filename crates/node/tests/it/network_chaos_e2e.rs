@@ -634,11 +634,13 @@ async fn run_l1_outage_case(
             )
             .await
         }
-        _ => eyre::bail!(
-            "unsupported L1 outage matrix row {}: {:?}",
-            case.phase,
-            case
-        ),
+        _ => {
+            eyre::bail!(
+                "unsupported L1 outage matrix row {}: {:?}",
+                case.phase,
+                case
+            );
+        }
     }
 }
 

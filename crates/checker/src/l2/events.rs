@@ -509,9 +509,11 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
             return Ok(None);
         }
         IZoneInbox::DepositRejected::SIGNATURE_HASH => {
-            eyre::bail!("unsupported DepositRejected in block {block}")
+            eyre::bail!("unsupported DepositRejected in block {block}");
         }
-        _ => eyre::bail!("unsupported ZoneInbox event {topic} in block {block}"),
+        _ => {
+            eyre::bail!("unsupported ZoneInbox event {topic} in block {block}");
+        }
     }))
 }
 
@@ -560,11 +562,13 @@ fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
                 (false, false) => WithdrawalOrigin::User {
                     sender: event.sender,
                 },
-                _ => eyre::bail!(
-                    "invalid WithdrawalRequested origin in block {block}: sender {}, fallback nonce {}",
-                    event.sender,
-                    event.fallbackNonce,
-                ),
+                _ => {
+                    eyre::bail!(
+                        "invalid WithdrawalRequested origin in block {block}: sender {}, fallback nonce {}",
+                        event.sender,
+                        event.fallbackNonce,
+                    );
+                }
             };
             ReceiptEvent::Action(L2BridgeAction::WithdrawalRequested {
                 withdrawal_index: event.withdrawalIndex,
@@ -590,7 +594,9 @@ fn decode_outbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
             )?;
             return Ok(None);
         }
-        _ => eyre::bail!("unsupported ZoneOutbox event {topic} in block {block}"),
+        _ => {
+            eyre::bail!("unsupported ZoneOutbox event {topic} in block {block}");
+        }
     }))
 }
 

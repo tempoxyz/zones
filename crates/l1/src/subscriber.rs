@@ -291,7 +291,7 @@ impl L1BlockTracker {
                             block.number,
                             block.hash,
                             observation.hash
-                        )
+                        );
                     }
                     None if state
                         .pruned_through
@@ -300,7 +300,7 @@ impl L1BlockTracker {
                         eyre::bail!(
                             "L1 block {} was already consumed and pruned from the tracker",
                             block.number
-                        )
+                        );
                     }
                     None if state
                         .latest
@@ -310,7 +310,7 @@ impl L1BlockTracker {
                             "L1 block {} is missing below the latest observed height {}",
                             block.number,
                             state.latest.expect("checked above").number
-                        )
+                        );
                     }
                     None => {}
                 }

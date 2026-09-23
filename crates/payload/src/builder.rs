@@ -324,6 +324,7 @@ where
                 block_number,
                 self.withdrawal_batch_interval_blocks,
                 follows_checkpoint_blocks,
+                total_deposits > 0,
                 self.withdrawal_reveal_encryptor.as_deref(),
                 chain_id,
             )?;
@@ -593,12 +594,13 @@ fn is_l1_storage_unavailable(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
-/// Finalize withdrawals when the current pending list is non-empty or at a batch boundary.
+/// Finalize a batch after processing deposits, with pending withdrawals, or at a batch boundary.
 fn finalize_withdrawal_batch_if_needed<B>(
     builder: &mut B,
     block_number: u64,
     interval_blocks: u64,
     follows_checkpoint_blocks: bool,
+    has_processed_deposits: bool,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
     chain_id: u64,
 ) -> Result<(), PayloadBuilderError>
@@ -612,6 +614,7 @@ where
         block_number,
         interval_blocks,
         follows_checkpoint_blocks,
+        has_processed_deposits,
     ) {
         return Ok(());
     }
@@ -665,8 +668,10 @@ fn should_finalize_withdrawal_batch(
     block_number: u64,
     interval_blocks: u64,
     follows_checkpoint_blocks: bool,
+    has_processed_deposits: bool,
 ) -> bool {
     has_pending_withdrawals
+        || has_processed_deposits
         || block_number.is_multiple_of(interval_blocks)
         || follows_checkpoint_blocks
 }
@@ -892,16 +897,20 @@ mod tests {
 
         assert_eq!(blocks, 120);
         assert!(!super::should_finalize_withdrawal_batch(
-            false, 119, blocks, false
+            false, 119, blocks, false, false
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            false, 120, blocks, false
+            false, 120, blocks, false, false
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            true, 121, blocks, false
+            true, 121, blocks, false, false
         ));
         assert!(super::should_finalize_withdrawal_batch(
-            false, 150, blocks, true
+            false, 150, blocks, true, false
+        ));
+        // Deposit-only blocks must settle before the interval to reopen portal capacity.
+        assert!(super::should_finalize_withdrawal_batch(
+            false, 121, blocks, false, true
         ));
     }
 

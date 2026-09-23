@@ -730,8 +730,7 @@ async fn test_tempo_state_advances_with_l1_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify that TempoAdvanced and encrypted-deposit events are emitted on
-/// the ZoneInbox when processing deposits.
+/// Verify deposit processing emits inbox events and finalizes a batch in the same block.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -772,6 +771,26 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
         deposit_event.is_some(),
         "should have a TempoAdvanced event with depositsProcessed == 1"
     );
+
+    let deposit_block = deposit_event.unwrap().1.block_number.unwrap();
+    assert_eq!(
+        deposit_block, 1,
+        "deposit must precede the eight-block interval"
+    );
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let finalized = outbox
+        .BatchFinalized_filter()
+        .from_block(deposit_block)
+        .to_block(deposit_block)
+        .query()
+        .await?;
+    assert_eq!(
+        finalized.len(),
+        1,
+        "deposit-only block must finalize a batch"
+    );
+    assert_eq!(finalized[0].0.withdrawalQueueHash, B256::ZERO);
+    assert_eq!(finalized[0].0.withdrawalBatchIndex, 1);
 
     // Query encrypted deposit events
     let deposit_processed_filter = zone_inbox.DepositProcessed_filter().from_block(0);

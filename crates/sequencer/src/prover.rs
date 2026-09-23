@@ -890,10 +890,12 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
                 finalize_count = Some(call.count);
                 finalize_encrypted_senders = call.encryptedSenders;
             }
-            target => bail!(
-                "unsupported system transaction target {target:?} in Zone block {}",
-                header.number()
-            ),
+            target => {
+                bail!(
+                    "unsupported system transaction target {target:?} in Zone block {}",
+                    header.number()
+                );
+            }
         }
     }
 

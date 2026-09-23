@@ -1000,10 +1000,12 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
     let block_hash = header.hash_slow();
     let rpc_transactions = match block.transactions {
         BlockTransactions::Full(transactions) => transactions,
-        _ => bail!(
-            "Zone block {} did not return full transactions",
-            header.number()
-        ),
+        _ => {
+            bail!(
+                "Zone block {} did not return full transactions",
+                header.number()
+            );
+        }
     };
 
     let mut tempo_import = None;
@@ -1087,10 +1089,12 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
                 finalize_count = Some(call.count);
                 finalize_encrypted_senders = call.encryptedSenders;
             }
-            other => bail!(
-                "unsupported system transaction target {other:?} in Zone block {}",
-                header.number()
-            ),
+            other => {
+                bail!(
+                    "unsupported system transaction target {other:?} in Zone block {}",
+                    header.number()
+                );
+            }
         }
     }
 
