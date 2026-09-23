@@ -1305,6 +1305,11 @@ contract ZonePortal is IZonePortal {
         );
     }
 
+    /// @dev Resolve the proof verifier separately so test runtimes can substitute it.
+    function _proofVerifier() internal view virtual returns (IVerifier) {
+        return IVerifier(verifier);
+    }
+
     /*//////////////////////////////////////////////////////////////
                            BATCH SUBMISSION
     //////////////////////////////////////////////////////////////*/
@@ -1410,7 +1415,7 @@ contract ZonePortal is IZonePortal {
         }
 
         // Verify proof (handles both direct and ancestry modes)
-        bool valid = IVerifier(verifier)
+        bool valid = _proofVerifier()
             .verify(
                 zoneId,
                 tempoBlockNumber,

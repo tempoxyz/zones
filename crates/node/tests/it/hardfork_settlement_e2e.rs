@@ -28,7 +28,7 @@ use crate::utils::{
 };
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "T13 settlement requires a Nitro proof fixture"]
+#[ignore = "T13 migration replaces the mock portal runtime; settlement requires Nitro verification"]
 async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let activation = now_secs() + 60;

@@ -43,10 +43,11 @@ use tempo_chainspec::{
 };
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
-    initial_zone_factory_state,
+    t13_zone_factory_state,
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -197,6 +198,10 @@ alloy_sol_types::sol! {
 ///
 /// Requires `forge build` to have been run in `crates/contracts`.
 pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    forge_artifact_bytecode(contract, "bytecode")
+}
+
+fn forge_artifact_bytecode(contract: &str, field: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
@@ -204,16 +209,16 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
         format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let hex_str = artifact["bytecode"]["object"]
+    let hex_str = artifact[field]["object"]
         .as_str()
-        .ok_or_else(|| eyre::eyre!("missing bytecode in {contract} artifact"))?;
+        .ok_or_else(|| eyre::eyre!("missing {field} in {contract} artifact"))?;
     Ok(alloy_primitives::Bytes::from(
         alloy_primitives::hex::decode(hex_str)?,
     ))
 }
 
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    for account in initial_zone_factory_state(owner) {
+    for account in t13_zone_factory_state(owner) {
         let storage = account.storage.map(|(slot, value)| {
             BTreeMap::from([(
                 B256::from(slot.to_be_bytes()),
@@ -228,6 +233,29 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
                 .with_storage(storage),
         );
     }
+
+    // T13-at-genesis preserves this shared implementation. Only the proof call is mocked;
+    // the native factory, portal state transitions, and settlement certificates stay unchanged.
+    let portal_runtime = forge_artifact_bytecode("MockVerifierZonePortal", "deployedBytecode")?;
+    genesis
+        .alloc
+        .get_mut(&ZONE_PORTAL_IMPL_ADDRESS)
+        .unwrap()
+        .code = Some(portal_runtime);
+    genesis.alloc.insert(
+        address!("000000000000000000000000000000000000beef"),
+        GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(forge_artifact_bytecode(
+                "MockVerifier",
+                "deployedBytecode",
+            )?))
+            // Runtime allocation skips the constructor: initialize MockVerifier.shouldAccept.
+            .with_storage(Some(BTreeMap::from([(
+                B256::ZERO,
+                B256::with_last_byte(1),
+            )]))),
+    );
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
     let token_policy_slot = keccak256(
@@ -1326,12 +1354,6 @@ impl ZoneTestNode {
                 .expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
-        // Ordinary integration tests stay on T12; hardfork tests set their own activation.
-        genesis
-            .config
-            .extra_fields
-            .entry("t13Time".into())
-            .or_insert(serde_json::Value::Null);
         let chain_spec = ZoneChainSpec::from_genesis(genesis)?;
 
         let mut zone_node = ZoneNode::new(
@@ -1719,7 +1741,7 @@ impl L1TestNode {
         use tempo_zone_contracts::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
         let events = portal
-            .BatchSubmitted_0_filter()
+            .BatchSubmitted_1_filter()
             .from_block(0)
             .query()
             .await?;
@@ -2753,6 +2775,7 @@ impl L1TestNode {
     /// Start in T12 with the legacy shared runtimes; normal block execution installs T13.
     pub(crate) async fn start_with_t13(activation: u64) -> eyre::Result<Self> {
         use reth_chainspec::EthChainSpec as _;
+        use tempo_contracts::precompiles::initial_zone_factory_state;
         Self::start_with(|cfg| {
             let mut genesis = cfg.chain.genesis().clone();
             genesis
@@ -2760,6 +2783,9 @@ impl L1TestNode {
                 .extra_fields
                 .insert_value("t13Time".into(), activation)
                 .unwrap();
+            for account in initial_zone_factory_state(l1_dev_signer().address()) {
+                genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
+            }
             cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
             cfg.dev.block_time = None;
         })
