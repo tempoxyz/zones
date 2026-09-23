@@ -21,18 +21,18 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # main
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # main
+      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - name: Docker metadata for tempo-zone-profiling
         id: meta-tempo-zone
-        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # main
+        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           images: ${{ env.REGISTRY }}/tempo-zone
           bake-target: tempo-zone
@@ -41,7 +41,7 @@ jobs:
             type=sha,prefix=${{ github.event.inputs.tag }}-sha-
 
       - name: Log in to Container Registry
-        uses: tempoxyz/gh-actions/vendor/docker/login-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # main
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -51,7 +51,7 @@ jobs:
         run: echo "shortsha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker images
-        uses: tempoxyz/gh-actions/vendor/depot/bake-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # main
+        uses: tempoxyz/gh-actions/vendor/depot/bake-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           files: |
             docker/docker-bake.hcl
