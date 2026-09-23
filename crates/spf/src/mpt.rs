@@ -21,35 +21,48 @@ impl StatelessSparseTrie {
     /// Construct and validate a sparse trie from a flat witness node pool.
     pub(crate) fn new(
         state_root: B256,
-        node_pool: &[Bytes],
+        node_pool: Vec<Bytes>,
     ) -> Result<Self, StatelessSparseTrieError> {
-        // This is the flat-witness indexing step from `StatelessSparseTrie`.
-        let mut nodes = B256Map::default();
+        Self::new_with_node_pool(state_root, &IndexedTrieNodePool::new(node_pool)?)
+    }
 
-        for node in node_pool {
-            let node_hash = keccak256(node);
-            if nodes.insert(node_hash, node.clone()).is_some() {
-                return Err(StatelessSparseTrieError::DuplicateNodeHash { node_hash });
-            }
-        }
+    /// Construct and validate a sparse trie from a flat indexed witness node pool.
+    pub(crate) fn new_with_node_pool(
+        state_root: B256,
+        node_pool: &IndexedTrieNodePool,
+    ) -> Result<Self, StatelessSparseTrieError> {
+        let mut trie = Self::default();
+        trie.reset(state_root, node_pool)?;
+        Ok(trie)
+    }
 
-        let mut inner = SparseStateTrie::new();
+    /// Reset this trie and reveal the witness rooted at `state_root`.
+    ///
+    /// Preserves underlying allocations so the same trie can be reused for independent roots.
+    pub(crate) fn reset(
+        &mut self,
+        state_root: B256,
+        node_pool: &IndexedTrieNodePool,
+    ) -> Result<(), StatelessSparseTrieError> {
+        self.inner.clear();
         if state_root == EMPTY_ROOT_HASH {
-            inner.set_accounts_trie(RevealableSparseTrie::revealed_empty());
-            return Ok(Self { inner });
+            self.inner
+                .set_accounts_trie(RevealableSparseTrie::revealed_empty());
+            return Ok(());
         }
-        if !nodes.contains_key(&state_root) {
+        if !node_pool.nodes.contains_key(&state_root) {
             return Err(StatelessSparseTrieError::MissingStateRootNode { state_root });
         }
 
         guarded(|| {
-            let multiproof = DecodedMultiProofV2::from_witness(state_root, &nodes)
+            let multiproof = DecodedMultiProofV2::from_witness(state_root, &node_pool.nodes)
                 .map_err(|_| StatelessSparseTrieError::InvalidNodeEncoding)?;
-            inner
+            self.inner
                 .reveal_decoded_multiproof_v2(multiproof)
                 .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)?;
 
-            let actual_root = inner
+            let actual_root = self
+                .inner
                 .root(TrieNodeEpoch::UNMODIFIED)
                 .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)?;
             if actual_root != state_root {
@@ -59,7 +72,7 @@ impl StatelessSparseTrie {
                 });
             }
 
-            Ok(Self { inner })
+            Ok(())
         })
     }
 
@@ -223,6 +236,33 @@ impl StatelessSparseTrie {
             .get_account_value(&hashed_address)
             .map(|value| decode_hashed_account(value))
             .transpose()
+    }
+}
+
+impl Default for StatelessSparseTrie {
+    fn default() -> Self {
+        Self {
+            inner: SparseStateTrie::new(),
+        }
+    }
+}
+
+/// Flat witness nodes indexed by their hash.
+#[derive(Debug)]
+pub(crate) struct IndexedTrieNodePool {
+    nodes: B256Map<Bytes>,
+}
+
+impl IndexedTrieNodePool {
+    pub(crate) fn new(node_pool: Vec<Bytes>) -> Result<Self, StatelessSparseTrieError> {
+        let mut nodes = B256Map::default();
+        for node in node_pool {
+            let node_hash = keccak256(&node);
+            if nodes.insert(node_hash, node).is_some() {
+                return Err(StatelessSparseTrieError::DuplicateNodeHash { node_hash });
+            }
+        }
+        Ok(Self { nodes })
     }
 }
 
