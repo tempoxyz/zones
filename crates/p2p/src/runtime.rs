@@ -554,8 +554,9 @@ async fn run_commands(
                     continue;
                 }
 
-                if block.block.len() > MAX_MESSAGE_SIZE as usize {
-                    error!(target: "zone::p2p", block_size_bytes = block.block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
+                let encoded = block.encode();
+                if encoded.len() > MAX_MESSAGE_SIZE as usize {
+                    error!(target: "zone::p2p", block_size_bytes = encoded.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
                     continue;
                 }
 
@@ -570,13 +571,8 @@ async fn run_commands(
                             if peers.is_empty() {
                                 continue;
                             }
-                            let payload = if witnesses { block.encode() } else { block.block.clone() };
-                            if payload.len() > MAX_MESSAGE_SIZE as usize {
-                                error!(target: "zone::p2p", block_size_bytes = payload.len(), "Witnessed block exceeds the P2P message size limit; sending bare RLP");
-                                admitted.extend(senders.blocks.send(Recipients::Some(peers), block.block.clone(), true));
-                            } else {
-                                admitted.extend(senders.blocks.send(Recipients::Some(peers), payload, true));
-                            }
+                            let payload = if witnesses { encoded.clone() } else { block.block.clone() };
+                            admitted.extend(senders.blocks.send(Recipients::Some(peers), payload, true));
                         }
                         if !admitted.is_empty() || recipients.is_empty() {
                             break admitted;
