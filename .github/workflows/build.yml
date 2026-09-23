@@ -28,6 +28,5 @@ jobs:
     with:
       binaries: tempo-zone
       profile: ${{ inputs.profile || 'maxperf' }}
-      rust-toolchain: "1.96.0"
       runs-on: depot-ubuntu-latest-16
       retention-days: 90
