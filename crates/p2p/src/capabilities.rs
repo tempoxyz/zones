@@ -16,9 +16,6 @@ pub(crate) const ANNOUNCEMENT_TTL: Duration = Duration::from_secs(15);
 pub(crate) const LOCAL_CAPABILITIES_VERSION: u8 = 1;
 
 /// Shared by live replication and backfill; never persisted across local restarts.
-///
-/// Commonware does not expose connection generations to applications. Expiring announcements
-/// bounds stale support after a remote rollback, but is not an instantaneous disconnect fence.
 #[derive(Clone, Default)]
 pub(crate) struct PeerCapabilities(Arc<Mutex<HashMap<P2pPeerId, (u8, Instant)>>>);
 
