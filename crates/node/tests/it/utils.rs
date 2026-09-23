@@ -43,7 +43,7 @@ use tempo_chainspec::{
 };
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
-    ZONE_PORTAL_IMPL_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -198,10 +198,6 @@ alloy_sol_types::sol! {
 ///
 /// Requires `forge build` to have been run in `crates/contracts`.
 pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
-    forge_artifact_bytecode(contract, "bytecode")
-}
-
-fn forge_artifact_bytecode(contract: &str, field: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/contracts/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
@@ -209,9 +205,9 @@ fn forge_artifact_bytecode(contract: &str, field: &str) -> eyre::Result<alloy_pr
         format!("{contract} artifact not found – run `forge build` in crates/contracts")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let hex_str = artifact[field]["object"]
+    let hex_str = artifact["bytecode"]["object"]
         .as_str()
-        .ok_or_else(|| eyre::eyre!("missing {field} in {contract} artifact"))?;
+        .ok_or_else(|| eyre::eyre!("missing bytecode in {contract} artifact"))?;
     Ok(alloy_primitives::Bytes::from(
         alloy_primitives::hex::decode(hex_str)?,
     ))
@@ -234,28 +230,28 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
         );
     }
 
-    // T13-at-genesis preserves this shared implementation. Only the proof call is mocked;
-    // the native factory, portal state transitions, and settlement certificates stay unchanged.
-    let portal_runtime = forge_artifact_bytecode("MockVerifierZonePortal", "deployedBytecode")?;
-    genesis
-        .alloc
-        .get_mut(&ZONE_PORTAL_IMPL_ADDRESS)
-        .unwrap()
-        .code = Some(portal_runtime);
+    // The T13 native verifier shadows its Solidity stub. Run that same stub at an ordinary
+    // address and redirect only submitBatch's proof call; certificate domains stay canonical.
+    let mock_verifier = genesis.alloc[&ZONE_VERIFIER_ADDRESS].clone();
     genesis.alloc.insert(
         address!("000000000000000000000000000000000000beef"),
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(forge_artifact_bytecode(
-                "MockVerifier",
-                "deployedBytecode",
-            )?))
-            // Runtime allocation skips the constructor: initialize MockVerifier.shouldAccept.
-            .with_storage(Some(BTreeMap::from([(
-                B256::ZERO,
-                B256::with_last_byte(1),
-            )]))),
+        mock_verifier,
     );
+    let portal = genesis.alloc.get_mut(&ZONE_PORTAL_IMPL_ADDRESS).unwrap();
+    let mut code = portal.code.as_ref().unwrap().to_vec();
+    // (2**160 - 1) & sload(16): this unique sequence loads the proof-call target.
+    // Replace PUSH1 0x10; SLOAD with PUSH2 0xBEEF, preserving all jump offsets.
+    const VERIFIER_LOAD: [u8; 13] = alloy_primitives::hex!("600160a01b6001900360105416");
+    let mut matches = code
+        .windows(VERIFIER_LOAD.len())
+        .enumerate()
+        .filter_map(|(offset, bytes)| (bytes == VERIFIER_LOAD).then_some(offset));
+    let offset = matches
+        .next()
+        .ok_or_else(|| eyre::eyre!("portal verifier load changed"))?;
+    eyre::ensure!(matches.next().is_none(), "ambiguous portal verifier load");
+    code[offset + 9..offset + 12].copy_from_slice(&[0x61, 0xbe, 0xef]);
+    portal.code = Some(code.into());
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
     let token_policy_slot = keccak256(

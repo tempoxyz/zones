@@ -73,12 +73,12 @@ Starts an in-process Tempo L1 dev node via `L1TestNode::start()`, then connects
 a zone node via `ZoneTestNode::start_from_l1()`. The `L1Subscriber` receives
 real blocks over WebSocket.
 
-The default L1 starts at T13 with `MockVerifierZonePortal` installed at the shared
-portal implementation address in genesis. It preserves portal behavior and
-certificate checks, but routes proof verification to `MockVerifier` at `0xBEEF`.
-The native Nitro verifier and prewarming remain enabled. `forge build` supplies
-both test runtimes. The T13 migration-and-settlement test remains ignored because
-activation replaces the genesis override with the canonical portal runtime.
+The default L1 starts at T13. Its genesis copies the bundled Solidity verifier
+stub to `0xBEEF` and patches the shared portal bytecode's proof-call target to use
+that address. The patch preserves code length and requires a unique matching
+instruction sequence. Portal state, certificate domains, native precompiles, and
+prewarming retain their normal behavior. The T13 migration-and-settlement test
+remains ignored because activation replaces the patched portal runtime.
 
 **Genesis patching in `start_from_l1()`:**
 

@@ -3001,48 +3001,6 @@ contract ZonePortalTest is BaseTest {
         );
     }
 
-    function test_submitBatch_genesisMockVerifierRuntime() public {
-        address mockVerifier = address(0xBEEF);
-        vm.etch(
-            ZONE_PORTAL_IMPL_ADDRESS,
-            vm.getDeployedCode("MockVerifierZonePortal.sol:MockVerifierZonePortal")
-        );
-        vm.etch(mockVerifier, vm.getDeployedCode("MockVerifier.sol:MockVerifier"));
-        // The canonical verifier rejects this empty proof. Only the test runtime's target differs.
-        vm.mockCall(
-            ZONE_VERIFIER_ADDRESS,
-            abi.encodeWithSelector(IVerifier.verify.selector),
-            abi.encode(false)
-        );
-        assertEq(portal.verifier(), ZONE_VERIFIER_ADDRESS);
-        vm.roll(block.number + 1);
-        BlockTransition memory transition = BlockTransition({
-            prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("mock-verified state")
-        });
-        DepositQueueTransition memory deposits = DepositQueueTransition({
-            prevProcessedHash: bytes32(0),
-            nextProcessedHash: bytes32(0),
-            prevDepositNumber: 0,
-            nextDepositNumber: 0
-        });
-
-        // A rejecting mock must still prevent the portal transition.
-        vm.expectRevert(IZonePortal.InvalidProof.selector);
-        _submitBatch(
-            portal, uint64(block.number - 1), 0, transition, deposits, bytes32(0), hex"01", ""
-        );
-        assertEq(portal.blockHash(), transition.prevBlockHash);
-
-        // Match the Rust genesis allocation of MockVerifier.shouldAccept.
-        vm.store(mockVerifier, bytes32(0), bytes32(uint256(1)));
-        _submitBatch(
-            portal, uint64(block.number - 1), 0, transition, deposits, bytes32(0), hex"01", ""
-        );
-        assertEq(portal.blockHash(), transition.nextBlockHash);
-        assertEq(portal.withdrawalBatchIndex(), 1);
-        assertEq(portal.verifier(), ZONE_VERIFIER_ADDRESS);
-    }
-
     function test_submitBatch_revertsOnInvalidProof() public {
         vm.mockCall(
             ZONE_VERIFIER_ADDRESS,
