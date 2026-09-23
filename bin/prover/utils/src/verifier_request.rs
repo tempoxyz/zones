@@ -142,16 +142,8 @@ mod tests {
         let (witness, response) = fixture();
         let typed_request = build(&witness, &response).unwrap();
         let request = serde_json::to_value(&typed_request).unwrap();
-        assert_eq!(request["chainId"], 31319);
         assert_eq!(request["arguments"].as_object().unwrap().len(), 12);
         let tx = &request["rpc"]["params"][0];
-        assert_eq!(
-            tx["from"],
-            json!(address!("5ad0000000000000000000000000000000000002"))
-        );
-        assert_eq!(tx["to"], json!(ZONE_VERIFIER_ADDRESS));
-        assert_eq!(request["rpc"]["method"], "eth_call");
-        assert_eq!(request["rpc"]["params"][1], "latest");
         let data: Bytes = serde_json::from_value(tx["data"].clone()).unwrap();
         // Compare the entire envelope, including omissions, to the previous wire shape.
         assert_eq!(
