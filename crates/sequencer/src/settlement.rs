@@ -1824,9 +1824,15 @@ pub(crate) async fn fetch_finalized_batch<P: ZoneSequencerProvider>(
             }
             if log.topics().first() == Some(&IZoneOutbox::ForcedWithdrawalRequested::SIGNATURE_HASH)
             {
-                requests.push(WithdrawalRequest::Forced(
-                    IZoneOutbox::ForcedWithdrawalRequested::decode_log(log)?.data,
-                ));
+                let event = IZoneOutbox::ForcedWithdrawalRequested::decode_log(log)
+                    .map_err(|err| {
+                        eyre::eyre!(
+                            "invalid ForcedWithdrawalRequested log in zone block {}: {err}",
+                            target.block_number
+                        )
+                    })?
+                    .data;
+                requests.push(WithdrawalRequest::Forced(event));
                 continue;
             }
             if log.topics().first() != Some(&IZoneOutbox::WithdrawalRequested::SIGNATURE_HASH) {

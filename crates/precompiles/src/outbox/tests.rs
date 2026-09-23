@@ -931,11 +931,7 @@ fn fallback_recipient_nonce_is_private_and_consumed_once_by_inbox() -> eyre::Res
 }
 
 impl Harness {
-    fn forced(
-        &mut self,
-        caller: Address,
-        amount: u128,
-    ) -> Result<Withdrawal, ForcedWithdrawalError> {
+    fn forced(&mut self, caller: Address, amount: u128) -> Result<(), ForcedWithdrawalError> {
         let l1 = L1State::new(self.l1.clone(), PORTAL);
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
@@ -1029,7 +1025,7 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
             token.total_supply()
         })?;
     }
-    let forced = h.forced(ZONE_INBOX_ADDRESS, 999_900).unwrap();
+    h.forced(ZONE_INBOX_ADDRESS, 999_900).unwrap();
     let event = h
         .ctx
         .journaled_state
@@ -1041,11 +1037,13 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
                 .flatten()
         })
         .expect("forced withdrawal event");
-    assert_eq!(Withdrawal::from_forced_requested_event(&event.data), forced);
+    // Settlement rebuilds the L1 withdrawal from this event alone.
+    let forced = Withdrawal::from_forced_requested_event(&event.data);
     assert_eq!(
         forced.senderTag,
         Withdrawal::sender_tag(ALICE, B256::repeat_byte(7), forced.fallbackNonce)
     );
+    assert_eq!((forced.token, forced.to), (h.token, BOB));
     assert_eq!(forced.fallbackNonce, 2);
     assert_eq!(forced.amount, 999_900);
     assert_eq!(h.balance_of(ALICE)?, U256::ZERO);
@@ -1055,10 +1053,7 @@ fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() 
         let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> TempoResult<()> {
             let token = TIP20Token::from_address(h.token)?;
-            assert_eq!(
-                token.total_supply()?,
-                supply_before - U256::from(forced.amount)
-            );
+            assert_eq!(token.total_supply()?, supply_before - U256::from(999_900));
             assert_eq!(
                 token.allowance(ITIP20::allowanceCall {
                     owner: ALICE,
@@ -1266,10 +1261,10 @@ fn forced_withdrawal_preserves_outer_rollback() -> eyre::Result<()> {
             recipient: BOB,
             amount: 1_000_000,
         };
-        let withdrawal = outbox
+        outbox
             .request_forced_withdrawal(&l1, ZONE_INBOX_ADDRESS, request)
             .unwrap();
-        assert_eq!(outbox.fallback_recipient(withdrawal.fallbackNonce)?, ALICE);
+        assert_eq!(outbox.fallback_recipient(1)?, ALICE);
         // A later fatal inbox error must be able to roll back an already committed helper.
         drop(outer);
         assert_eq!(

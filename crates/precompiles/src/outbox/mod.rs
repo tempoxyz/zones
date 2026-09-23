@@ -151,9 +151,14 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn enqueue(&mut self, pending: PendingWithdrawal, fee: u128) -> ZoneResult<()> {
+    /// Append `pending` to the withdrawal queue, emitting the event built for its queue index.
+    fn enqueue(
+        &mut self,
+        pending: PendingWithdrawal,
+        event: impl FnOnce(&PendingWithdrawal, u64) -> ZoneOutboxEvent,
+    ) -> ZoneResult<()> {
         let index = self.next_withdrawal_index.read()?;
-        self.emit_event(pending.requested_event(index, fee))?;
+        self.emit_event(event(&pending, index))?;
 
         self.pending_withdrawals.push(pending)?;
         self.next_withdrawal_index.write(
@@ -162,6 +167,18 @@ impl ZoneOutbox {
                 .ok_or_else(TempoPrecompileError::under_overflow)?,
         )?;
         Ok(())
+    }
+
+    /// Reserve the next fallback nonce and record the zone recipient for its bounce-back.
+    fn allocate_fallback_nonce(&mut self, recipient: Address) -> ZoneResult<u64> {
+        let nonce = self
+            .last_fallback_nonce
+            .read()?
+            .checked_add(1)
+            .ok_or_else(TempoPrecompileError::under_overflow)?;
+        self.last_fallback_nonce.write(nonce)?;
+        self.fallback_recipients[nonce].write(recipient)?;
+        Ok(nonce)
     }
 
     fn request_withdrawal<P: L1StorageReader>(
@@ -213,16 +230,10 @@ impl ZoneOutbox {
             }
         }
 
-        let fallback_nonce = self
-            .last_fallback_nonce
-            .read()?
-            .checked_add(1)
-            .ok_or_else(TempoPrecompileError::under_overflow)?;
-        self.last_fallback_nonce.write(fallback_nonce)?;
-        self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
+        let fallback_nonce = self.allocate_fallback_nonce(call.zoneFallbackRecipient)?;
         self.enqueue(
             PendingWithdrawal::from_request(caller, current_tx_hash, fallback_nonce, call),
-            fee,
+            |pending, index| pending.requested_event(index, fee),
         )
     }
 
@@ -256,7 +267,10 @@ impl ZoneOutbox {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
 
-        self.enqueue(PendingWithdrawal::from_bounce_back(call), 0)
+        self.enqueue(
+            PendingWithdrawal::from_bounce_back(call),
+            |pending, index| pending.requested_event(index, 0),
+        )
     }
 
     pub(crate) fn consume_fallback_recipient(
@@ -465,6 +479,17 @@ impl PendingWithdrawal {
             self.fallback_nonce,
             self.callback_data.clone(),
             self.reveal_to.clone(),
+        )
+    }
+
+    fn forced_requested_event(&self, index: u64) -> ZoneOutboxEvent {
+        ZoneOutboxEvent::forced_withdrawal_requested(
+            index,
+            self.token,
+            Withdrawal::sender_tag(self.sender, self.tx_hash, self.fallback_nonce),
+            self.to,
+            self.amount,
+            self.fallback_nonce,
         )
     }
 

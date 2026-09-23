@@ -51,7 +51,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
         request: ForcedWithdrawalRequest,
-    ) -> Result<Withdrawal, ForcedWithdrawalError> {
+    ) -> Result<(), ForcedWithdrawalError> {
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZonePrecompileError::from(ZoneOutboxError::only_zone_inbox()).into());
         }
@@ -124,39 +124,18 @@ impl ZoneOutbox {
             .burn(self.address, ITIP20::burnCall { amount: amount256 })
             .map_err(ForcedWithdrawalError::token_policy)?;
 
-        let nonce = self
-            .last_fallback_nonce
-            .read()?
-            .checked_add(1)
-            .ok_or_else(TempoPrecompileError::under_overflow)?;
-        let index = self.next_withdrawal_index.read()?;
-        self.last_fallback_nonce.write(nonce)?;
-        self.fallback_recipients[nonce].write(account)?;
+        let fallback_nonce = self.allocate_fallback_nonce(account)?;
         let pending = PendingWithdrawal {
             token: request.token,
             sender: account,
             tx_hash: private_request_hash,
             to: recipient,
             amount,
-            fallback_nonce: nonce,
+            fallback_nonce,
             ..Default::default()
         };
-        let withdrawal = pending.clone().into_withdrawal(Bytes::new())?;
-        self.pending_withdrawals.push(pending)?;
-        self.next_withdrawal_index.write(
-            index
-                .checked_add(1)
-                .ok_or_else(TempoPrecompileError::under_overflow)?,
-        )?;
-        self.emit_event(ZoneOutboxEvent::forced_withdrawal_requested(
-            index,
-            request.token,
-            withdrawal.senderTag,
-            recipient,
-            amount,
-            nonce,
-        ))?;
+        self.enqueue(pending, PendingWithdrawal::forced_requested_event)?;
         checkpoint.commit();
-        Ok(withdrawal)
+        Ok(())
     }
 }
