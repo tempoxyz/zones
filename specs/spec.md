@@ -897,7 +897,7 @@ ASCII("forced-exit-v1") || portal[20] || keyIndex[32, big-endian]
 
 ### Forced-Exit Admission
 
-`requestForcedExit(token, keyIndex, encrypted)` requires version 1 activation, an unpaused portal, an eligible fee payer under the ordinary depositor access rules, an enabled token, a valid current or unexpired encryption key, a valid compressed ephemeral point, a bounded ciphertext, and shared public inbox capacity. Token `depositsActive` controls principal deposits and does not prevent forced-exit admission.
+`requestForcedExit(token, keyIndex, encrypted)` requires version 1 activation (see [Network Upgrades and Hard Fork Activation](#network-upgrades-and-hard-fork-activation)), no withdrawal processing in progress (it cannot be called from a withdrawal callback), an unpaused portal, an eligible fee payer under the ordinary depositor access rules, an enabled token, a valid current or unexpired encryption key, a valid compressed ephemeral point, a bounded ciphertext, and shared public inbox capacity. Token `depositsActive` controls principal deposits and does not prevent forced-exit admission.
 
 The portal transfers `FORCED_EXIT_COMPENSATION = 100_000` base units (0.1 of a six-decimal TIP-20 token) from the fee payer and immediately pays the current admin in that token. The fee payer needs L1 balance and approval for this compensation. Either transfer failure, including failure to deliver directly to the admin, reverts the entire admission. No withdrawal principal is deposited, and compensation is not refunded for rejection, an empty balance, or failed delivery.
 
@@ -2420,7 +2420,7 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its read method
 
 ## Network Upgrades and Hard Fork Activation
 
-Forced-exit admission must remain disabled until the coordinated L1 runtime and Zone execution upgrade supports the complete request, execution, settlement, and recovery path. Version 1 activation is protocol-controlled, not an admin toggle. Validate the maximum admitted mixed workload and fork-boundary behavior against the final runtime before enabling admission.
+Forced-exit admission is disabled until the portal admin calls `activateForcedExits()`, which irreversibly sets `forcedExitVersion` to 1. Activation is an admin-controlled operational step, not a hard-fork gate. The admin MUST activate only after the coordinated L1 runtime and Zone execution upgrade supporting the complete request, execution, settlement, and recovery path is live. Activating earlier admits requests that Zone nodes reject as invalid transitions, stalling `advanceTempo` on the shared queue. Validate the maximum admitted mixed workload and fork-boundary behavior against the final runtime before activating.
 
 Zones activate hard fork upgrades in lockstep with Tempo. A zone block's timestamp selects its execution rules. The node MUST NOT produce a block under new rules until the finalized Tempo chain has activated the same fork, even when the block imports an older Tempo checkpoint during catch-up.
 

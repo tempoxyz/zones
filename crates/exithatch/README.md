@@ -31,16 +31,25 @@ helpers. Stateful execution lives in the Zone inbox and outbox precompiles.
 
 ## Activation
 
-L1 admission activates when a coordinated Tempo hard fork installs the forced-exit
+Forced exits require a coordinated Tempo hard fork that installs the forced-exit
 portal runtime. Historical portal runtimes remain in use before that fork and do
-not support forced requests. `forcedExitVersion()` is a pure format accessor that
-always returns 1 in the new runtime; it is not an activation flag. There is no
-version storage slot, operator enable transaction, or activation-time version bump.
+not support forced requests. After the fork, each portal's `forcedExitVersion`
+storage value starts at 0 and `requestForcedExit` reverts with
+`ForcedExitsNotActivated`. The portal admin enables admission by calling
+`activateForcedExits()`, which irreversibly sets `forcedExitVersion` to 1 and emits
+`ForcedExitsActivated`.
+
+Zone execution accepts a forced request only when the Zone block runs under the
+forced-exit fork and the portal's `forcedExitVersion` is 1 at the imported Tempo
+block. The admin must activate only after the Zone node and prover are upgraded;
+an older node cannot track forced entries in the deposit queue and stalls on the
+first one.
 
 ## Status and usage
 
-Production admission remains disabled until a coordinated protocol upgrade
-activates it. Native end-to-end tests use an explicitly activated test portal.
+Production admission remains disabled until the coordinated hard fork is live and
+the portal admin activates it. Native end-to-end tests use an explicitly activated
+test portal.
 The current L1 `Verifier` is a stub; execution-proof enforcement is not provided
 by this implementation.
 
