@@ -157,7 +157,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  RUSTFLAGS: -C target-cpu=native
+  RUSTFLAGS: -C target-cpu=native -C force-frame-pointers=yes
   RUSTC_WRAPPER: sccache
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
