@@ -15,7 +15,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
-use eyre::WrapErr as _;
+use eyre::{OptionExt as _, WrapErr as _};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
@@ -38,8 +38,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    SettlementProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer,
+    SettlementManager, SettlementProverConfig, ZoneSequencerConfig, ZoneSequencerHandle,
+    ZoneSequencerProvider, resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -53,7 +53,7 @@ use crate::{
     replication::{
         BroadcasterShutdown, broadcast_persisted_blocks, collect_follower_settlement_signatures,
     },
-    settlement_attestation::{AttestationContext, collect_leader_settlements},
+    settlement_attestation::AttestationContext,
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
 };
 
@@ -84,6 +84,7 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub commands: mpsc::Sender<P2pCommand>,
     pub backfill_commands: mpsc::Sender<BackfillCommand>,
     pub attestation: AttestationContext,
+    pub settlements: Option<SettlementManager>,
     pub portal_address: Address,
     /// Sequencer resources constructed unconditionally at startup; activation is gated by
     /// the leader generation. `None` means this node can never lead.
@@ -972,8 +973,6 @@ where
             // leader before promotion, so recovery remains bounded by one configured batch
             // interval (120 Zone blocks in production) rather than replaying history from genesis.
 
-            // Remove any submitted attestations for the portal-confirmed anchor, so the new leader
-            // can start from here.
             let portal_confirmed_height = portal_anchor.block_number;
             info!(
                 target: "zone::role",
@@ -981,10 +980,10 @@ where
                 portal_block_hash = %portal_anchor.block_hash,
                 "Seeded leader settlement recovery from the portal anchor"
             );
-            context
-                .attestation
-                .store
-                .remove_submitted(portal_confirmed_height);
+            let settlements = context
+                .settlements
+                .clone()
+                .ok_or_eyre("leader has no settlement manager")?;
 
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
@@ -1020,13 +1019,11 @@ where
             });
 
             let server_token = token.clone();
-            let provider = context.provider.clone();
-            let attestation = context.attestation.clone();
+            let signature_settlements = settlements.clone();
             tasks.spawn(async move {
                 collect_follower_settlement_signatures(
-                    provider,
                     sync_rx,
-                    attestation,
+                    signature_settlements,
                     server_token,
                 )
                 .await;
@@ -1040,24 +1037,6 @@ where
                     () = import_token.cancelled() => TaskEnd::Ended("transaction-import (cancelled)"),
                     () = insert_forwarded_transactions(pool, transactions_rx) => {
                         TaskEnd::Ended("transaction-import")
-                    }
-                }
-            });
-
-            let provider = context.provider.clone();
-            let commands = context.commands.clone();
-            let attestation = context.attestation.clone();
-            let settlement_token = token.clone();
-            tasks.spawn(async move {
-                tokio::select! {
-                    () = settlement_token.cancelled() => TaskEnd::Ended("settlement-collection (cancelled)"),
-                    () = collect_leader_settlements(
-                        provider,
-                        commands,
-                        attestation,
-                        portal_confirmed_height,
-                    ) => {
-                        TaskEnd::Ended("settlement-collection")
                     }
                 }
             });
@@ -1081,6 +1060,7 @@ where
                     zone_provider,
                     collector,
                     prover_config,
+                    Some(settlements),
                     sequencer_token.clone(),
                 )
                 .await;

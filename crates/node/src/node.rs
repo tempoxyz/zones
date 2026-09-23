@@ -104,7 +104,7 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
+    BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, SettlementManager,
     SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
     attestation::AttestationDomain, create_proof_collector, spawn_shadow_prover,
     spawn_zone_sequencer,
@@ -571,6 +571,7 @@ struct P2PRuntime {
     commands: Sender<P2pCommand>,
     backfill_commands: Sender<BackfillCommand>,
     attestation: AttestationContext,
+    settlements: Option<SettlementManager>,
     schedule: LeadershipSchedule,
     local_ed25519_public_key: P2pPeerId,
     role_status: SharedRoleStatus,
@@ -950,6 +951,7 @@ where
             commands,
             backfill_commands,
             attestation,
+            settlements,
             schedule,
             local_ed25519_public_key,
             role_status,
@@ -975,7 +977,6 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
-                    attestation.store.clone(),
                     proof_collector.clone(),
                     prover_config.clone(),
                 )?),
@@ -996,6 +997,7 @@ where
                 commands,
                 backfill_commands,
                 attestation,
+                settlements,
                 portal_address: self.portal_address,
                 sequencer,
                 peer_tips,
@@ -1046,7 +1048,6 @@ where
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
-                None,
                 proof_collector,
                 prover_config,
             )
@@ -1314,7 +1315,6 @@ where
             pinned_sequencer_set_version,
             config.block_attestation_signer(),
             config.block_attestation_addresses(),
-            AttestationStore::default(),
             l1_provider.clone(),
             anchor_config,
         );
@@ -1327,6 +1327,18 @@ where
             tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
         let (sinks, commands, backfill_commands) =
             Self::launch_p2p_network(config, network_id, task_executor, backfill_requests_tx)?;
+
+        let settlements = attestation.signer.clone().map(|signer| {
+            SettlementManager::new(
+                attestation.domain,
+                attestation.pinned_sequencer_set_version,
+                signer,
+                attestation.addresses.clone(),
+                attestation.l1_provider.clone(),
+                attestation.anchor_config,
+                commands.clone(),
+            )
+        });
 
         let role_status: SharedRoleStatus = Default::default();
         let peer_tips = PeerTipRegistry::default();
@@ -1373,6 +1385,7 @@ where
             commands,
             backfill_commands,
             attestation,
+            settlements,
             schedule,
             local_ed25519_public_key,
             role_status,
@@ -1462,7 +1475,6 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        attestation_store: AttestationStore,
         proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
@@ -1476,7 +1488,6 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store: Some(attestation_store),
         };
         Ok(LeaderSequencerDeps {
             config,
@@ -1655,7 +1666,6 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         sequencer_addr: Address,
-        attestation_store: Option<AttestationStore>,
         proof_collector: Option<ProofCollectorHandle>,
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<()> {
@@ -1670,7 +1680,6 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store,
         };
         let l1_transaction_signer = config
             .l1_transaction_signer
@@ -1682,6 +1691,7 @@ where
             zone_provider,
             proof_collector,
             prover_config,
+            None,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;

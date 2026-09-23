@@ -630,6 +630,7 @@ where
                 provider,
                 None,
                 None,
+                None,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
@@ -3662,7 +3663,6 @@ pub(crate) async fn spawn_sequencer_with_config(
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
         batch_anchor_config,
-        attestation_store: None,
     };
 
     zone.spawn_sequencer(config, sequencer_signer).await

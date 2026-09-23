@@ -1,6 +1,6 @@
-//! Batch-boundary settlement attestation construction and leader-side proposal recovery.
+//! Batch-boundary settlement attestation construction and validation.
 
-use std::{collections::HashMap, future::Future, time::Duration};
+use std::collections::HashMap;
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
@@ -9,26 +9,20 @@ use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent as _, SolValue as _};
 use eyre::{OptionExt as _, WrapErr as _};
-use futures::StreamExt as _;
-use reth_chain_state::PersistedBlockSubscriptions;
 use reth_provider::HeaderProvider;
-use reth_storage_api::{BlockNumReader, ReceiptProvider};
+use reth_storage_api::ReceiptProvider;
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneOutbox, LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
     ZonePortal,
 };
-use tokio::sync::{mpsc, watch};
-use tracing::{debug, info};
-use zone_p2p::P2pCommand;
+use tracing::info;
 use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 
 use zone_sequencer::{
     BatchAnchorConfig, SettlementAbi,
-    attestation::{
-        AttestationDomain, AttestationStore, SettlementAttestation, SignedSettlementAttestation,
-    },
+    attestation::{AttestationDomain, SettlementAttestation},
 };
 
 /// Shared signing and L1-validation context for settlement attestations.
@@ -40,7 +34,6 @@ pub(crate) struct AttestationContext {
     /// `None` on an rpc-only member: it holds no individual key and never signs.
     pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-    pub(crate) store: AttestationStore,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) anchor_config: BatchAnchorConfig,
 }
@@ -51,7 +44,6 @@ impl AttestationContext {
         pinned_sequencer_set_version: Option<u64>,
         signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-        store: AttestationStore,
         l1_provider: DynProvider<TempoNetwork>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
@@ -60,15 +52,11 @@ impl AttestationContext {
             pinned_sequencer_set_version,
             signer,
             addresses,
-            store,
             l1_provider,
             anchor_config,
         }
     }
 }
-
-/// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
-const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Check the manifest's settlement quorum against `ZonePortal` before any role task starts.
 ///
@@ -434,260 +422,6 @@ fn validate_settlement_anchor_height(
     Ok(())
 }
 
-/// Long-running async task that detects persisted batch boundaries and broadcasts settlement
-/// proposals to followers. At each boundary, it signs the proposal locally and initiates follower
-/// attestation collection; follower responses are received by the P2P sync task and inserted into
-/// the shared attestation store.
-pub(crate) async fn collect_leader_settlements<P>(
-    provider: P,
-    commands: mpsc::Sender<P2pCommand>,
-    context: AttestationContext,
-    portal_confirmed_height: u64,
-) where
-    P: PersistedBlockSubscriptions
-        + BlockNumReader
-        + HeaderProvider<Header = TempoHeader>
-        + ReceiptProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    // Subscribe before reading the persisted head, then reconcile through that head. Reth's
-    // persisted-block stream is latest-value based, so notifications are wake-ups rather than a
-    // lossless sequence of every persisted block.
-    let mut persisted = provider.persisted_block_stream();
-    let store = &context.store;
-    let mut submitted_heights = store.subscribe_submitted_height();
-    let head = match provider.last_block_number() {
-        Ok(head) => head,
-        Err(err) => {
-            tracing::error!(target: "zone::p2p", %err, "Failed reading head for settlement recovery");
-            return;
-        }
-    };
-
-    // Start at the block after the portal-confirmed anchor.
-    let recovery_start = portal_confirmed_height.saturating_add(1);
-    let mut pending_boundary =
-        propose_persisted_settlement_range(&provider, &commands, &context, recovery_start, head)
-            .await;
-
-    let mut last_scanned = head;
-    let mut retry = tokio::time::interval(SETTLEMENT_RETRY_INTERVAL);
-    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            tip = persisted.next() => {
-                let Some(tip) = tip else { return };
-                if tip.number < last_scanned {
-                    tracing::error!(target: "zone::p2p", persisted = tip.number, last_scanned, "Persisted zone head moved backwards");
-                    return;
-                }
-
-                if pending_boundary.is_none() {
-                    pending_boundary = propose_persisted_settlement_range(
-                        &provider,
-                        &commands,
-                        &context,
-                        last_scanned.saturating_add(1),
-                        tip.number,
-                    ).await;
-                }
-                last_scanned = tip.number;
-            }
-            submitted = wait_for_submitted_height(
-                &mut submitted_heights,
-                pending_boundary.unwrap_or(u64::MAX),
-            ), if pending_boundary.is_some() => {
-                let submitted = match submitted {
-                    Ok(submitted) => submitted,
-                    Err(err) => {
-                        tracing::error!(target: "zone::p2p", %err, "Settlement submission notification channel closed");
-                        return;
-                    }
-                };
-                let head = match provider.last_block_number() {
-                    Ok(head) => head,
-                    Err(err) => {
-                        tracing::warn!(target: "zone::p2p", %err, "Failed reading persisted head after settlement confirmation");
-                        continue;
-                    }
-                };
-                pending_boundary = propose_persisted_settlement_range(
-                    &provider,
-                    &commands,
-                    &context,
-                    submitted.saturating_add(1),
-                    head,
-                ).await;
-                last_scanned = head;
-            }
-            _ = retry.tick(), if pending_boundary.is_some() => {
-                let number = pending_boundary.expect("guarded by is_some");
-                match propose_settlement(&provider, number, &commands, &context).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // The retained candidate only failed before we could determine whether it
-                        // was a boundary. Once a retry classifies it as an ordinary block, resume
-                        // the startup scan after it instead of stranding the rest of the range
-                        // behind last_scanned.
-                        let head = match provider.last_block_number() {
-                            Ok(head) => head,
-                            Err(err) => {
-                                debug!(target: "zone::p2p", %err, "Failed reading head while resuming settlement recovery");
-                                continue;
-                            }
-                        };
-                        pending_boundary = propose_persisted_settlement_range(
-                            &provider,
-                            &commands,
-                            &context,
-                            number.saturating_add(1),
-                            head,
-                        )
-                        .await;
-                        last_scanned = head;
-                    }
-                    Err(err) => {
-                        debug!(target: "zone::p2p", %err, height = number, "Settlement proposal retry is not currently valid");
-
-                        // A successful submitBatch makes the previously pending proposal stale.
-                        // Walk the already-persisted boundaries after it so the next batch can be
-                        // proposed even when the live tip is now far ahead of the portal tip.
-                        let head = match provider.last_block_number() {
-                            Ok(head) => head,
-                            Err(err) => {
-                                debug!(target: "zone::p2p", %err, "Failed reading head while advancing settlement proposal");
-                                continue;
-                            }
-                        };
-                        for candidate in number.saturating_add(1)..=head {
-                            match propose_settlement(&provider, candidate, &commands, &context).await {
-                                Ok(true) => {
-                                    pending_boundary = Some(candidate);
-                                    break;
-                                }
-                                Ok(false) => {}
-                                Err(err) => debug!(target: "zone::p2p", %err, height = candidate, "Skipped non-current settlement boundary while advancing"),
-                            }
-                        }
-                        last_scanned = head;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Wait until the submitter or portal resync confirms at least `pending_height`.
-async fn wait_for_submitted_height(
-    submitted_heights: &mut watch::Receiver<u64>,
-    pending_height: u64,
-) -> Result<u64, watch::error::RecvError> {
-    loop {
-        let submitted_height = *submitted_heights.borrow_and_update();
-        if submitted_height >= pending_height {
-            return Ok(submitted_height);
-        }
-        submitted_heights.changed().await?;
-    }
-}
-
-/// Propose the first batch boundary in an already-persisted range.
-///
-/// A failed candidate is retained for timer-based retry so a transient L1 failure cannot strand
-/// it when no further persisted-block notification arrives.
-async fn propose_persisted_settlement_range<P>(
-    provider: &P,
-    commands: &mpsc::Sender<P2pCommand>,
-    context: &AttestationContext,
-    start: u64,
-    end: u64,
-) -> Option<u64>
-where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
-{
-    scan_settlement_range(start, end, |candidate| {
-        propose_settlement(provider, candidate, commands, context)
-    })
-    .await
-}
-
-async fn scan_settlement_range<F, Fut>(start: u64, end: u64, mut propose: F) -> Option<u64>
-where
-    F: FnMut(u64) -> Fut,
-    Fut: Future<Output = eyre::Result<bool>>,
-{
-    for candidate in start..=end {
-        match propose(candidate).await {
-            Ok(true) => return Some(candidate),
-            Ok(false) => {}
-            Err(err) => {
-                tracing::warn!(target: "zone::p2p", %err, height = candidate, "Failed proposing settlement boundary");
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Before we settle on L1 with `submitBatch`, we need to collect follower signatures for this
-/// batch. Create a settlement proposal and send it to followers, who will sign and return a
-/// SettlementAttestation that will be sent along with the submitBatch for the zoneportal's
-/// on-chain quorum.
-async fn propose_settlement<P>(
-    provider: &P,
-    number: u64,
-    commands: &mpsc::Sender<P2pCommand>,
-    context: &AttestationContext,
-) -> eyre::Result<bool>
-where
-    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
-{
-    let Some(commitments) = block_commitments(provider, number)? else {
-        return Ok(false);
-    };
-    if commitments.withdrawal.is_none() {
-        return Ok(false);
-    }
-    let anchor = context
-        .store
-        .prepared_anchor(number)
-        .ok_or_else(|| eyre::eyre!("zone monitor has not prepared settlement boundary {number}"))?;
-    let Some(attestation) = build_settlement_attestation(
-        provider,
-        number,
-        context,
-        (
-            anchor.block_number(commitments.tempo_block_number),
-            anchor.block_hash(),
-        ),
-    )
-    .await?
-    else {
-        return Ok(false);
-    };
-    let signer_key = context
-        .signer
-        .as_ref()
-        .ok_or_eyre("this node holds no individual secp256k1 key, so it cannot settle")?;
-    let signed =
-        SignedSettlementAttestation::sign(attestation.clone(), context.domain, signer_key)?;
-    let signer = signed.recover_signer(context.domain)?;
-    let (_, signatures) = context
-        .store
-        .insert_settlement(context.domain, signer, signed);
-    commands
-        .send(P2pCommand::BroadcastSettlementProposal(
-            attestation.encode(),
-        ))
-        .await
-        .wrap_err("P2P command channel closed")?;
-    info!(target: "zone::p2p", height = number, %signer, signatures, "Signed and broadcast settlement proposal");
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,14 +429,9 @@ mod tests {
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_provider::test_utils::MockEthProvider;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    };
     use tempo_alloy::TempoNetwork;
     use tempo_primitives::{TempoPrimitives, TempoReceipt, TempoTxType};
     use zone_p2p::ZoneManifest;
-    use zone_sequencer::attestation::AttestationStore;
 
     #[test]
     fn settlement_anchor_accepts_current_tip_and_rejects_future() {
@@ -906,7 +635,6 @@ mod tests {
             Some(1),
             None,
             HashMap::new(),
-            AttestationStore::default(),
             ProviderBuilder::new_with_network::<TempoNetwork>()
                 .connect_mocked_client(l1.clone())
                 .erased(),
@@ -976,7 +704,6 @@ mod tests {
                 attestation.tokenEnablementTransitionHash,
                 SettlementAbi::T13.token_transition_hash((number - 1) * 3, number * 3)
             );
-            assert_eq!(*context.store.subscribe_submitted_height().borrow(), 0);
             assert!(l1.read_q().is_empty());
             previous_tip = next_tip;
             previous_deposit = next_deposit;
@@ -1077,106 +804,5 @@ mod tests {
         assert!(err.to_string().contains("startup-pinned version 7"));
         validate_sequencer_set_version(None, 8)
             .expect("synthetic nodes without a Portal have no pinned version");
-    }
-
-    #[tokio::test]
-    async fn startup_recovery_retries_first_erroring_boundary() {
-        let failed_once = Arc::new(AtomicBool::new(false));
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let propose = |number| {
-            let failed_once = failed_once.clone();
-            let calls = calls.clone();
-            async move {
-                calls.lock().unwrap().push(number);
-                if number % 2 != 0 {
-                    return Ok(false);
-                }
-                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
-                    eyre::bail!("transient proposal failure");
-                }
-                Ok(number == 2)
-            }
-        };
-
-        let pending = scan_settlement_range(1, 4, propose).await;
-        assert_eq!(pending, Some(2));
-        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
-
-        let pending = scan_settlement_range(pending.unwrap(), 4, propose).await;
-        assert_eq!(pending, Some(2));
-        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2]);
-    }
-
-    #[tokio::test]
-    async fn startup_recovery_begins_after_portal_confirmed_height() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let propose = |number| {
-            let calls = calls.clone();
-            async move {
-                calls.lock().unwrap().push(number);
-                Ok(number == 360)
-            }
-        };
-
-        let portal_confirmed_height = 240u64;
-        let pending =
-            scan_settlement_range(portal_confirmed_height.saturating_add(1), 360, propose).await;
-
-        assert_eq!(pending, Some(360));
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.first(), Some(&241));
-        assert_eq!(calls.last(), Some(&360));
-        assert_eq!(calls.len(), 120);
-    }
-
-    #[tokio::test]
-    async fn startup_recovery_resumes_after_erroring_non_boundary() -> eyre::Result<()> {
-        let failed_once = Arc::new(AtomicBool::new(false));
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let propose = |number| {
-            let failed_once = failed_once.clone();
-            let calls = calls.clone();
-            async move {
-                calls.lock().unwrap().push(number);
-                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
-                    eyre::bail!("transient proposal failure");
-                }
-                Ok(number == 4)
-            }
-        };
-
-        let pending = scan_settlement_range(1, 4, propose).await;
-        assert_eq!(pending, Some(2));
-        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
-
-        let number = pending.unwrap();
-        assert!(!propose(number).await?);
-        let pending = scan_settlement_range(number.saturating_add(1), 4, propose).await;
-        assert_eq!(pending, Some(4));
-        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2, 3, 4]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn submission_confirmation_wakes_pending_boundary_without_retry_tick() {
-        let store = AttestationStore::default();
-        let mut submitted_heights = store.subscribe_submitted_height();
-        let waiting =
-            tokio::spawn(
-                async move { wait_for_submitted_height(&mut submitted_heights, 2_070).await },
-            );
-
-        tokio::task::yield_now().await;
-        store.remove_submitted(2_068);
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
-
-        store.remove_submitted(2_070);
-        let submitted = tokio::time::timeout(Duration::from_millis(100), waiting)
-            .await
-            .expect("confirmation should wake the collector without its fallback retry")
-            .expect("submission wait task should not panic")
-            .expect("submission notification channel should remain open");
-        assert_eq!(submitted, 2_070);
     }
 }
