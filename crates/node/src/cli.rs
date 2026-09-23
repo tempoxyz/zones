@@ -135,9 +135,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             manifest_mode,
             builder.config().txpool.max_tx_input_bytes,
         )?;
-        if manifest_mode {
-            // Replicate only durable blocks. Persist every block immediately so followers can
-            // acknowledge each block without waiting for Reth's in-memory buffer to fill.
+        if manifest_mode || args.enable_sequencer {
+            // Settlement and replication only consume durable blocks. Persist every block
+            // immediately so they do not wait for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }

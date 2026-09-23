@@ -1410,7 +1410,10 @@ impl ZoneTestNode {
             )
             .apply(|mut c| {
                 c.network.discovery.disable_discovery = true;
-                if p2p_enabled {
+                // A node attached to a real portal may have the standalone sequencer started
+                // after launch. Match production by making every settleable block durable
+                // immediately. Synthetic P2P nodes need the same policy for replication.
+                if p2p_enabled || !portal_address.is_zero() {
                     c.engine.persistence_threshold = 0;
                     c.engine.memory_block_buffer_target = Some(0);
                 }
