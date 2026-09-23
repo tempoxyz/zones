@@ -222,9 +222,9 @@ contract ZonePortal is IZonePortal {
     /// @notice Tempo block number that recorded the most recent leader transition.
     uint64 public leaderActivationTempoBlock;
 
-    /// @dev Per-Tempo-block deposit admission counter. Appended for upgrade-safe storage layout.
+    /// @dev Retired per-Tempo-block deposit admission counters, retained for storage compatibility.
+    ///      Admission weight is derived from queue counters in _outstandingDepositWeight.
     uint64 internal _depositCountBlock;
-    // Ordinary deposits/bounce-backs cost one unit; forced exits cost FORCED_EXIT_ADMISSION_WEIGHT.
     uint64 internal _depositsInCurrentBlock;
 
     /// @dev Retired per-Tempo-block token-enablement counters, retained for storage compatibility.
@@ -1062,6 +1062,7 @@ contract ZonePortal is IZonePortal {
         returns (uint64 requestId, uint64 depositNumber)
     {
         if (forcedExitVersion != 1) revert ForcedExitsNotActivated();
+        if (_withdrawalReentrancyStatus != WITHDRAWAL_NOT_ENTERED) revert ReentrantWithdrawal();
         _requireAllowedDepositor(msg.sender);
 
         // Enabled tokens have already passed the native TIP-20 factory validation. TIP-20

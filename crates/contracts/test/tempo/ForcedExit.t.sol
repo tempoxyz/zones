@@ -488,6 +488,7 @@ contract ForcedExitTest is BaseTest {
             abi.encode(true)
         );
         vm.roll(block.number + 1);
+        vm.startPrank(sequencer);
         _submitBatch(
             portal,
             uint64(block.number - 1),
@@ -503,6 +504,7 @@ contract ForcedExitTest is BaseTest {
             "",
             ""
         );
+        vm.stopPrank();
     }
 
     function test_weightedWithdrawalPreflightAndSettlementRecovery() public {
@@ -530,6 +532,7 @@ contract ForcedExitTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, uint64(230))
         );
+        vm.prank(sequencer);
         portal.processWithdrawals(withdrawals, bytes32(0));
         assertEq(portal.withdrawalQueueSlot(0), root);
         assertEq(portal.currentDepositQueueHash(), depositsBefore);
@@ -540,20 +543,24 @@ contract ForcedExitTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, uint64(230))
         );
+        vm.prank(sequencer);
         portal.processWithdrawals(invalidWithdrawals, bytes32(0));
 
+        vm.prank(sequencer);
         portal.processWithdrawals(_singleWithdrawal(withdrawal), suffix);
         assertEq(portal.remainingDepositCapacity(), 0);
         assertEq(portal.withdrawalQueueSlot(0), suffix);
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, uint64(230))
         );
+        vm.prank(sequencer);
         portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
 
         // Real submitBatch updates both cursors; processing a forced entry frees 14 units.
         settle(1, bytes32(0));
         assertEq(portal.remainingDepositCapacity(), 14);
         assertEq(uint256(vm.load(address(portal), bytes32(uint256(30)))), 1);
+        vm.prank(sequencer);
         portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
         assertEq(portal.remainingDepositCapacity(), 13);
         assertEq(portal.withdrawalQueueSlot(0), bytes32(0));
