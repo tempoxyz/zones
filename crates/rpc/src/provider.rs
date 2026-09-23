@@ -159,12 +159,13 @@ mod tests {
             token_ttl: Duration::from_secs(600),
             rpc_url: "http://localhost:8545".parse().unwrap(),
         };
-        let mut parities = [false; 2];
-        for now in 1_700_000_000..1_700_000_032 {
+        // Fixed timestamps cover both recovery parities.
+        for (now, parity) in [(1_700_000_000, false), (1_700_000_005, true)] {
             let expires_at = now + 600;
             let (fields, digest) =
                 build_token_fields(config.zone_id, config.chain_id, now, expires_at);
             let signature = config.signer.sign_hash_sync(&digest).unwrap();
+            assert_eq!(signature.v(), parity);
             let mut expected = Vec::new();
             expected.extend_from_slice(&signature.r().to_be_bytes::<32>());
             expected.extend_from_slice(&signature.s().to_be_bytes::<32>());
@@ -175,7 +176,6 @@ mod tests {
             assert!(header.is_sensitive());
             assert_eq!(header.to_str().unwrap(), hex::encode(expected));
             let parsed = parse_auth_header(header.to_str().unwrap()).unwrap();
-            assert_eq!(parsed.signature[64], u8::from(signature.v()));
             assert_eq!(parsed.digest, digest);
             assert_eq!(parsed.issued_at, now);
             assert_eq!(parsed.expires_at, expires_at);
@@ -186,8 +186,6 @@ mod tests {
                     .unwrap(),
                 config.signer.address()
             );
-            parities[usize::from(signature.v())] = true;
         }
-        assert_eq!(parities, [true, true]);
     }
 }

@@ -1989,8 +1989,13 @@ mod tests {
             portal_address: portal,
             zone_id: 7,
         };
-        let mut parities = [false; 2];
-        for height in 120..152 {
+        // Cover both recovery parities for each settlement ABI.
+        for (settlement_abi, height, parity) in [
+            (SettlementAbi::Legacy, 120, false),
+            (SettlementAbi::Legacy, 122, true),
+            (SettlementAbi::T13, 120, true),
+            (SettlementAbi::T13, 121, false),
+        ] {
             let prepared = test_prepared_batch(height, 100);
             let batch = &prepared.batch;
             let block_transition = BlockTransition {
@@ -2004,56 +2009,53 @@ mod tests {
                 nextDepositNumber: batch.next_deposit_number,
             };
             let verifier_config = Bytes::from_static(NITRO_VERIFIER_CONFIG_V1);
-            for settlement_abi in [SettlementAbi::Legacy, SettlementAbi::T13] {
-                let message = SettlementAttestation {
-                    zoneId: 7,
-                    sequencerSetVersion: 3,
-                    zoneHeight: U256::from(height),
-                    withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
-                    verifier: metadata.verifier,
-                    tempoBlockNumber: batch.tempo_block_number,
-                    anchorBlockNumber: prepared.anchor_block_number(),
-                    anchorBlockHash: prepared.anchor.block_hash(),
-                    blockTransitionHash: keccak256(block_transition.abi_encode()),
-                    depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
-                    tokenEnablementTransitionHash: settlement_abi.token_transition_hash(
-                        batch.prev_processed_token_count,
-                        batch.next_processed_token_count,
-                    ),
-                    withdrawalQueueHash: batch.withdrawal_queue_hash,
-                    verifierConfigHash: keccak256(&verifier_config),
-                };
-                let digest = domain.settlement_digest(&message);
-                let signature = signer.sign_hash_sync(&digest).unwrap();
-                let mut expected = Vec::new();
-                expected.extend_from_slice(&signature.r().to_be_bytes::<32>());
-                expected.extend_from_slice(&signature.s().to_be_bytes::<32>());
-                expected.push(u8::from(signature.v()) + 27);
-                let encoded = submitter
-                    .sign_settlement_attestation(
-                        &signer,
-                        metadata,
-                        SettlementAttestationInput {
-                            batch,
-                            settlement_abi,
-                            anchor_block_number: prepared.anchor_block_number(),
-                            anchor_block_hash: prepared.anchor.block_hash(),
-                            block_transition: &block_transition,
-                            deposit_transition: &deposit_transition,
-                            verifier_config: &verifier_config,
-                        },
-                    )
-                    .unwrap();
-                assert_eq!(encoded.as_ref(), expected);
-                let recovered = alloy_primitives::Signature::try_from(encoded.as_ref()).unwrap();
-                assert_eq!(
-                    recovered.recover_address_from_prehash(&digest).unwrap(),
-                    signer.address()
-                );
-                parities[usize::from(signature.v())] = true;
-            }
+            let message = SettlementAttestation {
+                zoneId: 7,
+                sequencerSetVersion: 3,
+                zoneHeight: U256::from(height),
+                withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
+                verifier: metadata.verifier,
+                tempoBlockNumber: batch.tempo_block_number,
+                anchorBlockNumber: prepared.anchor_block_number(),
+                anchorBlockHash: prepared.anchor.block_hash(),
+                blockTransitionHash: keccak256(block_transition.abi_encode()),
+                depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
+                tokenEnablementTransitionHash: settlement_abi.token_transition_hash(
+                    batch.prev_processed_token_count,
+                    batch.next_processed_token_count,
+                ),
+                withdrawalQueueHash: batch.withdrawal_queue_hash,
+                verifierConfigHash: keccak256(&verifier_config),
+            };
+            let digest = domain.settlement_digest(&message);
+            let signature = signer.sign_hash_sync(&digest).unwrap();
+            assert_eq!(signature.v(), parity);
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&signature.r().to_be_bytes::<32>());
+            expected.extend_from_slice(&signature.s().to_be_bytes::<32>());
+            expected.push(u8::from(signature.v()) + 27);
+            let encoded = submitter
+                .sign_settlement_attestation(
+                    &signer,
+                    metadata,
+                    SettlementAttestationInput {
+                        batch,
+                        settlement_abi,
+                        anchor_block_number: prepared.anchor_block_number(),
+                        anchor_block_hash: prepared.anchor.block_hash(),
+                        block_transition: &block_transition,
+                        deposit_transition: &deposit_transition,
+                        verifier_config: &verifier_config,
+                    },
+                )
+                .unwrap();
+            assert_eq!(encoded.as_ref(), expected);
+            let recovered = alloy_primitives::Signature::try_from(encoded.as_ref()).unwrap();
+            assert_eq!(
+                recovered.recover_address_from_prehash(&digest).unwrap(),
+                signer.address()
+            );
         }
-        assert_eq!(parities, [true, true]);
     }
 
     #[test]

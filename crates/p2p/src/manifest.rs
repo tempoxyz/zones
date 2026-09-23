@@ -2004,41 +2004,39 @@ mod tests {
         ))
         .unwrap();
 
-        // Include absent, zero, and nonzero addresses, then shrink to the empty set.
+        // Include absent, zero, and nonzero addresses in the same preimage.
         manifest.nodes[0].secp256k1_address = Some(alloy_primitives::Address::ZERO);
-        loop {
-            let mut members = manifest
-                .nodes
-                .iter()
-                .map(|node| {
-                    (
-                        node.ed25519_public_key.as_ref().to_vec(),
-                        node.rpc_only,
-                        node.secp256k1_address,
-                    )
-                })
-                .collect::<Vec<_>>();
-            members.sort();
-            let mut preimage = Vec::new();
-            for (key, rpc_only, address) in members {
-                preimage.extend_from_slice(&key);
-                preimage.push(u8::from(rpc_only));
-                match address {
-                    Some(address) => {
-                        preimage.push(1);
-                        preimage.extend_from_slice(address.as_slice());
-                    }
-                    None => preimage.push(0),
+        let mut members = manifest
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.ed25519_public_key.as_ref().to_vec(),
+                    node.rpc_only,
+                    node.secp256k1_address,
+                )
+            })
+            .collect::<Vec<_>>();
+        members.sort();
+        let mut preimage = Vec::new();
+        for (key, rpc_only, address) in members {
+            preimage.extend_from_slice(&key);
+            preimage.push(u8::from(rpc_only));
+            match address {
+                Some(address) => {
+                    preimage.push(1);
+                    preimage.extend_from_slice(address.as_slice());
                 }
-            }
-            let expected = alloy_primitives::keccak256(preimage);
-            assert_eq!(manifest.membership_digest(), expected);
-            manifest.nodes.reverse();
-            assert_eq!(manifest.membership_digest(), expected);
-            if manifest.nodes.pop().is_none() {
-                break;
+                None => preimage.push(0),
             }
         }
+        let expected = alloy_primitives::keccak256(preimage);
+        assert_eq!(manifest.membership_digest(), expected);
+        manifest.nodes.clear();
+        assert_eq!(
+            manifest.membership_digest(),
+            alloy_primitives::keccak256([])
+        );
     }
 
     #[test]

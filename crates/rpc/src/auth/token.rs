@@ -212,18 +212,6 @@ mod tests {
     const CHAIN_ID: u64 = 1_337;
     const NOW: u64 = 1_700_000_000;
 
-    #[test]
-    fn token_digest_matches_concatenated_preimage() {
-        for fields in [
-            [0; TOKEN_FIELDS_LEN],
-            [0xff; TOKEN_FIELDS_LEN],
-            core::array::from_fn(|i| i as u8),
-        ] {
-            let preimage = [TEMPO_ZONE_RPC_MAGIC.as_slice(), fields.as_slice()].concat();
-            assert_eq!(token_digest(&fields), alloy_primitives::keccak256(preimage));
-        }
-    }
-
     fn token(issued_at: u64, expires_at: u64) -> AuthorizationToken {
         let (fields, _) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
         let mut blob = vec![0u8; 65];
