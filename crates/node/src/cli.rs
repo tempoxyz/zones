@@ -99,31 +99,19 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let l1_config = match std::env::var("L1_HTTP_RPC_URL") {
+    let l1_rpc_url = match std::env::var("L1_HTTP_RPC_URL") {
         Ok(url) if !url.is_empty() => {
             let url = url
                 .parse()
                 .map_err(|error| eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}"))?;
-            let portal_address: Address = std::env::var("L1_PORTAL_ADDRESS")
-                .map_err(|error| {
-                    eyre::eyre!(
-                        "L1_PORTAL_ADDRESS must be set when L1_HTTP_RPC_URL is set: {error}"
-                    )
-                })?
-                .parse()
-                .map_err(|error| eyre::eyre!("invalid L1_PORTAL_ADDRESS: {error}"))?;
-            eyre::ensure!(
-                !portal_address.is_zero(),
-                "L1_PORTAL_ADDRESS must be nonzero"
-            );
-            Some((url, portal_address))
+            Some(url)
         }
         Ok(_) | Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(eyre::eyre!("invalid L1_HTTP_RPC_URL: {error}")),
     };
 
     let components = move |spec: Arc<ZoneChainSpec>| {
-        let evm_config = cli_evm_config(spec.clone(), l1_config.clone());
+        let evm_config = cli_evm_config(spec.clone(), l1_rpc_url.clone());
         (
             evm_config,
             TempoConsensus::new(spec)
@@ -147,9 +135,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             manifest_mode,
             builder.config().txpool.max_tx_input_bytes,
         )?;
-        if manifest_mode {
-            // Replicate only durable blocks. Persist every block immediately so followers can
-            // acknowledge each block without waiting for Reth's in-memory buffer to fill.
+        if manifest_mode || args.enable_sequencer {
+            // Settlement and replication only consume durable blocks. Persist every block
+            // immediately so they do not wait for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
@@ -213,15 +201,13 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     })
 }
 
-/// Creates the EVM config used by CLI subcommands.
-fn cli_evm_config(
-    chain_spec: Arc<ZoneChainSpec>,
-    l1_config: Option<(url::Url, Address)>,
-) -> ZoneEvmConfig {
-    let Some((l1_rpc_url, portal_address)) = l1_config else {
+/// Creates the EVM config used by CLI subcommands, deriving the portal from the chain's zone ID.
+fn cli_evm_config(chain_spec: Arc<ZoneChainSpec>, l1_rpc_url: Option<url::Url>) -> ZoneEvmConfig {
+    let Some(l1_rpc_url) = l1_rpc_url else {
         return ZoneEvmConfig::new_without_l1(chain_spec);
     };
 
+    let portal_address = tempo_precompiles::zone_factory::portal_address(chain_spec.zone_id());
     let cache = L1StateCache::default();
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_http(l1_rpc_url)
@@ -672,6 +658,54 @@ mod tests {
     struct ZoneArgsParser {
         #[command(flatten)]
         zone: ZoneArgs,
+    }
+
+    #[test]
+    fn re_execute_parses_without_portal_address() {
+        use reth_chainspec::EthChainSpec as _;
+
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        let mut genesis = parent.genesis().clone();
+        genesis.config.chain_id =
+            zone_primitives::constants::zone_chain_id(parent.chain().id(), 11).unwrap();
+        let genesis = serde_json::to_string(&genesis).unwrap();
+        let parsed =
+            ZoneCli::try_parse_from(["tempo-zone", "re-execute", "--chain", &genesis]).unwrap();
+        assert!(matches!(parsed, ZoneCli::Node(_)));
+    }
+
+    #[tokio::test]
+    async fn cli_evm_derives_portal_from_chain_spec() {
+        use alloy_evm::EvmFactory as _;
+        use reth_chainspec::EthChainSpec as _;
+        use reth_evm::ConfigureEvm as _;
+
+        let parent = tempo_chainspec::spec::MODERATO.clone();
+        for (zone_id, expected) in [
+            (
+                11,
+                alloy_primitives::address!("5ad000000000000000000000000000000000000b"),
+            ),
+            (
+                0x0102_0304,
+                alloy_primitives::address!("5ad0000000000000000000000000000001020304"),
+            ),
+        ] {
+            let mut genesis = parent.genesis().clone();
+            genesis.config.chain_id =
+                zone_primitives::constants::zone_chain_id(parent.chain().id(), zone_id).unwrap();
+            let spec =
+                std::sync::Arc::new(zone_chainspec::ZoneChainSpec::from_genesis(genesis).unwrap());
+            let config =
+                super::cli_evm_config(spec, Some("http://localhost:8545".parse().unwrap()));
+            let evm = config
+                .evm_factory()
+                .create_evm(revm::database::EmptyDB::default(), Default::default());
+            assert_eq!(
+                evm.ctx().journaled_state.database.l1_state().portal(),
+                expected
+            );
+        }
     }
 
     #[test]

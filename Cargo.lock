@@ -13970,6 +13970,8 @@ dependencies = [
  "jsonrpsee",
  "k256",
  "metrics",
+ "minicbor",
+ "minicbor-serde",
  "p256 0.13.2",
  "rand 0.8.7",
  "reqwest",
@@ -14051,6 +14053,7 @@ dependencies = [
  "derive_more",
  "eyre",
  "metrics",
+ "parking_lot",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -14137,6 +14140,8 @@ name = "zone-primitives"
 version = "0.3.1"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
+ "serde",
  "tempo-hardfork",
  "thiserror 2.0.18",
 ]
@@ -14249,6 +14254,7 @@ dependencies = [
  "tracing",
  "zone-chainspec",
  "zone-l1",
+ "zone-p2p",
  "zone-primitives",
  "zone-prover",
  "zone-rpc",

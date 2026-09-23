@@ -23,7 +23,7 @@ on:
 
 jobs:
   build:
-    uses: tempoxyz/gh-actions/.github/workflows/reproducible-build.yml@bce53819ffa60fcdf8f0f349686d807e5a66a71b # 2026-09-21T21-56-41Z-bce53819
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-build.yml@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
     permissions:
       contents: read
       id-token: write
