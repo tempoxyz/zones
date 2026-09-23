@@ -2842,7 +2842,15 @@ impl L1TestNode {
 
         f(&mut node_config);
 
-        let node = tempo_node::node::TempoNode::default();
+        // The prewarmer constructs its own default EVM instead of using the executor factory.
+        // Keep the test verifier policy consistent between simulation and block execution.
+        let node = tempo_node::node::TempoNode::new(
+            &tempo_node::node::TempoNodeArgs {
+                builder_disable_prewarming: true,
+                ..Default::default()
+            },
+            None,
+        );
         let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
             .with_types::<tempo_node::node::TempoNode>()
