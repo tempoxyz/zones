@@ -1387,7 +1387,7 @@ contract ZonePortal is IZonePortal {
         }
 
         uint64 enabledCount = uint64(_enabledTokens.length);
-        //   - bootstrap:   before initialization, legacy Z0 and the first Z1 transition start at 0
+        //   - bootstrap:   before initialization, pre-T13 and the first T13 transition start at 0
         //   - continuity:  once initialized, prevProcessedTokenCount must equal where we last left off
         //   - monotonic:   the processed prefix can only advance
         //   - in-range:    cannot process more tokens than have been enabled

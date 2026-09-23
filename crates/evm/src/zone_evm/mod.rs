@@ -20,7 +20,6 @@ use tempo_evm::{
     evm::TempoEvm,
 };
 use tempo_revm::{ExecutionContext, TempoInvalidTransaction, TempoTxEnv};
-use zone_hardfork::ZoneHardfork;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{L1StorageReader, tx_context};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
@@ -36,25 +35,13 @@ type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 /// their state transitions can be committed through that public database.
 pub struct ZoneEvm<DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: TempoEvm<L1OverlayDB<DB, L1>, I>,
-    zone_hardfork: ZoneHardfork,
 }
 
 impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
     /// Creates a new `ZoneEvm` with guarded `CREATE` and `CREATE2` opcodes.
-    pub(super) fn new(
-        mut evm: TempoEvm<L1OverlayDB<DB, L1>, I>,
-        zone_hardfork: ZoneHardfork,
-    ) -> Self {
+    pub(super) fn new(mut evm: TempoEvm<L1OverlayDB<DB, L1>, I>) -> Self {
         contract_creation::configure_runtime(&mut evm);
-        Self {
-            inner: evm,
-            zone_hardfork,
-        }
-    }
-
-    /// Returns the Zone-owned protocol revision selected for this block.
-    pub const fn zone_hardfork(&self) -> ZoneHardfork {
-        self.zone_hardfork
+        Self { inner: evm }
     }
 
     /// Provides a reference to the EVM context.
@@ -239,7 +226,7 @@ mod tests {
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
         let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default(), Address::ZERO);
-        ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()), ZoneHardfork::Z0)
+        ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
     }
 
     fn registry_write() -> AddressMap<Account> {
