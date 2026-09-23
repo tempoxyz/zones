@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use alloy_primitives::{Address as EthereumAddress, B256};
+use alloy_primitives::{Address as EthereumAddress, B256, Keccak256};
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Address, Ingress};
@@ -997,20 +997,20 @@ impl ZoneManifest {
             .collect::<Vec<_>>();
         members.sort();
 
-        let mut preimage = Vec::with_capacity(members.len() * 64);
+        let mut hasher = Keccak256::new();
         for (ed25519_public_key, rpc_only, secp256k1_address) in members {
-            preimage.extend_from_slice(&ed25519_public_key);
-            preimage.push(u8::from(rpc_only));
+            hasher.update(&ed25519_public_key);
+            hasher.update([u8::from(rpc_only)]);
             // Distinguish "no address" from a real one rather than substituting zero.
             match secp256k1_address {
                 Some(address) => {
-                    preimage.push(1);
-                    preimage.extend_from_slice(address.as_slice());
+                    hasher.update([1]);
+                    hasher.update(address);
                 }
-                None => preimage.push(0),
+                None => hasher.update([0]),
             }
         }
-        alloy_primitives::keccak256(&preimage)
+        hasher.finalize()
     }
 
     /// Ed25519 keys of the members that replicate without joining the on-chain quorum.
@@ -1989,6 +1989,56 @@ mod tests {
             ZoneManifest::parse(&standby_with_address),
             Err(ManifestError::RpcOnlySecp256k1Address(node)) if node == "operator-rpc"
         ));
+    }
+
+    #[test]
+    fn membership_digest_matches_concatenated_preimage() {
+        let mut manifest = ZoneManifest::parse(&manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", false),
+                (2, "follower-a", "127.0.0.1:9201", false),
+                (3, "follower-b", "127.0.0.1:9202", false),
+                (4, "operator-rpc", "127.0.0.1:9203", true),
+            ],
+        ))
+        .unwrap();
+
+        // Include absent, zero, and nonzero addresses, then shrink to the empty set.
+        manifest.nodes[0].secp256k1_address = Some(alloy_primitives::Address::ZERO);
+        loop {
+            let mut members = manifest
+                .nodes
+                .iter()
+                .map(|node| {
+                    (
+                        node.ed25519_public_key.as_ref().to_vec(),
+                        node.rpc_only,
+                        node.secp256k1_address,
+                    )
+                })
+                .collect::<Vec<_>>();
+            members.sort();
+            let mut preimage = Vec::new();
+            for (key, rpc_only, address) in members {
+                preimage.extend_from_slice(&key);
+                preimage.push(u8::from(rpc_only));
+                match address {
+                    Some(address) => {
+                        preimage.push(1);
+                        preimage.extend_from_slice(address.as_slice());
+                    }
+                    None => preimage.push(0),
+                }
+            }
+            let expected = alloy_primitives::keccak256(preimage);
+            assert_eq!(manifest.membership_digest(), expected);
+            manifest.nodes.reverse();
+            assert_eq!(manifest.membership_digest(), expected);
+            if manifest.nodes.pop().is_none() {
+                break;
+            }
+        }
     }
 
     #[test]

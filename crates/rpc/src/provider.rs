@@ -104,22 +104,7 @@ fn build_provider_with_token(
     let now = now_unix_seconds();
     let expires_at = now + config.token_ttl.as_secs();
 
-    let (fields, digest) = build_token_fields(config.zone_id, config.chain_id, now, expires_at);
-
-    let sig = config
-        .signer
-        .sign_hash_sync(&digest)
-        .map_err(|e| eyre::eyre!("failed to sign zone auth token: {e}"))?;
-
-    // Build blob: <65-byte sig><29-byte fields>
-    let mut blob = Vec::with_capacity(65 + fields.len());
-    blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
-    blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
-    blob.push(sig.v() as u8);
-    blob.extend_from_slice(&fields);
-
-    let mut auth_header = reqwest::header::HeaderValue::from_str(&hex::encode(&blob))?;
-    auth_header.set_sensitive(true);
+    let auth_header = build_auth_header(config, now, expires_at)?;
 
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(X_AUTHORIZATION_TOKEN, auth_header);
@@ -133,4 +118,76 @@ fn build_provider_with_token(
         .erased();
 
     Ok((provider, expires_at))
+}
+
+fn build_auth_header(
+    config: &ZoneProviderConfig,
+    now: u64,
+    expires_at: u64,
+) -> eyre::Result<reqwest::header::HeaderValue> {
+    let (fields, digest) = build_token_fields(config.zone_id, config.chain_id, now, expires_at);
+
+    let sig = config
+        .signer
+        .sign_hash_sync(&digest)
+        .map_err(|e| eyre::eyre!("failed to sign zone auth token: {e}"))?;
+
+    // Build blob: <65-byte sig><29-byte fields>
+    let mut blob = Vec::with_capacity(65 + fields.len());
+    // Authorization tokens use raw 0/1 parity, unlike settlement signatures.
+    blob.extend_from_slice(&sig.as_rsy());
+    blob.extend_from_slice(&fields);
+
+    let mut auth_header = reqwest::header::HeaderValue::from_str(&hex::encode(&blob))?;
+    auth_header.set_sensitive(true);
+
+    Ok(auth_header)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::parse_auth_header;
+    use alloy_primitives::{B256, Signature};
+
+    #[test]
+    fn authorization_header_preserves_raw_parity_and_fields() {
+        let config = ZoneProviderConfig {
+            signer: PrivateKeySigner::from_bytes(&B256::repeat_byte(1)).unwrap(),
+            zone_id: 42,
+            chain_id: 1337,
+            token_ttl: Duration::from_secs(600),
+            rpc_url: "http://localhost:8545".parse().unwrap(),
+        };
+        let mut parities = [false; 2];
+        for now in 1_700_000_000..1_700_000_032 {
+            let expires_at = now + 600;
+            let (fields, digest) =
+                build_token_fields(config.zone_id, config.chain_id, now, expires_at);
+            let signature = config.signer.sign_hash_sync(&digest).unwrap();
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&signature.r().to_be_bytes::<32>());
+            expected.extend_from_slice(&signature.s().to_be_bytes::<32>());
+            expected.push(u8::from(signature.v()));
+            expected.extend_from_slice(&fields);
+
+            let header = build_auth_header(&config, now, expires_at).unwrap();
+            assert!(header.is_sensitive());
+            assert_eq!(header.to_str().unwrap(), hex::encode(expected));
+            let parsed = parse_auth_header(header.to_str().unwrap()).unwrap();
+            assert_eq!(parsed.signature[64], u8::from(signature.v()));
+            assert_eq!(parsed.digest, digest);
+            assert_eq!(parsed.issued_at, now);
+            assert_eq!(parsed.expires_at, expires_at);
+            let recovered = Signature::try_from(parsed.signature.as_slice()).unwrap();
+            assert_eq!(
+                recovered
+                    .recover_address_from_prehash(&parsed.digest)
+                    .unwrap(),
+                config.signer.address()
+            );
+            parities[usize::from(signature.v())] = true;
+        }
+        assert_eq!(parities, [true, true]);
+    }
 }

@@ -190,10 +190,11 @@ pub fn build_token_fields(
 
 /// Build the signing digest from the canonical fixed-width token fields.
 fn token_digest(fields: &[u8; TOKEN_FIELDS_LEN]) -> B256 {
-    let mut msg = Vec::with_capacity(32 + TOKEN_FIELDS_LEN);
-    msg.extend_from_slice(&TEMPO_ZONE_RPC_MAGIC);
-    msg.extend_from_slice(fields);
-    keccak256(&msg)
+    let mut msg = [0; TEMPO_ZONE_RPC_MAGIC.len() + TOKEN_FIELDS_LEN];
+    msg[..TEMPO_ZONE_RPC_MAGIC.len()].copy_from_slice(&TEMPO_ZONE_RPC_MAGIC);
+    msg[TEMPO_ZONE_RPC_MAGIC.len()..].copy_from_slice(fields);
+    // Keep the one-shot API so repeated tokens still benefit from Alloy's global cache.
+    keccak256(msg)
 }
 
 /// Parse a hex-encoded authorization token from the header value.
@@ -210,6 +211,18 @@ mod tests {
     const ZONE_ID: u32 = 42;
     const CHAIN_ID: u64 = 1_337;
     const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn token_digest_matches_concatenated_preimage() {
+        for fields in [
+            [0; TOKEN_FIELDS_LEN],
+            [0xff; TOKEN_FIELDS_LEN],
+            core::array::from_fn(|i| i as u8),
+        ] {
+            let preimage = [TEMPO_ZONE_RPC_MAGIC.as_slice(), fields.as_slice()].concat();
+            assert_eq!(token_digest(&fields), alloy_primitives::keccak256(preimage));
+        }
+    }
 
     fn token(issued_at: u64, expires_at: u64) -> AuthorizationToken {
         let (fields, _) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
