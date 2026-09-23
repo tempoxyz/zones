@@ -42,7 +42,7 @@ enum ZoneBlockPhase {
 
 impl ZoneBlockPhase {
     fn validate_transaction(self, tx: &TempoTxEnvelope) -> Result<Self, BlockExecutionError> {
-        if tx.subblock_proposer().is_some() {
+        if tx.has_sub_block_nonce_key_prefix() {
             return Err(BlockValidationError::msg(
                 "subblock transactions are not supported in zone blocks",
             )
@@ -525,9 +525,7 @@ mod tests {
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: None,
-            subblock_fee_recipients: Default::default(),
         };
         let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
         executor.phase = ZoneBlockPhase::Executing;
@@ -581,9 +579,7 @@ mod tests {
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: None,
-            subblock_fee_recipients: Default::default(),
         };
         let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
         executor.phase = ZoneBlockPhase::Executing;
@@ -606,7 +602,7 @@ mod tests {
     #[test]
     fn subblock_transactions_are_rejected_in_every_block_phase() {
         let subblock = subblock_tx();
-        assert!(subblock.subblock_proposer().is_some());
+        assert!(subblock.has_sub_block_nonce_key_prefix());
 
         for phase in [
             ZoneBlockPhase::AwaitingAdvanceTempo,
@@ -801,9 +797,7 @@ mod tests {
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: None,
-            subblock_fee_recipients: Default::default(),
         };
         let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
 
