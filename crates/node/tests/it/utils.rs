@@ -13,8 +13,11 @@ use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519Private
 use eyre::WrapErr;
 use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
 use p256::ecdsa::SigningKey as P256SigningKey;
-use reth_node_api::FullNodeComponents;
-use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
+use reth_node_api::{FullNodeComponents, FullNodeTypes};
+use reth_node_builder::{
+    BuilderContext, Node, NodeBuilder, NodeConfig, NodeHandle, components::ExecutorBuilder,
+    rpc::RethRpcAddOns,
+};
 use reth_node_core::{args::RpcServerArgs, exit::NodeExitFuture};
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
@@ -1547,6 +1550,34 @@ pub(crate) struct L1TestNode {
     _tasks: Runtime,
 }
 
+/// Keep settlement tests independent of Nitro hardware and production PCR approval.
+/// Only this test node uses the bundled Solidity verifier stub at T13; production nodes
+/// retain the native verifier. Portal transitions and quorum signatures are still checked.
+#[derive(Clone, Copy, Debug)]
+struct TestL1ExecutorBuilder;
+
+impl<N> ExecutorBuilder<N> for TestL1ExecutorBuilder
+where
+    N: FullNodeTypes<Types = tempo_node::node::TempoNode>,
+{
+    type EVM = tempo_evm::TempoEvmConfig;
+
+    async fn build_evm(self, ctx: &BuilderContext<N>) -> eyre::Result<Self::EVM> {
+        let factory =
+            tempo_evm::TempoEvmFactory::default().with_precompile_overrides(|precompiles| {
+                precompiles
+                    .apply_precompile(&tempo_contracts::precompiles::ZONE_VERIFIER_ADDRESS, |_| {
+                        None
+                    });
+            });
+        let mut config = tempo_evm::TempoEvmConfig::new_with_evm_factory(ctx.chain_spec(), factory);
+        if let Some(cache) = ctx.sender_recovery_cache() {
+            config = config.with_sender_recovery_cache(cache.clone());
+        }
+        Ok(config)
+    }
+}
+
 /// Explicit account-access and callback-gateway configuration for a test zone.
 #[derive(Clone, Debug)]
 pub(crate) struct ZoneCreationConfig {
@@ -2808,9 +2839,12 @@ impl L1TestNode {
 
         f(&mut node_config);
 
+        let node = tempo_node::node::TempoNode::default();
         let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
-            .node(tempo_node::node::TempoNode::default())
+            .with_types::<tempo_node::node::TempoNode>()
+            .with_components(node.components_builder().executor(TestL1ExecutorBuilder))
+            .with_add_ons(node.add_ons())
             .launch_with_debug_capabilities()
             .await?;
 
