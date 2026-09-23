@@ -723,7 +723,7 @@ impl ZoneTestNode {
             }
             previous = current;
         }
-        eyre::bail!("ZoneEngine kept producing blocks after cancellation")
+        eyre::bail!("ZoneEngine kept producing blocks after cancellation");
     }
 
     /// Returns an HTTP provider connected to this zone node.

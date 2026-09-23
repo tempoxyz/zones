@@ -965,7 +965,7 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
         eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
     })?;
     let TempoTxEnvelope::Legacy(signed) = first_tx else {
-        eyre::bail!("first transaction in peer block is not a legacy system transaction")
+        eyre::bail!("first transaction in peer block is not a legacy system transaction");
     };
     eyre::ensure!(
         first_tx.is_system_tx(),
