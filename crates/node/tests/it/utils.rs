@@ -1719,7 +1719,7 @@ impl L1TestNode {
         use tempo_zone_contracts::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
         let events = portal
-            .BatchSubmitted_1_filter()
+            .BatchSubmitted_0_filter()
             .from_block(0)
             .query()
             .await?;
