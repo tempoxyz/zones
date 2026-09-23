@@ -202,6 +202,7 @@ alloy-eips = { version = "2.4.1", default-features = false }
 alloy-evm = { version = "0.38.0", default-features = false }
 alloy-genesis = { version = "2.4.1", default-features = false }
 alloy-json-abi = "1.7.2"
+alloy-json-rpc = "2.4.1"
 alloy-network = { version = "2.4.1", default-features = false }
 alloy-primitives = { version = "1.7.2", default-features = false }
 alloy-provider = { version = "2.4.1", default-features = false }
