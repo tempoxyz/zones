@@ -128,7 +128,7 @@ jobs:
       BENCH_MAX_CONCURRENT: ${{ inputs.max-concurrent || '4' }}
       BENCH_L1_BLOAT_MIB: ${{ inputs.state-bloat-mib || '0' }}
       BENCH_BATCH_INTERVAL_BLOCKS: "20"
-      BENCH_RESULTS_PATH: ${{ runner.temp }}/zones-prover-${{ github.run_id }}-${{ github.run_attempt }}
+      BENCH_RESULTS_PATH: ${{ github.workspace }}/zones-prover-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
