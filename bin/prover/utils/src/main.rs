@@ -37,6 +37,7 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
+mod generate_range;
 mod verifier_request;
 mod verify;
 
@@ -71,6 +72,8 @@ struct Cli {
 enum Command {
     /// Generate and locally validate an SPF batch witness.
     GenerateInput(GenerateInputArgs),
+    /// Generate and validate all submitted batches overlapping a Zone block range.
+    GenerateRange(generate_range::Args),
     /// Send a saved witness to a prover and save its output and proof.
     Prove(ProveArgs),
     /// Verify a saved proof against the native L1 verifier using eth_call.
@@ -195,6 +198,7 @@ async fn main() -> Result<()> {
     init_tracing(&cli.log_filter)?;
     match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
+        Command::GenerateRange(args) => generate_range::run(args).await,
         Command::Prove(args) => prove(args).await,
         Command::Verify(args) => verify::run(args).await,
     }
@@ -215,6 +219,19 @@ fn start_phase(name: &'static str) -> Instant {
 }
 
 async fn generate_input(args: GenerateInputArgs) -> Result<()> {
+    let config = SpfConfig::new(load_chain(&args.chain).await?);
+    let tempo = connect(&args.tempo_rpc_url, "Tempo").await?;
+    let zone = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
+    generate_batch(&args, &tempo, &zone, &config).await?;
+    Ok(())
+}
+
+async fn generate_batch(
+    args: &GenerateInputArgs,
+    tempo_provider: &DynProvider<TempoNetwork>,
+    zone_provider: &DynProvider<TempoNetwork>,
+    spf_config: &SpfConfig,
+) -> Result<BatchWitness> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
     info!(
@@ -233,13 +250,8 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     if args.block == Some(0.into()) {
         bail!("Zone genesis block 0 does not belong to a submitted batch");
     }
-    let chain = load_chain(&args.chain).await?;
-
     let started = start_phase("discovery");
-    let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
-    let zone_provider = connect(&args.zone_rpc_url, "unrestricted Zone").await?;
-    let mut discovery = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = SpfConfig::new(chain);
+    let mut discovery = discover(tempo_provider, zone_provider).await?;
     info!(
         zone_id = discovery.zone_id,
         portal = %discovery.portal,
@@ -252,15 +264,14 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let started = start_phase("batch extraction");
     let (from_override, to_override, target_block) = tokio::try_join!(
-        resolve_block_number(&zone_provider, args.from_block),
-        resolve_block_number(&zone_provider, args.to_block),
-        resolve_block_number(&zone_provider, args.block),
+        resolve_block_number(zone_provider, args.from_block),
+        resolve_block_number(zone_provider, args.to_block),
+        resolve_block_number(zone_provider, args.block),
     )?;
     let (parent_header, parent_number, extracted) = if let Some(block) = target_block {
-        let batch =
-            find_submitted_batch(&tempo_provider, &zone_provider, &discovery, block).await?;
+        let batch = find_submitted_batch(tempo_provider, zone_provider, &discovery, block).await?;
         let (parent, parent_number, extracted) =
-            discover_batch(&zone_provider, &discovery, Some(batch.from), Some(batch.to)).await?;
+            discover_batch(zone_provider, &discovery, Some(batch.from), Some(batch.to)).await?;
         if parent.hash_slow() != batch.parent_hash
             || extracted.last().expect("non-empty batch").block_hash != batch.block_hash
         {
@@ -274,8 +285,8 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         (parent, parent_number, extracted)
     } else if let Some(block_count) = args.zone_block_count {
         let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
-            &zone_provider,
-            &tempo_provider,
+            zone_provider,
+            tempo_provider,
             discovery,
             from_override,
             block_count,
@@ -285,7 +296,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         discovery = updated_discovery;
         (parent_header, parent_number, extracted)
     } else {
-        discover_batch(&zone_provider, &discovery, from_override, to_override).await?
+        discover_batch(zone_provider, &discovery, from_override, to_override).await?
     };
     let first_extracted = extracted
         .first()
@@ -300,7 +311,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .iter()
         .filter(|block| block.has_finalization)
         .count();
-    let parent_withdrawal_batch_index = withdrawal_batch_index_at(&zone_provider, parent_number)
+    let parent_withdrawal_batch_index = withdrawal_batch_index_at(zone_provider, parent_number)
         .await
         .context("read withdrawal batch index from parent Zone state")?;
     if args.from_block.is_none()
@@ -333,7 +344,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let started = start_phase("Zone and Tempo state witnesses");
     let (zone_state_witness, tempo_state_witness) =
-        zone_witnesses(&zone_provider, from_block, to_block).await?;
+        zone_witnesses(zone_provider, from_block, to_block).await?;
     let initial_tempo_header = decode_tempo_header(&tempo_state_witness.initial_tempo_header_rlp)?;
     timings.record("Zone and Tempo state witnesses", started, ());
 
@@ -355,7 +366,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let started = start_phase("Tempo ancestry");
     let (anchor_block_number, anchor_block_hash, tempo_ancestry_headers, anchor_mode) =
-        tempo_anchor(&tempo_provider, &final_tempo_header).await?;
+        tempo_anchor(tempo_provider, &final_tempo_header).await?;
     timings.record("Tempo ancestry", started, ());
 
     let witness = BatchWitness {
@@ -375,7 +386,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     };
 
     let started = start_phase("SPF validation");
-    let output = prove_zone_batch(&spf_config, witness.clone())
+    let output = prove_zone_batch(spf_config, witness.clone())
         .context("generated witness failed SPF validation")?;
     if output.block_transition.nextBlockHash != next_block_hash {
         bail!(
@@ -425,7 +436,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         println!("  Target prover:         not sent (pass --target <HOST:PORT>)");
     }
     timings.print(total_started.elapsed());
-    Ok(())
+    Ok(request.witness)
 }
 
 async fn prove(args: ProveArgs) -> Result<()> {

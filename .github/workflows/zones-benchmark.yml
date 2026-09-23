@@ -686,22 +686,40 @@ jobs:
             echo "::error::runner-local benchmark mnemonic must not be a symbolic link"
             exit 1
           fi
-          if [ ! -s "$mnemonic_file" ]; then
+          validate_mnemonic() {
+            local file="$1" phrase
+            if [ "$(awk 'END { print NR }' "$file")" != 1 ]; then
+              echo "::error::runner-local benchmark mnemonic must contain exactly one line"
+              return 1
+            fi
+            phrase="$(tr -d '\r\n' < "$file")"
+            if [ -z "$phrase" ] || [ "$phrase" = "null" ] || [ "$phrase" = "test test test test test test test test test test test junk" ]; then
+              echo "::error::runner-local benchmark mnemonic is empty, null, or public"
+              return 1
+            fi
+            # Invalid-word errors can include secret material; report only a generic error.
+            if ! cast wallet address --mnemonic "$file" --mnemonic-index 0 >/dev/null 2>&1; then
+              echo "::error::runner-local benchmark mnemonic failed wallet derivation"
+              return 1
+            fi
+          }
+          # Repair only the known jq-null sentinel; never rotate another existing identity.
+          if [ ! -s "$mnemonic_file" ] || [ "$(< "$mnemonic_file")" = null ]; then
             temporary="$(mktemp "$identity_root/.mnemonic.XXXXXX")"
+            trap 'rm -f -- "$temporary"' EXIT
             chmod 600 "$temporary"
-            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -er '
+              select(.success == true) | .data.mnemonic
+              | strings | select(length > 0 and . != "null")
+            ')"
             printf '%s\n' "$mnemonic" > "$temporary"
+            validate_mnemonic "$temporary"
             mv -f -- "$temporary" "$mnemonic_file"
+            trap - EXIT
           else
+            chmod 600 "$mnemonic_file"
+            validate_mnemonic "$mnemonic_file"
             mnemonic="$(tr -d '\r\n' < "$mnemonic_file")"
-          fi
-          if [ "$(awk 'END { print NR }' "$mnemonic_file")" != 1 ]; then
-            echo "::error::runner-local benchmark mnemonic must contain exactly one line"
-            exit 1
-          fi
-          if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
-            echo "::error::runner-local benchmark mnemonic is empty or public"
-            exit 1
           fi
           chmod 600 "$mnemonic_file"
           echo "::add-mask::$mnemonic"
@@ -852,16 +870,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$ZONES_BENCH_SPF_OUTPUT")"
+          test ! -e "$ZONES_BENCH_SPF_OUTPUT"
           test -s "$ZONES_BENCH_SPF_RANGE"
           # shellcheck source=/dev/null
           source "$ZONES_BENCH_SPF_RANGE"
           [[ "$ZONES_BENCH_SPF_FROM_BLOCK" =~ ^[0-9]+$ ]]
           [[ "$ZONES_BENCH_SPF_TO_BLOCK" =~ ^[0-9]+$ ]]
           (( ZONES_BENCH_SPF_FROM_BLOCK <= ZONES_BENCH_SPF_TO_BLOCK ))
-          private_key="$(cast wallet private-key \
-            --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
-            --mnemonic-index 4)"
-          trap 'unset private_key' EXIT
+
+          spf_args=()
+          if [[ "$ZONES_BENCH_NEOBANK_PRESET" != encrypted-deposit ]]; then
+            spf_args+=(--require-user-transactions)
+          fi
 
           samply_args=(
             record
@@ -871,20 +891,26 @@ jobs:
             --output "$ZONES_BENCH_SPF_PROFILE"
           )
           set +e
-          PRIVATE_KEY="$private_key" samply "${samply_args[@]}" -- \
+          samply "${samply_args[@]}" -- \
             taskset --cpu-list "$ZONES_BENCH_CPUSET" \
-              "$SPF_BIN" generate-input \
+              "$SPF_BIN" generate-range \
               --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
               --chain "$ZONES_BENCH_ZONE_GENESIS" \
-              --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
-              --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
+              --zone-rpc-url "$ZONE_RPC_URL" \
               --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
               --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
-              --output "$ZONES_BENCH_SPF_OUTPUT" \
+              --output "$ZONES_BENCH_SPF_OUTPUT" "${spf_args[@]}" \
             > "$ZONES_BENCH_SPF_REPORT" \
             2> target/zones-benchmark/spf.log
           spf_status=$?
           set -e
+          # Samply may return success even when its child fails. The command only
+          # publishes this manifest after validating every measured batch.
+          if (( spf_status == 0 )) && [[ ! -s "$ZONES_BENCH_SPF_OUTPUT" ]]; then
+            echo "SPF batch validation did not complete; see errors above" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          fi
           if (( spf_status == 0 )) && [[ ! -s "$ZONES_BENCH_SPF_PROFILE" ]]; then
             echo "Samply did not produce $ZONES_BENCH_SPF_PROFILE" \
               >> target/zones-benchmark/spf.log
@@ -899,14 +925,6 @@ jobs:
             spf_status=1
           elif [[ -n "$profile_url" ]]; then
             printf '%s\n' "$profile_url" > "$ZONES_BENCH_SPF_PROFILE_URL"
-          fi
-          if (( spf_status == 0 )) &&
-             [[ "$ZONES_BENCH_NEOBANK_PRESET" != encrypted-deposit ]] &&
-             ! grep -Eq '^  User transactions: +[1-9][0-9]*$' "$ZONES_BENCH_SPF_REPORT"
-          then
-            echo "selected SPF range contains no measured Zone user transactions" \
-              >> target/zones-benchmark/spf.log
-            spf_status=1
           fi
 
           {
@@ -1142,6 +1160,7 @@ jobs:
             target/zones-benchmark/spf.log
             target/zones-benchmark/spf-report.txt
             target/zones-benchmark/spf-range.env
+            target/zones-benchmark/spf-input.batches/
             target/zones-benchmark/topology/neobank-fixtures.json
             target/zones-benchmark/node-logs/
             target/zones-benchmark/invalid-block-diagnostics/
