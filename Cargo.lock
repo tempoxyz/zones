@@ -11941,6 +11941,7 @@ dependencies = [
  "const-hex",
  "eyre",
  "futures",
+ "minicbor",
  "reqwest",
  "reth-cli",
  "serde",
