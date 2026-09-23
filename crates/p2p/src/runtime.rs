@@ -1125,7 +1125,7 @@ mod tests {
 
         use crate::{
             EncodedBlock,
-            capabilities::{ANNOUNCEMENT_INTERVAL, ANNOUNCEMENT_TTL},
+            capabilities::{ANNOUNCEMENT_INTERVAL, ANNOUNCEMENT_TTL, LOCAL_CAPABILITIES_VERSION},
             network,
             protocol::{DecodeError, RequestFrame, ResponseFrame},
         };
@@ -1202,7 +1202,7 @@ mod tests {
                         () = stop.cancelled() => break,
                         result = &mut network_task => panic!("legacy transport stopped: {result:?}"),
                         _ = announcements.tick(), if advertise => {
-                            let _ = responses.send(Recipients::All, ResponseFrame::WitnessSupport.encode().unwrap(), false);
+                            let _ = responses.send(Recipients::All, ResponseFrame::Capabilities(LOCAL_CAPABILITIES_VERSION).encode().unwrap(), false);
                         }
                         command = command_rx.recv() => match command {
                             None => break,

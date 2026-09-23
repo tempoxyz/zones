@@ -12,7 +12,7 @@ use tracing::{debug, error, warn};
 
 use crate::{
     EncodedBlock, LeadershipSchedule, P2pPeerId, PeerTip,
-    capabilities::{ANNOUNCEMENT_INTERVAL, PeerCapabilities},
+    capabilities::{ANNOUNCEMENT_INTERVAL, LOCAL_CAPABILITIES_VERSION, PeerCapabilities},
     protocol::{RequestFrame, ResponseFrame},
     routing::{RoutingMembership, RoutingPolicy},
 };
@@ -255,7 +255,7 @@ where
         loop {
             tokio::select! {
                 _ = announcements.tick() => {
-                    let frame = ResponseFrame::WitnessSupport.encode().expect("fixed-size announcement");
+                    let frame = ResponseFrame::Capabilities(LOCAL_CAPABILITIES_VERSION).encode().expect("fixed-size announcement");
                     let _ = self.response_sender.send(
                         Recipients::Some(self.membership.other_peers(&self.local)), frame, false,
                     );
@@ -433,12 +433,12 @@ where
                 return Ok(());
             }
         };
-        if frame == ResponseFrame::WitnessSupport {
+        if let ResponseFrame::Capabilities(version) = frame {
             // Capability advertisements are independent of leadership and outstanding requests.
             if RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
                 .is_remote_member(&peer)
             {
-                self.capabilities.announce_witnesses(peer, Instant::now());
+                self.capabilities.announce(peer, version, Instant::now());
             }
             return Ok(());
         }
@@ -450,7 +450,7 @@ where
         }
         let received_at = Instant::now();
         match frame {
-            ResponseFrame::WitnessSupport => unreachable!("handled before backfill routing"),
+            ResponseFrame::Capabilities(_) => unreachable!("handled before backfill routing"),
             ResponseFrame::Block { request_id, block } => {
                 if !self.job.record_response(&peer, request_id, received_at) {
                     warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill block");

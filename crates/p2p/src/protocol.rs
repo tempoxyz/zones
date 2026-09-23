@@ -4,8 +4,7 @@ use crate::network::MAX_MESSAGE_SIZE;
 
 const BLOCK_FRAME: u8 = 0;
 const COMPLETE_FRAME: u8 = 1;
-const WITNESS_SUPPORT_FRAME: u8 = 2;
-const WITNESS_ENVELOPE_VERSION: u8 = 1;
+const CAPABILITIES_FRAME: u8 = 2;
 const REQUEST_LEN: usize = 16;
 const RESPONSE_HEADER_LEN: usize = 1 + std::mem::size_of::<u64>();
 
@@ -110,15 +109,15 @@ pub(crate) enum ResponseFrame {
         request_id: u64,
         tip: PeerTip,
     },
-    /// Unsolicited support announcement on the existing response channel. Old receivers
+    /// Unsolicited capability version on the existing response channel. Old receivers
     /// ignore this unknown frame tag without disconnecting the authenticated transport.
-    WitnessSupport,
+    Capabilities(u8),
 }
 
 impl ResponseFrame {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         match self {
-            Self::WitnessSupport => Ok(vec![WITNESS_SUPPORT_FRAME, WITNESS_ENVELOPE_VERSION]),
+            Self::Capabilities(version) => Ok(vec![CAPABILITIES_FRAME, *version]),
             Self::Block { request_id, block } => {
                 let frame_len = block.len().saturating_add(RESPONSE_HEADER_LEN);
                 if frame_len > MAX_MESSAGE_SIZE as usize {
@@ -147,11 +146,10 @@ impl ResponseFrame {
         let Some((&tag, payload)) = bytes.split_first() else {
             return Err(DecodeError::EmptyResponse);
         };
-        if tag == WITNESS_SUPPORT_FRAME {
-            return if payload == [WITNESS_ENVELOPE_VERSION] {
-                Ok(Self::WitnessSupport)
-            } else {
-                Err(DecodeError::InvalidWitnessSupport)
+        if tag == CAPABILITIES_FRAME {
+            return match payload {
+                [version] => Ok(Self::Capabilities(*version)),
+                _ => Err(DecodeError::InvalidCapabilities),
             };
         }
         if !matches!(tag, BLOCK_FRAME | COMPLETE_FRAME) {
@@ -190,8 +188,8 @@ impl ResponseFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum DecodeError {
-    #[error("invalid witness support announcement")]
-    InvalidWitnessSupport,
+    #[error("invalid capabilities announcement")]
+    InvalidCapabilities,
     #[error("incorrect request length: expected {expected} bytes, got {actual}")]
     IncorrectRequestLength { expected: usize, actual: usize },
     #[error("empty response")]
@@ -273,20 +271,25 @@ mod tests {
     }
 
     #[test]
-    fn witness_support_is_a_versioned_unsolicited_frame() {
-        let announcement = ResponseFrame::WitnessSupport.encode().unwrap();
+    fn capabilities_are_a_versioned_unsolicited_frame() {
+        let announcement = ResponseFrame::Capabilities(1).encode().unwrap();
         assert_eq!(announcement, [2, 1]);
         assert_eq!(
             ResponseFrame::decode(&announcement),
-            Ok(ResponseFrame::WitnessSupport)
+            Ok(ResponseFrame::Capabilities(1))
         );
         // The old decoder accepts only tags 0/1, returning UnknownResponseTag for this
         // announcement before trying to read a request ID. Its coordinator ignores that error.
         assert!(!matches!(announcement[0], 0 | 1));
-        for bytes in [&[2][..], &[2, 0], &[2, 2], &[2, 1, 0]] {
+        for version in 0..=u8::MAX {
+            let frame = ResponseFrame::Capabilities(version);
+            assert_eq!(frame.encode().unwrap(), [2, version]);
+            assert_eq!(ResponseFrame::decode(&[2, version]), Ok(frame));
+        }
+        for bytes in [&[2][..], &[2, 1, 0]] {
             assert_eq!(
                 ResponseFrame::decode(bytes),
-                Err(DecodeError::InvalidWitnessSupport)
+                Err(DecodeError::InvalidCapabilities)
             );
         }
     }
