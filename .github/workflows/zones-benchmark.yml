@@ -782,12 +782,12 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
-      - name: Install pinned Samply profiler
+      - name: Install latest Samply edge profiler
         run: |
           set -euo pipefail
           cargo install samply \
             --git https://github.com/DaniPopes/samply \
-            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --branch edge \
             --locked \
             --force
           samply_path="$(command -v samply)"
