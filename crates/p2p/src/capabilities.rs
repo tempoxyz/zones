@@ -2,9 +2,11 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+use parking_lot::Mutex;
 
 use crate::P2pPeerId;
 
@@ -22,19 +24,15 @@ pub(crate) struct PeerCapabilities(Arc<Mutex<HashMap<P2pPeerId, (u8, Instant)>>>
 
 impl PeerCapabilities {
     pub(crate) fn announce(&self, peer: P2pPeerId, version: u8, now: Instant) {
-        let mut peers = self.0.lock().expect("peer capabilities lock poisoned");
+        let mut peers = self.0.lock();
         peers.retain(|_, (_, last_seen)| now.duration_since(*last_seen) < ANNOUNCEMENT_TTL);
         peers.insert(peer, (version, now));
     }
 
     pub(crate) fn supports_witnesses(&self, peer: &P2pPeerId, now: Instant) -> bool {
-        self.0
-            .lock()
-            .expect("peer capabilities lock poisoned")
-            .get(peer)
-            .is_some_and(|(version, last_seen)| {
-                *version == 1 && now.duration_since(*last_seen) < ANNOUNCEMENT_TTL
-            })
+        self.0.lock().get(peer).is_some_and(|(version, last_seen)| {
+            *version == 1 && now.duration_since(*last_seen) < ANNOUNCEMENT_TTL
+        })
     }
 }
 

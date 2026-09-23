@@ -14047,6 +14047,7 @@ dependencies = [
  "derive_more",
  "eyre",
  "metrics",
+ "parking_lot",
  "serde",
  "thiserror 2.0.18",
  "tokio",
