@@ -13,11 +13,8 @@ use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519Private
 use eyre::WrapErr;
 use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
 use p256::ecdsa::SigningKey as P256SigningKey;
-use reth_node_api::{FullNodeComponents, FullNodeTypes};
-use reth_node_builder::{
-    BuilderContext, Node, NodeBuilder, NodeConfig, NodeHandle, components::ExecutorBuilder,
-    rpc::RethRpcAddOns,
-};
+use reth_node_api::FullNodeComponents;
+use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::{args::RpcServerArgs, exit::NodeExitFuture};
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
@@ -49,7 +46,7 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
-    t13_zone_factory_state,
+    initial_zone_factory_state,
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -216,7 +213,7 @@ pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::B
 }
 
 fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    for account in t13_zone_factory_state(owner) {
+    for account in initial_zone_factory_state(owner) {
         let storage = account.storage.map(|(slot, value)| {
             BTreeMap::from([(
                 B256::from(slot.to_be_bytes()),
@@ -1329,6 +1326,12 @@ impl ZoneTestNode {
                 .expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
+        // Ordinary integration tests stay on T12; hardfork tests set their own activation.
+        genesis
+            .config
+            .extra_fields
+            .entry("t13Time".into())
+            .or_insert(serde_json::Value::Null);
         let chain_spec = ZoneChainSpec::from_genesis(genesis)?;
 
         let mut zone_node = ZoneNode::new(
@@ -1548,37 +1551,6 @@ pub(crate) struct L1TestNode {
     ws_url: url::Url,
     _node_handle: Box<dyn TestNodeHandle>,
     _tasks: Runtime,
-}
-
-/// Keep settlement tests independent of Nitro hardware and production PCR approval.
-/// Only this test node uses the bundled Solidity verifier stub at T13; production nodes
-/// retain the native verifier. Portal transitions and quorum signatures are still checked.
-#[derive(Clone, Copy, Debug)]
-struct TestL1ExecutorBuilder;
-
-impl<N> ExecutorBuilder<N> for TestL1ExecutorBuilder
-where
-    N: FullNodeTypes<Types = tempo_node::node::TempoNode>,
-{
-    type EVM = tempo_evm::TempoEvmConfig;
-
-    async fn build_evm(self, ctx: &BuilderContext<N>) -> eyre::Result<Self::EVM> {
-        let factory =
-            tempo_evm::TempoEvmFactory::default().with_precompile_overrides(|precompiles| {
-                precompiles.map_precompile_lookup(|address, previous| {
-                    if *address == tempo_contracts::precompiles::ZONE_VERIFIER_ADDRESS {
-                        None
-                    } else {
-                        previous.and_then(|lookup| lookup.lookup(address))
-                    }
-                });
-            });
-        let mut config = tempo_evm::TempoEvmConfig::new_with_evm_factory(ctx.chain_spec(), factory);
-        if let Some(cache) = ctx.sender_recovery_cache() {
-            config = config.with_sender_recovery_cache(cache.clone());
-        }
-        Ok(config)
-    }
 }
 
 /// Explicit account-access and callback-gateway configuration for a test zone.
@@ -2781,7 +2753,6 @@ impl L1TestNode {
     /// Start in T12 with the legacy shared runtimes; normal block execution installs T13.
     pub(crate) async fn start_with_t13(activation: u64) -> eyre::Result<Self> {
         use reth_chainspec::EthChainSpec as _;
-        use tempo_contracts::precompiles::initial_zone_factory_state;
         Self::start_with(|cfg| {
             let mut genesis = cfg.chain.genesis().clone();
             genesis
@@ -2789,9 +2760,6 @@ impl L1TestNode {
                 .extra_fields
                 .insert_value("t13Time".into(), activation)
                 .unwrap();
-            for account in initial_zone_factory_state(l1_dev_signer().address()) {
-                genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
-            }
             cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
             cfg.dev.block_time = None;
         })
@@ -2842,20 +2810,9 @@ impl L1TestNode {
 
         f(&mut node_config);
 
-        // The prewarmer constructs its own default EVM instead of using the executor factory.
-        // Keep the test verifier policy consistent between simulation and block execution.
-        let node = tempo_node::node::TempoNode::new(
-            &tempo_node::node::TempoNodeArgs {
-                builder_disable_prewarming: true,
-                ..Default::default()
-            },
-            None,
-        );
         let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
-            .with_types::<tempo_node::node::TempoNode>()
-            .with_components(node.components_builder().executor(TestL1ExecutorBuilder))
-            .with_add_ons(node.add_ons())
+            .node(tempo_node::node::TempoNode::default())
             .launch_with_debug_capabilities()
             .await?;
 

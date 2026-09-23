@@ -394,6 +394,10 @@ fn state_changing_transaction(recipient: Address) -> TransactionRequest {
 
 fn funded_zone_genesis() -> Genesis {
     let mut genesis = zone_node::genesis::genesis_template().expect("valid Zone genesis template");
+    genesis
+        .config
+        .extra_fields
+        .insert("t13Time".into(), serde_json::Value::Null);
     let sender = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
     let fee_balance_slot = sender.mapping_slot(tip20_slots::BALANCES);
     genesis

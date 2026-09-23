@@ -73,11 +73,10 @@ Starts an in-process Tempo L1 dev node via `L1TestNode::start()`, then connects
 a zone node via `ZoneTestNode::start_from_l1()`. The `L1Subscriber` receives
 real blocks over WebSocket.
 
-`L1TestNode` uses a test-only EVM factory that removes the T13 native Nitro
-verifier precompile, allowing the bundled Solidity verifier stub to execute.
-These settlement tests do not supply Nitro attestations or test PCR approval;
-they still exercise portal transitions, settlement certificates, and hardfork
-migration. Production nodes keep the native verifier enabled.
+Ordinary integration tests run at T12 with the legacy shared L1 runtimes.
+Hardfork tests opt into T13 explicitly. The T13 migration-and-settlement test
+is ignored until it can supply a Nitro proof; the T12-to-T13 execution test
+continues to run with the native precompiles.
 
 **Genesis patching in `start_from_l1()`:**
 
