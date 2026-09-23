@@ -20,7 +20,7 @@ jobs:
     name: Scan GitHub Actions
     # Only the upstream repository runs the recurring organization-wide scan.
     if: github.event_name != 'schedule' || github.repository == 'tempoxyz/zones'
-    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # main
     permissions:
       id-token: write
       actions: read
