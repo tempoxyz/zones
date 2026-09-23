@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 mod backfill;
+mod capabilities;
 mod identity;
 mod manifest;
 mod network;
