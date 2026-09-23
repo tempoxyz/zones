@@ -301,10 +301,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     }
 
     async fn process_available_blocks(&mut self, shutdown: &sync::CancellationToken) {
-        let latest_zone_block = match self.provider.best_block_number() {
+        let latest_zone_block = match self.provider.last_block_number() {
             Ok(number) => number,
             Err(error) => {
-                error!(%error, "Failed to read canonical zone head");
+                error!(%error, "Failed to read persisted zone head");
                 return;
             }
         };
