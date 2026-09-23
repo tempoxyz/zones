@@ -301,10 +301,17 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     }
 
     async fn process_available_blocks(&mut self, shutdown: &sync::CancellationToken) {
-        let latest_zone_block = match self.provider.last_block_number() {
+        // A P2P leader must not settle a block before it is durable and eligible for
+        // replication. The legacy standalone sequencer has no replicas and continues to
+        // process the canonical in-memory head.
+        let latest_zone_block = match if self.config.settlements.is_some() {
+            self.provider.last_block_number()
+        } else {
+            self.provider.best_block_number()
+        } {
             Ok(number) => number,
             Err(error) => {
-                error!(%error, "Failed to read persisted zone head");
+                error!(%error, "Failed to read zone head");
                 return;
             }
         };
