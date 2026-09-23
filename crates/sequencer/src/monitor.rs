@@ -1296,7 +1296,7 @@ mod tests {
 
     #[tokio::test]
     async fn leader_demotion_cancels_quorum_collection_in_both_verifier_modes() {
-        for unavailable in [false, true] {
+        for verifier_mode in [VerifierMode::NitroV1, VerifierMode::NoProof] {
             let l1 = Asserter::new();
             let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
             let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
@@ -1314,10 +1314,8 @@ mod tests {
                 commands,
             );
             monitor.config.settlements = Some(settlements.clone());
-            if unavailable {
-                monitor.settlement_prover =
-                    Some(SettlementProver::failing(ProverFailure::Unavailable));
-            }
+            monitor.verifier_mode = verifier_mode;
+            settlements.set_verifier_mode(verifier_mode);
             l1.push_success(&serde_json::json!({ "active": "T13" }));
             l1.push_success(&abi_encode_multicall(vec![
                 abi_encode_u64(1),
@@ -1357,12 +1355,7 @@ mod tests {
                 panic!("expected a settlement proposal");
             };
             let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
-            let expected_mode = if unavailable {
-                VerifierMode::NoProof
-            } else {
-                VerifierMode::NitroV1
-            };
-            assert_eq!(attestation.verifierConfigHash, expected_mode.config_hash());
+            assert_eq!(attestation.verifierConfigHash, verifier_mode.config_hash());
             assert!(!task.is_finished(), "a second signature is still required");
             shutdown.cancel();
             let result = tokio::time::timeout(Duration::from_secs(1), task)
@@ -1370,7 +1363,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(matches!(result, Err(BatchSubmitError::Cancelled)));
-            assert_eq!(settlements.verifier_mode(), VerifierMode::NitroV1);
+            assert_eq!(settlements.verifier_mode(), verifier_mode);
             assert!(l1.read_q().is_empty());
         }
     }
