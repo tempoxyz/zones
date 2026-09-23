@@ -13,6 +13,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  clippy:
+    name: clippy
+    runs-on: depot-ubuntu-latest-32
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_HTTP_TIMEOUT: "180"
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: full
+      RUSTC_WRAPPER: sccache
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        with:
+          toolchain: nightly
+          components: clippy
+      - uses: tempoxyz/gh-actions/actions/setup-mold@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        with:
+          version: v0.15.0
+      - name: Run clippy on runtime targets
+        run: cargo clippy --workspace --lib --bins --all-features --locked
+        env:
+          RUSTFLAGS: -D warnings
+      - name: Run clippy on test targets
+        run: cargo clippy --workspace --tests --all-features --locked
+        env:
+          RUSTFLAGS: -D warnings
+      - name: Run clippy on bench and example targets
+        run: cargo clippy --workspace --benches --examples --all-features --locked
+        env:
+          RUSTFLAGS: -D warnings
+
   rust:
     permissions:
       contents: read
@@ -20,8 +61,7 @@ jobs:
     uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
     with:
       rust-toolchain: nightly
-      clippy-runner: depot-ubuntu-latest-16
-      clippy-flags: --all-targets --all-features --locked --jobs 4
+      run-clippy: false
 
   lint-success:
     name: lint success
@@ -30,6 +70,7 @@ jobs:
     permissions:
       id-token: write
     needs:
+      - clippy
       - rust
     timeout-minutes: 30
     steps:
