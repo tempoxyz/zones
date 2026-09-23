@@ -7,6 +7,32 @@ const COMPLETE_FRAME: u8 = 1;
 const REQUEST_LEN: usize = 16;
 const RESPONSE_HEADER_LEN: usize = 1 + std::mem::size_of::<u64>();
 
+/// A block's RLP bytes and optional CBOR-encoded witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedBlock {
+    pub block: Vec<u8>,
+    pub witness: Option<Vec<u8>>,
+}
+
+impl EncodedBlock {
+    /// Versioned prefix of the witnessed block envelope.
+    pub const WITNESS_PREFIX: &[u8] = b"ZWIT\x01";
+
+    /// Encode a witness envelope when present, otherwise preserve bare RLP.
+    pub fn encode(&self) -> Vec<u8> {
+        if let Some(witness) = &self.witness {
+            let mut encoded =
+                Vec::with_capacity(Self::WITNESS_PREFIX.len() + self.block.len() + witness.len());
+            encoded.extend_from_slice(Self::WITNESS_PREFIX);
+            encoded.extend_from_slice(&self.block);
+            encoded.extend_from_slice(witness);
+            encoded
+        } else {
+            self.block.clone()
+        }
+    }
+}
+
 /// A peer's advertised canonical tip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerTip {

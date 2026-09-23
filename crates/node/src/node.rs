@@ -21,11 +21,12 @@ use crate::{
     shadow_prover::RpcFollowerShadowProver,
 };
 use alloy_chains::Chain;
-use alloy_consensus::BlockHeader as _;
-use alloy_eips::BlockNumberOrTag;
+use alloy_consensus::{BlockHeader as _, TxReceipt as _};
+use alloy_eips::{BlockHashOrNumber, BlockNumberOrTag};
 use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider as _};
 use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::SolEvent as _;
 use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
@@ -50,7 +51,8 @@ use reth_rpc_api::Web3ApiServer as _;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
-    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
+    BlockNumReader, EmptyBodyStorage, HeaderProvider, ReceiptProvider, StateProvider,
+    StateProviderFactory,
 };
 use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
@@ -78,7 +80,10 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    LegacyTempoAdvanced, TempoAdvanced, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal::{self},
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
@@ -99,8 +104,10 @@ use zone_payload::{
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_shadow_prover, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle,
+    SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
+    attestation::AttestationDomain, create_proof_collector, spawn_shadow_prover,
+    spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -179,6 +186,9 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
+    /// Exercise witness persistence without requiring a remote prover in integration fixtures.
+    #[cfg(feature = "test-utils")]
+    pub enable_proof_persistence: bool,
     /// Shared sequencer signer used for block production and encryption.
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
@@ -193,10 +203,22 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
-    /// Run the SPF over finalized candidates in detached, observational mode.
+    /// Require SPF validation and a Nitro NSM attestation before settlement.
+    ///
+    /// Implies enable_proof_persistence.
     pub enable_prover: bool,
-    /// Remote prover TCP address. When absent, execute the SPF in-process.
+    /// Remote Nitro prover TCP address. Required for proof-gated settlement; when absent, the SPF
+    /// runs in-process but settlement fails because no NSM attestation can be produced.
     pub prover_address: Option<String>,
+}
+
+impl ZoneSequencerAddOnsConfig {
+    fn requires_proof_persistence(&self) -> bool {
+        let enabled = self.enable_prover;
+        #[cfg(feature = "test-utils")]
+        let enabled = enabled || self.enable_proof_persistence;
+        enabled
+    }
 }
 
 /// Execution mode for the detached shadow prover.
@@ -294,6 +316,7 @@ impl ZoneNode {
             l1_fetch_concurrency,
             retry_connection_interval,
             retain_portal_evidence: false,
+            deferred_work_start: None,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -588,6 +611,11 @@ where
         );
 
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
+        let last_operational_tempo_block = latest_operational_tempo_block(ctx.node.provider())?;
+        if last_operational_tempo_block < tempo_block_number {
+            self.l1_config.deferred_work_start =
+                Some(last_operational_tempo_block.saturating_add(1));
+        }
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
@@ -769,11 +797,6 @@ where
                 .await?,
             )
         } else {
-            if let Some(ref config) = self.sequencer_config {
-                // Legacy single-sequencer mode keeps the static engine.
-                let sequencer_addr = config.sequencer_signer.address();
-                self.spawn_zone_engine(&ctx, sequencer_addr)?;
-            }
             None
         };
 
@@ -801,6 +824,7 @@ where
         let portal_address = self.portal_address;
         let debug_l1_provider = l1_provider.clone();
         let evm_chain_spec = ctx.node.evm_config().chain_spec().clone();
+        let datadir = ctx.config.datadir().data_dir().to_path_buf();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
@@ -824,7 +848,54 @@ where
                 Ok(())
             })
             .await?;
-        let prover_config =
+
+        let persist_before_canonicalization = self
+            .sequencer_config
+            .as_ref()
+            .is_some_and(ZoneSequencerAddOnsConfig::requires_proof_persistence);
+        let proof_collector =
+            if persist_before_canonicalization || finalized_batch_submissions.is_some() {
+                let proof_collector_config = ProofCollectorConfig {
+                    directory: datadir.join("proofs"),
+                    debug_api: Arc::new(NodeZoneDebugApi::new(
+                        handle.eth_handlers().api.clone(),
+                        l1_provider.clone(),
+                    )),
+                    portal_address: self.portal_address,
+                    l1_provider: l1_provider.clone(),
+                };
+                // The collector serves every role and stops only with the node.
+                let (collector, collector_task) =
+                    create_proof_collector(proof_collector_config, provider.clone()).await?;
+                task_executor.spawn_critical_task("zone-proof-collector", collector_task);
+                Some(collector)
+            } else {
+                None
+            };
+        // Repair a pre-existing canonical tail before admitting new blocks or starting settlement.
+        if persist_before_canonicalization {
+            proof_collector
+                .as_ref()
+                .expect("proof collector enabled")
+                .collect_canonical_tail(&provider)
+                .await?;
+        }
+        let prover_config = self
+            .sequencer_config
+            .as_ref()
+            .filter(|config| config.enable_prover)
+            .map(|config| SettlementProverConfig {
+                parent_chain_id: l1_chain_id,
+                zone_id: config.zone_id,
+                chain_spec: evm_chain_spec.clone(),
+                debug_api: Arc::new(NodeZoneDebugApi::new(
+                    handle.eth_handlers().api.clone(),
+                    l1_provider.clone(),
+                )),
+                prover_address: config.prover_address.clone(),
+            });
+
+        let shadow_prover_config =
             effective_shadow_prover_config
                 .as_ref()
                 .map(|config| ShadowProverConfig {
@@ -841,15 +912,12 @@ where
                         .map(ToOwned::to_owned),
                 });
 
-        if let (Some(config), Some(runtime_config), Some(submissions)) = (
-            effective_shadow_prover_config.as_ref(),
-            prover_config.clone(),
-            finalized_batch_submissions,
-        ) {
+        if let (Some(runtime_config), Some(submissions)) =
+            (shadow_prover_config, finalized_batch_submissions)
+        {
             let prover = spawn_shadow_prover(
                 runtime_config,
-                self.portal_address,
-                config.batch_anchor_config,
+                proof_collector.clone(),
                 provider.clone(),
                 l1_provider.clone(),
             );
@@ -898,6 +966,7 @@ where
                     provider.clone(),
                     backfill_commands.clone(),
                     backfill_requests_rx,
+                    proof_collector.clone(),
                 ),
             );
             let sequencer = match self.sequencer_config.take() {
@@ -907,6 +976,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    proof_collector.clone(),
                     prover_config.clone(),
                 )?),
                 None => None,
@@ -948,6 +1018,24 @@ where
             );
         } else if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
+            let last_header = provider
+                .sealed_header(provider.best_block_number()?)?
+                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let engine = ZoneEngine::new(
+                provider.chain_spec(),
+                engine_handle,
+                payload_builder,
+                self.deposit_queue.clone(),
+                self.l1_block_tracker.clone(),
+                last_header,
+                sequencer_addr,
+                self.encryption_keys
+                    .clone()
+                    .expect("sequencer mode configures deposit decryption keys"),
+                self.portal_address,
+                proof_collector.clone(),
+            );
+            task_executor.spawn_critical_task("zone-engine", engine.run());
 
             Self::launch_sequencer_tasks(
                 config,
@@ -959,6 +1047,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                proof_collector,
                 prover_config,
             )
             .await?;
@@ -1374,7 +1463,8 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
-        prover_config: Option<ShadowProverConfig>,
+        proof_collector: Option<ProofCollectorHandle>,
+        prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1391,6 +1481,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            proof_collector,
             prover_config,
         })
     }
@@ -1497,42 +1588,20 @@ where
                 .call()
                 .await?;
             eyre::ensure!(
-                !validity.valid,
-                "missing private decryption key for grace-valid Portal key index {key_index} at \
-                 L1 block {block_number}"
+                !validity.valid
+                // A key that has expired at the persisted checkpoint may still be needed by a deposit in the
+                // deferred Portal-work range.
+                    && self
+                        .l1_config
+                        .deferred_work_start.is_none_or(|from| validity.expiresAtBlock <= from),
+                "missing private decryption key for Portal key index {key_index} required at L1 \
+                 checkpoint {block_number} or by deferred work starting at {:?} (expires at L1 \
+                 block {})",
+                self.l1_config.deferred_work_start,
+                validity.expiresAtBlock,
             );
         }
 
-        Ok(())
-    }
-
-    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
-    fn spawn_zone_engine(
-        &self,
-        ctx: &AddOnsContext<'_, N>,
-        fee_recipient: Address,
-    ) -> eyre::Result<()> {
-        let provider = ctx.node.provider();
-        let last_header = provider
-            .sealed_header(provider.best_block_number()?)?
-            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-        let engine = ZoneEngine::new(
-            provider.chain_spec(),
-            ctx.beacon_engine_handle.clone(),
-            ctx.node.payload_builder_handle().clone(),
-            self.deposit_queue.clone(),
-            self.l1_block_tracker.clone(),
-            last_header,
-            fee_recipient,
-            self.encryption_keys
-                .clone()
-                .expect("sequencer mode configures deposit decryption keys"),
-            self.portal_address,
-        );
-        ctx.node
-            .task_executor()
-            .spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned");
         Ok(())
     }
 
@@ -1587,7 +1656,8 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
-        prover_config: Option<ShadowProverConfig>,
+        proof_collector: Option<ProofCollectorHandle>,
+        prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
@@ -1610,13 +1680,14 @@ where
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            proof_collector,
             prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
-        // Critical task — node shuts down if either exits.
+        // Critical task — node shuts down if any sequencer child exits.
         task_executor.spawn_critical_task("zone-monitor", async move {
             tokio::select! {
                 res = seq_handle.withdrawal_handle => {
@@ -1996,6 +2067,49 @@ where
 
         Ok(transaction_pool)
     }
+}
+
+/// Returns the latest Tempo block whose portal work was processed by a full `advanceTempo` import.
+///
+/// Checkpoint-only `advanceTempoHeaders` imports move the Zone's Tempo checkpoint without consuming
+/// their deposits, withdrawals, token updates, key rotations, or leader transitions. On restart,
+/// the caller uses the block after this operational boundary as the beginning of the deferred-work
+/// recovery range. If no operational import exists after genesis, the genesis Tempo anchor is the
+/// boundary.
+fn latest_operational_tempo_block<P>(provider: &P) -> eyre::Result<u64>
+where
+    P: BlockNumReader + ReceiptProvider + StateProviderFactory,
+{
+    let best = provider.best_block_number()?;
+    for number in (1..=best).rev() {
+        let Some(receipts) = provider.receipts_by_block(BlockHashOrNumber::Number(number))? else {
+            continue;
+        };
+        for receipt in receipts {
+            for log in receipt.logs() {
+                if log.address != ZONE_INBOX_ADDRESS {
+                    continue;
+                }
+                match log.topics().first() {
+                    Some(topic) if topic == &TempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(TempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    Some(topic) if topic == &LegacyTempoAdvanced::SIGNATURE_HASH => {
+                        return Ok(LegacyTempoAdvanced::decode_log(log)?.tempoBlockNumber);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let genesis_hash = provider
+        .block_hash(0)?
+        .ok_or_else(|| eyre::eyre!("zone genesis block hash is unavailable"))?;
+    Ok(provider
+        .state_by_block_hash(genesis_hash)?
+        .tempo_num_hash()?
+        .number)
 }
 
 #[cfg(test)]

@@ -22,12 +22,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-
 # Solidity contracts compiled for shared runtimes, routers, and zone genesis artifacts.
 # Requires the crates/contracts/lib submodules to be checked out.
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS solidity
-ARG FOUNDRY_VERSION=nightly
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
+# This stage lacks Git metadata required by newer Foundry lockfile validation.
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
-    && /root/.foundry/bin/foundryup --install ${FOUNDRY_VERSION}
+    && /root/.foundry/bin/foundryup --install nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 ENV PATH="/root/.foundry/bin:${PATH}"
 WORKDIR /app/crates/contracts
 COPY crates/contracts .

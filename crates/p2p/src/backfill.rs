@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use crate::{
-    LeadershipSchedule, P2pPeerId, PeerTip,
+    EncodedBlock, LeadershipSchedule, P2pPeerId, PeerTip,
     protocol::{RequestFrame, ResponseFrame},
     routing::{RoutingMembership, RoutingPolicy},
 };
@@ -37,7 +37,7 @@ pub enum BackfillCommand {
     SendBlock {
         peer: P2pPeerId,
         request_id: u64,
-        block: Vec<u8>,
+        block: EncodedBlock,
     },
     /// Finish one response page and advertise the responder's snapshot tip.
     Complete {
@@ -279,6 +279,7 @@ where
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill block addressed to an unknown peer");
                     return Ok(());
                 }
+                let block = block.encode();
                 let frame = match (ResponseFrame::Block { request_id, block }).encode() {
                     Ok(frame) => frame,
                     Err(err) => {

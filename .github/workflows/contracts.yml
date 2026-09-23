@@ -31,36 +31,36 @@ env:
 
 jobs:
   conformance:
-    name: ABI and storage conformance
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    name: ABI and storage conformance
+    runs-on: ubuntu-latest
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@89eccc47fadc422ccf04b957a24125bba1596f2d
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
           persist-credentials: false
 
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/actions/setup-mold@ab45d76f6e7420a094281a22aee1973ecc0754f8
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+      - uses: tempoxyz/gh-actions/actions/setup-mold@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           version: v0.15.0
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
+        uses: tempoxyz/gh-actions/actions/setup-foundry@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Build Solidity artifacts
         working-directory: crates/contracts
-        run: forge build --sizes
+        run: forge build --skip test
 
       - name: Check Solidity and Rust ABIs
         run: cargo run -p tempo-xtask -- check-abi
@@ -69,14 +69,14 @@ jobs:
         run: cargo test -p zone-precompiles --test storage --features test-utils
 
   build:
-    name: Forge Build
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    name: Forge Build
+    runs-on: ubuntu-latest
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@89eccc47fadc422ccf04b957a24125bba1596f2d
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,9 +84,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
+        uses: tempoxyz/gh-actions/actions/setup-foundry@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Show Forge version
         run: forge --version
@@ -107,17 +107,27 @@ jobs:
 
       - name: Run Forge build
         working-directory: crates/contracts
-        run: forge build --sizes
+        run: forge build --skip test
+
+      # Exclude all test helpers too: their imports would pull the runtimes back in. Protocol-
+      # installed runtimes have a separate 64 KiB budget in PortalRuntime.t.sol.
+      - name: Check sizes of normally deployed contracts
+        working-directory: crates/contracts
+        run: |
+          forge build --sizes --skip 'test/**' \
+            src/runtime/tempo/ZonePortal.sol \
+            src/runtime/tempo/ZoneMessenger.sol \
+            src/runtime/tempo/Verifier.sol
 
   lint:
-    name: Forge Fmt
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    name: Forge Fmt
+    runs-on: ubuntu-latest
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@89eccc47fadc422ccf04b957a24125bba1596f2d
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,27 +135,27 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@22a3c7b7fd5e0975bd7c1aaa9de61905afb1da9d
+        uses: tempoxyz/gh-actions/actions/setup-foundry@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
-          version: nightly
+          version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
       - name: Run Forge fmt check
         working-directory: crates/contracts
         run: forge fmt --check src/runtime test
 
   test:
-    name: Forge Test & Coverage
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    name: Forge Test & Coverage
+    runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: "sccache"
       MIN_LINES: "88"
       MIN_BRANCHES: "60"
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@89eccc47fadc422ccf04b957a24125bba1596f2d
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -185,18 +195,18 @@ jobs:
 
       - name: Setup Rust
         if: steps.forge-cache.outputs.cache-hit != 'true'
-        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           toolchain: stable
       - name: Setup mold
         if: steps.forge-cache.outputs.cache-hit != 'true'
-        uses: tempoxyz/gh-actions/actions/setup-mold@ab45d76f6e7420a094281a22aee1973ecc0754f8
+        uses: tempoxyz/gh-actions/actions/setup-mold@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
       - name: Setup sccache
         if: steps.forge-cache.outputs.cache-hit != 'true'
-        uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           version: v0.15.0
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         if: steps.forge-cache.outputs.cache-hit != 'true'
         with:
           workspaces: foundry
@@ -225,6 +235,17 @@ jobs:
             crates/contracts/out
           key: tempo-forge-specs-v1-${{ runner.os }}-${{ steps.foundry-ref.outputs.sha }}-${{ env.TEMPO_FOUNDRY_REF }}-${{ steps.contracts-key.outputs.tree }}
 
+      - name: Build and check deployment sizes with Tempo-capable Forge
+        working-directory: crates/contracts
+        run: |
+          "$GITHUB_WORKSPACE/foundry/target/release/forge" build --skip test
+          # Protocol-installed runtimes are excluded here and have a separate 64 KiB budget in
+          # PortalRuntime.t.sol.
+          "$GITHUB_WORKSPACE/foundry/target/release/forge" build --sizes --skip 'test/**' \
+            src/runtime/tempo/ZonePortal.sol \
+            src/runtime/tempo/ZoneMessenger.sol \
+            src/runtime/tempo/Verifier.sol
+
       - name: Run Forge tests (zone specs)
         working-directory: crates/contracts
         run: |
@@ -240,6 +261,7 @@ jobs:
       - name: Forge coverage (zone specs)
         working-directory: crates/contracts
         run: |
+          set -o pipefail
           "$GITHUB_WORKSPACE/foundry/target/release/forge" coverage \
             --ir-minimum --match-path "test/**" --exclude-tests --report summary | tee coverage.txt
           {
@@ -282,6 +304,9 @@ jobs:
           PY
 
   contracts-success:
+    permissions:
+      contents: read
+      id-token: write
     name: contracts success
     runs-on: ubuntu-latest
     if: always()
@@ -292,7 +317,10 @@ jobs:
       - test
     timeout-minutes: 5
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+
       - name: Decide whether the needed jobs succeeded or failed
-        uses: tempoxyz/gh-actions/actions/check-needs@ab45d76f6e7420a094281a22aee1973ecc0754f8
+        uses: tempoxyz/gh-actions/actions/check-needs@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           jobs: ${{ toJSON(needs) }}

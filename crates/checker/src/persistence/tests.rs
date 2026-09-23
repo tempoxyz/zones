@@ -30,6 +30,40 @@ fn identity() -> Identity {
 }
 
 #[test]
+fn checkpoint_accounting_anchor_survives_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checker");
+    let checkpoint = Checkpoint {
+        identity: identity(),
+        zone: block(0, 10),
+        tempo: block(100, 20),
+        state: Default::default(),
+    };
+    let (store, snapshot) = Store::open_or_create(&path, &checkpoint).unwrap();
+    let candidate = CandidateTransition::derive(
+        snapshot,
+        block(1, 11),
+        checkpoint.zone,
+        checkpoint.tempo,
+        &[],
+    )
+    .unwrap();
+    let one = store.apply(candidate).unwrap();
+    drop(store);
+    let (store, reopened) = Store::open(&path, identity()).unwrap();
+    assert_eq!(reopened, one);
+    assert_eq!(reopened.metadata.imported_tempo, checkpoint.tempo);
+    assert_eq!(reopened.metadata.status, Status::Verifying);
+
+    let candidate =
+        CandidateTransition::derive(reopened, block(2, 12), block(1, 11), block(110, 30), &[])
+            .unwrap();
+    let full = store.apply(candidate).unwrap();
+    assert_eq!(full.metadata.imported_tempo, block(110, 30));
+    assert_eq!(full.metadata.verified_zone, block(2, 12));
+}
+
+#[test]
 fn rows_survive_restart_and_clear_on_reset() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("checker");

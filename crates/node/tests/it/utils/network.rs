@@ -16,6 +16,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+const P2P_NODE_COUNT: usize = 3;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DirectionCondition {
     paused: bool,
@@ -82,10 +84,10 @@ impl P2pChaosNetwork {
     /// Returns the per-node manifest addresses. Row `from`, column `to` is the address node
     /// `from` should use for node `to`; diagonal entries retain the node's real listen address.
     pub(crate) async fn start(
-        node_addresses: [SocketAddr; 3],
-    ) -> eyre::Result<(Self, [[SocketAddr; 3]; 3])> {
-        let mut manifest_addresses = [node_addresses; 3];
-        let mut links = Vec::with_capacity(6);
+        node_addresses: [SocketAddr; P2P_NODE_COUNT],
+    ) -> eyre::Result<(Self, [[SocketAddr; P2P_NODE_COUNT]; P2P_NODE_COUNT])> {
+        let mut manifest_addresses = [node_addresses; P2P_NODE_COUNT];
+        let mut links = Vec::with_capacity(P2P_NODE_COUNT * (P2P_NODE_COUNT - 1));
         for (from, manifest_row) in manifest_addresses.iter_mut().enumerate() {
             for (to, (manifest_address, &node_address)) in
                 manifest_row.iter_mut().zip(&node_addresses).enumerate()
@@ -118,6 +120,37 @@ impl P2pChaosNetwork {
         for proxy in self.links_for(nodes) {
             proxy.resume();
         }
+    }
+
+    /// Wait until every selected node has a live P2P stream with every other cluster member.
+    pub(crate) async fn wait_for_nodes_connected(
+        &self,
+        nodes: &[usize],
+        timeout: Duration,
+    ) -> eyre::Result<()> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let connected = nodes.iter().all(|&node| {
+                    (0..P2P_NODE_COUNT)
+                        .filter(|&peer| peer != node)
+                        .all(|peer| {
+                            self.links.iter().any(|link| {
+                                ((link.from == node && link.to == peer)
+                                    || (link.from == peer && link.to == node))
+                                    && link.proxy.active_connections() > 0
+                            })
+                        })
+                });
+                if connected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            eyre::eyre!("timed out after {timeout:?} waiting for selected P2P nodes to reconnect")
+        })
     }
 
     pub(crate) async fn wait_for_nodes_disconnected(

@@ -21,6 +21,7 @@ use crate::{
         MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL,
         SETTLEMENT_SIGNATURE_CHANNEL, TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
     },
+    protocol::EncodedBlock,
     routing::{RoutingMembership, RoutingPolicy},
 };
 
@@ -200,8 +201,8 @@ fn validate_ip_check_configuration(
 /// Outbound protocol commands accepted by the dedicated P2P runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum P2pCommand {
-    /// Broadcast one RLP-encoded sealed zone block to all nodes.
-    BroadcastBlock(Vec<u8>),
+    /// Broadcast a block and its optional witness to every peer.
+    BroadcastBlock(EncodedBlock),
     /// Broadcast one ABI-encoded settlement proposal to all followers.
     BroadcastSettlementProposal(Vec<u8>),
     /// Return one ABI-encoded settlement signature to the leader that proposed it.
@@ -542,6 +543,7 @@ async fn run_commands(
                     continue;
                 }
 
+                let block = block.encode();
                 if block.len() > MAX_MESSAGE_SIZE as usize {
                     error!(target: "zone::p2p", block_size_bytes = block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
                     continue;
@@ -550,9 +552,7 @@ async fn run_commands(
                 let admitted = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
                         let admitted = senders.blocks.send(
-                            Recipients::Some(recipients.clone()),
-                            block.clone(),
-                            true,
+                            Recipients::Some(recipients.clone()), block.clone(), true,
                         );
                         if !admitted.is_empty() || recipients.is_empty() {
                             break admitted;
@@ -1156,7 +1156,13 @@ mod tests {
 
         let block = vec![0xf8, 0x01, 0x80];
         let commands = handles[0].parts.as_ref().unwrap().commands.clone();
-        let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(block.clone()));
+        let broadcaster = repeat(
+            commands,
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: block.clone(),
+                witness: None,
+            }),
+        );
 
         for handle in handles.iter_mut().skip(1) {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -1172,6 +1178,35 @@ mod tests {
             })
             .await
             .expect("follower did not receive block");
+        }
+        broadcaster.abort();
+
+        // Witness envelopes are broadcast to every follower once witness collection is enabled.
+        let witness = vec![0x01];
+        let encoded = crate::EncodedBlock {
+            block: block.clone(),
+            witness: Some(witness.clone()),
+        };
+        let witnessed_block = encoded.encode();
+        let commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(encoded));
+        for handle in handles.iter_mut().skip(1) {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        block: received, ..
+                    }) = handle.events_mut().recv().await
+                    {
+                        if received == witnessed_block {
+                            break;
+                        }
+                        // A previous plain broadcast may still be queued.
+                        assert_eq!(received, block);
+                    }
+                }
+            })
+            .await
+            .expect("follower did not receive witnessed blocks");
         }
         broadcaster.abort();
 
@@ -1284,7 +1319,10 @@ mod tests {
                 .send(crate::BackfillCommand::SendBlock {
                     peer: requesting_peer.clone(),
                     request_id,
-                    block: block.clone(),
+                    block: crate::EncodedBlock {
+                        block: block.clone(),
+                        witness: Some(witness.clone()),
+                    },
                 })
                 .await
                 .unwrap();
@@ -1315,7 +1353,14 @@ mod tests {
                     }
                     Some(crate::BackfillResponse::Completed { tip, .. }) => {
                         assert_eq!(tip, test_tip(9));
-                        assert_eq!(received_blocks, backfill_blocks);
+                        assert_eq!(
+                            received_blocks,
+                            backfill_blocks.map(|block| crate::EncodedBlock {
+                                block,
+                                witness: Some(witness.clone())
+                            }
+                            .encode())
+                        );
                         return;
                     }
                     None => panic!("follower backfill response channel closed"),
@@ -1341,6 +1386,45 @@ mod tests {
             .await
             .is_err(),
             "completed backfill request accepted a replay"
+        );
+
+        // Backfill without a stored witness still uses plain blocks.
+        handles[2]
+            .parts
+            .as_ref()
+            .unwrap()
+            .backfill
+            .commands
+            .send(crate::BackfillCommand::Request { start: 10 })
+            .await
+            .unwrap();
+        let request = tokio::time::timeout(
+            Duration::from_secs(15),
+            handles[0].parts.as_mut().unwrap().backfill.requests.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        leader_commands
+            .send(crate::BackfillCommand::SendBlock {
+                peer: request.peer.clone(),
+                request_id: request.request_id,
+                block: crate::EncodedBlock {
+                    block: block.clone(),
+                    witness: None,
+                },
+            })
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(15),
+            handles[2].parts.as_mut().unwrap().backfill.responses.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(response, crate::BackfillResponse::Block { block: received, .. } if received == block)
         );
 
         for handle in handles {
@@ -1422,7 +1506,10 @@ mod tests {
         let broadcaster = tokio::spawn(async move {
             loop {
                 outgoing_commands
-                    .send(P2pCommand::BroadcastBlock(broadcast_block.clone()))
+                    .send(P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                        block: broadcast_block.clone(),
+                        witness: None,
+                    }))
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1641,7 +1728,10 @@ mod tests {
         let block = vec![0xf8, 0x01, 0x80];
         let broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: block.clone(),
+                witness: None,
+            }),
         );
         for index in [QUORUM_FOLLOWER, QUORUM_FOLLOWER_B, RPC_FOLLOWER] {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -1989,7 +2079,10 @@ mod tests {
         let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
         let initial_broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(initial_block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: initial_block.clone(),
+                witness: None,
+            }),
         );
         for (label, handle) in [
             ("follower-a", &mut follower_a),
@@ -2025,7 +2118,10 @@ mod tests {
         let offline_block = vec![0xf8, 0x02, 0x80];
         let offline_broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(offline_block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: offline_block.clone(),
+                witness: None,
+            }),
         );
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -2077,7 +2173,10 @@ mod tests {
         let remesh_block = vec![0xf8, 0x03, 0x80];
         let remesh_broadcaster = repeat(
             leader_commands,
-            P2pCommand::BroadcastBlock(remesh_block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: remesh_block.clone(),
+                witness: None,
+            }),
         );
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
@@ -2211,7 +2310,10 @@ mod tests {
         let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
         let broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: block.clone(),
+                witness: None,
+            }),
         );
         for (index, handle) in followers.iter_mut().enumerate() {
             tokio::time::timeout(Duration::from_secs(20), async {

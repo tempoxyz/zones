@@ -28,6 +28,7 @@ zone-p2p.workspace = true
 zone-payload.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
+zone-prover.workspace = true
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
 zone-checker = { workspace = true, optional = true }
@@ -77,6 +78,8 @@ alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 
 # misc
+minicbor.workspace = true
+minicbor-serde.workspace = true
 clap = { workspace = true, optional = true }
 eyre.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
@@ -84,6 +87,7 @@ futures.workspace = true
 jsonrpsee.workspace = true
 k256.workspace = true
 metrics.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

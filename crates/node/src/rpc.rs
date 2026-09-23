@@ -26,7 +26,7 @@ use eyre::{OptionExt as _, WrapErr};
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_provider::{CanonStateSubscriptions, HeaderProvider};
+use reth_provider::{BlockReader, CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_api::Web3ApiServer;
@@ -37,7 +37,7 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::{EthApiError, logs_utils};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
-use reth_trie_common::{ExecutionWitnessMode, HashedPostState};
+use reth_trie_common::{ExecutionWitnessMode, HashedPostState, HashedStorage};
 use tempo_alloy::{
     TempoNetwork,
     provider::ext::TempoProviderExt as _,
@@ -56,7 +56,7 @@ use tokio::{
 use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{IZoneInbox, ZONE_TOKEN_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
@@ -266,10 +266,7 @@ impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
 where
     E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
 {
-    async fn zone_execution_witness(
-        &self,
-        block_id: BlockNumberOrTag,
-    ) -> RpcResult<ZoneExecutionWitness> {
+    async fn zone_execution_witness(&self, block_id: BlockId) -> RpcResult<ZoneExecutionWitness> {
         let _permit = self
             .eth_api
             .tracing_task_guard()
@@ -277,12 +274,27 @@ where
             .acquire_owned()
             .await;
 
-        let block = self
-            .eth_api
-            .recovered_block(block_id.into())
-            .await
-            .map_err(|error| operator_rpc_error(internal(error)))?
-            .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
+        let pending = if let BlockId::Hash(hash) = block_id
+            && hash.require_canonical != Some(true)
+        {
+            self.eth_api
+                .provider()
+                .pending_block()
+                .map_err(|error| operator_rpc_error(internal(error)))?
+                .filter(|block| block.hash() == hash.block_hash)
+                .map(Arc::new)
+        } else {
+            None
+        };
+        let block = match pending {
+            Some(block) => Some(block),
+            None => self
+                .eth_api
+                .recovered_block(block_id)
+                .await
+                .map_err(|error| operator_rpc_error(internal(error)))?,
+        }
+        .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
         let block_number = block.header().number();
         let block_hash = block.hash();
         let parent_hash = block.parent_hash();
@@ -299,15 +311,13 @@ where
                 let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
                 let block_executor = evm_config.executor(&mut db);
                 let mode = ExecutionWitnessMode::default();
-                let mut witness = None;
 
+                let mut witness = None;
                 let _ = block_executor
                     .execute_with_state_closure(&block, |statedb: &State<_>| {
-                        let mut additional_state = HashedPostState::default();
-                        record_block_hash_storage_proofs(&mut additional_state, statedb);
                         witness = Some(
                             ExecutionWitnessRecord::new(statedb)
-                                .with_additional_state(additional_state)
+                                .with_additional_state(spf_storage_targets(statedb))
                                 .into_execution_witness(
                                     &statedb.database.database.0,
                                     eth_api.provider(),
@@ -317,7 +327,6 @@ where
                         );
                     })
                     .map_err(|error| EthApiError::Internal(error.into()))?;
-
                 let witness = witness
                     .expect("state closure is called after successful execution")
                     .map_err(EthApiError::from)?;
@@ -333,7 +342,7 @@ where
             &reads,
         )
         .await
-        .map_err(|error| operator_rpc_error(internal(error)))?;
+        .map_err(|error| operator_rpc_error(internal(format!("{error:#}"))))?;
         Ok(ZoneExecutionWitness {
             block_number,
             block_hash,
@@ -408,28 +417,40 @@ async fn collect_tempo_witness(
     Ok((initial_header, nodes.into_values().collect()))
 }
 
-/// Add EIP-2935 history-contract storage paths for every BLOCKHASH value read during replay.
+/// Build storage targets for SPF reads not necessarily covered by execution.
 ///
-/// Reth records these reads in REVM's block-hash cache and normally proves them with ancestor
+/// Reth records BLOCKHASH reads in REVM's block-hash cache and normally proves them with ancestor
 /// headers. Zones already commit the EIP-2935 history contract in state, so adding the matching
 /// storage targets lets the SPF authenticate the same values against the parent state root.
-fn record_block_hash_storage_proofs<DB>(additional_state: &mut HashedPostState, state: &State<DB>) {
-    let block_hashes = state.block_hashes.iter().collect::<Vec<_>>();
-    if block_hashes.is_empty() {
-        return;
-    }
+fn spf_storage_targets<DB>(state: &State<DB>) -> HashedPostState {
+    // SPF always reads the token cursor, but pre-T13 execution never touches it. Include its
+    // absence proof explicitly; ExecutionWitnessRecord overrides this zero with any value
+    // recorded during execution.
+    let mut targets = HashedPostState::from_hashed_storage(
+        keccak256(ZONE_INBOX_ADDRESS),
+        HashedStorage::from_iter([(
+            keccak256(
+                zone_precompiles::inbox::slots::PROCESSED_ENABLED_TOKEN_COUNT.to_be_bytes::<32>(),
+            ),
+            U256::ZERO,
+        )]),
+    );
 
-    let history_storage = additional_state
-        .storages
-        .entry(keccak256(HISTORY_STORAGE_ADDRESS))
-        .or_default();
-    for (number, hash) in block_hashes {
+    let mut history_storage = HashedStorage::default();
+    for (number, hash) in state.block_hashes.iter() {
         let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
         history_storage.storage.insert(
             keccak256(slot.to_be_bytes::<32>()),
             U256::from_be_bytes(hash.0),
         );
     }
+    if !history_storage.storage.is_empty() {
+        targets.extend(HashedPostState::from_hashed_storage(
+            keccak256(HISTORY_STORAGE_ADDRESS),
+            history_storage,
+        ));
+    }
+    targets
 }
 
 fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
@@ -1278,8 +1299,8 @@ where
 
     fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
-            let provider = self.eth.api.provider().clone();
             let api = self.eth.api.clone();
+            let provider = self.eth.api.provider().clone();
             let caller = auth.caller;
 
             let zone_tokens = self.zone_tokens();
@@ -1313,9 +1334,11 @@ where
                             removed,
                         ) {
                             Ok(logs) => all_logs.extend(logs),
-                            Err(error) => {
-                                tracing::error!(target: "rpc", %error, "Failed to convert logs");
-                            }
+                            Err(error) => tracing::error!(
+                                target: "rpc",
+                                %error,
+                                "Failed to convert subscription logs"
+                            ),
                         }
                     }
                     futures::stream::iter(all_logs)
@@ -1595,11 +1618,9 @@ mod tests {
             .with_database(revm::database::EmptyDB::default())
             .build();
         state.block_hashes.insert(number, hash);
-        let mut additional_state = HashedPostState::default();
+        let targets = spf_storage_targets(&state);
 
-        record_block_hash_storage_proofs(&mut additional_state, &state);
-
-        let storage = additional_state
+        let storage = targets
             .storages
             .get(&keccak256(HISTORY_STORAGE_ADDRESS))
             .unwrap();
@@ -1686,7 +1707,15 @@ mod tests {
             assert_eq!(requests[0][0], serde_json::json!([[account, [slot]]]));
         }
         fail.store(true, Ordering::Relaxed);
-        let (_, nodes) = collect_tempo_witness(&provider, initial, None, &HashSet::new()).await?;
+        // Checkpoint-only blocks authenticate headers without reading L1 state, so they
+        // must not decode advanceTempo or request proofs, even when the proof RPC fails.
+        let checkpoint_input = IZoneInbox::advanceTempoHeadersCall {
+            headers: vec![alloy_rlp::encode(&checkpoint).into()],
+        }
+        .abi_encode();
+        let (_, nodes) =
+            collect_tempo_witness(&provider, initial, Some(&checkpoint_input), &HashSet::new())
+                .await?;
         assert!(nodes.is_empty());
         assert_eq!(requests.lock().unwrap().len(), 1);
         let error = collect_tempo_witness(&provider, initial, Some(&first_tx_input), &reads)

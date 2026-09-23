@@ -38,7 +38,7 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
+    SettlementProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
     resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
@@ -112,11 +112,13 @@ pub struct RoleStatus {
 /// Shared handle to the live [`RoleStatus`].
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
-/// Leader-only background task dependencies (batch submission, withdrawal processing).
+/// Dependencies used by leader tasks; the proof collector itself is node-owned.
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
-    pub prover_config: Option<ShadowProverConfig>,
+    /// Node-owned collector shared across all role generations.
+    pub proof_collector: Option<zone_sequencer::ProofCollectorHandle>,
+    pub prover_config: Option<SettlementProverConfig>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
@@ -324,7 +326,7 @@ enum GenerationStopOutcome {
     Failed,
 }
 
-/// Supervise the two long-running sequencer children as one role-generation task.
+/// Supervise the long-running sequencer children as one role-generation task.
 ///
 /// An unexpected child exit must restart the whole generation immediately. During an intentional
 /// generation stop, however, both children retain the graceful shutdown window needed to finish
@@ -550,8 +552,8 @@ enum Readiness {
 /// Forced-recovery promotion requires the operator-selected block to remain in the local canonical
 /// chain. The node may have advanced beyond that checkpoint before restarting, so requiring it to
 /// remain the head would make every in-progress recovery restart fatal. Normal transitions need no
-/// additional evidence: the next-anchor rule and one-to-one zone/L1 block mapping ensure all
-/// earlier leaders' blocks are already local.
+/// additional evidence: the next-anchor rule and production permits that stop checkpoint batches
+/// at leadership boundaries ensure all earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -895,6 +897,10 @@ where
                 attestation: context.attestation.clone(),
                 schedule: context.schedule.clone(),
                 peer_tips: context.peer_tips.clone(),
+                proof_collector: context
+                    .sequencer
+                    .as_ref()
+                    .and_then(|sequencer| sequencer.proof_collector.clone()),
             };
             let sync_p2p = BlockSyncP2p {
                 events: sync_rx,
@@ -985,6 +991,7 @@ where
             sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
+            let collector = sequencer.proof_collector.clone();
             let engine = build_engine(context, sequencer, last_header);
             let engine_token = token.clone();
             let (engine_done_tx, engine_done_rx) = oneshot::channel();
@@ -1005,8 +1012,10 @@ where
             });
             let provider = context.provider.clone();
             let commands = context.commands.clone();
+            let broadcast_proofs = collector.clone();
             tasks.spawn(async move {
-                broadcast_persisted_blocks(provider, commands, broadcaster_rx).await;
+                broadcast_persisted_blocks(provider, commands, broadcaster_rx, broadcast_proofs)
+                    .await;
                 TaskEnd::Ended("block-broadcast")
             });
 
@@ -1070,6 +1079,7 @@ where
                     sequencer_config,
                     signer,
                     zone_provider,
+                    collector,
                     prover_config,
                     sequencer_token.clone(),
                 )
@@ -1119,6 +1129,7 @@ where
         sequencer.config.sequencer_signer.address(),
         context.encryption_keys.clone(),
         context.portal_address,
+        sequencer.proof_collector.clone(),
     )
     .with_production_permit(ProductionPermit::new(
         context.schedule.clone(),

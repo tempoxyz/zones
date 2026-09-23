@@ -423,7 +423,7 @@ impl EventCollector {
             .anchor
             .ok_or_else(|| eyre::eyre!("block {block} is missing TempoAdvanced"))?;
         Ok(super::L2BlockEvidence {
-            anchor,
+            anchor: Some(anchor),
             transfers: self.transfers,
             actions: self.actions,
         })
@@ -437,8 +437,15 @@ fn decode_inbox(log: &Log, block: u64) -> eyre::Result<Option<ReceiptEvent>> {
         .first()
         .ok_or_else(|| eyre::eyre!("topicless ZoneInbox log in block {block}"))?;
     Ok(Some(match *topic {
-        IZoneInbox::TempoAdvanced::SIGNATURE_HASH => {
-            let event = decode_event::<IZoneInbox::TempoAdvanced>(log, "TempoAdvanced", block)?;
+        IZoneInbox::TempoAdvanced_0::SIGNATURE_HASH => {
+            let event = decode_event::<IZoneInbox::TempoAdvanced_0>(log, "TempoAdvanced_0", block)?;
+            ReceiptEvent::Anchor(L1Anchor {
+                tempo_block_hash: event.tempoBlockHash,
+                tempo_block_number: event.tempoBlockNumber,
+            })
+        }
+        IZoneInbox::TempoAdvanced_1::SIGNATURE_HASH => {
+            let event = decode_event::<IZoneInbox::TempoAdvanced_1>(log, "TempoAdvanced_1", block)?;
             ReceiptEvent::Anchor(L1Anchor {
                 tempo_block_hash: event.tempoBlockHash,
                 tempo_block_number: event.tempoBlockNumber,
@@ -602,7 +609,7 @@ mod tests {
         block: BlockNumHash,
     ) -> eyre::Result<super::super::L2BlockEvidence>
     where
-        T: TxHashRef,
+        T: TxHashRef + alloy_consensus::Transaction,
         R: TxReceipt<Log = Log>,
     {
         crate::l2::collect_l2_block_evidence(transactions, receipts, block)
@@ -619,12 +626,13 @@ mod tests {
     fn anchor_log(number: u64) -> Log {
         Log {
             address: ZONE_INBOX_ADDRESS,
-            data: IZoneInbox::TempoAdvanced {
+            data: IZoneInbox::TempoAdvanced_1 {
                 tempoBlockHash: B256::repeat_byte(0xaa),
                 tempoBlockNumber: number,
                 depositsProcessed: U256::from(2),
                 newProcessedDepositQueueHash: B256::repeat_byte(0xbb),
                 lastProcessedDepositNumber: 3,
+                lastProcessedEnabledTokenCount: 4,
             }
             .encode_log_data(),
         }
@@ -820,7 +828,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(events.anchor.tempo_block_number, 100);
+        assert_eq!(events.l1_anchor().unwrap().tempo_block_number, 100);
         assert_eq!(events.transfers.len(), 5);
         assert_eq!(events.actions.len(), 7);
         assert!(matches!(events.actions[0], L2BridgeAction::Deposit {
@@ -853,6 +861,96 @@ mod tests {
         } if sender == Address::repeat_byte(0x44) && token == token_b
             && principal == U256::from(2000) && fee == U256::from(75))
         );
+    }
+
+    #[test]
+    fn checkpoint_only_blocks_require_the_exact_event_and_transaction_shape() {
+        use alloy_sol_types::SolCall;
+        use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState};
+
+        let header = tempo_primitives::TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 109,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let encoded = Bytes::from(alloy_rlp::encode(&header));
+        let tx = TxLegacy {
+            to: TxKind::Call(ZONE_INBOX_ADDRESS),
+            input: IZoneInbox::advanceTempoHeadersCall {
+                headers: vec![encoded.clone()],
+            }
+            .abi_encode()
+            .into(),
+            ..Default::default()
+        }
+        .into_signed(Signature::test_signature());
+        let log = event_log(
+            TEMPO_STATE_ADDRESS,
+            TempoState::TempoBlockFinalized {
+                blockHash: alloy_primitives::keccak256(&encoded),
+                blockNumber: 109,
+                stateRoot: header.inner.state_root,
+            },
+        );
+        let block = BlockNumHash::new(4, B256::ZERO);
+        let events = collect(
+            std::slice::from_ref(&tx),
+            &[receipt(vec![log.clone()])],
+            block,
+        )
+        .unwrap();
+        assert!(events.l1_anchor().is_none());
+        assert!(events.token_transfers().next().is_none());
+        assert!(events.bridge_actions().next().is_none());
+
+        // Missing anchors in ordinary blocks must still fail.
+        assert!(collect(&[transaction()], &[receipt(vec![])], block).is_err());
+        assert!(collect(std::slice::from_ref(&tx), &[receipt(vec![])], block).is_err());
+        assert!(
+            collect(
+                std::slice::from_ref(&tx),
+                &[receipt(vec![anchor_log(7)])],
+                block
+            )
+            .is_err()
+        );
+        assert!(
+            collect(
+                std::slice::from_ref(&tx),
+                &[receipt(vec![log.clone(), anchor_log(7)])],
+                block
+            )
+            .is_err()
+        );
+        assert!(
+            collect(
+                &[tx.clone(), transaction()],
+                &[receipt(vec![log.clone()]), receipt(vec![])],
+                block,
+            )
+            .is_err()
+        );
+        let mut failed = receipt(vec![log.clone()]);
+        failed.success = false;
+        assert!(collect(std::slice::from_ref(&tx), &[failed], block).is_err());
+        // A reverted user call later in a full block is not its opening system transaction.
+        let mut reverted_user_call = receipt(vec![]);
+        reverted_user_call.success = false;
+        assert!(
+            collect(
+                &[transaction(), tx.clone()],
+                &[receipt(vec![anchor_log(110)]), reverted_user_call],
+                block,
+            )
+            .unwrap()
+            .l1_anchor()
+            .is_some()
+        );
+        let mut wrong_address = log;
+        wrong_address.address = ZONE_INBOX_ADDRESS;
+        assert!(collect(&[tx], &[receipt(vec![wrong_address])], block).is_err());
     }
 
     #[test]
@@ -910,7 +1008,7 @@ mod tests {
         let malformed = Log {
             address: ZONE_INBOX_ADDRESS,
             data: LogData::new_unchecked(
-                vec![IZoneInbox::TempoAdvanced::SIGNATURE_HASH],
+                vec![IZoneInbox::TempoAdvanced_1::SIGNATURE_HASH],
                 Bytes::from(vec![0xde, 0xad]),
             ),
         };
@@ -1013,7 +1111,7 @@ mod tests {
         .unwrap();
         assert!(events.actions.is_empty());
         assert!(events.transfers.is_empty());
-        assert_eq!(events.l1_anchor().block_number(), 7);
+        assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
     }
 
     #[test]
@@ -1072,7 +1170,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(events.l1_anchor().block_number(), 7);
+        assert_eq!(events.l1_anchor().unwrap().block_number(), 7);
         assert!(events.actions.is_empty());
         assert_eq!(events.transfers, vec![failed_fee, successful_fee]);
     }

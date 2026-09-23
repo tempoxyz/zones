@@ -117,7 +117,7 @@ macro_rules! activity_log {
 pub(crate) struct CheckerMetrics {
     /// Highest durably verified Zone block.
     pub(crate) verified_zone_height: Gauge,
-    /// Tempo block imported by the verified Zone tip.
+    /// Last Tempo block accounted for by a verified full import.
     pub(crate) imported_tempo_height: Gauge,
     /// Highest Zone block delivered to the checker.
     pub(crate) observed_zone_height: Gauge,
