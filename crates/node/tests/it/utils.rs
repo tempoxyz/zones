@@ -1565,10 +1565,13 @@ where
     async fn build_evm(self, ctx: &BuilderContext<N>) -> eyre::Result<Self::EVM> {
         let factory =
             tempo_evm::TempoEvmFactory::default().with_precompile_overrides(|precompiles| {
-                precompiles
-                    .apply_precompile(&tempo_contracts::precompiles::ZONE_VERIFIER_ADDRESS, |_| {
+                precompiles.map_precompile_lookup(|address, previous| {
+                    if *address == tempo_contracts::precompiles::ZONE_VERIFIER_ADDRESS {
                         None
-                    });
+                    } else {
+                        previous.and_then(|lookup| lookup.lookup(address))
+                    }
+                });
             });
         let mut config = tempo_evm::TempoEvmConfig::new_with_evm_factory(ctx.chain_spec(), factory);
         if let Some(cache) = ctx.sender_recovery_cache() {
