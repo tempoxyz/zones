@@ -347,8 +347,7 @@ fn read_zone_storage(
 ) -> Result<U256, Error> {
     match zone_state.get_storage(&address, &slot) {
         Ok(value) => Ok(value),
-        Err(code) => {
-            let error = zone_state.error(code);
+        Err(error) => {
             if let Some(error) = error.downcast_ref::<WitnessDatabaseError>() {
                 return Err((*error).into());
             }

@@ -5,7 +5,7 @@ use std::fmt;
 
 use alloy_primitives::{Address, B256, U256};
 use evm2::{
-    AnyError, ErrorCode, PendingState,
+    DatabaseError, PendingState,
     bytecode::Bytecode,
     evm::{
         AccountChangeRef, AccountInfo, DynDatabase, StateChangeSink, StateChangeSource,
@@ -15,7 +15,7 @@ use evm2::{
 use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
-    storage::{L1State, L1StateError, L1StorageReader},
+    storage::{L1State, L1StorageReader},
 };
 
 /// Resolves mirrored L1 reads at the active Tempo anchor and forwards all other database
@@ -23,7 +23,6 @@ use zone_precompiles::{
 pub struct L1OverlayDB<DB, L1> {
     inner: DB,
     l1: L1State<L1>,
-    error: Option<AnyError>,
 }
 
 impl<DB, L1> L1OverlayDB<DB, L1> {
@@ -32,7 +31,6 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
         Self {
             inner,
             l1: L1State::new(l1, portal_address),
-            error: None,
         }
     }
 
@@ -57,41 +55,30 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
     }
 }
 
-const L1_ERROR: ErrorCode = ErrorCode::new_custom(0).expect("valid custom error code");
-
 impl<DB: DynDatabase, L1: L1StorageReader> L1OverlayDB<DB, L1> {
-    fn anchor(&mut self) -> Result<u64, ErrorCode> {
+    fn anchor(&mut self) -> Result<u64, DatabaseError> {
         if let Some(anchor) = self.l1.get_anchor() {
             return Ok(anchor);
         }
-
-        let value = self.l1.initial_anchor().ok_or_else(|| {
-            self.error = Some(AnyError::new(ZoneDbError::MissingAnchor));
-            L1_ERROR
-        })?;
-        let anchor = u64::try_from(value).map_err(|_| {
-            self.error = Some(AnyError::new(ZoneDbError::AnchorOverflow(value)));
-            L1_ERROR
-        })?;
-        Ok(anchor)
-    }
-
-    fn store_l1_error(&mut self, error: L1StateError) -> ErrorCode {
-        self.error = Some(AnyError::new(error));
-        L1_ERROR
+        let value = self
+            .l1
+            .initial_anchor()
+            .ok_or_else(|| DatabaseError::new(ZoneDbError::MissingAnchor, true))?;
+        u64::try_from(value)
+            .map_err(|_| DatabaseError::new(ZoneDbError::AnchorOverflow(value), true))
     }
 }
 
 impl<DB: DynDatabase, L1: L1StorageReader> DynDatabase for L1OverlayDB<DB, L1> {
-    fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, ErrorCode> {
+    fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, DatabaseError> {
         self.inner.get_account(address)
     }
 
-    fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, ErrorCode> {
+    fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, DatabaseError> {
         self.inner.get_code_by_hash(code_hash)
     }
 
-    fn get_storage(&mut self, address: &Address, slot: &U256) -> Result<U256, ErrorCode> {
+    fn get_storage(&mut self, address: &Address, slot: &U256) -> Result<U256, DatabaseError> {
         if *address != TIP403_REGISTRY_ADDRESS {
             return self.inner.get_storage(address, slot);
         }
@@ -102,20 +89,11 @@ impl<DB: DynDatabase, L1: L1StorageReader> DynDatabase for L1OverlayDB<DB, L1> {
         self.l1
             .read_l1_storage_unmetered(*address, B256::from(*slot), anchor)
             .map(Into::into)
-            .map_err(|error| self.store_l1_error(error))
+            .map_err(|error| DatabaseError::new(error, true))
     }
 
-    fn get_block_hash(&mut self, number: &U256) -> Result<B256, ErrorCode> {
+    fn get_block_hash(&mut self, number: &U256) -> Result<B256, DatabaseError> {
         self.inner.get_block_hash(number)
-    }
-
-    fn error(&mut self, code: ErrorCode) -> AnyError {
-        if code == L1_ERROR
-            && let Some(error) = self.error.clone()
-        {
-            return error;
-        }
-        self.inner.error(code)
     }
 }
 
@@ -187,7 +165,8 @@ mod tests {
     use super::*;
     use evm2::evm::InMemoryDB;
     use zone_precompiles::{
-        tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader as TestL1,
+        storage::L1StateError, tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
+        test_utils::MockL1Reader as TestL1,
     };
     use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
@@ -233,7 +212,7 @@ mod tests {
         let code =
             DynDatabase::get_storage(&mut failing, &TIP403_REGISTRY_ADDRESS, &slot).unwrap_err();
         assert!(matches!(
-            DynDatabase::error(&mut failing, code).downcast_ref::<L1StateError>(),
+            code.downcast_ref::<L1StateError>(),
             Some(L1StateError::StorageUnavailable {
                 block_number: 42,
                 ..
@@ -292,7 +271,7 @@ mod tests {
         assert_eq!(db.l1_state().initial_anchor(), None);
         let code = db.get_storage(&TIP403_REGISTRY_ADDRESS, &slot).unwrap_err();
         assert!(matches!(
-            db.error(code).downcast_ref::<ZoneDbError>(),
+            code.downcast_ref::<ZoneDbError>(),
             Some(ZoneDbError::MissingAnchor)
         ));
     }
