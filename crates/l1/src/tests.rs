@@ -2357,3 +2357,85 @@ async fn sync_applies_portal_pause_before_enqueueing_the_pause_block() {
     assert_eq!(tracker.portal_pause_block(), Some(anchor));
     assert_eq!(queue.last_enqueued(), Some(anchor));
 }
+
+#[tokio::test]
+async fn paused_subscriber_wedges_at_lookahead_then_resumes_contiguously() {
+    let checkpoint = seal(make_test_header(0)).num_hash();
+    let subscriber = test_subscriber_with_checkpoint(checkpoint);
+    let tracker = subscriber.block_tracker.clone();
+    let queue = subscriber.deposit_queue.clone();
+    tracker.observe_portal_pause(checkpoint, true).unwrap();
+    assert_eq!(subscriber.next_block_to_sync().unwrap(), 1);
+
+    let tip = MAX_L1_LOOKAHEAD_BLOCKS + 1;
+    let mut parent = checkpoint.hash;
+    let mut headers = Vec::new();
+    for number in 1..=tip {
+        let header = make_chained_header(number, parent);
+        parent = header_hash(&header);
+        headers.push(header);
+    }
+    let asserter = Asserter::new();
+    asserter.push_success(&Some(header_response(headers.last().unwrap().clone())));
+    for header in &headers[..headers.len() - 1] {
+        push_header_and_empty_receipts(&asserter, header.clone());
+    }
+    let provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let sync = subscriber.sync_to_finalized(&provider, 1);
+    tokio::pin!(sync);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            result = &mut sync => panic!("ingestion must wedge at the lookahead bound: {result:?}"),
+            () = async {
+                while tracker.latest().is_none_or(|latest| latest.number < tip - 1) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut sync)
+            .await
+            .is_err(),
+        "ingestion must wedge at the lookahead bound while nothing is consumed"
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.latest().map(|block| block.number), Some(tip - 1));
+    assert_eq!(
+        queue.last_enqueued().map(|block| block.number),
+        Some(tip - 1)
+    );
+    assert!(!tracker.has_capacity_for(tip));
+    assert!(
+        asserter.read_q().is_empty(),
+        "the block beyond the lookahead must not be fetched while wedged"
+    );
+
+    // The poller observes resume (or expiry) independently of ingestion, the engine consumes the
+    // first queued anchor, and pruning releases exactly one block of capacity.
+    tracker
+        .observe_portal_pause(NumHash::new(tip, parent), false)
+        .unwrap();
+    let first = queue.peek().unwrap().header.num_hash();
+    queue.confirm(first).unwrap();
+    tracker.prune_through(first.number);
+    push_header_and_empty_receipts(&asserter, headers.last().unwrap().clone());
+    // The unchanged finalized target lets the sync return.
+    asserter.push_success(&Some(header_response(headers.last().unwrap().clone())));
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), &mut sync)
+            .await
+            .unwrap()
+            .unwrap(),
+        tip + 1
+    );
+    assert!(!tracker.portal_paused());
+    assert_eq!(tracker.latest(), Some(NumHash::new(tip, parent)));
+    assert_eq!(queue.last_enqueued(), Some(NumHash::new(tip, parent)));
+    assert!(asserter.read_q().is_empty());
+}

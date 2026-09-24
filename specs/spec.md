@@ -419,7 +419,9 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
   import whatever the leader produces. Because automatic expiry emits no event, the leader also
   polls `paused()` at the latest finalized Tempo block, and reads it at startup before producing
   blocks. Proof-verified batch submission for blocks produced before the pause continues. After
-  the pause clears, the Zone catches up on the Tempo blocks finalized during the pause.
+  the pause clears, the Zone catches up on the Tempo blocks finalized during the pause. Historical
+  catch-up requires an L1 endpoint that serves the missed finalized headers, receipts, and
+  anchored state.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
