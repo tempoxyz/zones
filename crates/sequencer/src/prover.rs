@@ -53,24 +53,20 @@ const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
 
-/// Failure categories that determine whether proofless fallback is safe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ProverFailure {
+/// Prover failures, categorized by whether proofless fallback is safe.
+#[derive(Debug)]
+pub(crate) enum ProverError {
     /// The proof or validated output is incorrect and must not trigger fallback.
-    #[error("prover validation failed")]
-    Validation,
+    Invalid(eyre::Report),
     /// Proving infrastructure could not produce a result and may trigger fallback.
-    #[error("settlement proof unavailable")]
-    Unavailable,
+    Unavailable(eyre::Report),
+    /// Any other operational failure; must not trigger fallback.
+    Other(eyre::Report),
 }
 
-impl ProverFailure {
-    pub(crate) fn is_invalid(error: &eyre::Report) -> bool {
-        error.downcast_ref() == Some(&Self::Validation)
-    }
-
-    pub(crate) fn is_unavailable(error: &eyre::Report) -> bool {
-        error.downcast_ref() == Some(&Self::Unavailable)
+impl From<eyre::Report> for ProverError {
+    fn from(error: eyre::Report) -> Self {
+        Self::Other(error)
     }
 }
 
@@ -139,7 +135,7 @@ struct ProverJob {
     batch: BatchData,
     anchor: ProverAnchor,
     enqueued_at: Instant,
-    response: Option<oneshot::Sender<Result<ProofBundle>>>,
+    response: Option<oneshot::Sender<Result<ProofBundle, ProverError>>>,
 }
 
 #[derive(Debug)]
@@ -324,7 +320,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
                     );
                     Ok(proof_bundle)
                 }
-                Err(err) if ProverFailure::is_invalid(&err) => {
+                Err(err @ ProverError::Invalid(_)) => {
                     metrics.validation_failure_total.increment(1);
                     error!(
                         target: "zone::sequencer::prover",
@@ -355,9 +351,11 @@ fn spawn_prover<P: ZoneSequencerProvider>(
             };
             if let Some(sender) = job.response {
                 let _ = sender.send(response.and_then(|proof| {
-                    proof.ok_or_eyre(
-                        "attested settlement requires a remote prover with Nitro NSM support",
-                    )
+                    proof
+                        .ok_or_eyre(
+                            "attested settlement requires a remote prover with Nitro NSM support",
+                        )
+                        .map_err(Into::into)
                 }));
             }
         }
@@ -373,7 +371,9 @@ impl SettlementProver {
         from: u64,
         to: u64,
         prepared: PreparedBatch,
-    ) -> Result<ProofBundle> {
+    ) -> Result<ProofBundle, ProverError> {
+        let unavailable =
+            || ProverError::Unavailable(eyre::eyre!("settlement prover is unavailable"));
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ProverJob {
@@ -385,18 +385,17 @@ impl SettlementProver {
                 response: Some(response),
             })
             .await
-            .map_err(|_| ProverFailure::Unavailable)?;
-        receiver.await.map_err(|_| ProverFailure::Unavailable)?
+            .map_err(|_| unavailable())?;
+        receiver.await.map_err(|_| unavailable())?
     }
 
+    /// Answer the first proving request with `result`.
     #[cfg(test)]
-    pub(crate) fn fixed(result: std::result::Result<ProofBundle, ProverFailure>) -> Self {
+    pub(crate) fn fixed(result: Result<ProofBundle, ProverError>) -> Self {
         let (sender, mut receiver) = mpsc::channel::<ProverJob>(1);
         tokio::spawn(async move {
-            while let Some(job) = receiver.recv().await {
-                if let Some(response) = job.response {
-                    let _ = response.send(result.clone().map_err(Into::into));
-                }
+            if let Some(response) = receiver.recv().await.and_then(|job| job.response) {
+                let _ = response.send(result);
             }
         });
         Self { sender }
@@ -431,7 +430,50 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     job: &ProverJob,
     proofs: Option<&ProofCollectorHandle>,
     metrics: &ProverMetrics,
-) -> Result<(ValidationStats, Option<ProofBundle>)> {
+) -> Result<(ValidationStats, Option<ProofBundle>), ProverError> {
+    let (witness, stats) = build_witness(context, job, proofs, metrics).await?;
+    let batch = &job.batch;
+
+    let started = Instant::now();
+    let (output, proof_bundle) = if let Some(address) = &context.config.prover_address {
+        let (output, proof_bundle) =
+            verify_remotely(address, context.config.zone_id, job, witness, metrics).await?;
+        (output, Some(proof_bundle))
+    } else {
+        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
+        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, witness))
+            .await
+            .context("SPF worker panicked")?
+            .context("SPF rejected generated witness")
+            .map_err(ProverError::Invalid)?;
+        (output, None)
+    };
+    metrics
+        .spf_execution_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+
+    let started = Instant::now();
+    compare_output(&output, batch, batch.prev_block_hash).map_err(ProverError::Invalid)?;
+    metrics
+        .output_validation_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+
+    if job.response.is_some() && proof_bundle.is_none() {
+        return Err(eyre::eyre!(
+            "attested settlement requires a remote prover with Nitro NSM support"
+        )
+        .into());
+    }
+    Ok((stats, proof_bundle))
+}
+
+/// Collect and assemble the SPF witness for a candidate batch.
+async fn build_witness<P: ZoneSequencerProvider>(
+    context: &ProverContext<P>,
+    job: &ProverJob,
+    proofs: Option<&ProofCollectorHandle>,
+    metrics: &ProverMetrics,
+) -> Result<(BatchWitness, ValidationStats)> {
     let batch = &job.batch;
     ensure!(
         batch.zone_height == job.to,
@@ -573,34 +615,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     };
 
-    let started = Instant::now();
-    let (output, proof_bundle) = if let Some(address) = &context.config.prover_address {
-        let (output, proof_bundle) =
-            verify_remotely(address, context.config.zone_id, job, witness, metrics).await?;
-        (output, Some(proof_bundle))
-    } else {
-        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
-        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, witness))
-            .await
-            .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")
-            .context(ProverFailure::Validation)?;
-        (output, None)
-    };
-    metrics
-        .spf_execution_duration_seconds
-        .record(started.elapsed().as_secs_f64());
-
-    let started = Instant::now();
-    compare_output(&output, batch, batch.prev_block_hash).context(ProverFailure::Validation)?;
-    metrics
-        .output_validation_duration_seconds
-        .record(started.elapsed().as_secs_f64());
-
-    if job.response.is_some() && proof_bundle.is_none() {
-        bail!("attested settlement requires a remote prover with Nitro NSM support");
-    }
-    Ok((stats, proof_bundle))
+    Ok((witness, stats))
 }
 
 /// Require an L1-settled range to close exactly one withdrawal snapshot at its final block.
@@ -632,7 +647,7 @@ async fn verify_remotely(
     job: &ProverJob,
     witness: BatchWitness,
     metrics: &ProverMetrics,
-) -> Result<(BatchOutput, ProofBundle)> {
+) -> Result<(BatchOutput, ProofBundle), ProverError> {
     let request = VerifyRequest {
         version: PROTOCOL_VERSION,
         request_id: format!(
@@ -648,7 +663,7 @@ async fn verify_remotely(
         .record(started.elapsed().as_secs_f64());
     let stream = stream
         .wrap_err_with(|| format!("connect to remote prover at {address}"))
-        .context(ProverFailure::Unavailable)?;
+        .map_err(ProverError::Unavailable)?;
 
     let first_read_at = Arc::new(OnceLock::new());
     let stream = FirstReadTimed {
@@ -665,7 +680,7 @@ async fn verify_remotely(
         .record(started.elapsed().as_secs_f64());
     send_result
         .wrap_err_with(|| format!("send request to remote prover at {address}"))
-        .context(ProverFailure::Unavailable)?;
+        .map_err(ProverError::Unavailable)?;
 
     let response_started = Instant::now();
     let response_result = connection.receive();
@@ -690,11 +705,10 @@ async fn verify_remotely(
     }
     let response: VerifyResponse = response_result
         .wrap_err_with(|| format!("read response from remote prover at {address}"))
-        .context(ProverFailure::Unavailable)?
-        .ok_or_else(|| {
-            eyre::eyre!("remote prover closed the connection without a response")
-                .wrap_err(ProverFailure::Unavailable)
-        })?;
+        .and_then(|response| {
+            response.ok_or_eyre("remote prover closed the connection without a response")
+        })
+        .map_err(ProverError::Unavailable)?;
 
     match response {
         VerifyResponse::Ok {
@@ -703,14 +717,7 @@ async fn verify_remotely(
             output,
             proof_bundle,
         } => {
-            ensure!(
-                version == PROTOCOL_VERSION,
-                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-            );
-            ensure!(
-                request_id == expected_id,
-                "remote prover response request ID {request_id} does not match {expected_id}"
-            );
+            validate_response_header(version, Some(&request_id), &expected_id)?;
             validate_proof_bundle(&proof_bundle)?;
             Ok((*output, proof_bundle))
         }
@@ -720,26 +727,35 @@ async fn verify_remotely(
             code,
             message,
         } => {
-            ensure!(
-                version == PROTOCOL_VERSION,
-                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-            );
-            if let Some(response_id) = request_id {
-                ensure!(
-                    response_id == expected_id,
-                    "remote prover error request ID {response_id} does not match {expected_id}",
-                );
-            }
+            validate_response_header(version, request_id.as_deref(), &expected_id)?;
             let error = eyre::eyre!("remote prover rejected request ({code:?}): {message}");
             Err(match code {
-                ErrorCode::VerificationFailed => error.wrap_err(ProverFailure::Validation),
+                ErrorCode::VerificationFailed => ProverError::Invalid(error),
                 ErrorCode::AttestationUnavailable | ErrorCode::InternalError => {
-                    error.wrap_err(ProverFailure::Unavailable)
+                    ProverError::Unavailable(error)
                 }
-                _ => error,
+                _ => ProverError::Other(error),
             })
         }
     }
+}
+
+fn validate_response_header(
+    version: u16,
+    request_id: Option<&str>,
+    expected_id: &str,
+) -> Result<()> {
+    ensure!(
+        version == PROTOCOL_VERSION,
+        "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+    );
+    if let Some(request_id) = request_id {
+        ensure!(
+            request_id == expected_id,
+            "remote prover response request ID {request_id} does not match {expected_id}"
+        );
+    }
+    Ok(())
 }
 
 fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {

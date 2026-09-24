@@ -38,7 +38,7 @@ use crate::{
     SettlementManager, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX},
     attestation::SettlementCertificate,
-    prover::{ProverFailure, SettlementProver},
+    prover::{ProverError, SettlementProver},
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -561,6 +561,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
+        // `Err(Ok(_))` is an unavailable proof that short-circuits Nitro preparation for fallback.
         let preparation = async {
             let proof = async {
                 match &self.settlement_prover {
@@ -568,8 +569,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         .prove(from, last_zone_block, prepared.clone())
                         .await
                         .map(Some)
-                        .map_err(BatchSubmitError::from),
-                    None => Ok::<_, BatchSubmitError>(None),
+                        .map_err(|error| match error {
+                            ProverError::Unavailable(error) => Ok(error),
+                            ProverError::Invalid(error) | ProverError::Other(error) => {
+                                Err(error.into())
+                            }
+                        }),
+                    None => Ok(None),
                 }
             };
             let settlement = async {
@@ -577,7 +583,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     Some(settlements) => settlements
                         .prepare(prepared, VerifierMode::NitroV1)
                         .await
-                        .map(Some),
+                        .map(Some)
+                        .map_err(Err),
                     None => Ok(None),
                 }
             };
@@ -598,10 +605,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 _ => Ok((Some(proof), certificate)),
             },
             Ok((None, certificate)) => Ok((None, certificate)),
-            Err(BatchSubmitError::Other(error)) if ProverFailure::is_unavailable(&error) => {
-                Err(error)
-            }
-            Err(error) => return Err(error),
+            Err(Ok(unavailable)) => Err(unavailable),
+            Err(Err(error)) => return Err(error),
         };
         let (verifier_mode, proof_bundle, certificate) = match nitro {
             Ok((proof, certificate)) => (VerifierMode::NitroV1, proof, certificate),
@@ -1300,7 +1305,9 @@ mod tests {
     async fn validation_failure_prevents_submit_batch() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover = Some(SettlementProver::fixed(Err(ProverFailure::Validation)));
+        monitor.settlement_prover = Some(SettlementProver::fixed(Err(ProverError::Invalid(
+            eyre::eyre!("invalid proof"),
+        ))));
         let prepared = prepared(test_batch_data());
 
         monitor
