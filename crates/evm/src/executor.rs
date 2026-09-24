@@ -398,17 +398,6 @@ mod tests {
         )
     }
 
-    fn ordinary_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(
-            TxLegacy {
-                to: to.into(),
-                input,
-                ..Default::default()
-            },
-            Signature::test_signature(),
-        ))
-    }
-
     fn withdrawal_requested_receipt(address: Address) -> TempoReceipt {
         let event = IZoneOutbox::WithdrawalRequested {
             withdrawalIndex: 0,
@@ -432,6 +421,17 @@ mod tests {
                 data: event.encode_log_data(),
             }],
         }
+    }
+
+    fn ordinary_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                to: to.into(),
+                input,
+                ..Default::default()
+            },
+            Signature::test_signature(),
+        ))
     }
 
     fn subblock_tx() -> TempoTxEnvelope {

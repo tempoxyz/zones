@@ -52,15 +52,15 @@ pub(crate) fn test_context() -> TestContext {
 }
 
 /// Create a test EVM context with the specified hardfork.
-pub(crate) fn test_context_with_hardfork(spec: TempoHardfork) -> TestContext {
-    let version = tempo_chainspec::gas_params::version(SpecId::OSAKA, spec, false);
+pub(crate) fn test_context_with_hardfork(hardfork: TempoHardfork) -> TestContext {
+    let version = tempo_chainspec::gas_params::version(SpecId::OSAKA, hardfork, false);
     let block = TempoBlockEnv::default();
     TestContext {
-        cfg: TestCfg { spec },
+        cfg: TestCfg { spec: hardfork },
         block,
         evm: Evm::new_with_execution_config_and_ext(
-            ExecutionConfig::for_spec_and_version(spec, version),
-            spec,
+            ExecutionConfig::for_spec_and_version(hardfork, version),
+            hardfork,
             block,
             tempo_tx_registry(SpecId::OSAKA),
             InMemoryDB::default(),

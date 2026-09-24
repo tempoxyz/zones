@@ -8,7 +8,6 @@ use alloy_primitives::{
     Address, B256, Bytes, U256, keccak256,
     map::{AddressMap, B256Map, U256Map},
 };
-use alloy_rlp::Decodable as _;
 use evm2::{bytecode::Bytecode, evm::AccountInfo};
 use reth_evm::Database;
 use reth_execution_types::native_account;
@@ -254,12 +253,8 @@ fn checkpoint_state(
     header_rlp: &[u8],
     node_pool: &[Bytes],
 ) -> Result<(Option<Arc<StatelessSparseTrie>>, B256, u64), Error> {
-    let mut encoded_header = header_rlp;
-    let header = TempoHeader::decode(&mut encoded_header)
+    let header: TempoHeader = alloy_rlp::decode_exact(header_rlp)
         .map_err(|_| WitnessDatabaseError::InvalidTempoHeader)?;
-    if !encoded_header.is_empty() {
-        return Err(WitnessDatabaseError::InvalidTempoHeader.into());
-    }
 
     let state_root = header.state_root();
     let state = match StatelessSparseTrie::new(state_root, node_pool) {

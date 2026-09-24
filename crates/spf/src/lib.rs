@@ -6,7 +6,6 @@
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::{B256, U256, keccak256};
-use alloy_rlp::Decodable as _;
 use evm2::evm::{CacheDB, Db};
 use reth_chainspec::EthChainSpec as _;
 use reth_evm::{DynDatabase as _, execute::BlockAssemblerInput};
@@ -395,12 +394,8 @@ fn validate_tempo_anchor(
     let mut previous_number = tempo_block_number;
     let mut previous_hash = tempo_block_hash;
     for (index, encoded_header) in ancestry_headers.iter().enumerate() {
-        let mut encoded = encoded_header.as_ref();
-        let header = TempoHeader::decode(&mut encoded)
+        let header: TempoHeader = alloy_rlp::decode_exact(encoded_header)
             .map_err(|_| Error::TempoAncestryHeaderDecoding { index })?;
-        if !encoded.is_empty() {
-            return Err(Error::TempoAncestryHeaderDecoding { index });
-        }
         let expected_number = previous_number
             .checked_add(1)
             .ok_or(Error::TempoAncestryBlockNumberOverflow)?;

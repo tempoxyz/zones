@@ -17,6 +17,7 @@ use std::{
 use tempo_contracts::{
     precompiles::INITIAL_FACTORY_OWNER,
     zones::{
+        T13_ZONE_MESSENGER_RUNTIME, T13_ZONE_PORTAL_RUNTIME, T13_ZONE_VERIFIER_RUNTIME,
         ZONE_MESSENGER_RUNTIME as TEMPO_ZONE_MESSENGER_RUNTIME,
         ZONE_PORTAL_RUNTIME as TEMPO_ZONE_PORTAL_RUNTIME,
         ZONE_VERIFIER_RUNTIME as TEMPO_ZONE_VERIFIER_RUNTIME,
@@ -217,19 +218,19 @@ fn install_native_zone_factory(
             "ZonePortal implementation",
             ZONE_PORTAL_IMPL_ADDRESS,
             artifacts.portal,
-            [TEMPO_ZONE_PORTAL_RUNTIME],
+            [TEMPO_ZONE_PORTAL_RUNTIME, T13_ZONE_PORTAL_RUNTIME],
         ),
         (
             "Verifier",
             ZONE_VERIFIER_ADDRESS,
             artifacts.verifier,
-            [TEMPO_ZONE_VERIFIER_RUNTIME],
+            [TEMPO_ZONE_VERIFIER_RUNTIME, T13_ZONE_VERIFIER_RUNTIME],
         ),
         (
             "ZoneMessenger",
             ZONE_MESSENGER_ADDRESS,
             artifacts.messenger,
-            [TEMPO_ZONE_MESSENGER_RUNTIME],
+            [TEMPO_ZONE_MESSENGER_RUNTIME, T13_ZONE_MESSENGER_RUNTIME],
         ),
     ] {
         let expected = GenesisAccount::default()
@@ -300,6 +301,11 @@ mod tests {
             TEMPO_ZONE_PORTAL_RUNTIME,
             TEMPO_ZONE_VERIFIER_RUNTIME,
             TEMPO_ZONE_MESSENGER_RUNTIME,
+        ]);
+        assert_validates_shared_runtimes([
+            T13_ZONE_PORTAL_RUNTIME,
+            T13_ZONE_VERIFIER_RUNTIME,
+            T13_ZONE_MESSENGER_RUNTIME,
         ]);
     }
 
