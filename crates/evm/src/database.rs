@@ -55,6 +55,15 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
     }
 }
 
+impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("L1OverlayDB")
+            .field("inner", &self.inner)
+            .field("l1", &self.l1)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<DB: DynDatabase, L1: L1StorageReader> L1OverlayDB<DB, L1> {
     fn anchor(&mut self) -> Result<u64, DatabaseError> {
         if let Some(anchor) = self.l1.get_anchor() {
@@ -66,43 +75,6 @@ impl<DB: DynDatabase, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             .ok_or_else(|| DatabaseError::new(ZoneDbError::MissingAnchor, true))?;
         u64::try_from(value)
             .map_err(|_| DatabaseError::new(ZoneDbError::AnchorOverflow(value), true))
-    }
-}
-
-impl<DB: DynDatabase, L1: L1StorageReader> DynDatabase for L1OverlayDB<DB, L1> {
-    fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, DatabaseError> {
-        self.inner.get_account(address)
-    }
-
-    fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, DatabaseError> {
-        self.inner.get_code_by_hash(code_hash)
-    }
-
-    fn get_storage(&mut self, address: &Address, slot: &U256) -> Result<U256, DatabaseError> {
-        if *address != TIP403_REGISTRY_ADDRESS {
-            return self.inner.get_storage(address, slot);
-        }
-
-        let anchor = self.anchor()?;
-        // The EVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged
-        // again.
-        self.l1
-            .read_l1_storage_unmetered(*address, B256::from(*slot), anchor)
-            .map(Into::into)
-            .map_err(|error| DatabaseError::new(error, true))
-    }
-
-    fn get_block_hash(&mut self, number: &U256) -> Result<B256, DatabaseError> {
-        self.inner.get_block_hash(number)
-    }
-}
-
-impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("L1OverlayDB")
-            .field("inner", &self.inner)
-            .field("l1", &self.l1)
-            .finish_non_exhaustive()
     }
 }
 
@@ -143,6 +115,34 @@ impl StateChangeSink for L1WriteGuard {
             });
         }
         Ok(())
+    }
+}
+
+impl<DB: DynDatabase, L1: L1StorageReader> DynDatabase for L1OverlayDB<DB, L1> {
+    fn get_account(&mut self, address: &Address) -> Result<Option<AccountInfo>, DatabaseError> {
+        self.inner.get_account(address)
+    }
+
+    fn get_code_by_hash(&mut self, code_hash: &B256) -> Result<Bytecode, DatabaseError> {
+        self.inner.get_code_by_hash(code_hash)
+    }
+
+    fn get_storage(&mut self, address: &Address, slot: &U256) -> Result<U256, DatabaseError> {
+        if *address != TIP403_REGISTRY_ADDRESS {
+            return self.inner.get_storage(address, slot);
+        }
+
+        let anchor = self.anchor()?;
+        // The EVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged
+        // again.
+        self.l1
+            .read_l1_storage_unmetered(*address, B256::from(*slot), anchor)
+            .map(Into::into)
+            .map_err(|error| DatabaseError::new(error, true))
+    }
+
+    fn get_block_hash(&mut self, number: &U256) -> Result<B256, DatabaseError> {
+        self.inner.get_block_hash(number)
     }
 }
 
