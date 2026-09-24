@@ -250,6 +250,7 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
         }],
         encryption_key_rotations: vec![],
         leader_transitions: vec![],
+        portal_pause: None,
     };
     let deposits: Vec<_> = events
         .deposits
@@ -2032,7 +2033,8 @@ fn pause_events_invalidate_cached_portal_storage() {
     let receipt = make_receipt_with_logs(1, B256::with_last_byte(0x10), logs);
 
     let block = NumHash::new(1, B256::with_last_byte(0x10));
-    let (_, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    let (events, invalidated, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert_eq!(events.portal_pause, Some(true));
     assert!(invalidated.contains(&portal));
     subscriber.update_l1_state_anchor(1, &invalidated);
     assert_eq!(
@@ -2238,4 +2240,120 @@ async fn sync_fails_fatally_when_the_leadership_sink_rejects_the_transition() {
     // Nothing was enqueued and no observation advanced: the block was not half-applied.
     assert_eq!(queue.last_enqueued(), None);
     assert_eq!(subscriber.block_tracker.latest(), None);
+}
+
+#[test]
+fn portal_pause_events_record_the_final_state_in_log_order() {
+    let subscriber = test_subscriber(9);
+    let portal = subscriber.config.portal_address;
+    let account = address!("0x0000000000000000000000000000000000000123");
+    let log = |data| Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data,
+        },
+        ..Default::default()
+    };
+    let block = NumHash::new(10, B256::with_last_byte(0x10));
+
+    let receipt = make_receipt_with_logs(10, block.hash, vec![]);
+    let (events, _, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert_eq!(events.portal_pause, None);
+
+    let receipt = make_receipt_with_logs(
+        10,
+        block.hash,
+        vec![
+            log(crate::abi::ZonePortal::PortalPaused { account }.encode_log_data()),
+            log(crate::abi::ZonePortal::PortalResumed { account }.encode_log_data()),
+        ],
+    );
+    let (events, _, _, _) = subscriber.extract_events(block, &[receipt]).unwrap();
+    assert_eq!(events.portal_pause, Some(false));
+
+    // The pause is applied during ingestion and must not be carried into operational work.
+    let mut operational = L1PortalEvents::default();
+    operational.extend_operational(events);
+    assert_eq!(operational.portal_pause, None);
+}
+
+#[test]
+fn l1_block_tracker_applies_only_newer_portal_pause_observations() {
+    let tracker = L1BlockTracker::default();
+    let block = |number: u64| NumHash::new(number, B256::with_last_byte(number as u8));
+    assert!(!tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), None);
+
+    assert!(tracker.observe_portal_pause(block(11), true).unwrap());
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), Some(block(11)));
+
+    // Replayed older events cannot regress the finalized state.
+    assert!(!tracker.observe_portal_pause(block(10), false).unwrap());
+    assert!(tracker.portal_paused());
+    // A repeated observation is idempotent and reports no change.
+    assert!(!tracker.observe_portal_pause(block(11), true).unwrap());
+    assert!(!tracker.observe_portal_pause(block(12), true).unwrap());
+    assert_eq!(tracker.portal_pause_block(), Some(block(12)));
+
+    assert!(tracker.observe_portal_pause(block(13), false).unwrap());
+    assert!(!tracker.portal_paused());
+}
+
+#[test]
+fn l1_block_tracker_rejects_conflicting_portal_pause_observations() {
+    let tracker = L1BlockTracker::default();
+    let block = NumHash::new(11, B256::repeat_byte(1));
+    tracker.observe_portal_pause(block, true).unwrap();
+
+    assert!(tracker.observe_portal_pause(block, false).is_err());
+    assert!(
+        tracker
+            .observe_portal_pause(NumHash::new(11, B256::repeat_byte(2)), true)
+            .is_err()
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), Some(block));
+}
+
+#[tokio::test]
+async fn sync_applies_portal_pause_before_enqueueing_the_pause_block() {
+    let subscriber = test_subscriber(9);
+    let portal = subscriber.config.portal_address;
+    let tracker = subscriber.block_tracker.clone();
+    let queue = subscriber.deposit_queue.clone();
+    let log = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: crate::abi::ZonePortal::PortalPaused {
+                account: Address::repeat_byte(1),
+            }
+            .encode_log_data(),
+        },
+        ..Default::default()
+    };
+    let mut header_10 = make_test_header(10);
+    let receipt = make_receipt_with_logs(10, B256::ZERO, vec![log]);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+    let anchor = seal(header_10.clone()).num_hash();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(vec![receipt]));
+    asserter.push_success(&Some(header_response(header_10)));
+
+    assert_eq!(
+        subscriber
+            .sync_to_finalized(&l1_provider, 10)
+            .await
+            .unwrap(),
+        11
+    );
+    assert!(tracker.portal_paused());
+    assert_eq!(tracker.portal_pause_block(), Some(anchor));
+    assert_eq!(queue.last_enqueued(), Some(anchor));
 }

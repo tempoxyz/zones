@@ -91,7 +91,9 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
     L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt, encryption_key_address,
+    initialize_portal_pause,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
+    watch_portal_pause,
 };
 use zone_p2p::{
     BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pCommand, P2pConfig,
@@ -755,6 +757,22 @@ where
                 None
             };
 
+        let task_executor = ctx.node.task_executor().clone();
+        if !self.portal_address.is_zero() {
+            // Initialize the pause gate before block production starts, so a restart during a
+            // pause does not produce blocks while ingestion catches up.
+            initialize_portal_pause(&l1_provider, self.portal_address, &self.l1_block_tracker)
+                .await;
+            task_executor.spawn_critical_task(
+                "portal-pause-watcher",
+                watch_portal_pause(
+                    l1_provider.clone(),
+                    self.portal_address,
+                    self.l1_block_tracker.clone(),
+                ),
+            );
+        }
+
         let l1_subscriber = L1Subscriber::new(
             self.l1_config.clone(),
             ctx.node.provider().clone(),
@@ -766,7 +784,6 @@ where
             finalized_batch_submission_sender,
             self.encryption_keys.clone(),
         );
-        let task_executor = ctx.node.task_executor().clone();
         task_executor.spawn_critical_task("l1-block-subscriber", Box::pin(l1_subscriber.run()));
         info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
