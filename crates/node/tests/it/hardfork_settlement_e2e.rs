@@ -1,16 +1,25 @@
 //! Upgrade an existing portal and prove the first T13 recovery batch before settling its output.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use alloy::genesis::Genesis;
 use alloy_consensus::{BlockHeader, Transaction};
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rlp::Decodable;
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
+use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
+use reth_chainspec::EthChainSpec;
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_contracts::precompiles::ITIP20;
-use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_precompiles::{
+    PATH_USD_ADDRESS,
+    storage::{
+        Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
+    },
+};
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS,
@@ -24,14 +33,27 @@ use zone_spf::{
 };
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, L1TestNode, TcpChaosProxy, ZoneAccount, ZoneTestNode, now_secs, poll_until,
+    DEFAULT_TIMEOUT, L1TestNode, TEST_MNEMONIC, TcpChaosProxy, ZoneAccount, ZoneTestNode, now_secs,
+    poll_until,
 };
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let activation = now_secs() + 60;
-    let (l1, portal_address) = L1TestNode::start_with_t13_portal(activation).await?;
+    let mut portal_address = Address::ZERO;
+    let l1 = L1TestNode::start_with(|cfg| {
+        let mut genesis = cfg.chain.genesis().clone();
+        portal_address =
+            init_migration_portal(&mut genesis, activation).expect("valid T12 migration genesis");
+        cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
+        cfg.dev.block_time = None;
+    })
+    .await?;
+    l1.fund_user(l1.admin_address(), 10_000_000).await?;
+    let encryption_key = k256::SecretKey::from(l1.dev_signer().credential());
+    l1.set_sequencer_encryption_key(portal_address, &encryption_key)
+        .await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     // Create metadata before the zone starts; only alpha is processed before the upgrade.
     let alpha = l1
@@ -306,6 +328,94 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     l1.enable_token_on_portal(portal_address, gamma).await?;
     assert_eq!(portal.enabledTokenCount().call().await?, U256::from(4));
     Ok(())
+}
+
+/// Predeploy a T12 portal whose mock verifier storage survives the canonical T13 runtime upgrade.
+fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result<Address> {
+    use revm::state::Bytecode;
+    use tempo_contracts::precompiles::{IZoneFactory, initial_zone_factory_state};
+    use tempo_precompiles::zone_factory::{
+        ZoneFactory, ZoneInfoStorageHandler, ZonePortalStorage, slots,
+    };
+
+    let signer_at = |index| {
+        MnemonicBuilder::<English>::default()
+            .phrase(TEST_MNEMONIC)
+            .index(index)?
+            .build()
+    };
+    let signer = signer_at(0)?;
+    let admin = signer_at(2)?.address();
+    let user = signer_at(1)?.address();
+    genesis
+        .config
+        .extra_fields
+        .insert_value("t13Time".into(), activation)?;
+    for account in initial_zone_factory_state(signer.address()) {
+        genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
+    }
+
+    // Run the real factory against the genesis state under T12, before the node starts.
+    // Genesis allocations do not consume storage credits or emit on-chain creation logs.
+    let mut storage =
+        HashMapStorageProvider::new_with_spec(genesis.config.chain_id, TempoHardfork::T12);
+    storage.set_tip1060_storage_credits(false);
+    storage.set_block_number(0);
+    storage.set_timestamp(U256::from(genesis.timestamp));
+    for (&address, account) in &genesis.alloc {
+        if let Some(code) = &account.code {
+            storage.set_code(address, Bytecode::new_legacy(code.clone()))?;
+        }
+        if let Some(slots) = &account.storage {
+            for (&slot, &value) in slots {
+                storage.sstore(address, slot.into(), value.into())?;
+            }
+        }
+    }
+    let portal_address = StorageCtx::enter(&mut storage, || -> eyre::Result<Address> {
+        let mut factory = ZoneFactory::new();
+        let created = factory.create_zone(
+            signer.address(),
+            IZoneFactory::createZoneCall {
+                params: IZoneFactory::CreateZoneParams {
+                    admin,
+                    initialToken: PATH_USD_ADDRESS,
+                    accessMode: true,
+                    gatewayMode: true,
+                    allowedAccounts: vec![admin, user],
+                    zoneGateways: Vec::new(),
+                    sequencers: vec![signer.address()],
+                    threshold: 1,
+                    rpcUrl: String::new(),
+                },
+            },
+        )?;
+        // The typed slot write preserves the other fields packed alongside the verifier.
+        // Unlike the default proof-call bytecode patch, this survives runtime replacement.
+        let verifier = address!("000000000000000000000000000000000000beef");
+        ZonePortalStorage::new(created.portal)
+            .verifier
+            .write(verifier)?;
+        ZoneInfoStorageHandler::new(
+            created.zoneId.mapping_slot(slots::ZONES),
+            tempo_precompiles::ZONE_FACTORY_ADDRESS,
+        )
+        .verifier
+        .write(verifier)?;
+        Ok(created.portal)
+    })?;
+    let (_, code) = storage.account_code(portal_address)?;
+    genesis.alloc.entry(portal_address).or_default().code = Some(code.original_bytes());
+    for (address, slot, value) in storage.into_storage() {
+        genesis
+            .alloc
+            .entry(address)
+            .or_default()
+            .storage
+            .get_or_insert_default()
+            .insert(slot.into(), value.into());
+    }
+    Ok(portal_address)
 }
 
 fn batch_from_output(height: u64, tempo_number: u64, output: &BatchOutput) -> BatchData {
