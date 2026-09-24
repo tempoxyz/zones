@@ -5,7 +5,9 @@ mod connection;
 mod protocol;
 
 pub use chainspec::{TrustedChainSpecError, TrustedChainSpecs};
-pub use connection::{ProverConnection, ProverConnectionError, request_error_response};
+pub use connection::{
+    ProverConnection, ProverConnectionError, decode_exact, request_error_response,
+};
 pub use protocol::{
     ErrorCode, NITRO_VERIFIER_CONFIG_V1, NitroBatchAttestation, PROTOCOL_VERSION, ProofBundle,
     VerifyRequest, VerifyResponse, nitro_batch_attestation_hash,

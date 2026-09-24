@@ -1,8 +1,11 @@
-use std::{io::Write, path::PathBuf};
+use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
-use eyre::{Context, Result, bail, ensure, eyre};
+use alloy_primitives::Bytes;
+use eyre::{Context, Result, ensure, eyre};
 use minicbor::{Decoder, data::Type};
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use zone_prover::decode_exact;
 
 #[derive(Debug, clap::Args)]
 pub(super) struct DecodeProofArgs {
@@ -13,6 +16,26 @@ pub(super) struct DecodeProofArgs {
     /// Write decoded JSON to a file instead of stdout.
     #[arg(long, short, value_name = "PATH")]
     output: Option<PathBuf>,
+}
+
+// Nitro's COSE headers contain the integer algorithm label and identifier.
+type Headers = BTreeMap<i64, i64>;
+
+#[derive(Deserialize)]
+struct CoseSign1(Bytes, Headers, Bytes, Bytes);
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationDocument {
+    module_id: String,
+    digest: String,
+    timestamp: u64,
+    pcrs: BTreeMap<u8, Bytes>,
+    certificate: Bytes,
+    cabundle: Vec<Bytes>,
+    public_key: Option<Bytes>,
+    user_data: Option<Bytes>,
+    nonce: Option<Bytes>,
 }
 
 pub(super) fn run(args: DecodeProofArgs) -> Result<()> {
@@ -36,132 +59,53 @@ fn decode_response(response: &Value) -> Result<Value> {
     let proof = body
         .pointer("/proofBundle/proof")
         .ok_or_else(|| eyre!("missing proofBundle.proof in prover response"))?;
-    let bytes = hex_bytes(proof).context("decode proofBundle.proof hex")?;
+    let bytes: Bytes =
+        serde_json::from_value(proof.clone()).context("decode proofBundle.proof hex")?;
     let mut decoder = Decoder::new(&bytes);
     if decoder.datatype()? == Type::Tag {
         ensure!(decoder.tag()?.as_u64() == 18, "expected COSE_Sign1 tag 18");
     }
-    let envelope = value(&mut decoder, 0).context("decode COSE_Sign1")?;
-    ensure!(
-        decoder.position() == bytes.len(),
-        "trailing bytes after COSE_Sign1"
-    );
-    let fields = envelope
-        .as_array()
-        .ok_or_else(|| eyre!("expected COSE_Sign1 array"))?;
-    ensure!(fields.len() == 4, "expected four COSE_Sign1 fields");
-    let protected_bytes = hex_bytes(&fields[0]).context("read protected headers")?;
-    let protected = if protected_bytes.is_empty() {
-        json!({})
+    let CoseSign1(protected, unprotected, payload, signature) =
+        decode_exact(&bytes[decoder.position()..]).context("decode COSE_Sign1")?;
+    let protected: Headers = if protected.is_empty() {
+        Headers::new()
     } else {
-        decode_cbor(&protected_bytes).context("decode protected headers")?
+        decode_exact(&protected).context("decode protected headers")?
     };
-    ensure!(protected.is_object(), "expected protected header map");
-    ensure!(fields[1].is_object(), "expected unprotected header map");
-    let payload = decode_cbor(&hex_bytes(&fields[2]).context("read attestation payload")?)
-        .context("decode attestation payload")?;
-    ensure!(payload.is_object(), "expected attestation payload map");
-    hex_bytes(&fields[3]).context("read COSE signature")?;
+    let payload: AttestationDocument =
+        decode_exact(&payload).context("decode attestation payload")?;
     Ok(json!({
         "protected": protected,
-        "unprotected": fields[1],
+        "unprotected": unprotected,
         "payload": payload,
-        "signature": fields[3],
+        "signature": signature,
     }))
-}
-
-fn hex_bytes(value: &Value) -> Result<Vec<u8>> {
-    let hex = value
-        .as_str()
-        .and_then(|s| s.strip_prefix("0x"))
-        .ok_or_else(|| eyre!("expected 0x-prefixed byte string"))?;
-    const_hex::decode(hex).context("invalid hex byte string")
-}
-
-fn decode_cbor(bytes: &[u8]) -> Result<Value> {
-    let mut decoder = Decoder::new(bytes);
-    let result = value(&mut decoder, 0)?;
-    ensure!(
-        decoder.position() == bytes.len(),
-        "trailing bytes after CBOR item"
-    );
-    Ok(result)
-}
-
-// Nitro uses this subset of CBOR. Byte strings stay hex; only the two known
-// COSE fields above are recursively decoded as embedded CBOR.
-fn value(decoder: &mut Decoder<'_>, depth: usize) -> Result<Value> {
-    ensure!(depth < 32, "CBOR nesting exceeds 32 levels");
-    Ok(match decoder.datatype()? {
-        Type::U8 | Type::U16 | Type::U32 | Type::U64 => json!(decoder.u64()?),
-        Type::I8 | Type::I16 | Type::I32 | Type::I64 => json!(decoder.i64()?),
-        Type::Bool => json!(decoder.bool()?),
-        Type::Null => {
-            decoder.null()?;
-            Value::Null
-        }
-        Type::Bytes | Type::BytesIndef => {
-            let mut bytes = Vec::new();
-            for chunk in decoder.bytes_iter()? {
-                bytes.extend_from_slice(chunk?);
-            }
-            json!(format!("0x{}", const_hex::encode(bytes)))
-        }
-        Type::String | Type::StringIndef => {
-            let mut text = String::new();
-            for chunk in decoder.str_iter()? {
-                text.push_str(chunk?);
-            }
-            json!(text)
-        }
-        Type::Array | Type::ArrayIndef => {
-            let length = decoder.array()?;
-            let mut items = Vec::new();
-            while more(decoder, length, items.len())? {
-                items.push(value(decoder, depth + 1)?);
-            }
-            Value::Array(items)
-        }
-        Type::Map | Type::MapIndef => {
-            let length = decoder.map()?;
-            let mut entries = Map::new();
-            while more(decoder, length, entries.len())? {
-                let key = match value(decoder, depth + 1)? {
-                    Value::String(key) => key,
-                    Value::Number(key) => key.to_string(),
-                    _ => bail!("expected text or integer CBOR map key"),
-                };
-                let item = value(decoder, depth + 1)?;
-                ensure!(
-                    entries.insert(key.clone(), item).is_none(),
-                    "duplicate JSON map key {key}"
-                );
-            }
-            Value::Object(entries)
-        }
-        other => bail!("unsupported attestation CBOR type: {other}"),
-    })
-}
-
-fn more(decoder: &mut Decoder<'_>, length: Option<u64>, count: usize) -> Result<bool> {
-    if let Some(length) = length {
-        return Ok((count as u64) < length);
-    }
-    if decoder.datatype()? == Type::Break {
-        decoder.skip()?;
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn proof() -> Vec<u8> {
+    fn payload() -> Vec<u8> {
+        payload_with_optional_fields(true)
+    }
+
+    fn payload_with_optional_fields(include_optional: bool) -> Vec<u8> {
         let mut payload = minicbor::Encoder::new(Vec::new());
         payload
             .begin_map()
+            .unwrap()
+            .str("module_id")
+            .unwrap()
+            .str("test-enclave")
+            .unwrap()
+            .str("digest")
+            .unwrap()
+            .str("SHA384")
+            .unwrap()
+            .str("timestamp")
+            .unwrap()
+            .u64(1_700_000_000_000)
             .unwrap()
             .str("pcrs")
             .unwrap()
@@ -171,32 +115,56 @@ mod tests {
             .unwrap()
             .bytes(&[0; 48])
             .unwrap()
-            .str("user_data")
+            .str("certificate")
             .unwrap()
-            .bytes(&[0xab; 32])
+            .bytes(&[0x30, 0x01])
             .unwrap()
-            .str("nonce")
+            .str("cabundle")
             .unwrap()
-            .null()
+            .array(1)
             .unwrap()
-            .end()
+            .bytes(&[0x30, 0x02])
             .unwrap();
+        if include_optional {
+            payload
+                .str("public_key")
+                .unwrap()
+                .bytes(&[0xef; 32])
+                .unwrap()
+                .str("user_data")
+                .unwrap()
+                .bytes(&[0xab; 32])
+                .unwrap()
+                .str("nonce")
+                .unwrap()
+                .null()
+                .unwrap();
+        }
+        payload.end().unwrap();
+        payload.into_writer()
+    }
+
+    fn proof_with(protected: &[u8], payload: &[u8]) -> Vec<u8> {
         let mut cose = minicbor::Encoder::new(Vec::new());
         cose.array(4)
             .unwrap()
-            .bytes(&[0xa1, 1, 0x38, 0x22])
+            .bytes(protected)
             .unwrap()
             .map(0)
             .unwrap()
-            .bytes(&payload.into_writer())
+            .bytes(payload)
             .unwrap()
             .bytes(&[0xcd; 96])
             .unwrap();
         cose.into_writer()
     }
 
+    fn proof() -> Vec<u8> {
+        proof_with(&[0xa1, 1, 0x38, 0x22], &payload())
+    }
+
     fn response(bytes: &[u8]) -> Value {
-        json!({"proofBundle": {"proof": format!("0x{}", const_hex::encode(bytes))}})
+        json!({"proofBundle": {"proof": Bytes::copy_from_slice(bytes)}})
     }
 
     #[test]
@@ -206,18 +174,44 @@ mod tests {
         let decoded = decode_response(&legacy).unwrap();
         assert_eq!(decode_response(&json!({"ok": legacy})).unwrap(), decoded);
         assert_eq!(decoded["protected"]["1"], -35);
+        assert_eq!(decoded["unprotected"], json!({}));
+        assert_eq!(decoded["payload"]["module_id"], "test-enclave");
+        assert_eq!(decoded["payload"]["digest"], "SHA384");
+        assert_eq!(decoded["payload"]["timestamp"], 1_700_000_000_000_u64);
         assert_eq!(
             decoded["payload"]["pcrs"]["0"],
             format!("0x{}", "00".repeat(48))
+        );
+        assert_eq!(decoded["payload"]["certificate"], "0x3001");
+        assert_eq!(decoded["payload"]["cabundle"], json!(["0x3002"]));
+        assert_eq!(
+            decoded["payload"]["public_key"],
+            format!("0x{}", "ef".repeat(32))
         );
         assert_eq!(
             decoded["payload"]["user_data"],
             format!("0x{}", "ab".repeat(32))
         );
         assert!(decoded["payload"]["nonce"].is_null());
+        assert_eq!(decoded["signature"], format!("0x{}", "cd".repeat(96)));
         let mut tagged = vec![0xd2];
         tagged.extend(proof);
         assert_eq!(decode_response(&response(&tagged)).unwrap(), decoded);
+    }
+
+    #[test]
+    fn accepts_empty_protected_headers() {
+        let decoded = decode_response(&response(&proof_with(&[], &payload()))).unwrap();
+        assert_eq!(decoded["protected"], json!({}));
+    }
+
+    #[test]
+    fn decodes_absent_optional_fields() {
+        let proof = proof_with(&[], &payload_with_optional_fields(false));
+        let decoded = decode_response(&response(&proof)).unwrap();
+        for field in ["public_key", "user_data", "nonce"] {
+            assert_eq!(decoded["payload"].get(field), Some(&Value::Null));
+        }
     }
 
     #[test]
@@ -228,7 +222,26 @@ mod tests {
         assert!(decode_response(&response(&bytes[..bytes.len() - 1])).is_err());
         bytes.push(0);
         assert!(decode_response(&response(&bytes)).is_err());
-        assert!(decode_cbor(&[0xa2, 1, 0, 1, 1]).is_err());
-        assert!(decode_cbor(&[0xa0, 0]).is_err());
+        assert!(decode_response(&response(&proof_with(&[0xa0, 0], &payload()))).is_err());
+        let mut payload = payload();
+        payload.push(0);
+        assert!(decode_response(&response(&proof_with(&[], &payload))).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_tag_shape_and_payload_schema() {
+        let mut tagged = vec![0xd1];
+        tagged.extend(proof());
+        assert!(decode_response(&response(&tagged)).is_err());
+        let mut extra_field = proof();
+        extra_field[0] = 0x85;
+        extra_field.push(0);
+        assert!(decode_response(&response(&extra_field)).is_err());
+        assert!(decode_response(&response(&proof_with(&[0x80], &payload()))).is_err());
+        assert!(decode_response(&response(&proof_with(&[], &[0xa0]))).is_err());
+        let mut duplicate_field = payload();
+        duplicate_field.pop();
+        duplicate_field.extend_from_slice(&[0x65, b'n', b'o', b'n', b'c', b'e', 0xf6, 0xff]);
+        assert!(decode_response(&response(&proof_with(&[], &duplicate_field))).is_err());
     }
 }

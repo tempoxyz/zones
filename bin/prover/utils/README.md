@@ -107,6 +107,10 @@ Accepts both the current `{"ok": {...}}` response and the legacy flat response w
 attestation payload. Byte strings are `0x`-prefixed hex; integer map keys (such as
 PCR indices and COSE header labels) become JSON object keys. Certificates remain
 hex-encoded DER. Both tagged and untagged COSE_Sign1 envelopes are accepted.
+Decoding uses the prover's shared CBOR decoder with the Nitro document schema
+and integer algorithm headers; missing required or unknown document fields are
+rejected. Optional `public_key`, `user_data`, and `nonce` fields appear as `null`
+when absent.
 
 Pretty-printed JSON goes to stdout, or to `--output decoded-proof.json`.
 This command inspects the document; it does not verify signatures, certificate

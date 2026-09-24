@@ -87,8 +87,8 @@ pub enum ProverConnectionError {
     WorkerPanic,
 }
 
-/// Decodes one schema-driven CBOR value and requires it to consume the complete frame.
-fn decode_exact<T: DeserializeOwned>(payload: &[u8]) -> Result<T, ProverConnectionError> {
+/// Decodes one schema-driven CBOR value and rejects trailing data.
+pub fn decode_exact<T: DeserializeOwned>(payload: &[u8]) -> Result<T, ProverConnectionError> {
     let decoder = minicbor::Decoder::new(payload);
     let mut deserializer = minicbor_serde::Deserializer::from(decoder);
     let value = T::deserialize(&mut deserializer).map_err(ProverConnectionError::CborDecode)?;
