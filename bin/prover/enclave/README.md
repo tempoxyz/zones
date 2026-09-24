@@ -7,10 +7,12 @@ the enclave performs no RPC or filesystem access.
 ## Protocol
 
 The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` when `--use-tcp` is
-enabled. Each connection carries one request and one response, then closes. A frame consists of a
+enabled. Each connection uses Nitro-attested TLS 1.3 with a single-use enclave key, carries one request
+and one response, then closes. The host proxy forwards only the challenge preface and TLS
+ciphertext. Inside TLS, a frame consists of a
 four-byte, big-endian payload length followed by a CBOR payload.
 
-Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `2`.
+Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `1`.
 The witness's byte-heavy fields are encoded as CBOR byte strings rather than human-readable hex.
 Decoding is schema-driven and rejects unknown, duplicate, or trailing request data. The prover
 accepts chain IDs compiled into Tempo plus custom genesis files configured by the enclave operator
@@ -38,9 +40,7 @@ defaults accommodate multi-GiB payloads while still recovering from crashed clie
 whole seconds and must be greater than zero; progress does not reset a deadline. SPF execution
 itself has no timeout.
 
-TCP mode is intended for development of framing, chain validation, and SPF error handling. The
-binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
-outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
+TCP mode is for enclave-side development and still requires the Nitro Secure Module.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
 JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
 override a built-in Tempo network.
@@ -98,11 +98,11 @@ The EIF uses Linux 6.6.79 and its matching NSM driver, built from a pinned AWS N
 commit. Changing either one changes the EIF PCR measurements, so the expected measurements must
 also be updated.
 
-Verifying a batch does not use local randomness or wall-clock time. If we add key or nonce
-generation or KMS/HTTPS calls, configure `random.trust_bootloader=off random.trust_cpu=off` and
-require `rng_current` to be `nsm-hwrng`. If we add KMS/HTTPS calls, expiring credentials, protocol
-timestamps, or time-based replay checks, use `kvm-clock`. Operational timeouts affect only liveness
-and can use a monotonic clock.
+Each TLS connection generates a fresh private key inside the enclave. The EIF builder therefore
+forces `random.trust_bootloader=off random.trust_cpu=off`, and enclave startup fails closed unless
+`rng_current` is `nsm-hwrng`. Certificate freshness comes from the client nonce and NSM-signed
+timestamp, so the enclave does not need a trusted wall clock.
+Operational timeouts affect only liveness and can use a monotonic clock.
 
 The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
 `PROVER_EIF_PATH`, `ENCLAVE_NAME`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_CID`,
