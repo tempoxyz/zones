@@ -28,13 +28,13 @@ use crate::utils::{
 };
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "T13 migration replaces the mock portal runtime; settlement requires Nitro verification"]
 async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let activation = now_secs() + 60;
-    let l1 = L1TestNode::start_with_t13(activation).await?;
-    let portal_address = l1.deploy_zone().await?;
+    let (l1, portal_address) = L1TestNode::start_with_t13_portal(activation).await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
+    let mock_verifier = alloy_primitives::address!("000000000000000000000000000000000000beef");
+    assert_eq!(portal.verifier().call().await?, mock_verifier);
     // Create metadata before the zone starts; only alpha is processed before the upgrade.
     let alpha = l1
         .create_tip20("Alpha", "ALP", B256::with_last_byte(1))
@@ -226,6 +226,16 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     assert_eq!(inbox.processedDepositNumber().call().await?, 2);
     assert_eq!(ITIP20::new(alpha, &provider).name().call().await?, "Alpha");
     assert_eq!(ITIP20::new(beta, &provider).name().call().await?, "Beta");
+    // The upgrade installed the canonical T13 runtime while preserving our verifier storage.
+    let canonical_portal = tempo_contracts::precompiles::t13_zone_factory_state(l1.dev_address())
+        .into_iter()
+        .find(|account| account.address == tempo_contracts::precompiles::ZONE_PORTAL_IMPL_ADDRESS)
+        .unwrap();
+    assert_eq!(
+        l1.provider().get_code_at(canonical_portal.address).await?,
+        canonical_portal.code
+    );
+    assert_eq!(portal.verifier().call().await?, mock_verifier);
     assert!(!portal.tokenEnablementCursorInitialized().call().await?);
     assert_eq!(portal.lastProcessedEnabledTokenCount().call().await?, 0);
     let blocked = ZonePortal::new(portal_address, l1.admin_provider())
