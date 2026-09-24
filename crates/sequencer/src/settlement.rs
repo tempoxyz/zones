@@ -32,9 +32,7 @@ use crate::{
         LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
         ZonePortal,
     },
-    attestation::{
-        AttestationDomain, AttestationStore, SettlementAttestation, SettlementCertificate,
-    },
+    attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_contract::CallBuilder;
@@ -55,7 +53,6 @@ use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoReceipt};
-use tokio_util::sync;
 use tracing::{info, instrument, warn};
 use zone_prover::{ProofBundle, VerifierMode};
 
@@ -78,9 +75,9 @@ impl From<eyre::Report> for BatchSubmitError {
 impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
+            Self::Cancelled => formatter.write_str("batch processing cancelled"),
             Self::PortalAdvanced => {
-                formatter.write_str("portal advanced while waiting for settlement quorum")
+                formatter.write_str("portal already committed the batch height")
             }
             Self::PreparedAnchorInvalid(error) => error.fmt(formatter),
             Self::Other(error) => error.fmt(formatter),
@@ -96,8 +93,6 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
 /// How often a quorum wait rechecks whether another leader has advanced the portal.
-const SETTLEMENT_PORTAL_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
@@ -242,8 +237,6 @@ pub struct BatchSubmitter {
     l1_fetch_concurrency: usize,
     /// EIP-2935 history and safety-margin limits used for anchor decisions.
     anchor_config: BatchAnchorConfig,
-    /// Signatures from followers attesting to the batch.
-    attestation_store: Option<AttestationStore>,
     /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
@@ -306,16 +299,10 @@ impl BatchSubmitter {
             signer,
             l1_fetch_concurrency: 16,
             anchor_config,
-            attestation_store: None,
             ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
                 DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
             ))),
         }
-    }
-
-    /// Attach the shared store populated by leader and follower settlement signatures.
-    pub fn set_attestation_store(&mut self, store: Option<AttestationStore>) {
-        self.attestation_store = store;
     }
 
     /// Resolve the single immutable anchor shared by proving, quorum, and submission.
@@ -324,10 +311,11 @@ impl BatchSubmitter {
         Ok(PreparedBatch { batch, anchor })
     }
 
-    /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier.
+    /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier, made as T13
+    /// `submitBatch` would make it (`from` the portal, same arguments).
     ///
     /// Returns `None` before T13 and `Some(verdict)` otherwise. Only `Some(false)` is a
-    /// rejection. Metadata, RPC, revert, and decoding failures are errors.
+    /// rejection; metadata, RPC, revert, and decoding failures are errors.
     pub async fn verifier_accepts(
         &self,
         prepared: &PreparedBatch,
@@ -341,7 +329,8 @@ impl BatchSubmitter {
             .as_ref()
             .map_or(Address::ZERO, PrivateKeySigner::address);
         let metadata = self.read_submission_metadata(signer).await?;
-        self.validate_submission_metadata(&prepared.batch, metadata)?;
+        // Only the batch index matters here; the quorum shape is checked at submission.
+        self.validate_submission_metadata(&prepared.batch, metadata, true)?;
         let call = prepared.verify_call(metadata.stable.zone_id, proof.clone());
         let output = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
             .to(metadata.verifier)
@@ -362,11 +351,10 @@ impl BatchSubmitter {
     ///   recent anchor block is used and ancestry headers are collected (for
     ///   future prover integration).
     ///
-    /// `verifier_mode` sets `verifierConfig`, the certificate's committed config hash, and the
-    /// required proof shape: a Nitro attestation, or empty for `NoProof` and pre-T11 settlement.
+    /// `verifier_mode` sets `verifierConfig`, which the certificate must commit to. A supplied
+    /// proof must match the mode's shape; without one, an empty proof is left to the verifier.
     ///
-    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
-    /// settlement quorum is cancelled when the leader generation shuts down.
+    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = prepared.batch.tempo_block_number,
@@ -380,55 +368,29 @@ impl BatchSubmitter {
         &self,
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
+        certificate: Option<&SettlementCertificate>,
         verifier_mode: VerifierMode,
-        shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
-        let (verifier_config, proof) =
-            settlement_proof(settlement_abi, verifier_mode, proof_bundle)?;
+        let (verifier_config, proof) = settlement_proof(verifier_mode, proof_bundle)?;
         let (block_transition, deposit_transition, token_transition) = batch.transitions();
 
         let signer = self.signer.as_ref();
         let metadata = self
             .read_submission_metadata(signer.map_or(Address::ZERO, PrivateKeySigner::address))
             .await?;
-        self.validate_submission_metadata(batch, metadata)?;
-        let certificate = if let Some(store) = &self.attestation_store {
-            store.set_verifier_mode(verifier_mode);
-            let threshold = metadata.sequencer_threshold as usize;
-            info!(
-                zone_height = batch.zone_height,
-                threshold, "Waiting for settlement quorum"
-            );
-            let certificate = self
-                .wait_for_settlement_or_portal_progress(
-                    store,
-                    batch.zone_height,
-                    threshold,
-                    batch.prev_block_hash,
-                    prepared,
-                    shutdown,
-                )
-                .await?;
-            match self.validate_certificate(
+        self.validate_submission_metadata(batch, metadata, certificate.is_some())?;
+        if let Some(certificate) = certificate {
+            self.validate_certificate(
                 prepared,
                 settlement_abi,
                 batch.zone_height,
                 metadata,
                 verifier_mode,
-                &certificate,
-            ) {
-                Ok(()) => {}
-                Err(err) => {
-                    store.remove_settlement(batch.zone_height, certificate.digest);
-                    return Err(err.into());
-                }
-            }
-            Some(certificate)
-        } else {
-            None
-        };
+                certificate,
+            )?;
+        }
         let current_l1_block = self.validate_prepared_anchor(prepared).await?;
         let recent_tempo_block_number = prepared.anchor.recent_block_number();
         // EIP-2935 exposes hash(N) starting in N+1. A transaction built after observing head N
@@ -437,7 +399,7 @@ impl BatchSubmitter {
         let anchor_block_hash = prepared.anchor.block_hash();
         let anchors_to_current_tip = anchor_block_number == current_l1_block;
 
-        let signatures = if let Some(certificate) = &certificate {
+        let signatures = if let Some(certificate) = certificate {
             certificate.signatures.clone()
         } else {
             // Legacy mode, where the 1-of-1 sequencer will self-sign the attestation
@@ -552,10 +514,6 @@ impl BatchSubmitter {
 
         let event = self.decode_batch_submitted(receipt.logs())?;
 
-        if let (Some(store), Some(_)) = (&self.attestation_store, &certificate) {
-            store.remove_submitted(batch.zone_height);
-        }
-
         info!(
             %tx_hash,
             withdrawal_batch_index = event.withdrawalBatchIndex,
@@ -564,44 +522,6 @@ impl BatchSubmitter {
         );
 
         Ok(event)
-    }
-
-    /// Wait for a local quorum while periodically checking that the proposal still extends the
-    /// portal tip. A portal change means another submission won the handoff race and the monitor
-    /// must resynchronize before attempting more work.
-    async fn wait_for_settlement_or_portal_progress(
-        &self,
-        store: &AttestationStore,
-        height: u64,
-        threshold: usize,
-        expected_portal_hash: B256,
-        prepared: &PreparedBatch,
-        shutdown: &sync::CancellationToken,
-    ) -> std::result::Result<SettlementCertificate, BatchSubmitError> {
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => {
-                    return Err(BatchSubmitError::Cancelled);
-                }
-                certificate = store.wait_for_settlement(height, threshold, shutdown) => {
-                    return certificate.ok_or(BatchSubmitError::Cancelled);
-                }
-                () = tokio::time::sleep(SETTLEMENT_PORTAL_POLL_INTERVAL) => {}
-            }
-
-            let portal_hash = tokio::select! {
-                biased;
-                () = shutdown.cancelled() => {
-                    return Err(BatchSubmitError::Cancelled);
-                }
-                result = self.read_portal_block_hash() => result?,
-            };
-            if portal_hash != expected_portal_hash {
-                return Err(BatchSubmitError::PortalAdvanced);
-            }
-            self.validate_prepared_anchor(prepared).await?;
-        }
     }
 
     fn sign_settlement_attestation(
@@ -742,6 +662,7 @@ impl BatchSubmitter {
         &self,
         batch: &BatchData,
         metadata: PortalSubmissionMetadata,
+        has_certificate: bool,
     ) -> Result<()> {
         let expected_l2_index = metadata
             .withdrawal_batch_index
@@ -757,7 +678,7 @@ impl BatchSubmitter {
             metadata.sequencer_threshold > 0,
             "portal sequencer threshold is zero"
         );
-        if self.attestation_store.is_none() {
+        if !has_certificate {
             eyre::ensure!(
                 metadata.sequencer_threshold == 1,
                 "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {}",
@@ -1461,8 +1382,8 @@ impl PreparedBatch {
         self.anchor.block_number(self.batch.tempo_block_number)
     }
 
-    /// The Nitro `verify` call T13 `submitBatch` makes for this batch.
-    /// Assumes `withdrawal_batch_index` was validated as portal index + 1.
+    /// The Nitro `verify` call T13 `submitBatch` makes for this batch. Assumes
+    /// `withdrawal_batch_index` was validated as portal index + 1.
     fn verify_call(&self, zone_id: u32, proof: Bytes) -> IVerifier::verifyCall {
         let batch = &self.batch;
         let (block_transition, deposit_transition, token_transition) = batch.transitions();
@@ -1529,23 +1450,21 @@ struct SettlementAttestationInput<'a> {
 }
 
 fn settlement_proof(
-    settlement_abi: SettlementAbi,
     verifier_mode: VerifierMode,
     proof_bundle: Option<&ProofBundle>,
 ) -> Result<(Bytes, Bytes)> {
-    let proof = if let Some(bundle) = proof_bundle {
-        eyre::ensure!(
-            VerifierMode::try_from(bundle.verifier_config.as_ref())? == verifier_mode,
-            "proof bundle verifier mode does not match requested mode"
-        );
-        bundle.proof.clone()
-    } else {
-        Bytes::new()
+    let config = Bytes::from_static(verifier_mode.config());
+    let Some(bundle) = proof_bundle else {
+        // Without a prover, let the on-chain verifier decide whether an empty proof is valid.
+        // This preserves settlement against the stub verifier used by integration fixtures.
+        return Ok((config, Bytes::new()));
     };
-    if settlement_abi == SettlementAbi::T13 || proof_bundle.is_some() {
-        verifier_mode.validate_proof_shape(&proof)?;
-    }
-    Ok((Bytes::from_static(verifier_mode.config()), proof))
+    eyre::ensure!(
+        VerifierMode::try_from(bundle.verifier_config.as_ref())? == verifier_mode,
+        "proof bundle verifier mode does not match requested mode"
+    );
+    verifier_mode.validate_proof_shape(&bundle.proof)?;
+    Ok((config, bundle.proof.clone()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2150,30 +2069,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quorum_wait_stops_when_the_portal_advances() {
-        let l1 = Asserter::new();
-        let advanced_hash = B256::repeat_byte(0x42);
-        l1.push_success(&Bytes::copy_from_slice(advanced_hash.as_slice()));
-        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
-        let store = AttestationStore::default();
-
-        let error = submitter
-            .wait_for_settlement_or_portal_progress(
-                &store,
-                120,
-                2,
-                B256::repeat_byte(0x24),
-                &test_prepared_batch(120, 100),
-                &sync::CancellationToken::new(),
-            )
-            .await
-            .expect_err("portal progress must invalidate the stale quorum wait");
-
-        assert!(matches!(error, BatchSubmitError::PortalAdvanced));
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
     async fn rejects_noncanonical_portal_hash() {
         let portal_hash = B256::repeat_byte(0x42);
         let l1 = Asserter::new();
@@ -2660,19 +2555,24 @@ mod tests {
 
     #[test]
     fn settlement_proof_enforces_verifier_mode_shape() {
-        let (config, proof) =
-            settlement_proof(SettlementAbi::T13, VerifierMode::NoProof, None).unwrap();
-        assert_eq!(config.as_ref(), VerifierMode::NoProof.config());
-        assert!(proof.is_empty());
-        assert!(settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, None).is_err());
+        let empty_nitro = ProofBundle {
+            verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+            proof: Bytes::new(),
+        };
+        assert!(settlement_proof(VerifierMode::NitroV1, Some(&empty_nitro)).is_err());
 
         let mismatched = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NoProof.config()),
             proof: Bytes::new(),
         };
-        assert!(
-            settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&mismatched)).is_err()
-        );
+        assert!(settlement_proof(VerifierMode::NitroV1, Some(&mismatched)).is_err());
+        assert!(settlement_proof(VerifierMode::NoProof, Some(&mismatched)).is_ok());
+
+        let nonempty_no_proof = ProofBundle {
+            verifier_config: Bytes::from_static(VerifierMode::NoProof.config()),
+            proof: Bytes::from_static(&[0xaa]),
+        };
+        assert!(settlement_proof(VerifierMode::NoProof, Some(&nonempty_no_proof)).is_err());
 
         let bundle = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
@@ -2680,7 +2580,7 @@ mod tests {
         };
 
         let (verifier_config, proof) =
-            settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&bundle)).unwrap();
+            settlement_proof(VerifierMode::NitroV1, Some(&bundle)).unwrap();
 
         assert_eq!(verifier_config.as_ref(), VerifierMode::NitroV1.config());
         assert_eq!(proof.as_ref(), [0xaa, 0xbb]);
@@ -2802,11 +2702,11 @@ mod tests {
     }
 
     #[test]
-    fn submission_metadata_requires_one_of_one_without_attestation_store() {
+    fn submission_metadata_requires_one_of_one_without_certificate() {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(Asserter::new())
             .erased();
-        let mut submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
         let batch = BatchData {
             zone_height: 1,
             tempo_block_number: 1,
@@ -2834,16 +2734,15 @@ mod tests {
         };
 
         let err = submitter
-            .validate_submission_metadata(&batch, metadata)
+            .validate_submission_metadata(&batch, metadata, false)
             .unwrap_err();
         assert!(
             err.to_string()
                 .contains("supports only a 1-of-1 sequencer set")
         );
 
-        submitter.set_attestation_store(Some(AttestationStore::default()));
         submitter
-            .validate_submission_metadata(&batch, metadata)
+            .validate_submission_metadata(&batch, metadata, true)
             .unwrap();
     }
 

@@ -35,7 +35,10 @@ use zone_primitives::constants::MAX_TEMPO_HEADERS_PER_ZONE_BLOCK;
 use zone_prover::VerifierMode;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
-use crate::settlement_attestation::{AttestationContext, build_settlement_attestation};
+use crate::{
+    replication::{PeerBlock, decode_peer_block},
+    settlement_attestation::{AttestationContext, build_settlement_attestation},
+};
 
 const BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BLOCK_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -98,7 +101,7 @@ impl BackfillProgress {
 /// backfilled blocks.
 #[derive(Debug)]
 struct PendingPeerBlock {
-    block: Block,
+    block: PeerBlock,
     live_sender: Option<P2pPeerId>,
 }
 
@@ -150,18 +153,6 @@ impl PendingBlocks {
     fn contains(&self, number: u64) -> bool {
         self.blocks.contains_key(&number)
     }
-}
-
-fn decode_peer_block(encoded: &[u8]) -> eyre::Result<Block> {
-    let mut input = encoded;
-    let block = Block::decode(&mut input)
-        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
-    eyre::ensure!(
-        input.is_empty(),
-        "encoded zone block has {} trailing bytes",
-        input.len()
-    );
-    Ok(block)
 }
 
 /// Latest tip evidence advertised by each peer, with observation time.
@@ -448,10 +439,10 @@ where
 
     async fn process_follower_block(
         &mut self,
-        block: Block,
+        block: PeerBlock,
         live_sender: Option<P2pPeerId>,
     ) -> bool {
-        let number = block.header.number();
+        let number = block.block.header.number();
         let best = match self.context.provider.best_block_number() {
             Ok(best) => best,
             Err(err) => {
@@ -522,7 +513,7 @@ where
         &self,
         peer_block: PendingPeerBlock,
     ) -> eyre::Result<PeerBlockImportOutcome> {
-        let block = SealedBlock::seal_slow(peer_block.block);
+        let block = SealedBlock::seal_slow(peer_block.block.block);
         let block_number = block.number();
         let hash = block.hash();
         let best_block = self.context.provider.best_block_number()?;
@@ -641,6 +632,17 @@ where
             })?;
         }
 
+        // Bind the received witness to this block. Its contents are trusted here; execution
+        // still goes through the normal engine, without an additional stateless replay.
+        if let Some(proof) = &peer_block.block.witness {
+            eyre::ensure!(
+                proof.witness.block_number == block_number
+                    && proof.witness.block_hash == hash
+                    && proof.witness.parent_hash == parent.hash(),
+                "peer witness does not match block and canonical parent"
+            );
+        }
+
         // 4. All txns in the block execute properly
         let payload = ZonePayloadTypes::block_to_payload(block, None);
         let status = self.context.engine.new_payload(payload).await?;
@@ -648,15 +650,21 @@ where
             eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
         }
 
-        // Preserve all inputs needed by a future leader before admitting this unsettled block.
-        // Already-settled backfill needs no retained witness.
+        // Peers without a stored witness still send plain blocks. Preserve local collection
+        // for them; supplied witnesses are persisted directly. Both paths precede canonicalization.
         if let Some(collector) = &self.context.proof_collector {
             self.stop
-                .run_until_cancelled(collector.collect_and_persist(block_number, hash))
+                .run_until_cancelled(async {
+                    match peer_block.block.witness {
+                        Some(proof) => collector.persist_received(proof).await,
+                        None => collector
+                            .collect_and_persist(block_number, hash)
+                            .await
+                            .map(|_| ()),
+                    }
+                })
                 .await
-                .ok_or_else(|| {
-                    eyre::eyre!("follower stopped while waiting for witness persistence")
-                })?
+                .ok_or_else(|| eyre::eyre!("follower stopped while persisting peer witness"))?
                 .wrap_err_with(|| {
                     format!("persist witness before importing Zone block {block_number}")
                 })?;
@@ -714,16 +722,20 @@ fn validate_live_block_sender(
     };
     match schedule.leader_for(anchor_number) {
         Some(record) if &record.leader == sender => Ok(()),
-        Some(record) => eyre::bail!(
-            "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
-             the schedule assigns that anchor to {} (epoch {})",
-            record.leader,
-            record.epoch,
-        ),
-        None => eyre::bail!(
-            "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
-             record governs",
-        ),
+        Some(record) => {
+            eyre::bail!(
+                "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
+                 the schedule assigns that anchor to {} (epoch {})",
+                record.leader,
+                record.epoch,
+            );
+        }
+        None => {
+            eyre::bail!(
+                "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
+                 record governs",
+            );
+        }
     }
 }
 
@@ -956,7 +968,7 @@ fn decode_advance_tempo(block: &SealedBlock<Block>) -> eyre::Result<DecodedTempo
         eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
     })?;
     let TempoTxEnvelope::Legacy(signed) = first_tx else {
-        eyre::bail!("first transaction in peer block is not a legacy system transaction")
+        eyre::bail!("first transaction in peer block is not a legacy system transaction");
     };
     eyre::ensure!(
         first_tx.is_system_tx(),
@@ -1485,15 +1497,18 @@ mod tests {
 
     fn pending_block(number: u64) -> PendingPeerBlock {
         PendingPeerBlock {
-            block: Block {
-                header: TempoHeader {
-                    inner: alloy_consensus::Header {
-                        number,
+            block: crate::replication::PeerBlock {
+                witness: None,
+                block: Block {
+                    header: TempoHeader {
+                        inner: alloy_consensus::Header {
+                            number,
+                            ..Default::default()
+                        },
                         ..Default::default()
                     },
                     ..Default::default()
                 },
-                ..Default::default()
             },
             live_sender: None,
         }
@@ -1525,7 +1540,7 @@ mod tests {
         let next = pending
             .take_next_after(98)
             .expect("the immediately next pending block must be available");
-        assert_eq!(next.block.header.number(), 99);
+        assert_eq!(next.block.block.header.number(), 99);
         assert_eq!(pending.first_number(), Some(100));
     }
     #[test]

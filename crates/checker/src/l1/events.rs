@@ -228,7 +228,9 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         ZonePortal::SequencerSetUpdated::SIGNATURE_HASH => {
             ignored!(ZonePortal::SequencerSetUpdated, "SequencerSetUpdated")
         }
-        _ => eyre::bail!("unsupported Portal event {topic} in block {block}"),
+        _ => {
+            eyre::bail!("unsupported Portal event {topic} in block {block}");
+        }
     }))
 }
 

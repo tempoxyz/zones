@@ -13,9 +13,9 @@ use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
-    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZonePortal,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tokio_util::sync::CancellationToken;
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_sequencer::{BatchData, BatchSubmitter};
 use zone_spf::{
@@ -62,13 +62,21 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     account.deposit(100, DEFAULT_TIMEOUT, &zone).await?;
     zone.wait_for_tempo_block_number(l1.provider().get_block_number().await?, DEFAULT_TIMEOUT)
         .await?;
-    // The fixture finalizes every eight Zone blocks. Reach exactly the first T12 boundary.
+    let deposit_block = provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .unwrap();
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+    assert_eq!(outbox.lastBatch().call().await?.withdrawalBatchIndex, 1);
+    // The deposit finalizes the first batch; block eight finalizes the second T12 batch.
+    assert!(deposit_block.header.number() < 8);
     while provider.get_block_number().await? < 8 {
         l1.fund_user(l1.admin_address(), 1).await?;
         zone.wait_for_tempo_block_number(l1.provider().get_block_number().await?, DEFAULT_TIMEOUT)
             .await?;
     }
     assert_eq!(provider.get_block_number().await?, 8);
+    assert_eq!(outbox.lastBatch().call().await?.withdrawalBatchIndex, 2);
     let parent = provider.get_block_by_number(8.into()).await?.unwrap();
     assert!(
         parent.header.timestamp() < activation,
@@ -105,11 +113,15 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         l1.dev_signer(),
         Default::default(),
     );
-    let legacy = BatchData {
-        zone_height: 8,
-        tempo_block_number: zone.tempo_block_number().await?,
+    let deposit_batch = BatchData {
+        zone_height: deposit_block.header.number(),
+        tempo_block_number: TempoState::new(TEMPO_STATE_ADDRESS, &provider)
+            .tempoBlockNumber()
+            .block(BlockId::number(deposit_block.header.number()))
+            .call()
+            .await?,
         prev_block_hash: B256::ZERO,
-        next_block_hash: parent.header.hash,
+        next_block_hash: deposit_block.header.hash,
         prev_processed_deposit_hash: B256::ZERO,
         next_processed_deposit_hash: inbox.processedDepositQueueHash().call().await?,
         prev_deposit_number: 0,
@@ -119,16 +131,29 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         withdrawal_queue_hash: B256::ZERO,
         withdrawal_batch_index: 1,
     };
-    submitter
-        .submit_batch(
-            &submitter.prepare_batch(legacy).await?,
-            None,
-            zone_prover::VerifierMode::NitroV1,
-            &CancellationToken::new(),
-        )
-        .await
-        .map_err(|err| eyre::eyre!("legacy settlement: {err:?}"))?;
+    let interval_batch = BatchData {
+        zone_height: 8,
+        tempo_block_number: zone.tempo_block_number().await?,
+        prev_block_hash: deposit_batch.next_block_hash,
+        next_block_hash: parent.header.hash,
+        prev_processed_deposit_hash: deposit_batch.next_processed_deposit_hash,
+        prev_deposit_number: deposit_batch.next_deposit_number,
+        withdrawal_batch_index: 2,
+        ..deposit_batch.clone()
+    };
+    for legacy in [deposit_batch, interval_batch] {
+        submitter
+            .submit_batch(
+                &submitter.prepare_batch(legacy).await?,
+                None,
+                None,
+                zone_prover::VerifierMode::NitroV1,
+            )
+            .await
+            .map_err(|err| eyre::eyre!("legacy settlement: {err:?}"))?;
+    }
     assert_eq!(portal.blockHash().call().await?, parent.header.hash);
+    assert_eq!(portal.withdrawalBatchIndex().call().await?, 2);
 
     // Leave one enablement and one deposit outstanding on T12 while the zone cannot receive L1.
     l1.enable_token_on_portal(portal_address, beta).await?;
@@ -236,7 +261,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     );
     assert_eq!(output.deposit_queue_transition.prevDepositNumber, 1);
     assert_eq!(output.deposit_queue_transition.nextDepositNumber, 2);
-    assert_eq!(output.last_batch_commitment.withdrawal_batch_index, 2);
+    assert_eq!(output.last_batch_commitment.withdrawal_batch_index, 3);
     assert_eq!(
         output.deposit_queue_transition.nextProcessedHash,
         inbox.processedDepositQueueHash().call().await?
@@ -261,17 +286,13 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
 
     let batch = batch_from_output(end, zone.tempo_block_number().await?, &output);
     let prepared = submitter.prepare_batch(batch).await?;
+    // This harness has no Nitro attestation service; T13 requires the explicit proofless mode.
     let settled = submitter
-        .submit_batch(
-            &prepared,
-            None,
-            zone_prover::VerifierMode::NitroV1,
-            &CancellationToken::new(),
-        )
+        .submit_batch(&prepared, None, None, zone_prover::VerifierMode::NoProof)
         .await
         .map_err(|err| eyre::eyre!("T13 settlement: {err:?}"))?;
     assert_eq!(settled.lastProcessedEnabledTokenCount, 3);
-    assert_eq!(settled.withdrawalBatchIndex, 2);
+    assert_eq!(settled.withdrawalBatchIndex, 3);
     assert_eq!(
         settled.withdrawalQueueIndex,
         U256::MAX,
@@ -286,17 +307,12 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     );
     assert!(
         submitter
-            .submit_batch(
-                &prepared,
-                None,
-                zone_prover::VerifierMode::NitroV1,
-                &CancellationToken::new(),
-            )
+            .submit_batch(&prepared, None, None, zone_prover::VerifierMode::NoProof)
             .await
             .is_err(),
         "settlement cannot replay"
     );
-    assert_eq!(portal.withdrawalBatchIndex().call().await?, 2);
+    assert_eq!(portal.withdrawalBatchIndex().call().await?, 3);
     l1.enable_token_on_portal(portal_address, gamma).await?;
     assert_eq!(portal.enabledTokenCount().call().await?, U256::from(4));
     Ok(())
@@ -429,7 +445,7 @@ async fn recovery_witness(
             tempo_block_number: final_header.number(),
             anchor_block_number: final_header.number(),
             anchor_block_hash: alloy_consensus::Sealable::hash_slow(&final_header),
-            expected_withdrawal_batch_index: 2,
+            expected_withdrawal_batch_index: 3,
         },
         parent_header: parent.header.as_ref().clone(),
         zone_blocks: blocks,

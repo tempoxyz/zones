@@ -634,9 +634,11 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
                     allowed: true,
                 }
                 .abi_encode(),
-                unsupported => eyre::bail!(
-                    "unsupported benchmark ZonePortal role {unsupported:?} at index {index}"
-                ),
+                unsupported => {
+                    eyre::bail!(
+                        "unsupported benchmark ZonePortal role {unsupported:?} at index {index}"
+                    );
+                }
             };
             missing_role_calls.push(Call {
                 to: portal_address.into(),
