@@ -10,8 +10,10 @@ use alloy_primitives::{
 };
 use alloy_rlp::Decodable as _;
 use evm2::{bytecode::Bytecode, evm::AccountInfo};
-use reth_evm::{Database, EvmState};
-use reth_execution_types::hashed_post_state_from_execution_state;
+use reth_evm::Database;
+use reth_execution_types::native_account;
+use reth_trie_common::{HashedPostState, KeccakKeyHasher};
+use revm::database::BundleState;
 use tempo_primitives::TempoHeader;
 use zone_precompiles::{L1StateError, L1StorageReader};
 
@@ -91,13 +93,28 @@ impl WitnessDatabase {
     /// return the resulting post-state root.
     pub(crate) fn state_root(
         &mut self,
-        execution_state: &EvmState,
+        bundle_state: &BundleState,
     ) -> Result<B256, StatelessSparseTrieError> {
         // Advance the trie from the previous block's root using this block's changes.
-        let state = hashed_post_state_from_execution_state::<reth_trie_common::KeccakKeyHasher>(
-            execution_state,
-        );
-        self.state.calculate_state_root(state)
+        let state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle_state.state());
+        let state_root = self.state.calculate_state_root(state)?;
+
+        // Keep database read caches coherent with the newly advanced trie.
+        for (address, account) in bundle_state.state() {
+            self.accounts
+                .insert(*address, account.info.as_ref().map(native_account));
+
+            if account.status.is_storage_known() {
+                self.storage.remove(address);
+            }
+
+            let storage_entry = self.storage.entry(*address).or_default();
+            for (slot, value) in account.storage.iter() {
+                storage_entry.insert(*slot, value.present_value());
+            }
+        }
+
+        Ok(state_root)
     }
 }
 
@@ -317,5 +334,34 @@ fn storage_unavailable(
         slot,
         block_number,
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_trie_common::EMPTY_ROOT_HASH;
+
+    #[test]
+    fn checkpoint_requires_exact_header_rlp() {
+        let mut header = TempoHeader::default();
+        header.inner.state_root = EMPTY_ROOT_HASH;
+        header.inner.number = 42;
+        let encoded = alloy_rlp::encode(header);
+        let (state, hash, number) = checkpoint_state(&encoded, &[]).unwrap();
+        assert!(state.is_some());
+        assert_eq!(hash, keccak256(&encoded));
+        assert_eq!(number, 42);
+
+        let mut invalid = (0..encoded.len())
+            .map(|len| encoded[..len].to_vec())
+            .collect::<Vec<_>>();
+        invalid.push([encoded.as_slice(), &[0x80]].concat());
+        for bytes in invalid {
+            assert_eq!(
+                checkpoint_state(&bytes, &[]).unwrap_err(),
+                WitnessDatabaseError::InvalidTempoHeader.into()
+            );
+        }
     }
 }

@@ -6,3 +6,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod constants;
+
+#[cfg(feature = "serde")]
+pub mod serde_rlp;

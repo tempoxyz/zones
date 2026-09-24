@@ -46,9 +46,13 @@ pub(crate) struct TestContext {
 
 pub(crate) type TestPrecompiles = ZonePrecompiles<TempoEvmTypes, MockL1Reader>;
 
-/// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
+/// Create an empty test EVM context at the latest Tempo hardfork affecting Zones.
 pub(crate) fn test_context() -> TestContext {
-    let spec = TempoHardfork::T8;
+    test_context_with_hardfork(TempoHardfork::T13)
+}
+
+/// Create a test EVM context with the specified hardfork.
+pub(crate) fn test_context_with_hardfork(spec: TempoHardfork) -> TestContext {
     let version = tempo_chainspec::gas_params::version(SpecId::OSAKA, spec, false);
     let block = TempoBlockEnv::default();
     TestContext {

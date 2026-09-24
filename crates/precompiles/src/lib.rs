@@ -83,7 +83,7 @@ pub mod zone_fee_manager;
 pub mod zone_state;
 pub mod ztip20;
 
-pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};
+pub use inbox::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR, ZoneInbox};
 pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
@@ -99,7 +99,7 @@ use evm2::{
     Evm, EvmTypes, Precompiles as BasePrecompiles, SpecId,
     evm::precompile::PrecompileProvider,
     interpreter::{GasTracker, Message},
-    precompiles::{PrecompileError, PrecompileResult},
+    precompiles::{MovePrecompileError, PrecompileError, PrecompileResult},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
@@ -162,6 +162,13 @@ where
     T: EvmTypes<BlockEnvExt = TempoBlockExt>,
     P: L1StorageReader,
 {
+    fn move_precompiles(
+        &mut self,
+        moves: &[(Address, Address)],
+    ) -> core::result::Result<(), MovePrecompileError> {
+        self.base.move_precompiles(moves)
+    }
+
     fn addresses(&self) -> alloc::vec::Vec<Address> {
         self.base.addresses()
     }

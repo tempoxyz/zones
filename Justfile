@@ -1019,4 +1019,5 @@ docs-specs-test:
 [group('docs')]
 [doc('Build Solidity contracts')]
 docs-specs-build:
-    cd crates/contracts && forge build --sizes
+    cd crates/contracts && forge build --skip test
+    cd crates/contracts && forge build --sizes --skip 'test/**' src/runtime/tempo/ZonePortal.sol src/runtime/tempo/ZoneMessenger.sol src/runtime/tempo/Verifier.sol

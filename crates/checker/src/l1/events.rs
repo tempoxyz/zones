@@ -127,8 +127,11 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
             let e = decode_event::<ZonePortal::TokenEnabled>(log, "TokenEnabled", block)?;
             L1PortalEvent::TokenEnabled { token: e.token }
         }
-        ZonePortal::BatchSubmitted::SIGNATURE_HASH => {
-            ignored!(ZonePortal::BatchSubmitted, "BatchSubmitted")
+        ZonePortal::BatchSubmitted_0::SIGNATURE_HASH => {
+            ignored!(ZonePortal::BatchSubmitted_0, "BatchSubmitted_0")
+        }
+        ZonePortal::BatchSubmitted_1::SIGNATURE_HASH => {
+            ignored!(ZonePortal::BatchSubmitted_1, "BatchSubmitted_1")
         }
         ZonePortal::WithdrawalProcessed::SIGNATURE_HASH => {
             let e =
@@ -225,7 +228,9 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         ZonePortal::SequencerSetUpdated::SIGNATURE_HASH => {
             ignored!(ZonePortal::SequencerSetUpdated, "SequencerSetUpdated")
         }
-        _ => eyre::bail!("unsupported Portal event {topic} in block {block}"),
+        _ => {
+            eyre::bail!("unsupported Portal event {topic} in block {block}");
+        }
     }))
 }
 
@@ -311,13 +316,14 @@ mod tests {
         .encode_log_data())
     }
     fn batch(index: U256) -> alloy_rpc_types_eth::Log {
-        log(ZonePortal::BatchSubmitted {
+        log(ZonePortal::BatchSubmitted_1 {
             withdrawalBatchIndex: 3,
             withdrawalQueueIndex: index,
             nextProcessedDepositQueueHash: B256::ZERO,
             nextBlockHash: B256::repeat_byte(6),
             withdrawalQueueHash: B256::repeat_byte(7),
             lastProcessedDepositNumber: 9,
+            lastProcessedEnabledTokenCount: 10,
         }
         .encode_log_data())
     }

@@ -276,17 +276,17 @@ where
         let l1 = db.l1_state().clone();
         let ext = TempoEvmExt::default().with_fee_manager(ZoneProtocolFeeManager::new());
         let precompiles = ZonePrecompiles::<TempoEvmTypes, L1>::new(
-            env.tempo_spec,
+            env.spec,
             ext.actions.clone(),
             ext.non_creditable_slots.clone(),
             l1.clone(),
             zone_hardfork,
         );
         evm2::Evm::new_with_execution_config_and_ext(
-            zone_execution_config(env.tempo_spec, env.version),
-            env.tempo_spec,
+            zone_execution_config(env.spec, env.version),
+            env.spec,
             env.block,
-            zone_tx_registry(env.tempo_spec, l1),
+            zone_tx_registry(env.spec, l1),
             db,
             precompiles,
             ext,
@@ -706,9 +706,6 @@ mod tests {
         let config = TempoEvmConfig::new(composed.inner.clone());
         let env = config.evm_env(&header).expect("valid EVM environment");
 
-        assert_eq!(
-            env.tempo_spec,
-            MODERATO.tempo_hardfork_at(activation_timestamp)
-        );
+        assert_eq!(env.spec, MODERATO.tempo_hardfork_at(activation_timestamp));
     }
 }

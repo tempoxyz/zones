@@ -13,13 +13,13 @@ use reth_evm::{
     BlockValidationError, ExecutorTx, GasOutput, RecoveredTx,
 };
 use reth_evm_ethereum::{EthBlockExecutor, EthTransactionResultWithState};
-use reth_execution_types::HashedPostState;
+use reth_execution_types::EvmState;
 use std::sync::Arc;
 use tempo_evm::{TempoBlockExecutionCtx, TempoEvmTypes, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_zone_contracts::IZoneOutbox;
+use tempo_zone_contracts::{IZoneOutbox, TempoAdvanced};
 use zone_chainspec::ZoneChainSpec;
-use zone_precompiles::ADVANCE_TEMPO_SELECTOR;
+use zone_precompiles::{ADVANCE_TEMPO_HEADERS_SELECTOR, ADVANCE_TEMPO_SELECTOR};
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{ZoneEvm, database::validate_pending_state};
@@ -31,6 +31,8 @@ enum ZoneBlockPhase {
     AwaitingAdvanceTempo,
     /// The block has committed `advanceTempo` and may execute ordinary transactions.
     Executing,
+    /// The block authenticated Tempo headers and must contain no further transactions.
+    CheckpointOnly,
     /// The block has finalized withdrawals and cannot accept any more transactions.
     WithdrawalsFinalized,
 }
@@ -48,6 +50,9 @@ impl ZoneBlockPhase {
 
         match (self, tx_kind) {
             (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempo) => Ok(Self::Executing),
+            (Self::AwaitingAdvanceTempo, ZoneTransactionKind::AdvanceTempoHeaders) => {
+                Ok(Self::CheckpointOnly)
+            }
             (Self::AwaitingAdvanceTempo, _) => Err(BlockValidationError::msg(
                 "advanceTempo must be the first transaction in a zone block",
             )
@@ -56,6 +61,9 @@ impl ZoneBlockPhase {
                 "advanceTempo must only execute once per zone block",
             )
             .into()),
+            (Self::Executing, ZoneTransactionKind::AdvanceTempoHeaders) => Err(
+                BlockValidationError::msg("advanceTempoHeaders must only open a zone block").into(),
+            ),
             (Self::Executing, ZoneTransactionKind::Regular) => Ok(Self::Executing),
             (Self::Executing, ZoneTransactionKind::FinalizeWithdrawalBatch) => {
                 Ok(Self::WithdrawalsFinalized)
@@ -71,6 +79,10 @@ impl ZoneBlockPhase {
                 "finalizeWithdrawalBatch must be the last transaction in a zone block",
             )
             .into()),
+            (Self::CheckpointOnly, _) => Err(BlockValidationError::msg(
+                "advanceTempoHeaders must be the only transaction in a zone block",
+            )
+            .into()),
         }
     }
 
@@ -83,6 +95,7 @@ impl ZoneBlockPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZoneTransactionKind {
     AdvanceTempo,
+    AdvanceTempoHeaders,
     Regular,
     FinalizeWithdrawalBatch,
     UnexpectedSystem,
@@ -98,6 +111,13 @@ impl ZoneTransactionKind {
             kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
         }) {
             return Self::AdvanceTempo;
+        }
+
+        if tx.calls().any(|(kind, input)| {
+            kind.to() == Some(&ZONE_INBOX_ADDRESS)
+                && input.starts_with(&ADVANCE_TEMPO_HEADERS_SELECTOR)
+        }) {
+            return Self::AdvanceTempoHeaders;
         }
 
         if tx.calls().any(|(kind, input)| {
@@ -127,9 +147,9 @@ impl BlockTransactionResult<TempoEvmTypes> for ZoneTxResult {
 /// Simplified block executor for zone nodes.
 ///
 /// Enforces the successful block-opening `advanceTempo` system transaction and same-block
-/// finalization of requested withdrawals, then delegates ordinary execution to
-/// [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or end-of-block
-/// metadata requirements.
+/// finalization of requested withdrawals and T13 processed deposits, then delegates ordinary
+/// execution to [`EthBlockExecutor`] without Tempo subblock validation, gas-section tracking, or
+/// end-of-block metadata requirements.
 pub struct ZoneBlockExecutor<'a> {
     inner: EthBlockExecutor<'a, TempoEvmTypes, TempoReceiptBuilder>,
     phase: ZoneBlockPhase,
@@ -233,6 +253,28 @@ impl<'a> BlockExecutor for ZoneBlockExecutor<'a> {
             .into());
         }
 
+        let processed_deposit = self.inner.evm().config_spec_id().is_t13()
+            && self
+                .inner
+                .receipts()
+                .iter()
+                .flat_map(|receipt| receipt.logs())
+                .filter(|log| {
+                    log.address == ZONE_INBOX_ADDRESS
+                        && log.topics().first() == Some(&TempoAdvanced::SIGNATURE_HASH)
+                })
+                .any(|log| {
+                    TempoAdvanced::decode_log(log)
+                        .is_ok_and(|event| !event.depositsProcessed.is_zero())
+                });
+        if processed_deposit && self.phase != ZoneBlockPhase::WithdrawalsFinalized {
+            return Err(BlockValidationError::msg(
+                "zone block with processed deposits is missing its finalizeWithdrawalBatch \
+                 system transaction",
+            )
+            .into());
+        }
+
         self.inner.finish_with_block_access_list()
     }
 
@@ -248,9 +290,16 @@ impl<'a> BlockExecutor for ZoneBlockExecutor<'a> {
         self.inner.receipts()
     }
 
-    fn set_state_hook(&mut self, hook: impl FnMut(HashedPostState) + Send + 'static) -> bool {
-        self.inner.set_state_hook(hook);
-        true
+    fn set_state_hook(&mut self, hook: impl FnMut(EvmState) + Send + 'static) -> bool {
+        self.inner.set_state_hook(hook)
+    }
+
+    fn validate_transaction_gas_limit(
+        &mut self,
+        transaction_gas_limit: u64,
+    ) -> Result<(), BlockExecutionError> {
+        self.inner
+            .validate_transaction_gas_limit(transaction_gas_limit)
     }
 
     fn convert_block_access_list(
@@ -308,7 +357,10 @@ mod tests {
             envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
         },
     };
-    use tempo_zone_contracts::{ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox};
+    use tempo_zone_contracts::{
+        ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox, LegacyTempoAdvanced,
+        TempoAdvanced,
+    };
     use zone_chainspec::ZoneChainSpec;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
     use zone_primitives::constants::{TEMPO_STATE_ADDRESS, zone_chain_id};
@@ -497,7 +549,7 @@ mod tests {
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
         let config = ZoneEvmConfig::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
         let mut env = TempoEvmEnv::default();
-        env.tempo_spec = TempoHardfork::T11;
+        env.spec = TempoHardfork::T11;
         let evm = config.evm_with_env(InMemoryDB::default(), env);
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
@@ -596,6 +648,148 @@ mod tests {
             "zone block with withdrawal requests is missing its finalizeWithdrawalBatch system \
              transaction"
         );
+    }
+
+    #[test]
+    fn processed_deposits_require_same_block_finalization() {
+        use ZoneBlockPhase::{Executing, WithdrawalsFinalized};
+
+        for (address, deposits, phase, legacy, spec, must_reject) in [
+            (
+                ZONE_INBOX_ADDRESS,
+                1,
+                Executing,
+                false,
+                TempoHardfork::T12,
+                false,
+            ),
+            (
+                ZONE_INBOX_ADDRESS,
+                1,
+                Executing,
+                true,
+                TempoHardfork::T12,
+                false,
+            ),
+            (
+                ZONE_INBOX_ADDRESS,
+                1,
+                Executing,
+                false,
+                TempoHardfork::T13,
+                true,
+            ),
+            (
+                ZONE_INBOX_ADDRESS,
+                0,
+                Executing,
+                false,
+                TempoHardfork::T13,
+                false,
+            ),
+            (
+                ZONE_INBOX_ADDRESS,
+                1,
+                WithdrawalsFinalized,
+                false,
+                TempoHardfork::T13,
+                false,
+            ),
+            (
+                Address::ZERO,
+                1,
+                Executing,
+                false,
+                TempoHardfork::T13,
+                false,
+            ),
+        ] {
+            let mut zone_genesis = DEV.genesis().clone();
+            zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
+            let chain_spec =
+                std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
+            let config =
+                ZoneEvmConfig::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
+            let mut env = TempoEvmEnv::default();
+            env.spec = spec;
+            let evm = config.evm_with_env(InMemoryDB::default(), env);
+            let ctx = TempoBlockExecutionCtx {
+                inner: EthBlockExecutionCtx {
+                    parent_hash: B256::ZERO,
+                    parent_beacon_block_root: None,
+                    ommers: &[],
+                    withdrawals: None,
+                    extra_data: Bytes::new(),
+                    tx_count_hint: Some(1),
+                    slot_number: None,
+                },
+                general_gas_limit: 0,
+                shared_gas_limit: 0,
+                consensus_context: None,
+            };
+            let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+            executor.phase = phase;
+            let event = TempoAdvanced {
+                tempoBlockHash: B256::ZERO,
+                tempoBlockNumber: 1,
+                depositsProcessed: U256::from(deposits),
+                newProcessedDepositQueueHash: B256::ZERO,
+                lastProcessedDepositNumber: deposits,
+                lastProcessedEnabledTokenCount: 0,
+            };
+            let data = if legacy {
+                LegacyTempoAdvanced {
+                    tempoBlockHash: event.tempoBlockHash,
+                    tempoBlockNumber: event.tempoBlockNumber,
+                    depositsProcessed: event.depositsProcessed,
+                    newProcessedDepositQueueHash: event.newProcessedDepositQueueHash,
+                    lastProcessedDepositNumber: event.lastProcessedDepositNumber,
+                }
+                .encode_log_data()
+            } else {
+                event.encode_log_data()
+            };
+            let receipt = TempoReceipt {
+                tx_type: TempoTxType::Legacy,
+                success: true,
+                cumulative_gas_used: 0,
+                logs: vec![Log { address, data }],
+            };
+            executor
+                .commit_transaction(ZoneTxResult {
+                    inner: EthTransactionResultWithState::new(
+                        TxResultWithState {
+                            result: TxResult::<TempoEvmTypes> {
+                                status: receipt.success,
+                                logs: receipt.logs,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        receipt.tx_type,
+                        0,
+                    ),
+                    next_phase: phase,
+                })
+                .unwrap();
+
+            let result = executor.finish();
+            if must_reject {
+                let error = match result {
+                    Ok(_) => panic!("deposit block without finalization was accepted"),
+                    Err(error) => error,
+                };
+                assert_eq!(
+                    error.to_string(),
+                    "zone block with processed deposits is missing its finalizeWithdrawalBatch system transaction"
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "unexpected rejection: address={address}, deposits={deposits}, phase={phase:?}, legacy={legacy}, spec={spec:?}"
+                );
+            }
+        }
     }
 
     #[test]
