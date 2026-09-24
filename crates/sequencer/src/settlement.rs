@@ -314,8 +314,8 @@ impl BatchSubmitter {
     /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier, made as T13
     /// `submitBatch` would make it (`from` the portal, same arguments).
     ///
-    /// Returns `None` before T13 and `Some(verdict)` otherwise. Only `Some(false)` is a
-    /// rejection; metadata, RPC, revert, and decoding failures are errors.
+    /// Returns `None` before T13 or for a stale withdrawal batch index, `Some(verdict)` otherwise.
+    /// Only `Some(false)` is a rejection. RPC, revert, and decoding failures are errors.
     pub async fn verifier_accepts(
         &self,
         prepared: &PreparedBatch,
@@ -329,8 +329,12 @@ impl BatchSubmitter {
             .as_ref()
             .map_or(Address::ZERO, PrivateKeySigner::address);
         let metadata = self.read_submission_metadata(signer).await?;
-        // Only the batch index matters here; the quorum shape is checked at submission.
-        self.validate_submission_metadata(&prepared.batch, metadata, true)?;
+        // A stale index has no verdict (actual submission will reconcile).
+        if metadata.withdrawal_batch_index.checked_add(1)
+            != Some(prepared.batch.withdrawal_batch_index)
+        {
+            return Ok(None);
+        }
         let call = prepared.verify_call(metadata.stable.zone_id, proof.clone());
         let output = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
             .to(metadata.verifier)
@@ -2667,7 +2671,7 @@ mod tests {
                 Some(Err("execution reverted: out of gas")),
                 None,
             ),
-            ("T13", Some(1), None, None),
+            ("T13", Some(1), None, Some(None)),
         ] {
             let asserter = Asserter::new();
             asserter.push_success(&serde_json::json!({ "active": fork }));
