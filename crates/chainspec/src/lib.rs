@@ -299,7 +299,6 @@ pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser;
     use tempo_chainspec::spec::{DEV, MODERATO};
