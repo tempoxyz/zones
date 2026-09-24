@@ -56,8 +56,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
-        (github.event.comment.body == 'derek bench' ||
-         github.event.comment.body == 'derek bench prover')))
+        startsWith(github.event.comment.body, 'derek bench ')))
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -77,13 +76,18 @@ jobs:
           policy: bench-e2e-multi-region
       - name: Check org membership
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         with:
           github-token: ${{ steps.benchmark-token.outputs.token }}
           script: |
-            try {
-              await github.rest.orgs.checkMembershipForUser({org: 'tempoxyz', username: context.actor});
-            } catch {
-              core.setFailed(`@${context.actor} must be a tempoxyz member`);
+            for (const username of new Set([context.actor, process.env.TRIGGERING_ACTOR])) {
+              try {
+                await github.rest.orgs.checkMembershipForUser({org: 'tempoxyz', username});
+              } catch {
+                core.setFailed(`@${username} must be a tempoxyz member`);
+                return;
+              }
             }
       - name: Resolve PR SHA
         id: request
@@ -93,13 +97,24 @@ jobs:
         with:
           script: |
             if (context.eventName === 'issue_comment') {
+              // Bind approval to the event's immutable comment payload, including on reruns.
+              const match = /^derek bench(?: prover)? ([0-9a-f]{40})$/.exec(context.payload.comment.body);
+              if (!match) {
+                core.setFailed('Use derek bench <40-character SHA> or derek bench prover <40-character SHA>');
+                return;
+              }
+              const sha = match[1];
               const number = context.issue.number;
               const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
-              if (pr.head.repo.full_name !== 'tempoxyz/zones') {
+              if (pr.head.repo?.full_name !== 'tempoxyz/zones') {
                 core.setFailed('Benchmark PR head must be in tempoxyz/zones');
                 return;
               }
-              core.setOutput('feature-sha', pr.head.sha);
+              if (pr.head.sha !== sha) {
+                core.setFailed('PR head must match the approved SHA; post a new benchmark comment for the current head');
+                return;
+              }
+              core.setOutput('feature-sha', sha);
               core.setOutput('pr-number', number);
             } else if (/^[0-9a-f]{40}$/.test(process.env.FEATURE_SHA)) {
               core.setOutput('feature-sha', process.env.FEATURE_SHA);
@@ -138,6 +153,22 @@ jobs:
         with:
           scope: tempoxyz/tempo-multi-region-benchmark
           policy: bench-e2e-multi-region
+      # A benchmark-only rerun can reuse authorize outputs, so recheck membership here.
+      - name: Check org membership
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        with:
+          github-token: ${{ steps.benchmark-token.outputs.token }}
+          script: |
+            for (const username of new Set([context.actor, process.env.TRIGGERING_ACTOR])) {
+              try {
+                await github.rest.orgs.checkMembershipForUser({org: 'tempoxyz', username});
+              } catch {
+                core.setFailed(`@${username} must be a tempoxyz member`);
+                return;
+              }
+            }
       - name: Mint Earn read token
         id: earn-token
         uses: tempoxyz/gh-actions/actions/github-sts@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
