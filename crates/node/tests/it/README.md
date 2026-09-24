@@ -81,7 +81,8 @@ prewarming retain their normal behavior.
 
 The T12-to-T13 migration-and-settlement test instead creates its portal in genesis
 using the native factory under T12, then points its verifier storage and factory
-metadata at the same mock. It uses the canonical shared runtimes throughout: the
+metadata at `0xBEEF`, with a handwritten runtime returning ABI-encoded `true` for
+any calldata so both verifier ABIs work. It uses the canonical shared runtimes: the
 T13 upgrade replaces the runtime but preserves the mock verifier in storage.
 Other tests continue creating their zones through real factory transactions.
 

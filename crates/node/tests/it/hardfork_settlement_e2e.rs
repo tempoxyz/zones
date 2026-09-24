@@ -355,6 +355,12 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
         genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
     }
 
+    // Return ABI-encoded true for both verifier ABIs, regardless of calldata.
+    // PUSH1 1; PUSH1 0; MSTORE; PUSH1 32; PUSH1 0; RETURN.
+    let verifier = address!("000000000000000000000000000000000000beef");
+    genesis.alloc.entry(verifier).or_default().code =
+        Some(alloy_primitives::bytes!("600160005260206000f3"));
+
     // Run the real factory against the genesis state under T12, before the node starts.
     // Genesis allocations do not consume storage credits or emit on-chain creation logs.
     let mut storage =
@@ -392,7 +398,6 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
         )?;
         // The typed slot write preserves the other fields packed alongside the verifier.
         // Unlike the default proof-call bytecode patch, this survives runtime replacement.
-        let verifier = address!("000000000000000000000000000000000000beef");
         ZonePortalStorage::new(created.portal)
             .verifier
             .write(verifier)?;
