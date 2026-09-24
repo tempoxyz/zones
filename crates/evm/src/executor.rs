@@ -548,8 +548,10 @@ mod tests {
         zone_genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 2).unwrap();
         let chain_spec = std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
         let config = ZoneEvmConfig::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
-        let mut env = TempoEvmEnv::default();
-        env.spec = TempoHardfork::T11;
+        let env = TempoEvmEnv {
+            spec: TempoHardfork::T11,
+            ..Default::default()
+        };
         let evm = config.evm_with_env(InMemoryDB::default(), env);
         let ctx = TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
@@ -710,8 +712,10 @@ mod tests {
                 std::sync::Arc::new(ZoneChainSpec::from_genesis(zone_genesis).unwrap());
             let config =
                 ZoneEvmConfig::new(chain_spec.clone(), MockL1Reader::default(), Address::ZERO);
-            let mut env = TempoEvmEnv::default();
-            env.spec = spec;
+            let env = TempoEvmEnv {
+                spec,
+                ..Default::default()
+            };
             let evm = config.evm_with_env(InMemoryDB::default(), env);
             let ctx = TempoBlockExecutionCtx {
                 inner: EthBlockExecutionCtx {
