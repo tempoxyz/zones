@@ -124,7 +124,7 @@ pub struct PortalZoneAnchor {
 /// Read the L1 portal tip and resolve it against the local canonical Zone chain.
 ///
 /// A zero portal hash denotes genesis only when the portal's Zone height is also zero. A non-zero
-/// hash must be present locally; silently treating an inconsistent checkpoint or a missing hash as
+/// hash must be present locally at exactly the portal's Zone height; silently treating an inconsistent checkpoint or a missing hash as
 /// genesis could replay already-submitted history and construct an invalid transition from state
 /// that the portal has superseded.
 pub async fn resolve_portal_zone_anchor<P>(
@@ -152,9 +152,14 @@ where
         );
         0
     } else {
-        zone_provider.block_number(block_hash)?.ok_or_eyre(format!(
+        let block_number = zone_provider.block_number(block_hash)?.ok_or_eyre(format!(
             "portal block hash {block_hash} is not canonical in the Zone node"
-        ))?
+        ))?;
+        eyre::ensure!(
+            U256::from(block_number) == zone_height,
+            "inconsistent ZonePortal checkpoint: block hash {block_hash} is local Zone block {block_number}, but portal Zone height is {zone_height}"
+        );
+        block_number
     };
 
     Ok(PortalZoneAnchor {
@@ -2036,6 +2041,42 @@ mod tests {
                 error.to_string(),
                 format!(
                     "inconsistent ZonePortal checkpoint: zero block hash at nonzero Zone height {zone_height}"
+                )
+            );
+            assert!(l1.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_portal_hash_at_mismatched_height() {
+        let portal_hash = B256::repeat_byte(0x42);
+        let zone = MockEthProvider::<TempoPrimitives>::new();
+        let mut header = TempoHeader::default();
+        header.inner.number = 42;
+        zone.add_block(
+            portal_hash,
+            Block {
+                header,
+                body: Default::default(),
+            },
+        );
+
+        for zone_height in [U256::ZERO, U256::from(41), U256::from(43), U256::MAX] {
+            let l1 = Asserter::new();
+            l1.push_success(&abi_encode_multicall(vec![
+                abi_word(portal_hash),
+                abi_word(zone_height),
+            ]));
+
+            let error =
+                resolve_portal_zone_anchor(&zone, Address::repeat_byte(0x11), &mock_l1(l1.clone()))
+                    .await
+                    .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "inconsistent ZonePortal checkpoint: block hash {portal_hash} is local Zone block 42, but portal Zone height is {zone_height}"
                 )
             );
             assert!(l1.read_q().is_empty());
