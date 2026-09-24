@@ -14115,7 +14115,6 @@ dependencies = [
  "alloy-provider",
  "alloy-rlp",
  "alloy-rpc-client",
- "alloy-rpc-types-debug",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-signer",
