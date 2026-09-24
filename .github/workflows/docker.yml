@@ -14,6 +14,15 @@ on:
         description: "Tag nightly"
         type: boolean
         default: false
+      reproducible_verify:
+        description: "Verify a non-production reproducible candidate image"
+        type: boolean
+        default: false
+      ref:
+        description: "Optional branch, tag, or SHA to verify (defaults to this workflow's commit)"
+        type: string
+        required: false
+        default: ""
       tempo_genesis_url:
         description: "Tempo genesis JSON URL to embed in the prover image"
         type: string
@@ -37,13 +46,42 @@ env:
   TEMPO_DEVNET_GENESIS_URL: ${{ inputs.tempo_genesis_url || 'https://devnet-assets.tempoxyz.dev/tempo-devnet-nextfork.json' }}
 
 jobs:
+  reproducible-verify:
+    name: Verify reproducible candidate
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.reproducible_verify == true &&
+      github.repository == 'tempoxyz/zones' &&
+      github.ref == 'refs/heads/main'
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-image-verify.yml@5e789f13f8434b76ac105b49e15f696569e23734 # main
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+      build-definitions-sha: ${{ github.workflow_sha }}
+      build-definition-paths: |
+        .dockerignore
+        docker/Dockerfile.reproducible
+        docker/docker-bake.hcl
+        scripts/reproducible-build.sh
+      depot-project: 0c6tg19qsp
+      candidate-repository: ghcr.io/tempoxyz/tempo-zone-repro
+      bake-file: docker/docker-bake.hcl
+      bake-target: tempo-zone-reproducible
+      binary-path: /usr/local/bin/tempo-zone
+      build-script: scripts/reproducible-build.sh
+      rebuild-output: out/tempo-zone
+
   build-and-push:
     name: Build and Push Docker Images
     # Private copies retain PR image builds, but must not publish shared images
     # or run the upstream's scheduled refreshes.
     if: >-
-      github.repository == 'tempoxyz/zones' ||
-      (github.event_name != 'schedule' && github.event_name != 'push')
+      (github.event_name != 'workflow_dispatch' || inputs.reproducible_verify != true) &&
+      (github.repository == 'tempoxyz/zones' ||
+      (github.event_name != 'schedule' && github.event_name != 'push'))
     runs-on: depot-ubuntu-latest-16
     permissions:
       contents: read
