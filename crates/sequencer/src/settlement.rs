@@ -314,13 +314,14 @@ impl BatchSubmitter {
     /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier, made as T13
     /// `submitBatch` would make it (`from` the portal, same arguments).
     ///
-    /// Returns `None` before T13 or for a stale withdrawal batch index, `Some(verdict)` otherwise.
-    /// Only `Some(false)` is a rejection. RPC, revert, and decoding failures are errors.
+    /// Returns `None` before T13 or for a stale withdrawal batch index. The inner
+    /// result contains the verdict or a simulation failure; the outer error indicates
+    /// preflight setup (hardfork or portal metadata) failed.
     pub async fn verifier_accepts(
         &self,
         prepared: &PreparedBatch,
         proof: &Bytes,
-    ) -> Result<Option<bool>> {
+    ) -> Result<Option<Result<bool>>> {
         if SettlementAbi::from_l1(&self.l1_provider).await? != SettlementAbi::T13 {
             return Ok(None);
         }
@@ -336,13 +337,16 @@ impl BatchSubmitter {
             return Ok(None);
         }
         let call = prepared.verify_call(metadata.stable.zone_id, proof.clone());
-        let output = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
+        let verdict = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
             .to(metadata.verifier)
             .from(self.portal_address)
             .call()
             .await
-            .wrap_err("verifier preflight call failed")?;
-        Ok(Some(IVerifier::verifyCall::abi_decode_returns(&output)?))
+            .wrap_err("verifier preflight call failed")
+            .and_then(|output| {
+                IVerifier::verifyCall::abi_decode_returns(&output).map_err(Into::into)
+            });
+        Ok(Some(verdict))
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
@@ -2698,8 +2702,11 @@ mod tests {
                 .verifier_accepts(&prepared, &Bytes::from_static(&[1]))
                 .await;
             match expected {
-                Some(verdict) => assert_eq!(result.unwrap(), verdict),
-                None => assert!(result.is_err(), "failures must not become a verdict"),
+                Some(verdict) => assert_eq!(result.unwrap().transpose().unwrap(), verdict),
+                None => assert!(
+                    result.unwrap().unwrap().is_err(),
+                    "simulation failures must not become a verdict"
+                ),
             }
             assert!(asserter.read_q().is_empty());
         }
