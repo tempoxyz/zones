@@ -74,7 +74,7 @@ use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool, TempoTransactionPoolExt,
     amm::AmmLiquidityCache,
     ordering::TempoTipOrdering,
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
@@ -477,6 +477,7 @@ impl NodeTypes for ZoneNode {
 pub struct ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     inner: RpcAddOns<
@@ -516,6 +517,7 @@ where
 impl<N> std::fmt::Debug for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -584,6 +586,7 @@ struct P2PRuntime {
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -1289,6 +1292,7 @@ async fn seed_leadership_schedule(
 impl<N> ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -1746,6 +1750,7 @@ where
 impl<N> RethRpcAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -1768,6 +1773,7 @@ where
 impl<N> EngineValidatorAddOn<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: TempoTransactionPoolExt,
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
@@ -2057,6 +2063,7 @@ where
             pending_limit: pool_config.pending_limit,
             queued_limit: pool_config.queued_limit,
             max_txs_per_sender: pool_config.max_account_slots,
+            ..Default::default()
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
@@ -2068,6 +2075,7 @@ where
                 DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
+            .with_minimum_fee_cap(0)
             // Zones collect the selected fee token directly and never route through FeeAMM.
             .with_disable_fee_amm_check(true)
         });

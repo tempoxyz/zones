@@ -1,6 +1,6 @@
 //! Tempo EVM setup and Zone-block execution.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
 
 use alloy_consensus::{
     Signed, TxLegacy,
@@ -197,7 +197,6 @@ pub(crate) fn next_block_env_attributes(
         shared_gas_limit: 0,
         timestamp_millis_part: block.timestamp_millis_part,
         consensus_context: None,
-        subblock_fee_recipients: HashMap::new(),
     })
 }
 
@@ -222,9 +221,7 @@ pub(crate) fn next_block_execution_context(
         },
         general_gas_limit: 0,
         shared_gas_limit: 0,
-        validator_set: None,
         consensus_context: None,
-        subblock_fee_recipients: HashMap::new(),
     }
 }
 
