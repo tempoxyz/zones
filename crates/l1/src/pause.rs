@@ -11,6 +11,10 @@ pub const PORTAL_PAUSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// stalls at its lookahead bound. This read observes both independently of ingestion. It is pinned
 /// to the finalized block hash, and failures leave the previous state in place so the gate fails
 /// closed.
+///
+/// The finalized header timestamp is recorded as well. A pause or outage that spans a hardfork
+/// activation fills the lookahead with pre-fork headers, and the engine needs to see the activation
+/// on L1 before it can checkpoint that prefix and let ingestion resume.
 pub async fn refresh_portal_pause(
     l1_provider: &impl Provider<TempoNetwork>,
     portal_address: Address,
@@ -21,6 +25,7 @@ pub async fn refresh_portal_pause(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))?;
     let block = NumHash::new(header.number(), header.hash());
+    tracker.observe_finalized_l1_timestamp(header.timestamp());
     if tracker.portal_pause_block() == Some(block) {
         return Ok(());
     }
@@ -105,6 +110,7 @@ mod tests {
                 inner: TempoHeader {
                     inner: alloy_consensus::Header {
                         number,
+                        timestamp: number,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -134,6 +140,7 @@ mod tests {
             .unwrap();
         assert!(tracker.portal_paused());
         assert_eq!(tracker.portal_pause_block(), Some(block(10)));
+        assert_eq!(tracker.finalized_l1_timestamp(), Some(10));
 
         // An unchanged finalized block does not repeat the state read.
         push_finalized_header(&asserter, 10);
@@ -164,6 +171,8 @@ mod tests {
         );
         assert!(tracker.portal_paused());
         assert_eq!(tracker.portal_pause_block(), Some(block(10)));
+        // Finalized hardfork readiness does not depend on the Portal state read succeeding.
+        assert_eq!(tracker.finalized_l1_timestamp(), Some(11));
     }
 
     #[tokio::test]

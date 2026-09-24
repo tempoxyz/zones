@@ -483,6 +483,7 @@ impl AvailableBlockDrain for ZoneEngine {
             &self.chain_spec,
             &queued_headers,
             &latest_l1_header,
+            self.l1_block_tracker.finalized_l1_timestamp(),
             self.l1_block_tracker.finalized_target(),
             self.last_header.timestamp_millis(),
             wall_clock_timestamp_millis,
@@ -554,7 +555,7 @@ impl AvailableTempoImport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TempoImportDecision {
-    /// Wait until the queued L1 tip activates the hardfork required by the next Zone block.
+    /// Wait until finalized L1 activates the hardfork required by the next Zone block.
     WaitForHardforkMatch,
     /// Wait until the subscriber confirms the queued finalized target did not advance.
     WaitForFinalizedTarget,
@@ -568,6 +569,7 @@ fn tempo_import_decision(
     chain_spec: &ZoneChainSpec,
     queued_headers: &[SealedHeader<TempoHeader>],
     latest_l1_header: &SealedHeader<TempoHeader>,
+    finalized_l1_timestamp: Option<u64>,
     finalized_target: Option<FinalizedTarget>,
     parent_timestamp_millis: u64,
     wall_clock_timestamp_millis: u64,
@@ -582,7 +584,13 @@ fn tempo_import_decision(
         wall_clock_timestamp_millis,
     );
     let zone_hardfork = chain_spec.tempo_hardfork_at(next_timestamp_millis / 1000);
-    let l1_tip_hardfork = chain_spec.tempo_hardfork_at(latest_l1_header.timestamp());
+    // Also consult finalized L1 observed outside the queue: after a long pause the lookahead can be
+    // full of pre-fork headers, and the activation header cannot arrive until some are consumed.
+    let l1_tip_hardfork = chain_spec.tempo_hardfork_at(
+        latest_l1_header
+            .timestamp()
+            .max(finalized_l1_timestamp.unwrap_or_default()),
+    );
 
     if !zone_hardfork.is_t13() {
         return TempoImportDecision::ImportFull;
@@ -789,17 +797,32 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t12),
                 &t12,
+                None,
                 finalized_target(1, true),
                 98_000,
                 100_000
             ),
             TempoImportDecision::WaitForHardforkMatch
         );
+        // A full lookahead of T12 headers: finalized L1 observed outside the queue proves activation.
+        assert_eq!(
+            tempo_import_decision(
+                &spec,
+                std::slice::from_ref(&t12),
+                &t12,
+                Some(100),
+                finalized_target(2, false),
+                98_000,
+                100_000
+            ),
+            TempoImportDecision::ImportCheckpoints(1)
+        );
         assert_eq!(
             tempo_import_decision(
                 &spec,
                 std::slice::from_ref(&t12),
                 &t13,
+                None,
                 None,
                 98_000,
                 100_000,
@@ -811,6 +834,7 @@ mod tests {
                 &spec,
                 &[t12, t13.clone()],
                 &t13,
+                None,
                 finalized_target(2, false),
                 98_000,
                 100_000,
@@ -822,6 +846,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t13),
                 &t13,
+                None,
                 finalized_target(2, true),
                 99_000,
                 100_000
@@ -839,6 +864,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&t12),
                 &t12,
+                None,
                 finalized_target(1, true),
                 98_000,
                 99_000
@@ -858,6 +884,7 @@ mod tests {
                 &spec,
                 &[t12],
                 &t13,
+                None,
                 finalized_target(2, true),
                 98_000,
                 99_000,
@@ -878,6 +905,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&first),
                 &first,
+                None,
                 finalized_target(199, false),
                 99_000,
                 100_000,
@@ -895,6 +923,7 @@ mod tests {
                 &spec,
                 &headers,
                 headers.last().unwrap(),
+                None,
                 finalized_target(199, false),
                 99_000,
                 100_000,
@@ -908,6 +937,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&target),
                 &target,
+                None,
                 finalized_target(199, false),
                 99_000,
                 100_000,
@@ -919,6 +949,7 @@ mod tests {
                 &spec,
                 std::slice::from_ref(&target),
                 &target,
+                None,
                 finalized_target(199, true),
                 99_000,
                 100_000,
