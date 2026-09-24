@@ -28,7 +28,7 @@ use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 use crate::{
     ZoneSequencerProvider,
     abi::{
-        self, BatchSubmitted, BlockTransition, DepositQueueTransition, IZoneOutbox,
+        self, BatchSubmitted, BlockTransition, DepositQueueTransition, IVerifier, IZoneOutbox,
         LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
         ZonePortal,
     },
@@ -37,6 +37,7 @@ use crate::{
     },
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
+use alloy_contract::CallBuilder;
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -45,7 +46,7 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{ContractError, SolCall, SolEvent, SolInterface as _, SolValue};
+use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::{OptionExt as _, Result, WrapErr as _};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
@@ -63,8 +64,6 @@ use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 #[derive(Debug)]
 pub enum BatchSubmitError {
     Cancelled,
-    InvalidProof,
-    SubmissionReverted,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
     Other(eyre::Report),
@@ -80,8 +79,6 @@ impl fmt::Display for BatchSubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str("settlement quorum wait cancelled"),
-            Self::InvalidProof => formatter.write_str("Nitro verifier rejected the proof"),
-            Self::SubmissionReverted => formatter.write_str("batch submission reverted on L1"),
             Self::PortalAdvanced => {
                 formatter.write_str("portal advanced while waiting for settlement quorum")
             }
@@ -327,6 +324,34 @@ impl BatchSubmitter {
         Ok(PreparedBatch { batch, anchor })
     }
 
+    /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier.
+    ///
+    /// Returns `None` before T13 and `Some(verdict)` otherwise. Only `Some(false)` is a
+    /// rejection. Metadata, RPC, revert, and decoding failures are errors.
+    pub async fn verifier_accepts(
+        &self,
+        prepared: &PreparedBatch,
+        proof: &Bytes,
+    ) -> Result<Option<bool>> {
+        if SettlementAbi::from_l1(&self.l1_provider).await? != SettlementAbi::T13 {
+            return Ok(None);
+        }
+        let signer = self
+            .signer
+            .as_ref()
+            .map_or(Address::ZERO, PrivateKeySigner::address);
+        let metadata = self.read_submission_metadata(signer).await?;
+        self.validate_submission_metadata(&prepared.batch, metadata)?;
+        let call = prepared.verify_call(metadata.stable.zone_id, proof.clone());
+        let output = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
+            .to(metadata.verifier)
+            .from(self.portal_address)
+            .call()
+            .await
+            .wrap_err("verifier preflight call failed")?;
+        Ok(Some(IVerifier::verifyCall::abi_decode_returns(&output)?))
+    }
+
     /// Submit a batch to the ZonePortal on Tempo L1.
     ///
     /// Uses the anchor already selected by the zone monitor:
@@ -337,12 +362,11 @@ impl BatchSubmitter {
     ///   recent anchor block is used and ancestry headers are collected (for
     ///   future prover integration).
     ///
-    /// `verifierConfig` selects the Nitro verifier policy. Configured settlement includes the
-    /// prover's Nitro attestation; the pre-T11 unconfigured path keeps `proof` empty.
+    /// `verifier_mode` sets `verifierConfig`, the certificate's committed config hash, and the
+    /// required proof shape: a Nitro attestation, or empty for `NoProof` and pre-T11 settlement.
     ///
     /// Returns the `BatchSubmitted` event decoded from the confirmed receipt. Waiting for a
-    /// settlement quorum is cancelled when the leader generation shuts down. `simulate` replays
-    /// the call before sending so a previous T13 submission revert can be classified.
+    /// settlement quorum is cancelled when the leader generation shuts down.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = prepared.batch.tempo_block_number,
@@ -357,28 +381,13 @@ impl BatchSubmitter {
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
         verifier_mode: VerifierMode,
-        simulate: bool,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
         let (verifier_config, proof) =
             settlement_proof(settlement_abi, verifier_mode, proof_bundle)?;
-        let block_transition = BlockTransition {
-            prevBlockHash: batch.prev_block_hash,
-            nextBlockHash: batch.next_block_hash,
-        };
-
-        let deposit_transition = DepositQueueTransition {
-            prevProcessedHash: batch.prev_processed_deposit_hash,
-            nextProcessedHash: batch.next_processed_deposit_hash,
-            prevDepositNumber: batch.prev_deposit_number,
-            nextDepositNumber: batch.next_deposit_number,
-        };
-        let token_transition = TokenEnablementTransition {
-            prevProcessedTokenCount: batch.prev_processed_token_count,
-            nextProcessedTokenCount: batch.next_processed_token_count,
-        };
+        let (block_transition, deposit_transition, token_transition) = batch.transitions();
 
         let signer = self.signer.as_ref();
         let metadata = self
@@ -528,12 +537,6 @@ impl BatchSubmitter {
                 if anchors_to_current_tip {
                     submission = submission.gas(SUBMIT_BATCH_GAS_LIMIT);
                 }
-                if simulate {
-                    submission
-                        .call()
-                        .await
-                        .map_err(|error| classify_submission_revert(error.into()))?;
-                }
                 tokio::time::timeout(Duration::from_secs(30), submission.send_sync()).await
             }
         }
@@ -542,10 +545,6 @@ impl BatchSubmitter {
 
         let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
-            if settlement_abi == SettlementAbi::T13 {
-                warn!(%tx_hash, "submitBatch was included but reverted on L1");
-                return Err(BatchSubmitError::SubmissionReverted);
-            }
             return Err(
                 eyre::eyre!("submitBatch tx {tx_hash} was included but reverted on L1").into(),
             );
@@ -1360,6 +1359,34 @@ pub struct BatchData {
     pub withdrawal_batch_index: u64,
 }
 
+impl BatchData {
+    /// Block, deposit, and token-enablement transitions, as passed to the portal and verifier.
+    fn transitions(
+        &self,
+    ) -> (
+        BlockTransition,
+        DepositQueueTransition,
+        TokenEnablementTransition,
+    ) {
+        (
+            BlockTransition {
+                prevBlockHash: self.prev_block_hash,
+                nextBlockHash: self.next_block_hash,
+            },
+            DepositQueueTransition {
+                prevProcessedHash: self.prev_processed_deposit_hash,
+                nextProcessedHash: self.next_processed_deposit_hash,
+                prevDepositNumber: self.prev_deposit_number,
+                nextDepositNumber: self.next_deposit_number,
+            },
+            TokenEnablementTransition {
+                prevProcessedTokenCount: self.prev_processed_token_count,
+                nextProcessedTokenCount: self.next_processed_token_count,
+            },
+        )
+    }
+}
+
 /// Immutable Tempo anchor selected for one settlement attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchAnchor {
@@ -1433,6 +1460,27 @@ impl PreparedBatch {
     pub const fn anchor_block_number(&self) -> u64 {
         self.anchor.block_number(self.batch.tempo_block_number)
     }
+
+    /// The Nitro `verify` call T13 `submitBatch` makes for this batch.
+    /// Assumes `withdrawal_batch_index` was validated as portal index + 1.
+    fn verify_call(&self, zone_id: u32, proof: Bytes) -> IVerifier::verifyCall {
+        let batch = &self.batch;
+        let (block_transition, deposit_transition, token_transition) = batch.transitions();
+        IVerifier::verifyCall {
+            zoneId: zone_id,
+            tempoBlockNumber: batch.tempo_block_number,
+            anchorBlockNumber: self.anchor_block_number(),
+            anchorBlockHash: self.anchor.block_hash(),
+            expectedWithdrawalBatchIndex: batch.withdrawal_batch_index,
+            nextZoneHeight: U256::from(batch.zone_height),
+            blockTransition: block_transition,
+            depositQueueTransition: deposit_transition,
+            tokenEnablementTransition: token_transition,
+            withdrawalQueueHash: batch.withdrawal_queue_hash,
+            verifierConfig: Bytes::from_static(VerifierMode::NitroV1.config()),
+            proof,
+        }
+    }
 }
 
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
@@ -1478,26 +1526,6 @@ struct SettlementAttestationInput<'a> {
     block_transition: &'a BlockTransition,
     deposit_transition: &'a DepositQueueTransition,
     verifier_config: &'a Bytes,
-}
-
-pub(crate) fn decode_portal_revert(
-    error: &eyre::Report,
-) -> Option<ContractError<ZonePortal::ZonePortalErrors>> {
-    let message = error.to_string();
-    let data = message.split_once("data: \"")?.1.split_once('"')?.0;
-    ContractError::abi_decode(&alloy_primitives::hex::decode(data).ok()?).ok()
-}
-
-fn classify_submission_revert(error: eyre::Report) -> BatchSubmitError {
-    match decode_portal_revert(&error) {
-        Some(ContractError::CustomError(ZonePortal::ZonePortalErrors::InvalidProof(_))) => {
-            BatchSubmitError::InvalidProof
-        }
-        Some(ContractError::CustomError(ZonePortal::ZonePortalErrors::StaleBlockTransition(_))) => {
-            BatchSubmitError::PortalAdvanced
-        }
-        _ => BatchSubmitError::Other(error),
-    }
 }
 
 fn settlement_proof(
@@ -2702,6 +2730,75 @@ mod tests {
         assert_eq!(second.stable.zone_id, 42);
         assert_eq!(second.stable.chain_id, 42431);
         assert!(asserter.read_q().is_empty());
+    }
+
+    #[test]
+    fn verify_call_matches_the_native_verifier_abi_and_portal_arguments() {
+        assert_eq!(IVerifier::verifyCall::SELECTOR, [0xeb, 0xb2, 0xdd, 0xc9]);
+        let mut prepared = test_prepared_batch(20, 100);
+        prepared.anchor = BatchAnchor::Ancestry {
+            block_number: 150,
+            block_hash: B256::repeat_byte(0xaa),
+            ancestry_headers: Vec::new(),
+        };
+        let call = prepared.verify_call(42, Bytes::from_static(&[0xbb]));
+        assert_eq!(
+            (call.zoneId, call.anchorBlockNumber, call.anchorBlockHash),
+            (42, 150, B256::repeat_byte(0xaa))
+        );
+        assert_eq!(call.expectedWithdrawalBatchIndex, 1);
+        assert_eq!(call.nextZoneHeight, U256::from(20));
+        assert_eq!(call.verifierConfig.as_ref(), VerifierMode::NitroV1.config());
+        assert_eq!(call.proof.as_ref(), [0xbb]);
+    }
+
+    #[tokio::test]
+    async fn verifier_preflight_returns_only_decoded_verdicts() {
+        let prepared = test_prepared_batch(20, 100);
+        // (hardfork, portal withdrawal index, verifier response, expected)
+        for (fork, portal_index, response, expected) in [
+            ("T12", None, None, Some(None)),
+            ("T13", Some(0), Some(Ok(abi_word(true))), Some(Some(true))),
+            ("T13", Some(0), Some(Ok(abi_word(false))), Some(Some(false))),
+            ("T13", Some(0), Some(Ok(Bytes::new())), None),
+            (
+                "T13",
+                Some(0),
+                Some(Err("execution reverted: out of gas")),
+                None,
+            ),
+            ("T13", Some(1), None, None),
+        ] {
+            let asserter = Asserter::new();
+            asserter.push_success(&serde_json::json!({ "active": fork }));
+            if let Some(index) = portal_index {
+                asserter.push_success(&abi_encode_multicall(vec![
+                    abi_word(index),
+                    abi_word(1_u64),
+                    abi_word(U256::from(1)),
+                    abi_word(true),
+                    abi_word(Address::repeat_byte(0x44)),
+                    abi_word(42_u32),
+                    abi_word(U256::from(42431)),
+                ]));
+            }
+            match response {
+                Some(Ok(output)) => asserter.push_success(&output),
+                Some(Err(message)) => asserter.push_failure_msg(message),
+                None => {}
+            }
+            let submitter =
+                BatchSubmitter::new(Address::repeat_byte(0x22), mock_l1(asserter.clone()));
+
+            let result = submitter
+                .verifier_accepts(&prepared, &Bytes::from_static(&[1]))
+                .await;
+            match expected {
+                Some(verdict) => assert_eq!(result.unwrap(), verdict),
+                None => assert!(result.is_err(), "failures must not become a verdict"),
+            }
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[test]

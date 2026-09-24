@@ -41,8 +41,8 @@ use crate::{
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
-        PreparedBatch, WithdrawalPage, ZoneBlockSnapshot, decode_portal_revert,
-        fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
+        PreparedBatch, WithdrawalPage, ZoneBlockSnapshot, fetch_finalized_batch,
+        fetch_finalized_batch_boundaries, read_zone_block_snapshot,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -56,7 +56,8 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(200);
 /// Backoff before rebuilding the monitor after a start or run failure.
 const RESTART_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Verifier mode activated after an invalid proof is rejected.
+/// Per-batch fallback when proving is unavailable or the verifier rejects the proof; `None`
+/// disables fallback.
 const FALLBACK_VERIFIER_MODE: Option<VerifierMode> = Some(VerifierMode::NoProof);
 
 /// Configuration for the [`ZoneMonitor`].
@@ -142,8 +143,6 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     latest_observed_zone_block: u64,
     /// Backpressured SPF and Nitro attestation worker required before configured settlement.
     settlement_prover: Option<SettlementProver>,
-    /// Sticky verifier mode shared with settlement attestation workers.
-    verifier_mode: VerifierMode,
 }
 
 struct PortalResyncSnapshot {
@@ -190,10 +189,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         repair_notify: Arc<Notify>,
         settlement_prover: Option<SettlementProver>,
     ) -> Result<Self> {
-        let verifier_mode = config
-            .attestation_store
-            .as_ref()
-            .map_or(VerifierMode::NitroV1, AttestationStore::verifier_mode);
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let mut batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
@@ -253,7 +248,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             prev_zone_block_hash,
             latest_observed_zone_block: last_submitted_zone_block,
             settlement_prover,
-            verifier_mode,
         };
 
         // Restore pending withdrawal data from zone L2 events so the
@@ -328,20 +322,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         {
             Ok(_) => self.record_observed_zone_block(latest_zone_block),
             Err(BatchSubmitError::Cancelled) => {}
-            Err(BatchSubmitError::InvalidProof) => {
-                error!(
-                    from = scan_from,
-                    to = latest_zone_block,
-                    "Verifier rejected batch proof"
-                );
-            }
-            Err(BatchSubmitError::SubmissionReverted) => {
-                error!(
-                    from = scan_from,
-                    to = latest_zone_block,
-                    "Batch submission reverted on L1"
-                );
-            }
             Err(BatchSubmitError::PortalAdvanced) => {
                 unreachable!("portal advancement is reconciled by submit_batch_with_retry")
             }
@@ -568,19 +548,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    fn activate_fallback(&mut self, persist: bool) -> Option<VerifierMode> {
-        let fallback = FALLBACK_VERIFIER_MODE?;
-        let trigger = if persist {
-            self.verifier_mode = fallback;
-            "verifier_rejection"
-        } else {
-            "prover_unavailable"
-        };
-        self.set_attestation_mode(fallback);
-        warn!(?fallback, trigger, "Activating verifier fallback");
-        Some(fallback)
-    }
-
+    /// Prove, preflight the proof against the verifier, and submit the batch.
+    ///
+    /// Falls back to [`FALLBACK_VERIFIER_MODE`] for this batch only if proving is unavailable or
+    /// the verifier returns `false`; validation and preflight errors fail instead. The mode is
+    /// chosen before quorum collection, so signers commit to the submitted `verifierConfig`.
+    /// The attestation store is reset to Nitro afterwards.
     async fn prove_and_submit_batch(
         &mut self,
         from: u64,
@@ -589,32 +562,39 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
-        let mut attempt_mode = self.verifier_mode;
-        let proof_bundle = if let (VerifierMode::NitroV1, Some(prover)) =
-            (attempt_mode, self.settlement_prover.as_ref())
-        {
-            match prover.prove(from, last_zone_block, prepared.clone()).await {
-                Ok(proof) => Some(proof),
-                Err(error) if ProverFailure::is_unavailable(&error) => {
-                    attempt_mode = self.activate_fallback(false).ok_or(error)?;
-                    None
-                }
+        let fallback = |cause: eyre::Report| {
+            let Some(mode) = FALLBACK_VERIFIER_MODE else {
+                return Err(cause);
+            };
+            warn!(?mode, %cause, "Settling batch with verifier fallback");
+            Ok(mode)
+        };
+        let (verifier_mode, proof_bundle) = match &self.settlement_prover {
+            None => (VerifierMode::NitroV1, None),
+            Some(prover) => match prover.prove(from, last_zone_block, prepared.clone()).await {
+                Ok(proof) => match self
+                    .batch_submitter
+                    .verifier_accepts(prepared, &proof.proof)
+                    .await?
+                {
+                    Some(false) => (fallback(eyre::eyre!("verifier rejected the proof"))?, None),
+                    _ => (VerifierMode::NitroV1, Some(proof)),
+                },
+                Err(error) if ProverFailure::is_unavailable(&error) => (fallback(error)?, None),
                 Err(error) => return Err(error.into()),
-            }
-        } else {
-            None
+            },
         };
         let result = self
             .submit_batch_with_retry(
                 prepared,
                 proof_bundle.as_ref(),
-                attempt_mode,
+                verifier_mode,
                 last_zone_block,
                 withdrawals,
                 shutdown,
             )
             .await;
-        self.set_attestation_mode(self.verifier_mode);
+        self.set_attestation_mode(VerifierMode::NitroV1);
         result
     }
 
@@ -629,24 +609,19 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// - Signals the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
-    /// After a mined revert, the next attempt simulates the call to classify the error:
-    /// `InvalidProof` activates the configured verifier fallback, while `StaleBlockTransition`
-    /// resyncs the portal anchor. Other failures use normal retry and backoff handling.
-    ///
-    /// After [`MAX_RETRIES`] attempts, resyncs the local submission anchor from the
-    /// portal-confirmed zone block so the next poll starts from accepted on-chain state.
+    /// The verifier mode and proof never change across attempts. Each attempt first reconciles
+    /// with the portal; after [`MAX_RETRIES`] failures, the anchor is resynced from the portal.
     async fn submit_batch_with_retry(
         &mut self,
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
-        mut verifier_mode: VerifierMode,
+        verifier_mode: VerifierMode,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
         let batch_data = &prepared.batch;
         let mut delay = INITIAL_RETRY_DELAY;
-        let mut simulate = false;
 
         for attempt in 1..=MAX_RETRIES {
             // Reconcile before every attempt. A prior submitBatch may have landed even when its
@@ -694,11 +669,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             }
 
             let submit_started = std::time::Instant::now();
-            // Drop the stale `NitroV1` proof when retrying in fallback `NoProof` mode.
-            let proof_bundle = proof_bundle.filter(|_| verifier_mode == VerifierMode::NitroV1);
             match self
                 .batch_submitter
-                .submit_batch(prepared, proof_bundle, verifier_mode, simulate, shutdown)
+                .submit_batch(prepared, proof_bundle, verifier_mode, shutdown)
                 .await
             {
                 Ok(event) => {
@@ -769,25 +742,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
                     return Ok(());
                 }
-                Err(BatchSubmitError::InvalidProof) if verifier_mode == VerifierMode::NitroV1 => {
-                    let Some(fallback) = self.activate_fallback(true) else {
-                        return Err(BatchSubmitError::InvalidProof);
-                    };
-                    verifier_mode = fallback;
-                    simulate = false;
-                    continue;
-                }
-                Err(BatchSubmitError::InvalidProof) => return Err(BatchSubmitError::InvalidProof),
-                Err(BatchSubmitError::SubmissionReverted) => {
-                    simulate = true;
-                    self.metrics.batch_submit_retry_total.increment(1);
-                    warn!(
-                        attempt,
-                        max_retries = MAX_RETRIES,
-                        "Batch submission reverted. Replaying call to classify error."
-                    );
-                    continue;
-                }
                 Err(BatchSubmitError::Cancelled) => return Err(BatchSubmitError::Cancelled),
                 Err(BatchSubmitError::PortalAdvanced) => {
                     self.metrics
@@ -826,10 +780,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         delay *= 2;
                     } else {
                         self.metrics.batch_submit_failure_total.increment(1);
-                        let revert_reason = decode_portal_revert(&e).map(|error| error.to_string());
                         error!(
                             error = %e,
-                            revert_reason,
                             last_zone_block,
                             tempo_block_number = batch_data.tempo_block_number,
                             prev_block_hash = %batch_data.prev_block_hash,
@@ -1058,11 +1010,6 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     })
 }
 
-/// Try to decode a ZonePortal revert reason from an eyre error chain.
-///
-/// Extracts hex-encoded revert data from the error's display string and decodes
-/// it using alloy's `ContractError`, which handles standard `Revert(string)`,
-/// `Panic(uint256)`, and ZonePortal custom errors (`NotSequencer`, etc.).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1171,7 +1118,6 @@ mod tests {
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             latest_observed_zone_block: 50,
             settlement_prover: None,
-            verifier_mode: VerifierMode::NitroV1,
         }
     }
 
@@ -1201,31 +1147,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sticky_fallback_updates_monitor_and_store() {
-        let l1 = Asserter::new();
-        let store = AttestationStore::default();
-        let mut monitor = test_monitor(l1, TestZoneProvider::new());
-        monitor.config.attestation_store = Some(store.clone());
-
-        assert_eq!(monitor.activate_fallback(true), Some(VerifierMode::NoProof));
-        assert_eq!(monitor.verifier_mode, VerifierMode::NoProof);
-        assert_eq!(store.verifier_mode(), VerifierMode::NoProof);
-    }
-
     #[tokio::test]
-    async fn prover_unavailability_uses_transient_fallback() {
+    async fn verifier_preflight_error_prevents_fallback_and_submission() {
         let l1 = Asserter::new();
-        let store = AttestationStore::default();
-        let mut monitor = test_monitor(l1, TestZoneProvider::new());
-        monitor.config.attestation_store = Some(store.clone());
-        monitor.settlement_prover = Some(SettlementProver::failing(ProverFailure::Unavailable));
-        let prepared = prepared(test_batch_data());
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover = Some(SettlementProver::fixed(Ok(ProofBundle {
+            verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+            proof: Bytes::from_static(&[1]),
+        })));
+        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(0),
+            abi_encode_u64(1),
+            abi_encode_u64(1),
+            abi_encode_u64(1),
+            abi_encode_u64(0),
+            abi_encode_u64(42),
+            abi_encode_u64(42431),
+        ]));
+        l1.push_failure_msg("execution reverted: out of gas");
 
         monitor
             .prove_and_submit_batch(
                 11,
-                &prepared,
+                &prepared(test_batch_data()),
                 20,
                 Vec::new(),
                 &sync::CancellationToken::new(),
@@ -1233,15 +1178,17 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(monitor.verifier_mode, VerifierMode::NitroV1);
-        assert_eq!(store.verifier_mode(), VerifierMode::NitroV1);
+        assert!(
+            l1.read_q().is_empty(),
+            "a preflight error must not reach fallback or submitBatch"
+        );
     }
 
     #[tokio::test]
     async fn validation_failure_prevents_submit_batch() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover = Some(SettlementProver::failing(ProverFailure::Validation));
+        monitor.settlement_prover = Some(SettlementProver::fixed(Err(ProverFailure::Validation)));
         let prepared = prepared(test_batch_data());
 
         monitor
@@ -1255,7 +1202,6 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(monitor.verifier_mode, VerifierMode::NitroV1);
         assert!(
             l1.read_q().is_empty(),
             "submitBatch must not issue any L1 request after proving fails"

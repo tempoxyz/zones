@@ -14210,6 +14210,7 @@ version = "0.3.1"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
+ "alloy-contract",
  "alloy-eips",
  "alloy-network",
  "alloy-primitives",

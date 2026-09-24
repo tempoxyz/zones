@@ -390,12 +390,12 @@ impl SettlementProver {
     }
 
     #[cfg(test)]
-    pub(crate) fn failing(failure: ProverFailure) -> Self {
+    pub(crate) fn fixed(result: std::result::Result<ProofBundle, ProverFailure>) -> Self {
         let (sender, mut receiver) = mpsc::channel::<ProverJob>(1);
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 if let Some(response) = job.response {
-                    let _ = response.send(Err(failure.into()));
+                    let _ = response.send(result.clone().map_err(Into::into));
                 }
             }
         });

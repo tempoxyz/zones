@@ -224,7 +224,6 @@ crate::sol! {
         error PortalIsPaused();
         error NotPendingAdmin();
         error InvalidProof();
-        error StaleBlockTransition();
         error InvalidTempoBlockNumber();
         error NotFactory();
         error NotSelf();
@@ -414,6 +413,25 @@ crate::sol! {
         function encryptionKeyAtBlock(uint64 tempoBlockNumber)
             external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
+    }
+
+    /// Verifier interface called by T13 `ZonePortal.submitBatch` (`msg.sender` = portal).
+    #[derive(Debug, PartialEq, Eq)]
+    interface IVerifier {
+        function verify(
+            uint32 zoneId,
+            uint64 tempoBlockNumber,
+            uint64 anchorBlockNumber,
+            bytes32 anchorBlockHash,
+            uint64 expectedWithdrawalBatchIndex,
+            uint256 nextZoneHeight,
+            ZonePortal.BlockTransition calldata blockTransition,
+            ZonePortal.DepositQueueTransition calldata depositQueueTransition,
+            ZonePortal.TokenEnablementTransition calldata tokenEnablementTransition,
+            bytes32 withdrawalQueueHash,
+            bytes calldata verifierConfig,
+            bytes calldata proof
+        ) external view returns (bool);
     }
 }
 
@@ -709,7 +727,6 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PortalIsPaused(_) => f.write_str("PortalIsPaused"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
-            Self::StaleBlockTransition(_) => f.write_str("StaleBlockTransition"),
             Self::InvalidTokenEnablementTransition(_) => {
                 f.write_str("InvalidTokenEnablementTransition")
             }
