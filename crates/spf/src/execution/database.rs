@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-use alloy_rlp::Decodable as _;
 use revm::{
     Database,
     database::states::bundle_state::BundleState,
@@ -254,12 +253,8 @@ fn checkpoint_state(
     header_rlp: &[u8],
     node_pool: &[Bytes],
 ) -> Result<(Option<Arc<StatelessSparseTrie>>, B256, u64), Error> {
-    let mut encoded_header = header_rlp;
-    let header = TempoHeader::decode(&mut encoded_header)
+    let header: TempoHeader = alloy_rlp::decode_exact(header_rlp)
         .map_err(|_| WitnessDatabaseError::InvalidTempoHeader)?;
-    if !encoded_header.is_empty() {
-        return Err(WitnessDatabaseError::InvalidTempoHeader.into());
-    }
 
     let state_root = header.state_root();
     let state = match StatelessSparseTrie::new(state_root, node_pool) {
@@ -334,5 +329,34 @@ fn storage_unavailable(
         slot,
         block_number,
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_trie_common::EMPTY_ROOT_HASH;
+
+    #[test]
+    fn checkpoint_requires_exact_header_rlp() {
+        let mut header = TempoHeader::default();
+        header.inner.state_root = EMPTY_ROOT_HASH;
+        header.inner.number = 42;
+        let encoded = alloy_rlp::encode(header);
+        let (state, hash, number) = checkpoint_state(&encoded, &[]).unwrap();
+        assert!(state.is_some());
+        assert_eq!(hash, keccak256(&encoded));
+        assert_eq!(number, 42);
+
+        let mut invalid = (0..encoded.len())
+            .map(|len| encoded[..len].to_vec())
+            .collect::<Vec<_>>();
+        invalid.push([encoded.as_slice(), &[0x80]].concat());
+        for bytes in invalid {
+            assert_eq!(
+                checkpoint_state(&bytes, &[]).unwrap_err(),
+                WitnessDatabaseError::InvalidTempoHeader.into()
+            );
+        }
     }
 }

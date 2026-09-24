@@ -7,7 +7,6 @@
 //! pre-state root before it can serve reads.
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::B256Map};
-use alloy_rlp::Decodable;
 use reth_trie_common::{DecodedMultiProofV2, EMPTY_ROOT_HASH, HashedPostState, TrieAccount};
 use reth_trie_sparse::{LeafUpdate, RevealableSparseTrie, SparseStateTrie, TrieNodeEpoch};
 
@@ -227,13 +226,8 @@ impl StatelessSparseTrie {
 }
 
 fn decode_account(value: &[u8], address: Address) -> Result<TrieAccount, StatelessSparseTrieError> {
-    let mut encoded = value;
-    let account = TrieAccount::decode(&mut encoded)
-        .map_err(|_| StatelessSparseTrieError::InvalidAccountValue { account: address })?;
-    if !encoded.is_empty() {
-        return Err(StatelessSparseTrieError::InvalidAccountValue { account: address });
-    }
-    Ok(account)
+    alloy_rlp::decode_exact(value)
+        .map_err(|_| StatelessSparseTrieError::InvalidAccountValue { account: address })
 }
 
 fn decode_storage_value(
@@ -241,23 +235,12 @@ fn decode_storage_value(
     account: Address,
     slot: U256,
 ) -> Result<U256, StatelessSparseTrieError> {
-    let mut encoded = value;
-    let value = U256::decode(&mut encoded)
-        .map_err(|_| StatelessSparseTrieError::InvalidStorageValue { account, slot })?;
-    if !encoded.is_empty() {
-        return Err(StatelessSparseTrieError::InvalidStorageValue { account, slot });
-    }
-    Ok(value)
+    alloy_rlp::decode_exact(value)
+        .map_err(|_| StatelessSparseTrieError::InvalidStorageValue { account, slot })
 }
 
 fn decode_hashed_account(value: &[u8]) -> Result<TrieAccount, StatelessSparseTrieError> {
-    let mut encoded = value;
-    let account = TrieAccount::decode(&mut encoded)
-        .map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)?;
-    if !encoded.is_empty() {
-        return Err(StatelessSparseTrieError::InvalidSparseTrie);
-    }
-    Ok(account)
+    alloy_rlp::decode_exact(value).map_err(|_| StatelessSparseTrieError::InvalidSparseTrie)
 }
 
 /// The pinned Reth helper assumes internally consistent paths in a few places.
@@ -306,4 +289,64 @@ pub enum StatelessSparseTrieError {
     /// by the witness.
     #[error("incomplete witness for an executed state update")]
     IncompleteStateUpdate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_decoders_require_exact_rlp_and_preserve_errors() {
+        let address = Address::repeat_byte(0x42);
+        let account = TrieAccount {
+            nonce: 7,
+            balance: U256::MAX,
+            ..Default::default()
+        };
+        let encoded = alloy_rlp::encode(account);
+        assert_eq!(decode_account(&encoded, address), Ok(account));
+        assert_eq!(decode_hashed_account(&encoded), Ok(account));
+
+        let mut invalid = (0..encoded.len())
+            .map(|len| encoded[..len].to_vec())
+            .collect::<Vec<_>>();
+        for suffix in [&[0][..], &[0x80][..], encoded.as_slice()] {
+            invalid.push([encoded.as_slice(), suffix].concat());
+        }
+        for bytes in invalid {
+            assert_eq!(
+                decode_account(&bytes, address),
+                Err(StatelessSparseTrieError::InvalidAccountValue { account: address })
+            );
+            assert_eq!(
+                decode_hashed_account(&bytes),
+                Err(StatelessSparseTrieError::InvalidSparseTrie)
+            );
+        }
+    }
+
+    #[test]
+    fn storage_decoder_requires_exact_rlp_and_preserves_error_context() {
+        let account = Address::repeat_byte(0x42);
+        let slot = U256::from(17);
+        for value in [U256::ZERO, U256::from(127), U256::from(128), U256::MAX] {
+            let encoded = alloy_rlp::encode(value);
+            assert_eq!(decode_storage_value(&encoded, account, slot), Ok(value));
+            let mut invalid = (0..encoded.len())
+                .map(|len| encoded[..len].to_vec())
+                .collect::<Vec<_>>();
+            invalid.push([encoded.as_slice(), &[0x80]].concat());
+            for bytes in invalid {
+                assert_eq!(
+                    decode_storage_value(&bytes, account, slot),
+                    Err(StatelessSparseTrieError::InvalidStorageValue { account, slot })
+                );
+            }
+        }
+        // A non-canonical integer must remain invalid too.
+        assert_eq!(
+            decode_storage_value(&[0x81, 0x01], account, slot),
+            Err(StatelessSparseTrieError::InvalidStorageValue { account, slot })
+        );
+    }
 }
