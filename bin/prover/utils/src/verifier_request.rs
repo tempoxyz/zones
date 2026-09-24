@@ -1,6 +1,11 @@
 //! Inspectable arguments and JSON-RPC requests for the native Nitro verifier.
 
+use alloy_eips::BlockId;
+use alloy_json_rpc::{Id, Request};
+use alloy_network::Ethereum;
 use alloy_primitives::{Address, Bytes};
+use alloy_provider::EthCallParams;
+use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use eyre::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -9,13 +14,13 @@ use tempo_zone_contracts::ZONE_VERIFIER_ADDRESS;
 
 // Keep the verifier wire ABI independent of the local STF schema, just like `prove`.
 sol! {
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct BlockTransition {
         bytes32 prevBlockHash;
         bytes32 nextBlockHash;
     }
 
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct DepositQueueTransition {
         bytes32 prevProcessedHash;
         bytes32 nextProcessedHash;
@@ -23,13 +28,13 @@ sol! {
         uint64 nextDepositNumber;
     }
 
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct TokenEnablementTransition {
         uint64 prevProcessedTokenCount;
         uint64 nextProcessedTokenCount;
     }
 
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
     function verify(
         uint32 zoneId,
         uint64 tempoBlockNumber,
@@ -46,7 +51,15 @@ sol! {
     ) external view returns (bool);
 }
 
-pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VerifierRequest {
+    pub chain_id: u64,
+    pub arguments: verifyCall,
+    pub rpc: Request<EthCallParams<Ethereum>>,
+}
+
+pub(super) fn build(witness: &Value, response: &Value) -> Result<VerifierRequest> {
     let inputs = &witness["publicInputs"];
     let output = &response["output"];
     let chain_id: u64 = serde_json::from_value(inputs["parentChainId"].clone())
@@ -77,21 +90,23 @@ pub(super) fn build(witness: &Value, response: &Value) -> Result<Value> {
         }
     }
     let data = Bytes::from(call.abi_encode());
-    Ok(json!({
-        "chainId": chain_id,
-        "arguments": call,
-        "rpc": {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_call",
-            "params": [{
-                "from": portal,
-                "to": ZONE_VERIFIER_ADDRESS,
-                "data": data,
-                "gas": "0x1c9c380",
-            }, "latest"],
+    let tx = TransactionRequest {
+        from: Some(portal),
+        to: Some(ZONE_VERIFIER_ADDRESS.into()),
+        // Keep the existing `data` spelling and omit all unspecified fields.
+        input: TransactionInput {
+            input: None,
+            data: Some(data),
         },
-    }))
+        gas: Some(30_000_000),
+        ..Default::default()
+    };
+    let params = EthCallParams::<Ethereum>::new(tx).with_block(BlockId::latest());
+    Ok(VerifierRequest {
+        chain_id,
+        arguments: call,
+        rpc: Request::new("eth_call", Id::Number(1), params),
+    })
 }
 
 #[cfg(test)]
@@ -125,18 +140,28 @@ mod tests {
     #[test]
     fn builds_inspectable_arguments_and_matching_calldata() {
         let (witness, response) = fixture();
-        let request = build(&witness, &response).unwrap();
-        assert_eq!(request["chainId"], 31319);
+        let typed_request = build(&witness, &response).unwrap();
+        let request = serde_json::to_value(&typed_request).unwrap();
         assert_eq!(request["arguments"].as_object().unwrap().len(), 12);
         let tx = &request["rpc"]["params"][0];
-        assert_eq!(
-            tx["from"],
-            json!(address!("5ad0000000000000000000000000000000000002"))
-        );
-        assert_eq!(tx["to"], json!(ZONE_VERIFIER_ADDRESS));
-        assert_eq!(request["rpc"]["method"], "eth_call");
-        assert_eq!(request["rpc"]["params"][1], "latest");
         let data: Bytes = serde_json::from_value(tx["data"].clone()).unwrap();
+        // Compare the entire envelope, including omissions, to the previous wire shape.
+        assert_eq!(
+            request,
+            json!({
+                "chainId": 31319,
+                "arguments": typed_request.arguments,
+                "rpc": {
+                    "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                    "params": [{
+                        "from": address!("5ad0000000000000000000000000000000000002"),
+                        "to": ZONE_VERIFIER_ADDRESS,
+                        "data": data,
+                        "gas": "0x1c9c380",
+                    }, "latest"],
+                },
+            })
+        );
         // IZoneVerifier.verify includes nextZoneHeight after expectedWithdrawalBatchIndex.
         assert_eq!(&data[..4], &[0xeb, 0xb2, 0xdd, 0xc9]);
         let decoded = verifyCall::abi_decode(&data).unwrap();
