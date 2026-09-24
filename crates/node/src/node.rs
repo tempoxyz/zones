@@ -688,23 +688,22 @@ where
         });
         let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
         // Validate before launching workers, including when the node has no batch to prove yet.
-        if let Some(config) = self
-            .sequencer_config
-            .as_ref()
-            .filter(|config| config.enable_prover)
-        {
-            let addresses = config.prover_addresses.as_ref().ok_or_else(|| {
-                eyre::eyre!("settlement proving requires a remote prover configuration")
-            })?;
-            addresses
-                .validate_startup(&l1_provider, chain_spec.as_ref())
-                .await?;
-        }
-        if rpc_only
-            && let Some(addresses) = effective_shadow_prover_config
+        let prover_addresses = if rpc_only {
+            effective_shadow_prover_config
                 .as_ref()
                 .and_then(|config| config.prover_runtime.remote_addresses())
-        {
+        } else {
+            self.sequencer_config
+                .as_ref()
+                .filter(|config| config.enable_prover)
+                .map(|config| {
+                    config.prover_addresses.as_ref().ok_or_else(|| {
+                        eyre::eyre!("settlement proving requires a remote prover configuration")
+                    })
+                })
+                .transpose()?
+        };
+        if let Some(addresses) = prover_addresses {
             addresses
                 .validate_startup(&l1_provider, chain_spec.as_ref())
                 .await?;
