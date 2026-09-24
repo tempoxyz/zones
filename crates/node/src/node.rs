@@ -795,7 +795,7 @@ where
         let p2p_runtime = if let Some(config) = self.p2p_config.take() {
             Some(
                 Self::start_p2p(
-                    config,
+                    config.with_storage_directory(ctx.config.datadir().data_dir().join("p2p")),
                     &l1_provider,
                     l1_chain_id,
                     genesis_zone_id,

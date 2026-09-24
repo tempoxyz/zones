@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -82,6 +82,7 @@ pub struct P2pConfig {
     listen: SocketAddr,
     bypass_ip_check: bool,
     leadership: LeadershipSchedule,
+    storage_directory: Option<PathBuf>,
 }
 
 impl P2pConfig {
@@ -122,6 +123,7 @@ impl P2pConfig {
             listen,
             bypass_ip_check,
             leadership,
+            storage_directory: None,
         })
     }
 
@@ -178,6 +180,13 @@ impl P2pConfig {
     /// Zone ID included in each block attestation.
     pub fn zone_id(&self) -> u32 {
         self.zone_id
+    }
+
+    /// Sets the Commonware runtime's storage directory, including its startup lock file.
+    /// Defaults to Commonware's temporary directory when not configured.
+    pub fn with_storage_directory(mut self, directory: PathBuf) -> Self {
+        self.storage_directory = Some(directory);
+        self
     }
 }
 
@@ -386,10 +395,13 @@ fn run(
     events: mpsc::Sender<P2pEvent>,
     backfill: BackfillNodeChannels,
 ) -> eyre::Result<()> {
-    let runtime_config = commonware_runtime::tokio::Config::default()
+    let mut runtime_config = commonware_runtime::tokio::Config::default()
         .with_tcp_nodelay(Some(true))
         .with_worker_threads(2)
         .with_catch_panics(true);
+    if let Some(directory) = &config.storage_directory {
+        runtime_config = runtime_config.with_storage_directory(directory.clone());
+    }
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
         let local_ed25519_public_key = config.ed25519_public_key();
         let leadership = config.leadership();
@@ -1017,6 +1029,7 @@ mod tests {
             secp256k1_identity: Some(secp256k1_identity(41)),
             listen: available_address(),
             bypass_ip_check: false,
+            storage_directory: None,
             leadership: manifest.leadership_schedule(),
         };
 
@@ -1163,6 +1176,7 @@ mod tests {
             secp256k1_identity: Some(secp256k1_identity(301 + index as u64)),
             listen: addresses[index],
             bypass_ip_check: false,
+            storage_directory: None,
             leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
         };
         let mut leader = spawn_p2p(config(0), network_id).unwrap();
@@ -1415,6 +1429,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -1761,6 +1776,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 21)),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
@@ -1973,6 +1989,7 @@ mod tests {
                             .then(|| secp256k1_identity(index as u64 + 31)),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
@@ -2146,6 +2163,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 51)),
                         listen: addresses[index],
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2245,6 +2263,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2335,6 +2354,7 @@ mod tests {
                     secp256k1_identity: Some(secp256k1_identity(index as u64 + 61)),
                     listen: addresses[index],
                     bypass_ip_check: false,
+                    storage_directory: None,
                     leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
                 },
                 network_id,
@@ -2422,6 +2442,7 @@ mod tests {
                     secp256k1_identity: Some(secp256k1_identity(63)),
                     listen: addresses[2],
                     bypass_ip_check: false,
+                    storage_directory: None,
                     leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
                 },
                 network_id,
@@ -2516,6 +2537,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 71)),
                         listen: addresses[index],
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2571,6 +2593,7 @@ mod tests {
                 secp256k1_identity: Some(secp256k1_identity(71)),
                 listen: addresses[0],
                 bypass_ip_check: false,
+                storage_directory: None,
                 leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
             },
             network_id,
