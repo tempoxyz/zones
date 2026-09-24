@@ -194,7 +194,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let verifier_mode = config
             .settlements
             .as_ref()
-            .map_or(VerifierMode::NitroV1, SettlementManager::verifier_mode);
+            .map_or(VerifierMode::NitroV1, |settlements| {
+                *settlements.verifier_mode.lock()
+            });
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
@@ -576,7 +578,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let trigger = if persist {
             self.verifier_mode = fallback;
             if let Some(settlements) = &self.config.settlements {
-                settlements.set_verifier_mode(fallback);
+                *settlements.verifier_mode.lock() = fallback;
             }
             "verifier_rejection"
         } else {
@@ -1270,7 +1272,7 @@ mod tests {
 
         assert_eq!(monitor.activate_fallback(true), Some(VerifierMode::NoProof));
         assert_eq!(monitor.verifier_mode, VerifierMode::NoProof);
-        assert_eq!(settlements.verifier_mode(), VerifierMode::NoProof);
+        assert_eq!(*settlements.verifier_mode.lock(), VerifierMode::NoProof);
     }
 
     #[tokio::test]
@@ -1315,7 +1317,7 @@ mod tests {
             );
             monitor.config.settlements = Some(settlements.clone());
             monitor.verifier_mode = verifier_mode;
-            settlements.set_verifier_mode(verifier_mode);
+            *settlements.verifier_mode.lock() = verifier_mode;
             l1.push_success(&serde_json::json!({ "active": "T13" }));
             l1.push_success(&abi_encode_multicall(vec![
                 abi_encode_u64(1),
@@ -1363,7 +1365,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(matches!(result, Err(BatchSubmitError::Cancelled)));
-            assert_eq!(settlements.verifier_mode(), verifier_mode);
+            assert_eq!(*settlements.verifier_mode.lock(), verifier_mode);
             assert!(l1.read_q().is_empty());
         }
     }

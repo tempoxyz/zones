@@ -39,7 +39,8 @@ pub struct SettlementManager {
     anchor_config: BatchAnchorConfig,
     p2p_tx: mpsc::Sender<P2pCommand>,
     pending: PendingSettlements,
-    verifier_mode: Arc<Mutex<VerifierMode>>,
+    /// Persist the fallback selection across monitor generations.
+    pub(crate) verifier_mode: Arc<Mutex<VerifierMode>>,
 }
 
 impl std::fmt::Debug for SettlementManager {
@@ -71,15 +72,6 @@ impl SettlementManager {
             pending: PendingSettlements::default(),
             verifier_mode: Arc::default(),
         }
-    }
-
-    pub fn verifier_mode(&self) -> VerifierMode {
-        *self.verifier_mode.lock()
-    }
-
-    /// Persist the fallback selection across monitor generations.
-    pub fn set_verifier_mode(&self, mode: VerifierMode) {
-        *self.verifier_mode.lock() = mode;
     }
 
     /// Prepare and collect the certificate for one exact batch, anchor, and verifier mode.
