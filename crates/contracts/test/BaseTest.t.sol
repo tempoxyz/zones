@@ -19,8 +19,9 @@ import { EIP2935 } from "../src/runtime/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/runtime/tempo/Verifier.sol";
 import { ZoneMessenger } from "../src/runtime/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../src/runtime/tempo/ZonePortal.sol";
+import { PortalRuntimeTest } from "./PortalRuntimeTest.sol";
 import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
-import { Test, console } from "forge-std/Test.sol";
+import { console } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { IAccountKeychain } from "tempo-std/interfaces/IAccountKeychain.sol";
@@ -36,7 +37,7 @@ import { IValidatorConfig } from "tempo-std/interfaces/IValidatorConfig.sol";
 
 /// @notice Base test framework for all spec tests
 /// pathUSD is just a TIP20 at a special address (0x20C0...) with token_id=0
-contract BaseTest is Test {
+contract BaseTest is PortalRuntimeTest {
 
     mapping(address portal => uint256 height) private _submittedZoneHeights;
 
@@ -182,9 +183,9 @@ contract BaseTest is Test {
         vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
     }
 
-    /// @notice Creates a direct portal fixture with native-factory-equivalent storage.
-    /// @dev Native ZoneFactory behavior is tested in Tempo. Solidity behavior tests use a direct
-    ///      implementation because vanilla Forge cannot execute the Rust precompile.
+    /// @notice Creates a canonical proxy with native-factory-equivalent storage.
+    /// @dev Solidity initialize approximates the native factory's Rust storage writes;
+    ///      native factory initialization is covered in Tempo integration tests.
     function _createZonePortal(
         uint32 zoneId,
         address initialToken,
@@ -197,7 +198,7 @@ contract BaseTest is Test {
         returns (ZonePortal portal)
     {
         _installSharedZoneRuntimes();
-        portal = new ZonePortal();
+        portal = _newPortalProxy(zoneId);
         vm.prank(ZONE_FACTORY_ADDRESS);
         portal.initialize(
             zoneId,

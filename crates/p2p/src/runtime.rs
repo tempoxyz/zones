@@ -1,4 +1,10 @@
-use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use alloy_primitives::{Address as EthereumAddress, B256};
 use commonware_cryptography::ed25519::PublicKey;
@@ -15,12 +21,14 @@ use crate::{
         BackfillCommand, BackfillCoordinator, BackfillPorts, BackfillRequest, BackfillResponse,
         BackfillRuntimeChannels,
     },
+    capabilities::PeerCapabilities,
     identity::{Ed25519Identity, Secp256k1Identity},
     network::{
-        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
-        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL,
-        SETTLEMENT_SIGNATURE_CHANNEL, TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
+        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
+        MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
+        TRANSACTION_CHANNEL,
     },
+    protocol::EncodedBlock,
     routing::{RoutingMembership, RoutingPolicy},
 };
 
@@ -200,8 +208,8 @@ fn validate_ip_check_configuration(
 /// Outbound protocol commands accepted by the dedicated P2P runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum P2pCommand {
-    /// Broadcast one RLP-encoded sealed zone block to all nodes.
-    BroadcastBlock(Vec<u8>),
+    /// Broadcast a block and its optional witness to every peer.
+    BroadcastBlock(EncodedBlock),
     /// Broadcast one ABI-encoded settlement proposal to all followers.
     BroadcastSettlementProposal(Vec<u8>),
     /// Return one ABI-encoded settlement signature to the leader that proposed it.
@@ -396,33 +404,28 @@ fn run(
         )?;
         oracle.track(0, peers);
         let (block_sender, block_receiver) =
-            commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
+            commonware.register(BLOCK_CHANNEL, network::block_quota());
         let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
             SETTLEMENT_PROPOSAL_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
         let (settlement_signature_sender, settlement_signature_receiver) = commonware.register(
             SETTLEMENT_SIGNATURE_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
 
         // The backfill request and responses are on separate channels
         let (backfill_request_sender, backfill_request_receiver) = commonware.register(
             BACKFILL_REQUEST_CHANNEL,
             network::backfill_request_quota(),
-            BLOCK_BACKLOG,
         );
         let (backfill_response_sender, backfill_response_receiver) = commonware.register(
             BACKFILL_RESPONSE_CHANNEL,
             network::backfill_response_quota(),
-            BLOCK_BACKLOG,
         );
         let (transaction_sender, transaction_receiver) = commonware.register(
             TRANSACTION_CHANNEL,
             network::transaction_quota(),
-            TRANSACTION_BACKLOG,
         );
         let mut network_task = commonware.start();
 
@@ -450,11 +453,13 @@ fn run(
             .await;
 
         let membership = RoutingMembership::from_manifest(&config.manifest);
+        let capabilities = PeerCapabilities::default();
 
         let command_loop = run_commands(
             local_ed25519_public_key.clone(),
             membership.clone(),
             leadership.clone(),
+            capabilities.clone(),
             P2pSenders {
                 blocks: block_sender,
                 settlement_proposals: settlement_proposal_sender,
@@ -484,6 +489,7 @@ fn run(
             local_ed25519_public_key,
             membership,
             leadership,
+            capabilities,
             BackfillRuntimeChannels {
                 request_sender: backfill_request_sender,
                 request_receiver: backfill_request_receiver,
@@ -521,6 +527,7 @@ async fn run_commands(
     local_ed25519_public_key: PublicKey,
     membership: RoutingMembership,
     leadership: LeadershipSchedule,
+    capabilities: PeerCapabilities,
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
@@ -542,18 +549,26 @@ async fn run_commands(
                     continue;
                 }
 
-                if block.len() > MAX_MESSAGE_SIZE as usize {
-                    error!(target: "zone::p2p", block_size_bytes = block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
+                let encoded = block.encode();
+                if encoded.len() > MAX_MESSAGE_SIZE as usize {
+                    error!(target: "zone::p2p", block_size_bytes = encoded.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
                     continue;
                 }
 
                 let admitted = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
-                        let admitted = senders.blocks.send(
-                            Recipients::Some(recipients.clone()),
-                            block.clone(),
-                            true,
-                        );
+                        let now = Instant::now();
+                        let (witness_peers, legacy_peers): (Vec<_>, Vec<_>) = recipients.iter()
+                            .cloned()
+                            .partition(|peer| capabilities.supports_witnesses(peer, now));
+                        let mut admitted = Vec::new();
+                        for (peers, witnesses) in [(legacy_peers, false), (witness_peers, true)] {
+                            if peers.is_empty() {
+                                continue;
+                            }
+                            let payload = if witnesses { encoded.clone() } else { block.block.clone() };
+                            admitted.extend(senders.blocks.send(Recipients::Some(peers), payload, true));
+                        }
                         if !admitted.is_empty() || recipients.is_empty() {
                             break admitted;
                         }
@@ -851,6 +866,10 @@ mod tests {
             self.blocked.lock().unwrap().push(peer);
             Feedback::Ok
         }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            panic!("receiver tests do not subscribe to blocked peers")
+        }
     }
 
     fn mock_receiver() -> (
@@ -1099,6 +1118,258 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn witness_transport_requires_peer_announcements() {
+        use commonware_p2p::{AddressableManager as _, Receiver as _, Recipients, Sender as _};
+        use commonware_runtime::{Runner as _, Spawner as _};
+
+        use crate::{
+            EncodedBlock,
+            capabilities::{ANNOUNCEMENT_INTERVAL, ANNOUNCEMENT_TTL, LOCAL_CAPABILITIES_VERSION},
+            network,
+            protocol::{DecodeError, RequestFrame, ResponseFrame},
+        };
+
+        enum Command {
+            Advertise(bool),
+            Request(RequestFrame),
+        }
+        #[derive(Debug)]
+        enum Event {
+            Block(Vec<u8>),
+            Response(ResponseFrame),
+            IgnoredAnnouncement,
+        }
+
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [301, 302, 303].map(ed25519_identity);
+        let manifest = Arc::new(
+            ZoneManifest::parse(&manifest_with_standby(
+                &identities,
+                &addresses,
+                301,
+                usize::MAX,
+            ))
+            .unwrap(),
+        );
+        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let config = |index: usize| P2pConfig {
+            zone_id: 9,
+            manifest: manifest.clone(),
+            ed25519_identity: ed25519_identity(301 + index as u64),
+            secp256k1_identity: Some(secp256k1_identity(301 + index as u64)),
+            listen: addresses[index],
+            bypass_ip_check: false,
+            leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+        };
+        let mut leader = spawn_p2p(config(0), network_id).unwrap();
+        let mut upgraded = spawn_p2p(config(2), network_id).unwrap();
+        let legacy_config = config(1);
+        let leader_peer = identities[0].ed25519_public_key();
+        let legacy_peer = identities[1].ed25519_public_key();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        let (commands, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // A wire-level legacy peer: only the original six Commonware channels, no
+        // advertisements by default, and the old response tag check. Explicitly enabling
+        // advertisements below simulates upgrading this peer without changing its identity.
+        let legacy_thread = std::thread::spawn(move || {
+            commonware_runtime::tokio::Runner::new(
+                commonware_runtime::tokio::Config::default().with_worker_threads(2),
+            ).start(|context| async move {
+                let (mut network, mut oracle, peers) = network::instantiate(
+                    &context, &legacy_config.manifest, legacy_config.zone_id,
+                    legacy_config.ed25519_identity.into_private_key(), legacy_config.listen,
+                    false, network_id,
+                ).unwrap();
+                oracle.track(0, peers);
+                let (_, mut blocks) = network.register(network::BLOCK_CHANNEL, network::block_quota());
+                let (mut requests, _) = network.register(network::BACKFILL_REQUEST_CHANNEL, network::backfill_request_quota());
+                let (mut responses, mut backfill) = network.register(network::BACKFILL_RESPONSE_CHANNEL, network::backfill_response_quota());
+                let _remaining = [network::TRANSACTION_CHANNEL, network::SETTLEMENT_PROPOSAL_CHANNEL, network::SETTLEMENT_SIGNATURE_CHANNEL]
+                    .map(|channel| network.register(channel, network::settlement_quota()));
+                let mut network_task = network.start();
+                let mut advertise = false;
+                let mut announcements = tokio::time::interval(ANNOUNCEMENT_INTERVAL);
+                loop {
+                    tokio::select! {
+                        () = stop.cancelled() => break,
+                        result = &mut network_task => panic!("legacy transport stopped: {result:?}"),
+                        _ = announcements.tick(), if advertise => {
+                            let _ = responses.send(Recipients::All, ResponseFrame::Capabilities(LOCAL_CAPABILITIES_VERSION).encode().unwrap(), false);
+                        }
+                        command = command_rx.recv() => match command {
+                            None => break,
+                            Some(Command::Advertise(enabled)) => {
+                                advertise = enabled;
+                                announcements.reset_immediately();
+                            }
+                            Some(Command::Request(frame)) => {
+                                let _ = requests.send(Recipients::Some(vec![leader_peer.clone()]), frame.encode().to_vec(), true);
+                            }
+                        },
+                        received = blocks.recv() => {
+                            let (_, bytes) = received.unwrap();
+                            events.send(Event::Block(bytes.into())).unwrap();
+                        }
+                        received = backfill.recv() => {
+                            let (_, bytes) = received.unwrap();
+                            // Pre-announcement decoder's exact tag check. Malformed frames
+                            // are ignored at the application layer, leaving transport intact.
+                            let frame = match bytes.as_ref().first().copied() {
+                                Some(0 | 1) => ResponseFrame::decode(bytes.as_ref()),
+                                Some(tag) => Err(DecodeError::UnknownResponseTag(tag)),
+                                None => Err(DecodeError::EmptyResponse),
+                            };
+                            match frame {
+                                Ok(frame) => events.send(Event::Response(frame)).unwrap(),
+                                Err(DecodeError::UnknownResponseTag(2)) => events.send(Event::IgnoredAnnouncement).unwrap(),
+                                Err(err) => panic!("unexpected legacy response error: {err}"),
+                            }
+                        }
+                    }
+                }
+                context.stop(0, Some(Duration::from_secs(5))).await.unwrap();
+            });
+        });
+        let block = EncodedBlock {
+            block: vec![0xc1, 0x80],
+            witness: Some(vec![0x01]),
+        };
+        let broadcaster = repeat(
+            leader.parts.as_ref().unwrap().commands.clone(),
+            P2pCommand::BroadcastBlock(block.clone()),
+        );
+
+        // Old peer never advertises: announcements must not disconnect it or cause witnesses.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut ignored = false;
+            let mut received_block = false;
+            while !(ignored && received_block) {
+                match event_rx.recv().await.unwrap() {
+                    Event::IgnoredAnnouncement => ignored = true,
+                    Event::Block(bytes) => {
+                        assert_eq!(bytes, block.block);
+                        received_block = true;
+                    }
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("legacy peer did not keep receiving bare blocks after announcement");
+        // The other upgraded peer advertises and receives witnessed blocks concurrently.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::BlockReceived { block: bytes, .. }) =
+                    upgraded.events_mut().recv().await
+                {
+                    if bytes == block.encode() {
+                        break;
+                    }
+                    assert_eq!(bytes, block.block);
+                }
+            }
+        })
+        .await
+        .expect("upgraded peer did not receive witnesses");
+
+        for (request_id, supports_witnesses) in [(41, false), (42, true), (43, false)] {
+            if request_id == 42 {
+                commands.send(Command::Advertise(true)).unwrap();
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        if let Event::Block(bytes) = event_rx.recv().await.unwrap() {
+                            if bytes == block.encode() {
+                                break;
+                            }
+                            assert_eq!(bytes, block.block);
+                        }
+                    }
+                })
+                .await
+                .expect("explicit support did not enable witnesses");
+            } else if request_id == 43 {
+                commands.send(Command::Advertise(false)).unwrap();
+                tokio::time::sleep(ANNOUNCEMENT_TTL + Duration::from_secs(1)).await;
+                // Drain traffic queued during the lease. Subsequent sends must be legacy.
+                while event_rx.try_recv().is_ok() {}
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Event::Block(bytes) = event_rx.recv().await.unwrap() {
+                            assert_eq!(bytes, block.block);
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("expired support did not restore bare blocks");
+            }
+            // Backfill requests have a one-message/second quota, so consecutive phases
+            // retry until the request is admitted rather than assuming the first send wins.
+            let request = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(1100));
+                loop {
+                    tokio::select! {
+                        _ = retry.tick() => commands.send(Command::Request(RequestFrame { request_id, start: 7 })).unwrap(),
+                        request = leader.parts.as_mut().unwrap().backfill.requests.recv() => break request.unwrap(),
+                    }
+                }
+            }).await.expect("legacy peer's backfill request did not arrive");
+            assert_eq!(request.peer, legacy_peer);
+            assert_eq!(request.request_id, request_id);
+            leader
+                .parts
+                .as_ref()
+                .unwrap()
+                .backfill
+                .commands
+                .send(crate::BackfillCommand::SendBlock {
+                    peer: legacy_peer.clone(),
+                    request_id,
+                    block: block.clone(),
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Event::Response(ResponseFrame::Block {
+                        request_id: actual_id,
+                        block: bytes,
+                    }) = event_rx.recv().await.unwrap()
+                    {
+                        assert_eq!(actual_id, request_id);
+                        assert_eq!(
+                            bytes,
+                            if supports_witnesses {
+                                block.encode()
+                            } else {
+                                block.block.clone()
+                            }
+                        );
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("backfill response did not arrive");
+        }
+        broadcaster.abort();
+        shutdown.cancel();
+        tokio::task::spawn_blocking(move || legacy_thread.join())
+            .await
+            .unwrap()
+            .unwrap();
+        shutdown_while_receiving(leader).await.unwrap();
+        shutdown_while_receiving(upgraded).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn leader_broadcasts_blocks_and_serves_backfill() {
         let addresses = [
             available_address(),
@@ -1156,7 +1427,13 @@ mod tests {
 
         let block = vec![0xf8, 0x01, 0x80];
         let commands = handles[0].parts.as_ref().unwrap().commands.clone();
-        let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(block.clone()));
+        let broadcaster = repeat(
+            commands,
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: block.clone(),
+                witness: None,
+            }),
+        );
 
         for handle in handles.iter_mut().skip(1) {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -1172,6 +1449,35 @@ mod tests {
             })
             .await
             .expect("follower did not receive block");
+        }
+        broadcaster.abort();
+
+        // Upgraded followers eventually advertise support and receive witness envelopes.
+        let witness = vec![0x01];
+        let encoded = crate::EncodedBlock {
+            block: block.clone(),
+            witness: Some(witness.clone()),
+        };
+        let witnessed_block = encoded.encode();
+        let commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(encoded));
+        for handle in handles.iter_mut().skip(1) {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        block: received, ..
+                    }) = handle.events_mut().recv().await
+                    {
+                        if received == witnessed_block {
+                            break;
+                        }
+                        // Plain blocks may be queued or sent before the advertisement arrives.
+                        assert_eq!(received, block);
+                    }
+                }
+            })
+            .await
+            .expect("follower did not receive witnessed blocks");
         }
         broadcaster.abort();
 
@@ -1284,7 +1590,10 @@ mod tests {
                 .send(crate::BackfillCommand::SendBlock {
                     peer: requesting_peer.clone(),
                     request_id,
-                    block: block.clone(),
+                    block: crate::EncodedBlock {
+                        block: block.clone(),
+                        witness: Some(witness.clone()),
+                    },
                 })
                 .await
                 .unwrap();
@@ -1315,7 +1624,14 @@ mod tests {
                     }
                     Some(crate::BackfillResponse::Completed { tip, .. }) => {
                         assert_eq!(tip, test_tip(9));
-                        assert_eq!(received_blocks, backfill_blocks);
+                        assert_eq!(
+                            received_blocks,
+                            backfill_blocks.map(|block| crate::EncodedBlock {
+                                block,
+                                witness: Some(witness.clone())
+                            }
+                            .encode())
+                        );
                         return;
                     }
                     None => panic!("follower backfill response channel closed"),
@@ -1341,6 +1657,45 @@ mod tests {
             .await
             .is_err(),
             "completed backfill request accepted a replay"
+        );
+
+        // Backfill without a stored witness still uses plain blocks.
+        handles[2]
+            .parts
+            .as_ref()
+            .unwrap()
+            .backfill
+            .commands
+            .send(crate::BackfillCommand::Request { start: 10 })
+            .await
+            .unwrap();
+        let request = tokio::time::timeout(
+            Duration::from_secs(15),
+            handles[0].parts.as_mut().unwrap().backfill.requests.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        leader_commands
+            .send(crate::BackfillCommand::SendBlock {
+                peer: request.peer.clone(),
+                request_id: request.request_id,
+                block: crate::EncodedBlock {
+                    block: block.clone(),
+                    witness: None,
+                },
+            })
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(15),
+            handles[2].parts.as_mut().unwrap().backfill.responses.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(response, crate::BackfillResponse::Block { block: received, .. } if received == block)
         );
 
         for handle in handles {
@@ -1422,7 +1777,10 @@ mod tests {
         let broadcaster = tokio::spawn(async move {
             loop {
                 outgoing_commands
-                    .send(P2pCommand::BroadcastBlock(broadcast_block.clone()))
+                    .send(P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                        block: broadcast_block.clone(),
+                        witness: None,
+                    }))
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1641,7 +1999,10 @@ mod tests {
         let block = vec![0xf8, 0x01, 0x80];
         let broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: block.clone(),
+                witness: None,
+            }),
         );
         for index in [QUORUM_FOLLOWER, QUORUM_FOLLOWER_B, RPC_FOLLOWER] {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -1989,7 +2350,10 @@ mod tests {
         let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
         let initial_broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(initial_block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: initial_block.clone(),
+                witness: None,
+            }),
         );
         for (label, handle) in [
             ("follower-a", &mut follower_a),
@@ -2025,7 +2389,10 @@ mod tests {
         let offline_block = vec![0xf8, 0x02, 0x80];
         let offline_broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(offline_block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: offline_block.clone(),
+                witness: None,
+            }),
         );
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -2077,7 +2444,10 @@ mod tests {
         let remesh_block = vec![0xf8, 0x03, 0x80];
         let remesh_broadcaster = repeat(
             leader_commands,
-            P2pCommand::BroadcastBlock(remesh_block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: remesh_block.clone(),
+                witness: None,
+            }),
         );
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
@@ -2211,7 +2581,10 @@ mod tests {
         let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
         let broadcaster = repeat(
             leader_commands.clone(),
-            P2pCommand::BroadcastBlock(block.clone()),
+            P2pCommand::BroadcastBlock(crate::EncodedBlock {
+                block: block.clone(),
+                witness: None,
+            }),
         );
         for (index, handle) in followers.iter_mut().enumerate() {
             tokio::time::timeout(Duration::from_secs(20), async {

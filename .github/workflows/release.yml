@@ -43,7 +43,7 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - name: Get version from tag
         id: get_version
@@ -65,12 +65,12 @@ jobs:
     if: ${{ github.event.inputs.dry_run != 'true' }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           toolchain: stable
       - name: Verify crate version matches tag
@@ -81,7 +81,7 @@ jobs:
         run: |
           tag="$VERSION"
           tag=${tag#v}
-          cargo_ver=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          cargo_ver=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
           [[ "$tag" == "$cargo_ver"* ]] || { echo "Tag $tag doesn’t match the Cargo version $cargo_ver"; exit 1; }
 
   build-release:
@@ -107,7 +107,7 @@ jobs:
 
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,14 +115,14 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           toolchain: stable
           targets: ${{ matrix.platform.target }}
 
       - name: Setup mold linker
         if: runner.os == 'Linux'
-        uses: tempoxyz/gh-actions/actions/setup-mold@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/setup-mold@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - name: Get build profile
         id: profile
@@ -143,7 +143,7 @@ jobs:
           FEATURES: ${{ matrix.binary.features }}
           PROFILE: ${{ steps.profile.outputs.profile }}
           TARGET: ${{ matrix.platform.target }}
-        run: cargo build --bin "$BINARY_NAME" --features "$FEATURES" --profile "$PROFILE" --target "$TARGET"
+        run: cargo build --locked --bin "$BINARY_NAME" --features "$FEATURES" --profile "$PROFILE" --target "$TARGET"
 
       - name: Prepare binary
         id: prepare
@@ -201,7 +201,7 @@ jobs:
       # This is necessary for generating the changelog.
       # It has to come before "Download Artifacts" or else it deletes the artifacts.
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

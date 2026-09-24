@@ -36,6 +36,7 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use revm::context::result::HaltReason;
 use std::{
     collections::HashSet,
     fmt,
@@ -46,7 +47,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
 use tempo_evm::{
     FeeTokenResolver, TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig,
-    TempoEvmError, TempoHaltReason, TempoNextBlockEnvAttributes, TempoStateAccess,
+    TempoEvmError, TempoNextBlockEnvAttributes, TempoStateAccess,
     evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
@@ -113,7 +114,7 @@ where
     type Context<DB: Database> = TempoCtx<L1OverlayDB<DB, L1>>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
     type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
-    type HaltReason = TempoHaltReason;
+    type HaltReason = HaltReason;
     type Spec = tempo_chainspec::hardfork::TempoHardfork;
     type BlockEnv = TempoBlockEnv;
     type Precompiles = PrecompilesMap;
@@ -320,7 +321,7 @@ where
     type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type TxExecutionResult = ZoneTxResult<TempoHaltReason, TempoTxType>;
+    type TxExecutionResult = ZoneTxResult<HaltReason, TempoTxType>;
     type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>> =
         ZoneBlockExecutor<'a, DB, I, L1>;
 
@@ -402,9 +403,7 @@ where
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,
-            validator_set: None,
             consensus_context: block.header().consensus_context,
-            subblock_fee_recipients: Default::default(),
         })
     }
 
@@ -432,9 +431,7 @@ where
         &self,
         payload: &'a TempoExecutionData,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
-        let mut context = self.context_for_block(&payload.block)?;
-        context.validator_set = payload.validator_set.clone();
-        Ok(context)
+        self.context_for_block(&payload.block)
     }
 
     fn tx_iterator_for_payload(

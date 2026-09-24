@@ -206,7 +206,7 @@ jobs:
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -518,7 +518,7 @@ jobs:
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -528,7 +528,7 @@ jobs:
 
       - name: Mint read-only Earn token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@68851d67c611dc0050e9f3fcd5bd47f3f899a00e # main
+        uses: tempoxyz/gh-actions/actions/github-sts@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           scope: tempoxyz/earn
           policy: zones-read
@@ -540,7 +540,11 @@ jobs:
           path: earn
           token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
-          submodules: true
+
+      - name: Initialize Earn public dependencies
+        working-directory: earn
+        # PropAMM is private and only needed by Earn's integration tests.
+        run: git submodule update --init lib/forge-std lib/openzeppelin-contracts lib/openzeppelin-contracts-upgradeable
 
       - name: Prepare persistent topology control path
         env:
@@ -582,15 +586,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/actions/setup-mold@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+      - uses: tempoxyz/gh-actions/actions/setup-mold@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           version: v0.15.0
 
-      - uses: tempoxyz/gh-actions/actions/setup-foundry@68851d67c611dc0050e9f3fcd5bd47f3f899a00e
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
         with:
           version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
@@ -607,7 +611,7 @@ jobs:
           echo "ZONES_BENCH_EARN_REVISION=$earn_sha" >> "$GITHUB_ENV"
 
       - name: Restore Solidity artifacts
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             earn/cache
@@ -696,13 +700,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
-            --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
+            --locked --profile profiling -p tempo-zone -p tempo-zone-prover-utils -p tempo-xtask
           nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
             '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
             'jemalloc,asm-keccak,keccak-cache-global,otlp' \
             '$ZONES_BENCH_TEMPO_REF'"
           cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
-            --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
+            --locked --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
             echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-prover-utils"
@@ -778,17 +782,14 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
-      - name: Install Samply profiler
+      - name: Install pinned Samply profiler
         run: |
           set -euo pipefail
-          samply_help="$(samply record --help 2>/dev/null || true)"
-          if ! grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"; then
-            cargo install samply \
-              --git https://github.com/DaniPopes/samply \
-              --branch edge \
-              --locked \
-              --force
-          fi
+          cargo install samply \
+            --git https://github.com/DaniPopes/samply \
+            --rev 06f9075697ad144feaf3e15c2254a043b243fdbf \
+            --locked \
+            --force
           samply_path="$(command -v samply)"
           "$samply_path" --version
           samply_help="$(samply record --help)"

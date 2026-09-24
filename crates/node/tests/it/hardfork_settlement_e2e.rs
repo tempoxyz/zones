@@ -1,21 +1,30 @@
 //! Upgrade an existing portal and prove the first T13 recovery batch before settling its output.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use alloy::genesis::Genesis;
 use alloy_consensus::{BlockHeader, Transaction};
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rlp::Decodable;
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
+use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
+use reth_chainspec::EthChainSpec;
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_contracts::precompiles::ITIP20;
-use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_precompiles::{
+    PATH_USD_ADDRESS,
+    storage::{
+        Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
+    },
+};
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
-    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZonePortal,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tokio_util::sync::CancellationToken;
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_sequencer::{BatchData, BatchSubmitter};
 use zone_spf::{
@@ -24,15 +33,27 @@ use zone_spf::{
 };
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, L1TestNode, TcpChaosProxy, ZoneAccount, ZoneTestNode, now_secs, poll_until,
+    DEFAULT_TIMEOUT, L1TestNode, TEST_MNEMONIC, TcpChaosProxy, ZoneAccount, ZoneTestNode, now_secs,
+    poll_until,
 };
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let activation = now_secs() + 60;
-    let l1 = L1TestNode::start_with_t13(activation).await?;
-    let portal_address = l1.deploy_zone().await?;
+    let mut portal_address = Address::ZERO;
+    let l1 = L1TestNode::start_with(|cfg| {
+        let mut genesis = cfg.chain.genesis().clone();
+        portal_address =
+            init_migration_portal(&mut genesis, activation).expect("valid T12 migration genesis");
+        cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
+        cfg.dev.block_time = None;
+    })
+    .await?;
+    l1.fund_user(l1.admin_address(), 10_000_000).await?;
+    let encryption_key = k256::SecretKey::from(l1.dev_signer().credential());
+    l1.set_sequencer_encryption_key(portal_address, &encryption_key)
+        .await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     // Create metadata before the zone starts; only alpha is processed before the upgrade.
     let alpha = l1
@@ -62,13 +83,21 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     account.deposit(100, DEFAULT_TIMEOUT, &zone).await?;
     zone.wait_for_tempo_block_number(l1.provider().get_block_number().await?, DEFAULT_TIMEOUT)
         .await?;
-    // The fixture finalizes every eight Zone blocks. Reach exactly the first T12 boundary.
+    let deposit_block = provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .unwrap();
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+    assert_eq!(outbox.lastBatch().call().await?.withdrawalBatchIndex, 1);
+    // The deposit finalizes the first batch; block eight finalizes the second T12 batch.
+    assert!(deposit_block.header.number() < 8);
     while provider.get_block_number().await? < 8 {
         l1.fund_user(l1.admin_address(), 1).await?;
         zone.wait_for_tempo_block_number(l1.provider().get_block_number().await?, DEFAULT_TIMEOUT)
             .await?;
     }
     assert_eq!(provider.get_block_number().await?, 8);
+    assert_eq!(outbox.lastBatch().call().await?.withdrawalBatchIndex, 2);
     let parent = provider.get_block_by_number(8.into()).await?.unwrap();
     assert!(
         parent.header.timestamp() < activation,
@@ -105,11 +134,15 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         l1.dev_signer(),
         Default::default(),
     );
-    let legacy = BatchData {
-        zone_height: 8,
-        tempo_block_number: zone.tempo_block_number().await?,
+    let deposit_batch = BatchData {
+        zone_height: deposit_block.header.number(),
+        tempo_block_number: TempoState::new(TEMPO_STATE_ADDRESS, &provider)
+            .tempoBlockNumber()
+            .block(BlockId::number(deposit_block.header.number()))
+            .call()
+            .await?,
         prev_block_hash: B256::ZERO,
-        next_block_hash: parent.header.hash,
+        next_block_hash: deposit_block.header.hash,
         prev_processed_deposit_hash: B256::ZERO,
         next_processed_deposit_hash: inbox.processedDepositQueueHash().call().await?,
         prev_deposit_number: 0,
@@ -119,15 +152,24 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         withdrawal_queue_hash: B256::ZERO,
         withdrawal_batch_index: 1,
     };
-    submitter
-        .submit_batch(
-            &submitter.prepare_batch(legacy).await?,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .map_err(|err| eyre::eyre!("legacy settlement: {err:?}"))?;
+    let interval_batch = BatchData {
+        zone_height: 8,
+        tempo_block_number: zone.tempo_block_number().await?,
+        prev_block_hash: deposit_batch.next_block_hash,
+        next_block_hash: parent.header.hash,
+        prev_processed_deposit_hash: deposit_batch.next_processed_deposit_hash,
+        prev_deposit_number: deposit_batch.next_deposit_number,
+        withdrawal_batch_index: 2,
+        ..deposit_batch.clone()
+    };
+    for legacy in [deposit_batch, interval_batch] {
+        submitter
+            .submit_batch(&submitter.prepare_batch(legacy).await?, None, None)
+            .await
+            .map_err(|err| eyre::eyre!("legacy settlement: {err:?}"))?;
+    }
     assert_eq!(portal.blockHash().call().await?, parent.header.hash);
+    assert_eq!(portal.withdrawalBatchIndex().call().await?, 2);
 
     // Leave one enablement and one deposit outstanding on T12 while the zone cannot receive L1.
     l1.enable_token_on_portal(portal_address, beta).await?;
@@ -235,7 +277,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     );
     assert_eq!(output.deposit_queue_transition.prevDepositNumber, 1);
     assert_eq!(output.deposit_queue_transition.nextDepositNumber, 2);
-    assert_eq!(output.last_batch_commitment.withdrawal_batch_index, 2);
+    assert_eq!(output.last_batch_commitment.withdrawal_batch_index, 3);
     assert_eq!(
         output.deposit_queue_transition.nextProcessedHash,
         inbox.processedDepositQueueHash().call().await?
@@ -261,11 +303,11 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     let batch = batch_from_output(end, zone.tempo_block_number().await?, &output);
     let prepared = submitter.prepare_batch(batch).await?;
     let settled = submitter
-        .submit_batch(&prepared, None, &CancellationToken::new())
+        .submit_batch(&prepared, None, None)
         .await
         .map_err(|err| eyre::eyre!("T13 settlement: {err:?}"))?;
     assert_eq!(settled.lastProcessedEnabledTokenCount, 3);
-    assert_eq!(settled.withdrawalBatchIndex, 2);
+    assert_eq!(settled.withdrawalBatchIndex, 3);
     assert_eq!(
         settled.withdrawalQueueIndex,
         U256::MAX,
@@ -279,16 +321,106 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         output.block_transition.nextBlockHash
     );
     assert!(
-        submitter
-            .submit_batch(&prepared, None, &CancellationToken::new())
-            .await
-            .is_err(),
+        submitter.submit_batch(&prepared, None, None).await.is_err(),
         "settlement cannot replay"
     );
-    assert_eq!(portal.withdrawalBatchIndex().call().await?, 2);
+    assert_eq!(portal.withdrawalBatchIndex().call().await?, 3);
     l1.enable_token_on_portal(portal_address, gamma).await?;
     assert_eq!(portal.enabledTokenCount().call().await?, U256::from(4));
     Ok(())
+}
+
+/// Predeploy a T12 portal whose mock verifier storage survives the canonical T13 runtime upgrade.
+fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result<Address> {
+    use revm::state::Bytecode;
+    use tempo_contracts::precompiles::{IZoneFactory, initial_zone_factory_state};
+    use tempo_precompiles::zone_factory::{
+        ZoneFactory, ZoneInfoStorageHandler, ZonePortalStorage, slots,
+    };
+
+    let signer_at = |index| {
+        MnemonicBuilder::<English>::default()
+            .phrase(TEST_MNEMONIC)
+            .index(index)?
+            .build()
+    };
+    let signer = signer_at(0)?;
+    let admin = signer_at(2)?.address();
+    let user = signer_at(1)?.address();
+    genesis
+        .config
+        .extra_fields
+        .insert_value("t13Time".into(), activation)?;
+    for account in initial_zone_factory_state(signer.address()) {
+        genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
+    }
+
+    // Return ABI-encoded true for both verifier ABIs, regardless of calldata.
+    // PUSH1 1; PUSH1 0; MSTORE; PUSH1 32; PUSH1 0; RETURN.
+    let verifier = address!("000000000000000000000000000000000000beef");
+    genesis.alloc.entry(verifier).or_default().code =
+        Some(alloy_primitives::bytes!("600160005260206000f3"));
+
+    // Run the real factory against the genesis state under T12, before the node starts.
+    // Genesis allocations do not consume storage credits or emit on-chain creation logs.
+    let mut storage =
+        HashMapStorageProvider::new_with_spec(genesis.config.chain_id, TempoHardfork::T12);
+    storage.set_tip1060_storage_credits(false);
+    storage.set_block_number(0);
+    storage.set_timestamp(U256::from(genesis.timestamp));
+    for (&address, account) in &genesis.alloc {
+        if let Some(code) = &account.code {
+            storage.set_code(address, Bytecode::new_legacy(code.clone()))?;
+        }
+        if let Some(slots) = &account.storage {
+            for (&slot, &value) in slots {
+                storage.sstore(address, slot.into(), value.into())?;
+            }
+        }
+    }
+    let portal_address = StorageCtx::enter(&mut storage, || -> eyre::Result<Address> {
+        let mut factory = ZoneFactory::new();
+        let created = factory.create_zone(
+            signer.address(),
+            IZoneFactory::createZoneCall {
+                params: IZoneFactory::CreateZoneParams {
+                    admin,
+                    initialToken: PATH_USD_ADDRESS,
+                    accessMode: true,
+                    gatewayMode: true,
+                    allowedAccounts: vec![admin, user],
+                    zoneGateways: Vec::new(),
+                    sequencers: vec![signer.address()],
+                    threshold: 1,
+                    rpcUrl: String::new(),
+                },
+            },
+        )?;
+        // The typed slot write preserves the other fields packed alongside the verifier.
+        // Unlike the default proof-call bytecode patch, this survives runtime replacement.
+        ZonePortalStorage::new(created.portal)
+            .verifier
+            .write(verifier)?;
+        ZoneInfoStorageHandler::new(
+            created.zoneId.mapping_slot(slots::ZONES),
+            tempo_precompiles::ZONE_FACTORY_ADDRESS,
+        )
+        .verifier
+        .write(verifier)?;
+        Ok(created.portal)
+    })?;
+    let (_, code) = storage.account_code(portal_address)?;
+    genesis.alloc.entry(portal_address).or_default().code = Some(code.original_bytes());
+    for (address, slot, value) in storage.into_storage() {
+        genesis
+            .alloc
+            .entry(address)
+            .or_default()
+            .storage
+            .get_or_insert_default()
+            .insert(slot.into(), value.into());
+    }
+    Ok(portal_address)
 }
 
 fn batch_from_output(height: u64, tempo_number: u64, output: &BatchOutput) -> BatchData {
@@ -418,7 +550,7 @@ async fn recovery_witness(
             tempo_block_number: final_header.number(),
             anchor_block_number: final_header.number(),
             anchor_block_hash: alloy_consensus::Sealable::hash_slow(&final_header),
-            expected_withdrawal_batch_index: 2,
+            expected_withdrawal_batch_index: 3,
         },
         parent_header: parent.header.as_ref().clone(),
         zone_blocks: blocks,

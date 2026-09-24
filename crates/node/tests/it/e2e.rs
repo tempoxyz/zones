@@ -34,6 +34,39 @@ const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
 const LEADER_INCLUSION_TIMEOUT: Duration = Duration::from_secs(30);
 const P2P_RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zero_fee_transactions_are_admitted_and_included() -> eyre::Result<()> {
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let (provider, sender) = local_dev_zone_account(&zone)?;
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, sender, sender, 1_000_000);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        sender,
+        U256::from(1_000_000),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    for legacy in [true, false] {
+        let token = ITIP20::new(PATH_USD_ADDRESS, &provider);
+        let approval = token
+            .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+            .gas(TIP20_TX_GAS);
+        let approval = if legacy {
+            approval.gas_price(0)
+        } else {
+            approval.max_fee_per_gas(0).max_priority_fee_per_gas(0)
+        };
+        let pending = approval.send().await?;
+        fixture.inject_empty_block(zone.deposit_queue());
+        let receipt = pending.get_receipt().await?;
+        assert!(receipt.status(), "zero-fee approval should execute");
+        assert_eq!(receipt.effective_gas_price, 0);
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_sequencer_exposes_simulation_endpoints() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -730,8 +763,7 @@ async fn test_tempo_state_advances_with_l1_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify that TempoAdvanced and encrypted-deposit events are emitted on
-/// the ZoneInbox when processing deposits.
+/// Verify deposit processing emits inbox events and finalizes a batch in the same block.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -772,6 +804,26 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
         deposit_event.is_some(),
         "should have a TempoAdvanced event with depositsProcessed == 1"
     );
+
+    let deposit_block = deposit_event.unwrap().1.block_number.unwrap();
+    assert_eq!(
+        deposit_block, 1,
+        "deposit must precede the eight-block interval"
+    );
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let finalized = outbox
+        .BatchFinalized_filter()
+        .from_block(deposit_block)
+        .to_block(deposit_block)
+        .query()
+        .await?;
+    assert_eq!(
+        finalized.len(),
+        1,
+        "deposit-only block must finalize a batch"
+    );
+    assert_eq!(finalized[0].0.withdrawalQueueHash, B256::ZERO);
+    assert_eq!(finalized[0].0.withdrawalBatchIndex, 1);
 
     // Query encrypted deposit events
     let deposit_processed_filter = zone_inbox.DepositProcessed_filter().from_block(0);
