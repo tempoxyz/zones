@@ -299,13 +299,10 @@ where
             let mut best_txs = StateAwareBestTransactions::new(raw_best_txs);
             if execute_pool_transactions(
                 |tx, best_txs| {
-                    let result = builder
-                        .executor_mut()
-                        .execute_transaction_without_commit(tx)?;
-                    best_txs.on_new_result(&result);
                     builder
-                        .executor_mut()
-                        .commit_transaction(result)
+                        .execute_transaction_with_result_closure(tx, |result| {
+                            best_txs.on_new_result(result);
+                        })
                         .map(|_| ())
                 },
                 &mut best_txs,
