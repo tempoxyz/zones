@@ -145,7 +145,7 @@ where
     }
     metrics.update(&snapshot);
 
-    ctx.set_notifications_with_head(ExExHead::new(snapshot.metadata.verified_zone.into()));
+    ctx.catch_up_notifications_with_head(ExExHead::new(snapshot.metadata.verified_zone.into()))?;
     ctx.send_finished_height(snapshot.metadata.verified_zone.into())?;
 
     while let Some(notification) = ctx.notifications.try_next().await? {
@@ -153,7 +153,7 @@ where
             snapshot = store.reset(&checkpoint)?;
             metrics.recovery_rebuilds_total.increment(1);
             metrics.update(&snapshot);
-            ctx.set_notifications_with_head(ExExHead::new(bootstrap.zone().into()));
+            ctx.catch_up_notifications_with_head(ExExHead::new(bootstrap.zone().into()))?;
             tracing::warn!(target: "zone::checker", "unexpected Zone revert; rebuilding from genesis");
             continue;
         }
