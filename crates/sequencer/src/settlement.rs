@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
+use std::{collections::BTreeMap, fmt, future::Future, sync::OnceLock, time::Duration};
 
 use crate::{
     ZoneSequencerProvider,
@@ -371,15 +371,18 @@ impl BatchSubmitter {
         expected: Option<TempoHardfork>,
         preparation: impl Future<Output = Result<T, BatchSubmitError>>,
     ) -> Result<T, BatchSubmitError> {
-        tokio::pin!(preparation);
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            tokio::select! {
-                result = &mut preparation => return result,
-                _ = interval.tick(), if expected.is_some() => {
-                    self.validate_live_prover_hardfork(expected).await?;
+        let watch_hardfork = async {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                if let Err(error) = self.validate_live_prover_hardfork(expected).await {
+                    return error;
                 }
             }
+        };
+        tokio::select! {
+            result = preparation => result,
+            error = watch_hardfork, if expected.is_some() => Err(error),
         }
     }
 
