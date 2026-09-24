@@ -63,6 +63,9 @@ const FALLBACK_VERIFIER_MODE: Option<VerifierMode> = Some(VerifierMode::NoProof)
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
+    /// Use the T13 proofless verifier in integration fixtures without a Nitro prover.
+    #[cfg(feature = "test-utils")]
+    pub proofless_settlement: bool,
     /// ZoneOutbox contract address on Zone L2.
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
@@ -597,6 +600,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
         let mut verifier_mode = self.verifier_mode;
+        #[cfg(feature = "test-utils")]
+        if self.config.proofless_settlement
+            && self.settlement_prover.is_none()
+            && crate::SettlementAbi::from_l1(self.batch_submitter.l1_provider()).await?
+                == crate::SettlementAbi::T13
+        {
+            verifier_mode = VerifierMode::NoProof;
+        }
         let preparation = async {
             let proof = async {
                 match (verifier_mode, &self.settlement_prover) {
@@ -1196,6 +1207,8 @@ mod tests {
     ) -> ZoneMonitor<TestZoneProvider> {
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
+            #[cfg(feature = "test-utils")]
+            proofless_settlement: false,
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),
@@ -1400,6 +1413,8 @@ mod tests {
         let l1 = Asserter::new();
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
+            #[cfg(feature = "test-utils")]
+            proofless_settlement: false,
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),

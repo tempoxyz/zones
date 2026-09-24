@@ -290,6 +290,8 @@ async fn configure_sequencing(
                 max_batch_gas: args.withdrawal_max_batch_gas,
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
+            #[cfg(feature = "test-utils")]
+            proofless_settlement: false,
             enable_prover: args.enable_prover,
             prover_address: args.prover_address.clone(),
         });

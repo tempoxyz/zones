@@ -99,6 +99,9 @@ pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
 /// Configuration for all zone sequencer background tasks.
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerConfig {
+    /// Use the T13 proofless verifier in integration fixtures without a Nitro prover.
+    #[cfg(feature = "test-utils")]
+    pub proofless_settlement: bool,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
     /// Tempo L1 RPC URL.
@@ -188,6 +191,8 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     };
 
     let monitor_config = ZoneMonitorConfig {
+        #[cfg(feature = "test-utils")]
+        proofless_settlement: config.proofless_settlement,
         outbox_address: config.outbox_address,
         inbox_address: config.inbox_address,
         poll_interval: config.zone_poll_interval,

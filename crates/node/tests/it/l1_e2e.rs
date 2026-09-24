@@ -288,6 +288,11 @@ async fn test_two_online_sequencers_submit_two_signature_certificate() -> eyre::
 
     let call = fetch_submit_batch_call(&cluster.l1, tx_hash).await?;
     eyre::ensure!(
+        call.verifierConfig.as_ref() == zone_prover::VerifierMode::NoProof.config()
+            && call.proof.is_empty(),
+        "proverless fixture must submit the proofless verifier config with an empty proof"
+    );
+    eyre::ensure!(
         call.signatures.len() == 2,
         "expected exactly the 2-of-3 threshold signatures, got {}",
         call.signatures.len()
