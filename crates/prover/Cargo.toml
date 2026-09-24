@@ -15,22 +15,31 @@ tempo-zone-contracts = { workspace = true, features = ["std"] }
 zone-spf.workspace = true
 
 tempo-chainspec.workspace = true
+tempo-nitro-attestation.workspace = true
 
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 
+aws-lc-rs.workspace = true
+const-hex.workspace = true
 futures.workspace = true
 minicbor.workspace = true
 minicbor-serde.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util = { workspace = true, features = ["codec"] }
 
 [dev-dependencies]
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
+ciborium = "=0.2.2"
 reth-trie-common.workspace = true
-serde_json.workspace = true
 tempo-primitives.workspace = true

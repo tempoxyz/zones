@@ -21,7 +21,6 @@ use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
     ZonePortal,
 };
-use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
@@ -29,7 +28,7 @@ use zone_precompiles::outbox;
 use zone_primitives::constants::zone_chain_id;
 use zone_prover::{
     DEFAULT_MAX_REQUEST_BYTES, PROTOCOL_VERSION, ProofBundle, ProverConnection, VerifyRequest,
-    VerifyResponse,
+    VerifyResponse, attested_transport::RemoteProverConfig,
 };
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_spf::{
@@ -87,6 +86,10 @@ struct ProveArgs {
     #[arg(long, value_name = "HOST:PORT")]
     target: String,
 
+    /// JSON allowlist used to authenticate the prover's Nitro attestation.
+    #[arg(long, value_name = "PATH")]
+    attestation_policy: PathBuf,
+
     /// Write the complete successful JSON response, including output and proofBundle.
     #[arg(long, short, value_name = "PATH")]
     output: PathBuf,
@@ -135,8 +138,12 @@ struct GenerateInputArgs {
     output: Option<PathBuf>,
 
     /// Send the generated witness to a Tempo Zone prover TCP socket.
-    #[arg(long, value_name = "HOST:PORT")]
+    #[arg(long, value_name = "HOST:PORT", requires = "attestation_policy")]
     target: Option<String>,
+
+    /// JSON allowlist used to authenticate the target prover's Nitro attestation.
+    #[arg(long, value_name = "PATH", requires = "target")]
+    attestation_policy: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -417,8 +424,13 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     );
 
     if let Some(target) = &args.target {
+        let policy = args
+            .attestation_policy
+            .as_deref()
+            .ok_or_eyre("--attestation-policy is required with --target")?;
+        let remote = RemoteProverConfig::from_policy_file(target.clone(), policy)?;
         let started = start_phase("target prover");
-        let bytes = send_to_prover(target, request, &output).await?;
+        let bytes = send_to_prover(&remote, request, &output).await?;
         timings.record("target prover", started, ());
         println!("  Target prover:         {target} ({bytes} request bytes, verified)");
     } else {
@@ -429,6 +441,15 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 }
 
 async fn prove(args: ProveArgs) -> Result<()> {
+    let remote =
+        RemoteProverConfig::from_policy_file(args.target.clone(), &args.attestation_policy)?;
+    prove_with_connection(args, remote.connect()).await
+}
+
+async fn prove_with_connection<IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    args: ProveArgs,
+    connect: impl std::future::Future<Output = std::io::Result<IO>>,
+) -> Result<()> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
     info!(input = %args.input.display(), target = %args.target, output = %args.output.display(), "proving saved witness");
@@ -446,7 +467,8 @@ async fn prove(args: ProveArgs) -> Result<()> {
         witness,
     };
     let started = start_phase("target prover");
-    let (_, response) = exchange_with_prover(&args.target, request).await?;
+    let stream = connect.await.wrap_err("authenticate target prover")?;
+    let (_, response) = exchange_connected(&args.target, stream, request).await?;
     timings.record("target prover", started, ());
     let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
@@ -508,18 +530,28 @@ fn validate_proof_response<'a>(
 }
 
 async fn exchange_with_prover(
-    target: &str,
+    remote: &RemoteProverConfig,
     request: VerifyRequest,
 ) -> Result<(usize, VerifyResponse)> {
+    let target = remote.address();
     let started = Instant::now();
     info!(target, "connecting to prover");
-    let stream = TcpStream::connect(target)
+    let stream = remote
+        .connect()
         .await
         .wrap_err_with(|| format!("connect to target prover at {target}"))?;
     info!(
         elapsed_ms = started.elapsed().as_millis(),
         "connected to prover"
     );
+    exchange_connected(target, stream, request).await
+}
+
+async fn exchange_connected(
+    target: &str,
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    request: VerifyRequest,
+) -> Result<(usize, VerifyResponse)> {
     let mut connection = ProverConnection::new(stream, DEFAULT_MAX_REQUEST_BYTES);
     let started = Instant::now();
     info!("sending witness to prover");
@@ -546,12 +578,12 @@ async fn exchange_with_prover(
 }
 
 async fn send_to_prover(
-    target: &str,
+    remote: &RemoteProverConfig,
     request: VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
     let expected_id = request.request_id.clone();
-    let (request_bytes, response) = exchange_with_prover(target, request).await?;
+    let (request_bytes, response) = exchange_with_prover(remote, request).await?;
     validate_proof_response(&response, &expected_id)?;
     let VerifyResponse::Ok { output, .. } = response else {
         unreachable!("successful validation requires an ok response")
@@ -1428,6 +1460,8 @@ mod tests {
             "witness.json",
             "--target",
             "localhost:5000",
+            "--attestation-policy",
+            "measurements.json",
             "--output",
             "proof.json",
         ])
@@ -1526,19 +1560,28 @@ mod tests {
             }
             success.unwrap()
         });
-        prove(ProveArgs {
-            input: input.clone(),
-            target: target.clone(),
-            output: output.clone(),
-        })
+        prove_with_connection(
+            ProveArgs {
+                input: input.clone(),
+                target: target.clone(),
+                attestation_policy: PathBuf::new(),
+                output: output.clone(),
+            },
+            tokio::net::TcpStream::connect(&target),
+        )
         .await
         .unwrap();
         let saved = std::fs::read(&output).unwrap();
-        let error = prove(ProveArgs {
-            input,
-            target,
-            output: output.clone(),
-        })
+        let stream = tokio::net::TcpStream::connect(&target).await.unwrap();
+        let error = prove_with_connection(
+            ProveArgs {
+                input,
+                target,
+                attestation_policy: PathBuf::new(),
+                output: output.clone(),
+            },
+            std::future::ready(Ok(stream)),
+        )
         .await
         .unwrap_err();
         assert!(error.to_string().contains("VerificationFailed"));

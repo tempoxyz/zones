@@ -142,6 +142,11 @@ zone-checker = { path = "crates/checker" }
 
 # AWS Nitro Enclaves
 aws-nitro-enclaves-nsm-api = "0.5.2"
+aws-lc-rs = { version = "1.17.0", features = ["ring-sig-verify"] }
+rcgen = { version = "0.14.7", default-features = false, features = ["crypto", "aws_lc_rs"] }
+rustls = { version = "0.23.45", default-features = false, features = ["std", "aws_lc_rs"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs"] }
+tempo-nitro-attestation = { git = "https://github.com/tempoxyz/tempo", rev = "a31ce53704d7f95c9cecc3e2263bcc6646a20767", default-features = false }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "5f02aa3" }

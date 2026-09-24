@@ -1,14 +1,32 @@
 # Tempo Zone SPF enclave service
 
 `tempo-zone-prover-enclave` runs the Zone stateless proof function inside an AWS Nitro Enclave. The
-parent instance generates a complete `BatchWitness` and sends it to the enclave over `AF_VSOCK`;
-the enclave performs no RPC or filesystem access.
+client generates a complete `BatchWitness` and sends it over Nitro-attested TLS through the host's
+TCP-to-`AF_VSOCK` proxy. SPF execution performs no RPC or filesystem access.
 
 ## Protocol
 
 The server listens on AF_VSOCK port `5000` by default, or on TCP port `5000` when `--use-tcp` is
-enabled. Each connection carries one request and one response, then closes. A frame consists of a
-four-byte, big-endian payload length followed by a CBOR payload.
+enabled. Each connection authenticates the enclave, carries one request and one response inside
+TLS 1.3, then closes. The CBOR framing inside TLS is unchanged: a four-byte, big-endian payload
+length followed by the payload.
+
+At startup the enclave generates one in-memory self-signed certificate and private key. The
+plaintext bootstrap consists of `TZRATLS2` followed by a 32-byte client-generated random nonce.
+The enclave replies with two length-prefixed frames: certificate DER (at most 4096 bytes) and a
+fresh NSM attestation (at most 24576 bytes). Its `nonce` echoes the challenge; `user_data` is
+`SHA256(b"tempo-zone-prover/tls-bootstrap/v1\0" || certificate_DER)`. The certificate is always
+the enclave's own, never supplied by the client.
+
+The client verifies the AWS certificate chain and COSE signature, PCR policy, timestamp, nonce,
+and certificate binding before using that certificate as its only rustls trust anchor. Normal
+TLS verification checks the `tempo-zone-prover.invalid` name and proves possession of the private
+key. Session resumption and early data are disabled. No witness is sent before authentication.
+The host proxy forwards bootstrap bytes and TLS ciphertext without interpreting either.
+The bootstrap adds one round trip before the TLS handshake on each connection.
+Both endpoints bound the complete handshake to ten seconds (including TCP connect on the client).
+The server authenticates itself; this does not add client authorization or prevent host denial of
+service. The batch attestation used for on-chain settlement remains separate and unchanged.
 
 Requests use the serde representation of `zone_prover::VerifyRequest` with protocol version `2`.
 The witness's byte-heavy fields are encoded as CBOR byte strings rather than human-readable hex.
@@ -24,8 +42,8 @@ response includes `proofBundle.verifierConfig = 0x01` and the raw COSE/CBOR docu
 `proofBundle.proof`. The prover returns `attestation_unavailable` when `/dev/nsm` is unavailable or
 the NSM request fails.
 
-Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. This works on every supported
-operating system; AF_VSOCK remains the default and is available only on Linux. Set `SPF_PORT` or
+Pass `--use-tcp` to listen on localhost TCP instead of AF_VSOCK. Both modes require Nitro;
+AF_VSOCK remains the default. Set `SPF_PORT` or
 pass `--port` to change the selected transport's port. The maximum request payload defaults to 2
 GiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`. The host runner
 allocates 10 GiB to the enclave by default; override it with `ENCLAVE_MEMORY_MIB`.
@@ -38,9 +56,8 @@ defaults accommodate multi-GiB payloads while still recovering from crashed clie
 whole seconds and must be greater than zero; progress does not reset a deadline. SPF execution
 itself has no timeout.
 
-TCP mode is intended for development of framing, chain validation, and SPF error handling. The
-binary still requires the Nitro Secure Module after a successful SPF replay, so a valid request run
-outside an enclave ends with `attestation_unavailable` rather than an unattested success response.
+TCP mode uses the same attestation and entropy requirements as AF_VSOCK. Local protocol tests use
+in-memory streams and a test-only signed attestation chain; the binary has no plaintext fallback.
 Set `SPF_TEMPO_GENESIS` or pass `--tempo-genesis` with a directory containing trusted Tempo genesis
 JSON files. Files are loaded in filename order. Each custom chain ID must be unique and cannot
 override a built-in Tempo network.
@@ -98,11 +115,17 @@ The EIF uses Linux 6.6.79 and its matching NSM driver, built from a pinned AWS N
 commit. Changing either one changes the EIF PCR measurements, so the expected measurements must
 also be updated.
 
-Verifying a batch does not use local randomness or wall-clock time. If we add key or nonce
-generation or KMS/HTTPS calls, configure `random.trust_bootloader=off random.trust_cpu=off` and
-require `rng_current` to be `nsm-hwrng`. If we add KMS/HTTPS calls, expiring credentials, protocol
-timestamps, or time-based replay checks, use `kvm-clock`. Operational timeouts affect only liveness
-and can use a monotonic clock.
+TLS keys require trusted randomness. The EIF builder sets
+`random.trust_bootloader=off random.trust_cpu=off`; startup checks these flags and requires
+`rng_current` to be `nsm-hwrng` before generating the key, including in TCP mode. The enclave does
+not require a wall clock: certificate validity spans 2024–9999 and the client checks NSM-signed
+timestamps and fresh nonces. Clients require an accurate wall clock. The default maximum evidence
+age is 300 seconds, with at most 300 seconds of future clock skew.
+
+Remote clients must supply a PCR0–2 allowlist with `--sequencer.prover-attestation-policy` (node)
+or `--attestation-policy` (prover utils); see the [policy example](../utils/README.md). Debug-mode
+zero PCRs are rejected. Rebuild the EIF and distribute its trusted measurements when deploying
+this change; coordinate client/server upgrades because plaintext clients are no longer accepted.
 
 The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
 `PROVER_EIF_PATH`, `ENCLAVE_NAME`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_CID`,
