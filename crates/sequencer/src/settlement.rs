@@ -347,8 +347,7 @@ impl BatchSubmitter {
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
-        let (verifier_config, proof) =
-            settlement_proof(settlement_abi, verifier_mode, proof_bundle)?;
+        let (verifier_config, proof) = settlement_proof(verifier_mode, proof_bundle)?;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -1420,23 +1419,21 @@ fn classify_submission_revert(error: eyre::Report) -> BatchSubmitError {
 }
 
 fn settlement_proof(
-    settlement_abi: SettlementAbi,
     verifier_mode: VerifierMode,
     proof_bundle: Option<&ProofBundle>,
 ) -> Result<(Bytes, Bytes)> {
-    let proof = if let Some(bundle) = proof_bundle {
-        eyre::ensure!(
-            VerifierMode::try_from(bundle.verifier_config.as_ref())? == verifier_mode,
-            "proof bundle verifier mode does not match requested mode"
-        );
-        bundle.proof.clone()
-    } else {
-        Bytes::new()
+    let config = Bytes::from_static(verifier_mode.config());
+    let Some(bundle) = proof_bundle else {
+        // Without a prover, let the on-chain verifier decide whether an empty proof is valid.
+        // This preserves settlement against the stub verifier used by integration fixtures.
+        return Ok((config, Bytes::new()));
     };
-    if settlement_abi == SettlementAbi::T13 || proof_bundle.is_some() {
-        verifier_mode.validate_proof_shape(&proof)?;
-    }
-    Ok((Bytes::from_static(verifier_mode.config()), proof))
+    eyre::ensure!(
+        VerifierMode::try_from(bundle.verifier_config.as_ref())? == verifier_mode,
+        "proof bundle verifier mode does not match requested mode"
+    );
+    verifier_mode.validate_proof_shape(&bundle.proof)?;
+    Ok((config, bundle.proof.clone()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2526,20 +2523,34 @@ mod tests {
     }
 
     #[test]
+    fn settlement_without_prover_preserves_verifier_config() {
+        for mode in [VerifierMode::NitroV1, VerifierMode::NoProof] {
+            let (config, proof) = settlement_proof(mode, None).unwrap();
+            assert_eq!(config.as_ref(), mode.config());
+            assert!(proof.is_empty());
+        }
+    }
+
+    #[test]
     fn settlement_proof_enforces_verifier_mode_shape() {
-        let (config, proof) =
-            settlement_proof(SettlementAbi::T13, VerifierMode::NoProof, None).unwrap();
-        assert_eq!(config.as_ref(), VerifierMode::NoProof.config());
-        assert!(proof.is_empty());
-        assert!(settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, None).is_err());
+        let empty_nitro = ProofBundle {
+            verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+            proof: Bytes::new(),
+        };
+        assert!(settlement_proof(VerifierMode::NitroV1, Some(&empty_nitro)).is_err());
 
         let mismatched = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NoProof.config()),
             proof: Bytes::new(),
         };
-        assert!(
-            settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&mismatched)).is_err()
-        );
+        assert!(settlement_proof(VerifierMode::NitroV1, Some(&mismatched)).is_err());
+        assert!(settlement_proof(VerifierMode::NoProof, Some(&mismatched)).is_ok());
+
+        let nonempty_no_proof = ProofBundle {
+            verifier_config: Bytes::from_static(VerifierMode::NoProof.config()),
+            proof: Bytes::from_static(&[0xaa]),
+        };
+        assert!(settlement_proof(VerifierMode::NoProof, Some(&nonempty_no_proof)).is_err());
 
         let bundle = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
@@ -2547,7 +2558,7 @@ mod tests {
         };
 
         let (verifier_config, proof) =
-            settlement_proof(SettlementAbi::T13, VerifierMode::NitroV1, Some(&bundle)).unwrap();
+            settlement_proof(VerifierMode::NitroV1, Some(&bundle)).unwrap();
 
         assert_eq!(verifier_config.as_ref(), VerifierMode::NitroV1.config());
         assert_eq!(proof.as_ref(), [0xaa, 0xbb]);

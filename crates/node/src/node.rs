@@ -186,9 +186,6 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
-    /// Use the T13 proofless verifier in integration fixtures without a Nitro prover.
-    #[cfg(feature = "test-utils")]
-    pub proofless_settlement: bool,
     /// Exercise witness persistence without requiring a remote prover in integration fixtures.
     #[cfg(feature = "test-utils")]
     pub enable_proof_persistence: bool,
@@ -1482,8 +1479,6 @@ where
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
-            #[cfg(feature = "test-utils")]
-            proofless_settlement: config.proofless_settlement,
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
@@ -1676,8 +1671,6 @@ where
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
-            #[cfg(feature = "test-utils")]
-            proofless_settlement: config.proofless_settlement,
             portal_address,
             l1_rpc_url,
             retry_connection_interval,

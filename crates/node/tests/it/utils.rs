@@ -1376,7 +1376,6 @@ impl ZoneTestNode {
             zone_node = zone_node
                 .with_p2p(p2p_config)
                 .with_sequencer(ZoneSequencerAddOnsConfig {
-                    proofless_settlement: true,
                     enable_proof_persistence: !portal_address.is_zero(),
                     sequencer_signer: sequencer_signer.clone(),
                     l1_transaction_signer,
@@ -3658,7 +3657,6 @@ pub(crate) async fn spawn_sequencer_with_config(
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {
-        proofless_settlement: true,
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),
