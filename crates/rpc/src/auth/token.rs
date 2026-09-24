@@ -190,10 +190,11 @@ pub fn build_token_fields(
 
 /// Build the signing digest from the canonical fixed-width token fields.
 fn token_digest(fields: &[u8; TOKEN_FIELDS_LEN]) -> B256 {
-    let mut msg = Vec::with_capacity(32 + TOKEN_FIELDS_LEN);
-    msg.extend_from_slice(&TEMPO_ZONE_RPC_MAGIC);
-    msg.extend_from_slice(fields);
-    keccak256(&msg)
+    let mut msg = [0; TEMPO_ZONE_RPC_MAGIC.len() + TOKEN_FIELDS_LEN];
+    msg[..TEMPO_ZONE_RPC_MAGIC.len()].copy_from_slice(&TEMPO_ZONE_RPC_MAGIC);
+    msg[TEMPO_ZONE_RPC_MAGIC.len()..].copy_from_slice(fields);
+    // Keep the one-shot API so repeated tokens still benefit from Alloy's global cache.
+    keccak256(msg)
 }
 
 /// Parse a hex-encoded authorization token from the header value.
