@@ -20,11 +20,10 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolValue};
-use tempo_chainspec::hardfork::TempoHardfork;
+use alloy_sol_types::{SolCall, SolValue, abi::AbiDecoderConfig};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
-    dispatch::abi_decoder_config_for_spec,
+    dispatch::ABI_DECODER_MEMORY_LIMIT,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
@@ -267,8 +266,8 @@ impl ZoneInbox {
                 PATH_USD_ADDRESS,
                 ZONE_INBOX_ADDRESS,
             )?;
-            token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?;
             policy_registry.token_transfer_policies[enabled.token].write(l1_policy)?;
 
             self.emit_event(enabled.enabled_event())?;
@@ -445,7 +444,10 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
     type Error = ZonePrecompileError;
 
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
-        let config = abi_decoder_config_for_spec(TempoHardfork::latest());
+        // Queue payloads must remain canonical even when L1 precompile calls allow trailing bytes.
+        let config = AbiDecoderConfig::new()
+            .memory_limit(ABI_DECODER_MEMORY_LIMIT)
+            .strict(true);
 
         match queued.depositType {
             DepositType::WithdrawalBounceBack => {

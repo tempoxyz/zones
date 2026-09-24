@@ -74,10 +74,11 @@ use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool, TempoTransactionPoolExt,
     amm::AmmLiquidityCache,
     ordering::TempoTipOrdering,
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
+    tt_2d_pool::DEFAULT_MAX_TXS_PER_LANE,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{
@@ -475,7 +476,8 @@ impl NodeTypes for ZoneNode {
 pub struct ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
+    N::Pool: TempoTransactionPoolExt
+        + reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     inner: RpcAddOns<
         N,
@@ -514,7 +516,8 @@ where
 impl<N> std::fmt::Debug for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
+    N::Pool: TempoTransactionPoolExt
+        + reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoneAddOns").finish_non_exhaustive()
@@ -582,7 +585,8 @@ struct P2PRuntime {
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<
+    N::Pool: TempoTransactionPoolExt
+        + reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
     TempoEthApiBuilder<N>: EthApiBuilder<
@@ -1272,7 +1276,8 @@ async fn seed_leadership_schedule(
 impl<N> ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<
+    N::Pool: TempoTransactionPoolExt
+        + reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
     TempoEthApiBuilder<N>: EthApiBuilder<
@@ -1729,7 +1734,8 @@ where
 impl<N> RethRpcAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<
+    N::Pool: TempoTransactionPoolExt
+        + reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
     TempoEthApiBuilder<N>: EthApiBuilder<
@@ -1751,7 +1757,8 @@ where
 impl<N> EngineValidatorAddOn<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<
+    N::Pool: TempoTransactionPoolExt
+        + reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
     TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
@@ -2040,6 +2047,7 @@ where
             pending_limit: pool_config.pending_limit,
             queued_limit: pool_config.queued_limit,
             max_txs_per_sender: pool_config.max_account_slots,
+            max_txs_per_lane: DEFAULT_MAX_TXS_PER_LANE,
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;

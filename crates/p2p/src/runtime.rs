@@ -24,9 +24,9 @@ use crate::{
     capabilities::PeerCapabilities,
     identity::{Ed25519Identity, Secp256k1Identity},
     network::{
-        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
-        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL,
-        SETTLEMENT_SIGNATURE_CHANNEL, TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
+        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
+        MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
+        TRANSACTION_CHANNEL,
     },
     protocol::EncodedBlock,
     routing::{RoutingMembership, RoutingPolicy},
@@ -404,33 +404,28 @@ fn run(
         )?;
         oracle.track(0, peers);
         let (block_sender, block_receiver) =
-            commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
+            commonware.register(BLOCK_CHANNEL, network::block_quota());
         let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
             SETTLEMENT_PROPOSAL_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
         let (settlement_signature_sender, settlement_signature_receiver) = commonware.register(
             SETTLEMENT_SIGNATURE_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
 
         // The backfill request and responses are on separate channels
         let (backfill_request_sender, backfill_request_receiver) = commonware.register(
             BACKFILL_REQUEST_CHANNEL,
             network::backfill_request_quota(),
-            BLOCK_BACKLOG,
         );
         let (backfill_response_sender, backfill_response_receiver) = commonware.register(
             BACKFILL_RESPONSE_CHANNEL,
             network::backfill_response_quota(),
-            BLOCK_BACKLOG,
         );
         let (transaction_sender, transaction_receiver) = commonware.register(
             TRANSACTION_CHANNEL,
             network::transaction_quota(),
-            TRANSACTION_BACKLOG,
         );
         let mut network_task = commonware.start();
 
@@ -831,10 +826,7 @@ mod tests {
     };
     use commonware_runtime::IoBuf;
 
-    use super::{
-        P2pCommand, P2pConfig, P2pEvent, P2pReceivers, into_bounded_payload, run_receivers,
-        spawn_p2p, validate_ip_check_configuration,
-    };
+    use super::*;
     use crate::{
         P2pHandle, P2pHandleParts, P2pNetworkId, ZoneManifest,
         identity::{Ed25519Identity, Secp256k1Identity},
@@ -870,6 +862,10 @@ mod tests {
         fn block(&mut self, peer: Self::PublicKey) -> Feedback {
             self.blocked.lock().unwrap().push(peer);
             Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            unreachable!("receiver tests do not subscribe to blocked peers")
         }
     }
 
@@ -1189,11 +1185,11 @@ mod tests {
                     false, network_id,
                 ).unwrap();
                 oracle.track(0, peers);
-                let (_, mut blocks) = network.register(network::BLOCK_CHANNEL, network::block_quota(), 128);
-                let (mut requests, _) = network.register(network::BACKFILL_REQUEST_CHANNEL, network::backfill_request_quota(), 128);
-                let (mut responses, mut backfill) = network.register(network::BACKFILL_RESPONSE_CHANNEL, network::backfill_response_quota(), 128);
+                let (_, mut blocks) = network.register(network::BLOCK_CHANNEL, network::block_quota());
+                let (mut requests, _) = network.register(network::BACKFILL_REQUEST_CHANNEL, network::backfill_request_quota());
+                let (mut responses, mut backfill) = network.register(network::BACKFILL_RESPONSE_CHANNEL, network::backfill_response_quota());
                 let _remaining = [network::TRANSACTION_CHANNEL, network::SETTLEMENT_PROPOSAL_CHANNEL, network::SETTLEMENT_SIGNATURE_CHANNEL]
-                    .map(|channel| network.register(channel, network::settlement_quota(), 128));
+                    .map(|channel| network.register(channel, network::settlement_quota()));
                 let mut network_task = network.start();
                 let mut advertise = false;
                 let mut announcements = tokio::time::interval(ANNOUNCEMENT_INTERVAL);

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
 use alloy_primitives::Address as EthereumAddress;
 use commonware_cryptography::{
@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{AddressableTrackedPeers, authenticated::lookup};
 use commonware_runtime::{Quota, Supervisor as _};
-use commonware_utils::{NZU32, ordered::Map};
+use commonware_utils::{NZU32, NZUsize, ordered::Map};
 use eyre::WrapErr as _;
 
 use crate::ZoneManifest;
@@ -24,10 +24,6 @@ pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
 pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
 /// Follower-to-leader settlement signature channel.
 pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
-pub(crate) const BLOCK_BACKLOG: usize = 128;
-/// Forwarded transactions are retried from the sender's pool, so a small receive backlog bounds
-/// memory before the transaction-specific wire limit can run without sacrificing eventual relay.
-pub(crate) const TRANSACTION_BACKLOG: usize = 4;
 
 /// Maximum raw EIP-2718 transaction frame accepted from another sequencer.
 ///
@@ -70,10 +66,20 @@ fn setup_commonware_config(
     ed25519_private_key: PrivateKey,
     namespace: &[u8],
     listen: SocketAddr,
+    max_peers_per_set: NonZeroUsize,
     bypass_ip_check: bool,
 ) -> lookup::Config<PrivateKey> {
-    let mut config =
-        lookup::Config::recommended(ed25519_private_key, namespace, listen, MAX_MESSAGE_SIZE);
+    let mut config = lookup::Config::recommended(
+        ed25519_private_key,
+        namespace,
+        listen,
+        max_peers_per_set,
+        MAX_MESSAGE_SIZE,
+    );
+
+    // Zones track one static manifest at index zero. Commonware derives channel capacities from
+    // the retained peer bound and each channel's quota burst.
+    config.tracked_peer_sets = NZUsize!(1);
 
     // Sequencers communicate over private pod or VPC addresses in a multi-AZ deployment.
     config.allow_private_ips = true;
@@ -114,7 +120,15 @@ pub(crate) fn instantiate(
     // into a coordinated fleet restart. Compare this across nodes to diagnose one.
     tracing::info!(target: "zone::p2p", membership_digest = %manifest.membership_digest(), "Zone P2P membership");
     let local_ed25519_public_key = ed25519_private_key.public_key();
-    let config = setup_commonware_config(ed25519_private_key, &namespace, listen, bypass_ip_check);
+    let max_peers_per_set = NonZeroUsize::new(manifest.nodes().len())
+        .ok_or_else(|| eyre::eyre!("P2P manifest must contain at least one node"))?;
+    let config = setup_commonware_config(
+        ed25519_private_key,
+        &namespace,
+        listen,
+        max_peers_per_set,
+        bypass_ip_check,
+    );
     let peers = peer_sets(manifest, &local_ed25519_public_key)?;
     let (network, oracle) = lookup::Network::new(context.child("network"), config);
     Ok((network, oracle, peers))
@@ -183,7 +197,9 @@ pub(crate) fn backfill_response_quota() -> Quota {
 }
 
 pub(crate) fn transaction_quota() -> Quota {
-    Quota::per_second(NZU32!(1024))
+    // Forwarded transactions are retried from the sender's pool. Limit bursts to bound the
+    // per-peer receive capacity before the transaction-specific wire limit is checked.
+    Quota::per_second(NZU32!(1024)).allow_burst(NZU32!(4))
 }
 
 /// ACKs are small fixed-shape EIP-712 statements plus one secp256k1 signature.
@@ -194,12 +210,8 @@ pub(crate) fn settlement_quota() -> Quota {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::address;
-    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
-    use super::{
-        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, NETWORK_NAMESPACE_PREFIX, P2pNetworkId,
-        TRANSACTION_BACKLOG, WIRE_PROTOCOL_VERSION, namespace, peer_sets,
-    };
+    use super::*;
     use crate::ZoneManifest;
 
     fn ed25519_public_key(seed: u64) -> String {
@@ -230,9 +242,24 @@ mod tests {
     fn transaction_channel_bounds_pre_validation_memory() {
         assert!(MAX_TRANSACTION_MESSAGE_SIZE < MAX_MESSAGE_SIZE as usize);
         assert_eq!(
-            TRANSACTION_BACKLOG * MAX_MESSAGE_SIZE as usize,
+            transaction_quota().burst_size().get() as usize * MAX_MESSAGE_SIZE as usize,
             80 * 1024 * 1024,
         );
+    }
+
+    #[test]
+    fn network_capacity_tracks_one_manifest() {
+        let manifest = manifest_with_rpc_follower();
+        let max_peers = NonZeroUsize::new(manifest.nodes().len()).unwrap();
+        let config = setup_commonware_config(
+            PrivateKey::from_seed(1),
+            b"test",
+            "127.0.0.1:9201".parse().unwrap(),
+            max_peers,
+            false,
+        );
+        assert_eq!(config.max_peers_per_set.get(), 4);
+        assert_eq!(config.tracked_peer_sets.get(), 1);
     }
 
     #[test]

@@ -2562,7 +2562,7 @@ impl L1TestNode {
 
         // Admin can grant ISSUER_ROLE to self
         let receipt = IRolesAuth::new(token, &provider)
-            .grantRole(*ISSUER_ROLE, self.dev_address())
+            .grantRole(ISSUER_ROLE, self.dev_address())
             .send()
             .await?
             .get_receipt()
