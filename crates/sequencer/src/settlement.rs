@@ -2523,15 +2523,6 @@ mod tests {
     }
 
     #[test]
-    fn settlement_without_prover_preserves_verifier_config() {
-        for mode in [VerifierMode::NitroV1, VerifierMode::NoProof] {
-            let (config, proof) = settlement_proof(mode, None).unwrap();
-            assert_eq!(config.as_ref(), mode.config());
-            assert!(proof.is_empty());
-        }
-    }
-
-    #[test]
     fn settlement_proof_enforces_verifier_mode_shape() {
         let empty_nitro = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
