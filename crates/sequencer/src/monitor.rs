@@ -57,10 +57,6 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(200);
 /// Backoff before rebuilding the monitor after a start or run failure.
 const RESTART_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Per-batch fallback when proving is unavailable or the verifier rejects the proof; `None`
-/// disables fallback.
-const FALLBACK_VERIFIER_MODE: Option<VerifierMode> = Some(VerifierMode::NoProof);
-
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
@@ -554,7 +550,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// Prove the batch while collecting its Nitro certificate, preflight the proof against the
     /// verifier, and submit.
     ///
-    /// Falls back to [`FALLBACK_VERIFIER_MODE`] for this batch only if proving is unavailable or
+    /// Falls back to [`VerifierMode::NoProof`] for this batch only if proving is unavailable or
     /// the verifier returns `false`, collecting a fresh certificate for the fallback
     /// `verifierConfig`. Validation and preflight errors fail instead.
     async fn prove_and_submit_batch(
@@ -610,15 +606,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let (verifier_mode, proof_bundle, certificate) = match nitro {
             Ok((proof, certificate)) => (VerifierMode::NitroV1, proof, certificate),
             Err(cause) => {
-                let Some(fallback) = FALLBACK_VERIFIER_MODE else {
-                    return Err(cause.into());
-                };
-                warn!(?fallback, %cause, "Settling batch with verifier fallback");
+                warn!(%cause, "Settling batch with the `NoProof` verifier fallback");
                 // The Nitro preparation has been dropped, releasing its signature route.
                 let certificate = self
-                    .prepare_certificate(prepared, fallback, shutdown)
+                    .prepare_certificate(prepared, VerifierMode::NoProof, shutdown)
                     .await?;
-                (fallback, None, certificate)
+                (VerifierMode::NoProof, None, certificate)
             }
         };
         self.submit_batch_with_retry(
