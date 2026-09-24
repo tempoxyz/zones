@@ -172,6 +172,7 @@ pub(crate) fn call_precompile(
             PrecompileHalt::other(reason.to_string()),
             reservoir,
         )),
+        Err(Evm2PrecompileError::Database(error)) => Err(PrecompileError::Fatal(error.to_string())),
         Err(Evm2PrecompileError::Fatal(error)) => Err(PrecompileError::Fatal(error.to_string())),
     }
 }
