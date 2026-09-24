@@ -32,6 +32,7 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
+use zone_chainspec::ZoneChainSpec;
 
 use alloy_sol_types::{ContractError, SolInterface as _};
 
@@ -61,6 +62,8 @@ const RESTART_BACKOFF: Duration = Duration::from_secs(5);
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
+    /// Fork schedule inherited from the parent Tempo chain.
+    pub chain_spec: Arc<ZoneChainSpec>,
     /// ZoneOutbox contract address on Zone L2.
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
@@ -191,6 +194,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
+            config.chain_spec.clone(),
             signer,
             config.batch_anchor_config,
         );
@@ -1057,6 +1061,7 @@ mod tests {
     use alloy_sol_types::{SolEvent, SolValue};
     use alloy_transport::mock::Asserter;
     use reth_provider::test_utils::MockEthProvider;
+    use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{
         Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
     };
@@ -1065,6 +1070,32 @@ mod tests {
         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased()
+    }
+
+    fn test_chain_spec() -> Arc<ZoneChainSpec> {
+        let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t13Time".into(), 1000_u64)
+            .unwrap();
+        Arc::new(ZoneChainSpec {
+            inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
+        })
+    }
+
+    fn l1_tip(timestamp: u64) -> TempoHeaderResponse {
+        let mut inner = TempoHeader::default();
+        inner.inner.timestamp = timestamp;
+        TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header {
+                hash: B256::ZERO,
+                inner,
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: timestamp.saturating_mul(1000),
+        }
     }
 
     type TestZoneProvider = MockEthProvider<TempoPrimitives>;
@@ -1132,6 +1163,7 @@ mod tests {
     ) -> ZoneMonitor<TestZoneProvider> {
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
+            chain_spec: test_chain_spec(),
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),
@@ -1146,7 +1178,7 @@ mod tests {
             metrics: crate::metrics::ZoneMonitorMetrics::default(),
             provider: zone_provider,
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider),
+            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, test_chain_spec()),
             withdrawal_notify: Arc::new(Notify::new()),
             repair_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
@@ -1232,10 +1264,10 @@ mod tests {
         };
         // The first attempt fails after selecting the ABI. Before retry, L1 activates T13.
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
-        l1.push_success(&serde_json::json!({ "active": "T12" }));
+        l1.push_success(&l1_tip(999));
         l1.push_failure_msg("submission metadata temporarily unavailable");
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
-        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&l1_tip(1000));
         let proof = SettlementProof {
             bundle: ProofBundle {
                 verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
@@ -1262,6 +1294,7 @@ mod tests {
         let l1 = Asserter::new();
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
+            chain_spec: test_chain_spec(),
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),

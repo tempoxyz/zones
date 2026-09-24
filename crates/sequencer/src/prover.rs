@@ -571,7 +571,9 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let started = Instant::now();
     let (output, proof_bundle) = if let Some(addresses) = &context.config.prover_addresses {
-        let (address, hardfork) = addresses.resolve(&context.l1_provider).await?;
+        let (address, hardfork) = addresses
+            .resolve(&context.l1_provider, context.config.chain_spec.as_ref())
+            .await?;
         info!(
             address,
             ?hardfork,

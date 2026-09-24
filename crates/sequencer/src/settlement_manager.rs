@@ -14,6 +14,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::ZonePortal;
 use tokio::sync::mpsc;
 use tracing::info;
+use zone_chainspec::ZoneChainSpec;
 use zone_p2p::{P2pCommand, P2pPeerId};
 use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 
@@ -36,6 +37,7 @@ pub struct SettlementManager {
     signer: PrivateKeySigner,
     addresses: HashMap<P2pPeerId, Address>,
     l1_provider: DynProvider<TempoNetwork>,
+    chain_spec: Arc<ZoneChainSpec>,
     anchor_config: BatchAnchorConfig,
     p2p_tx: mpsc::Sender<P2pCommand>,
     pending: PendingSettlements,
@@ -56,6 +58,7 @@ impl SettlementManager {
         signer: PrivateKeySigner,
         addresses: HashMap<P2pPeerId, Address>,
         l1_provider: DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         anchor_config: BatchAnchorConfig,
         p2p_tx: mpsc::Sender<P2pCommand>,
     ) -> Self {
@@ -65,6 +68,7 @@ impl SettlementManager {
             signer,
             addresses,
             l1_provider,
+            chain_spec,
             anchor_config,
             p2p_tx,
             pending: PendingSettlements::default(),
@@ -139,7 +143,8 @@ impl SettlementManager {
 
     async fn settlement_status(&self) -> Result<SettlementStatus, BatchSubmitError> {
         let portal = ZonePortal::new(self.domain.portal_address, self.l1_provider.clone());
-        let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
+        let settlement_abi =
+            SettlementAbi::from_l1(&self.l1_provider, self.chain_spec.as_ref()).await?;
         let (sequencer_set_version, threshold, verifier, portal_zone_height) = self
             .l1_provider
             .multicall()
