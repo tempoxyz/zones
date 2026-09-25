@@ -14,10 +14,11 @@ import {
 ///      The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof
 ///      validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 ///
-///      The queue supports user deposits and internal withdrawal bounce-backs. The hash
-///      chain includes a type discriminator to distinguish between them:
+///      The queue holds user deposits, internal withdrawal bounce-backs, and forced-exit
+///      requests. The hash chain includes a type discriminator to distinguish between them:
 ///      - WithdrawalBounceBack: keccak256(abi.encode(DepositType.WithdrawalBounceBack, bounceBack, prevHash))
 ///      - Deposit:              keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
+///      - ForcedExit:           keccak256(abi.encode(DepositType.ForcedExit, forcedExit, prevHash))
 library DepositQueueLib {
 
     /// @notice Enqueue an internal withdrawal bounce-back into the queue
