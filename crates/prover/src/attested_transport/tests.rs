@@ -161,14 +161,17 @@ fn verifies_signatures_root_freshness_nonce_certificate_context_and_pcrs() {
     assert!(verify(&valid, cert, &[4; 32]).is_err());
     assert!(verify(&valid, b"substituted certificate", &nonce).is_err());
     assert!(verify_evidence(&valid, cert, &nonce, &policy(), AWS_NITRO_ROOT_DER, now).is_err());
-    for (data, time, pcr) in [
-        (binding, (now - 301) * 1000, 0x11),
-        (binding, (now + 301) * 1000, 0x11),
-        (binding, now * 1000, 0x12),
-        (binding, now * 1000, 0),
-        (Sha256::digest(cert).into(), now * 1000, 0x11),
+    for (data, time, pcr, expected) in [
+        (binding, (now - 300) * 1000, 0x11, true),
+        (binding, (now + 300) * 1000, 0x11, true),
+        (binding, (now - 301) * 1000, 0x11, false),
+        (binding, (now + 301) * 1000, 0x11, false),
+        (binding, now * 1000, 0x12, false),
+        (binding, now * 1000, 0, false),
+        (Sha256::digest(cert).into(), now * 1000, 0x11, false),
     ] {
-        assert!(verify(&nsm.attest(&nonce, &data, time, pcr), cert, &nonce).is_err());
+        let result = verify(&nsm.attest(&nonce, &data, time, pcr), cert, &nonce);
+        assert_eq!(result.is_ok(), expected, "{time}/{pcr}: {result:?}");
     }
     let mut tampered = valid;
     *tampered.last_mut().unwrap() ^= 1;
@@ -190,6 +193,15 @@ async fn attestation_does_not_replace_tls_key_possession() {
             UnixTime::now().as_secs() * 1000,
             0x11,
         );
+        verify_evidence(
+            &doc,
+            &legitimate.certificate,
+            &hello[MAGIC.len()..],
+            &policy(),
+            &nsm.root,
+            UnixTime::now().as_secs(),
+        )
+        .unwrap();
         write_frame(&mut server_io, &legitimate.certificate, MAX_CERT_BYTES)
             .await
             .unwrap();
@@ -255,27 +267,30 @@ async fn rejects_plaintext_and_oversized_bootstrap_frames() {
 
 #[test]
 fn rejects_incomplete_zero_and_malformed_measurement_policies() {
-    for json in [
-        r#"{"pcrs":{}}"#.to_owned(),
-        format!(
-            r#"{{"pcrs":{{"0":["{}"],"1":["{}"],"2":["{}"]}}}}"#,
-            "00".repeat(48),
-            "11".repeat(48),
-            "11".repeat(48)
-        ),
-        r#"{"pcrs":{"0":["invalid"]}}"#.to_owned(),
-    ] {
-        assert!(
-            RemoteProverConfig::from_policy_json("localhost:5000".into(), json.as_bytes()).is_err()
-        );
-    }
     let pcr = "11".repeat(48);
-    let json = serde_json::json!({"pcrs":{"0":[&pcr],"1":[&pcr],"2":[&pcr]}});
-    assert!(
-        RemoteProverConfig::from_policy_json(
+    let valid = serde_json::json!({"pcrs":{"0":[&pcr],"1":[&pcr],"2":[&pcr]}});
+    let mut cases = vec![
+        (valid.clone(), true),
+        (serde_json::json!({"pcrs":{}}), false),
+        (serde_json::json!({"pcrs":{"0":["invalid"]}}), false),
+    ];
+    for (index, values) in [
+        ("0", serde_json::json!(["00".repeat(48)])),
+        ("0", serde_json::json!([])),
+        ("32", serde_json::json!([&pcr])),
+    ] {
+        let mut json = valid.clone();
+        json["pcrs"][index] = values;
+        cases.push((json, false));
+    }
+    let mut zero_age = valid;
+    zero_age["max_age_seconds"] = serde_json::json!(0);
+    cases.push((zero_age, false));
+    for (json, expected) in cases {
+        let result = RemoteProverConfig::from_policy_json(
             "localhost:5000".into(),
-            &serde_json::to_vec(&json).unwrap()
-        )
-        .is_ok()
-    );
+            &serde_json::to_vec(&json).unwrap(),
+        );
+        assert_eq!(result.is_ok(), expected, "policy: {json}: {result:?}");
+    }
 }
