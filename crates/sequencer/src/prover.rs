@@ -24,6 +24,7 @@ use eyre::{Context as _, OptionExt as _, Result, bail, ensure};
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use reth_primitives_traits::RecoveredBlock;
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{Block, TempoHeader};
 use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -47,8 +48,8 @@ use zone_spf::{
 };
 
 use crate::{
-    BatchAnchor, BatchData, PreparedBatch, ZoneSequencerProvider, metrics::ProverMetrics,
-    proofs::ProofCollectorHandle,
+    BatchAnchor, BatchData, PreparedBatch, ProverAddresses, ZoneSequencerProvider,
+    metrics::ProverMetrics, proofs::ProofCollectorHandle,
 };
 
 /// Number of candidates allowed to wait behind the active validation.
@@ -68,9 +69,9 @@ pub struct SettlementProverConfig {
     pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
-    /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
+    /// Remote Nitro prover endpoints. When absent, execute the SPF in-process.
     /// Settlement requires a remote NSM attestation; shadow validation does not.
-    pub prover_address: Option<String>,
+    pub prover_addresses: Option<ProverAddresses>,
     /// Optional pinned PCR policy for local verification. Without it, remote proofs are
     /// checked against the portal's L1 verifier after T13.
     pub proof_verifier: Option<ShadowProofVerifier>,
@@ -84,7 +85,7 @@ impl fmt::Debug for SettlementProverConfig {
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
-            .field("prover_address", &self.prover_address)
+            .field("prover_addresses", &self.prover_addresses)
             .field("proof_verifier", &self.proof_verifier)
             .finish()
     }
@@ -96,6 +97,13 @@ pub type ShadowProverConfig = SettlementProverConfig;
 #[derive(Debug, Clone)]
 pub(crate) struct SettlementProver {
     sender: mpsc::Sender<ProverJob>,
+}
+
+/// Locally tracked routing policy for an attestation; not part of the proof wire format.
+#[derive(Debug, Clone)]
+pub struct SettlementProof {
+    pub bundle: ProofBundle,
+    pub hardfork: TempoHardfork,
 }
 
 /// Detached validation worker for accepted L1 submissions.
@@ -126,7 +134,7 @@ struct ProverJob {
     batch: BatchData,
     anchor: ProverAnchor,
     enqueued_at: Instant,
-    response: Option<oneshot::Sender<Result<ProofBundle>>>,
+    response: Option<oneshot::Sender<Result<SettlementProof>>>,
 }
 
 #[derive(Debug)]
@@ -238,7 +246,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
     info!(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
-        prover_address = ?config.prover_address,
+        prover_addresses = ?config.prover_addresses,
         shadow_proof_verification = config.proof_verifier.is_some(),
         queue_capacity,
         "Prover enabled"
@@ -347,7 +355,7 @@ impl SettlementProver {
         from: u64,
         to: u64,
         prepared: PreparedBatch,
-    ) -> Result<ProofBundle> {
+    ) -> Result<SettlementProof> {
         let unavailable = || eyre::eyre!("settlement prover is unavailable");
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -366,13 +374,13 @@ impl SettlementProver {
 
     /// Answer the first proving request with `result`.
     #[cfg(test)]
-    pub(crate) fn fixed(result: Result<ProofBundle>) -> Self {
+    pub(crate) fn fixed(result: Result<SettlementProof>) -> Self {
         Self::fixed_after(std::future::ready(result))
     }
 
     #[cfg(test)]
     pub(crate) fn fixed_after(
-        result: impl Future<Output = Result<ProofBundle>> + Send + 'static,
+        result: impl Future<Output = Result<SettlementProof>> + Send + 'static,
     ) -> Self {
         let (sender, mut receiver) = mpsc::channel::<ProverJob>(1);
         tokio::spawn(async move {
@@ -412,16 +420,26 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     job: &ProverJob,
     proofs: Option<&ProofCollectorHandle>,
     metrics: &ProverMetrics,
-) -> Result<(ValidationStats, Option<ProofBundle>)> {
+) -> Result<(ValidationStats, Option<SettlementProof>)> {
     let (witness, stats) = build_witness(context, job, proofs, metrics).await?;
     let public_inputs = witness.public_inputs.clone();
     let batch = &job.batch;
 
     let started = Instant::now();
-    let (output, proof_bundle) = if let Some(address) = &context.config.prover_address {
-        let (output, proof_bundle) =
+    let (output, proof_bundle) = if let Some(addresses) = &context.config.prover_addresses {
+        let (address, hardfork) = addresses
+            .resolve(&context.l1_provider, context.config.chain_spec.as_ref())
+            .await?;
+        info!(
+            address,
+            ?hardfork,
+            zone_from = job.from,
+            zone_to = job.to,
+            "Selected remote prover"
+        );
+        let (output, bundle) =
             verify_remotely(address, context.config.zone_id, job, witness, metrics).await?;
-        (output, Some(proof_bundle))
+        (output, Some(SettlementProof { bundle, hardfork }))
     } else {
         let spf_config = SpfConfig::new(context.config.chain_spec.clone());
         let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, witness))
@@ -440,11 +458,12 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
-    if let Some(bundle) = &proof_bundle {
+    if let Some(proof) = &proof_bundle {
         let started = Instant::now();
-        let call = verifier_call(&public_inputs, &output, bundle);
+        let call = verifier_call(&public_inputs, &output, &proof.bundle);
         let result = verify_proof(
             &context.l1_provider,
+            context.config.chain_spec.as_ref(),
             context.config.proof_verifier.as_ref(),
             context.config.parent_chain_id,
             call,

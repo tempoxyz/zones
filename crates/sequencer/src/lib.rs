@@ -15,6 +15,7 @@ use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tokio::sync::Notify;
+use zone_chainspec::ZoneChainSpec;
 
 pub mod abi {
     pub use tempo_zone_contracts::*;
@@ -27,6 +28,7 @@ pub mod monitor;
 pub mod nonce_keys;
 mod proofs;
 mod prover;
+mod prover_config;
 mod rpc;
 pub mod settlement;
 mod settlement_manager;
@@ -41,9 +43,10 @@ pub use proofs::{
     ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, create_proof_collector,
 };
 pub use prover::{
-    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProverConfig, ShadowProofAnchor, ShadowProver,
-    ShadowProverConfig, spawn_shadow_prover,
+    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProof, SettlementProverConfig, ShadowProofAnchor,
+    ShadowProver, ShadowProverConfig, spawn_shadow_prover,
 };
+pub use prover_config::{HardforkProverAddress, ProverAddresses};
 pub use settlement::{
     BatchAnchor, BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, PreparedBatch,
     SettlementAbi, resolve_portal_zone_anchor,
@@ -99,6 +102,8 @@ pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
 /// Configuration for all zone sequencer background tasks.
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerConfig {
+    /// Zone chainspec containing the inherited Tempo hardfork schedule.
+    pub chain_spec: Arc<ZoneChainSpec>,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
     /// Tempo L1 RPC URL.
@@ -188,6 +193,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     };
 
     let monitor_config = ZoneMonitorConfig {
+        chain_spec: config.chain_spec.clone(),
         outbox_address: config.outbox_address,
         inbox_address: config.inbox_address,
         poll_interval: config.zone_poll_interval,

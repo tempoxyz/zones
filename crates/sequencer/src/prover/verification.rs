@@ -8,6 +8,7 @@ use eyre::{Context as _, Result};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::IZoneVerifier;
 use tempo_precompiles::zone_factory::portal_address;
+use zone_chainspec::ZoneChainSpec;
 use zone_prover::{ProofBundle, ShadowProofVerifier};
 use zone_spf::{BatchOutput, PublicInputs};
 
@@ -24,6 +25,7 @@ pub(super) enum ProofVerification {
 /// The call's commitments were checked against the expected batch before reaching this point.
 pub(super) async fn verify_proof(
     provider: &DynProvider<TempoNetwork>,
+    chain_spec: &ZoneChainSpec,
     local: Option<&ShadowProofVerifier>,
     parent_chain_id: u64,
     call: IZoneVerifier::verifyCall,
@@ -35,7 +37,7 @@ pub(super) async fn verify_proof(
             .wrap_err("proof verification worker panicked")?
             .wrap_err("local proof verification failed")?
     } else {
-        if SettlementAbi::from_l1(provider).await? != SettlementAbi::T13 {
+        if SettlementAbi::from_l1(provider, chain_spec).await? != SettlementAbi::T13 {
             return Ok(ProofVerification::SkippedBeforeT13);
         }
         let portal_address = portal_address(call.zoneId);
@@ -107,6 +109,36 @@ mod tests {
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
     };
 
+    fn chain_spec() -> ZoneChainSpec {
+        let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t13Time".into(), 1_000u64)
+            .unwrap();
+        ZoneChainSpec {
+            inner: std::sync::Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
+        }
+    }
+
+    fn fork_header(timestamp: u64) -> tempo_alloy::rpc::TempoHeaderResponse {
+        tempo_alloy::rpc::TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header {
+                hash: B256::ZERO,
+                inner: tempo_primitives::TempoHeader {
+                    inner: alloy_consensus::Header {
+                        timestamp,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        }
+    }
+
     fn call() -> IZoneVerifier::verifyCall {
         verifier_call(
             &PublicInputs {
@@ -154,9 +186,9 @@ mod tests {
     #[tokio::test]
     async fn proof_verification_skips_onchain_before_t13() {
         let rpc = Asserter::new();
-        rpc.push_success(&serde_json::json!({ "active": "T12", "schedule": [] }));
+        rpc.push_success(&fork_header(999));
         assert_eq!(
-            verify_proof(&provider(&rpc), None, 42431, call())
+            verify_proof(&provider(&rpc), &chain_spec(), None, 42431, call())
                 .await
                 .unwrap(),
             ProofVerification::SkippedBeforeT13,
@@ -168,13 +200,13 @@ mod tests {
         response: Result<Bytes, &'static str>,
     ) -> Result<ProofVerification> {
         let rpc = Asserter::new();
-        rpc.push_success(&serde_json::json!({ "active": "T13", "schedule": [] }));
+        rpc.push_success(&fork_header(1_000));
         rpc.push_success(&Bytes::from(Address::repeat_byte(0x44).abi_encode()));
         match response {
             Ok(output) => rpc.push_success(&output),
             Err(message) => rpc.push_failure_msg(message),
         }
-        let result = verify_proof(&provider(&rpc), None, 42431, call()).await;
+        let result = verify_proof(&provider(&rpc), &chain_spec(), None, 42431, call()).await;
         assert!(rpc.read_q().is_empty());
         result
     }
@@ -199,10 +231,10 @@ mod tests {
         for fail_verifier_lookup in [false, true] {
             let rpc = Asserter::new();
             if fail_verifier_lookup {
-                rpc.push_success(&serde_json::json!({ "active": "T13", "schedule": [] }));
+                rpc.push_success(&fork_header(1_000));
             }
             rpc.push_failure_msg("L1 unavailable");
-            let error = verify_proof(&provider(&rpc), None, 42431, call())
+            let error = verify_proof(&provider(&rpc), &chain_spec(), None, 42431, call())
                 .await
                 .unwrap_err();
             assert!(error.root_cause().to_string().contains("L1 unavailable"));
@@ -216,7 +248,7 @@ mod tests {
         // No responses are queued: local verification must not make any L1 RPC calls.
         let pcr = "11".repeat(48);
         let local: ShadowProofVerifier = format!("{pcr},{pcr},{pcr}").parse().unwrap();
-        let verdict = verify_proof(&provider(&rpc), Some(&local), 42431, call())
+        let verdict = verify_proof(&provider(&rpc), &chain_spec(), Some(&local), 42431, call())
             .await
             .unwrap();
         assert_eq!(verdict, ProofVerification::Rejected);
