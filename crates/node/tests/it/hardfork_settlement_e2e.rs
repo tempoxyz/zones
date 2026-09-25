@@ -110,7 +110,6 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     let submitter = BatchSubmitter::with_signer_and_anchor_config(
         portal_address,
         l1_provider.clone(),
-        spec.clone(),
         l1.dev_signer(),
         Default::default(),
     );

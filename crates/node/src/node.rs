@@ -798,7 +798,6 @@ where
                 Self::start_p2p(
                     config,
                     &l1_provider,
-                    chain_spec.clone(),
                     l1_chain_id,
                     genesis_zone_id,
                     self.portal_address,
@@ -1007,7 +1006,6 @@ where
             let sequencer = match self.sequencer_config.take() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
                     config,
-                    provider.chain_spec(),
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
@@ -1077,7 +1075,6 @@ where
                 config,
                 &handle,
                 zone_provider,
-                provider.chain_spec(),
                 &task_executor,
                 self.l1_config.l1_rpc_url,
                 self.l1_config.portal_address,
@@ -1322,7 +1319,6 @@ where
     async fn start_p2p(
         config: P2pConfig,
         l1_provider: &DynProvider<TempoNetwork>,
-        chain_spec: Arc<ZoneChainSpec>,
         l1_chain_id: u64,
         genesis_zone_id: u32,
         portal_address: Address,
@@ -1352,7 +1348,6 @@ where
             config.block_attestation_signer(),
             config.block_attestation_addresses(),
             l1_provider.clone(),
-            chain_spec,
             anchor_config,
         );
         let schedule = config.leadership();
@@ -1372,7 +1367,6 @@ where
                 signer,
                 attestation.addresses.clone(),
                 attestation.l1_provider.clone(),
-                attestation.chain_spec.clone(),
                 attestation.anchor_config,
                 commands.clone(),
             )
@@ -1510,7 +1504,6 @@ where
     /// Build the leader-generation sequencer dependencies (activated only while leader).
     fn build_leader_sequencer_deps(
         config: ZoneSequencerAddOnsConfig,
-        chain_spec: Arc<ZoneChainSpec>,
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
@@ -1518,7 +1511,6 @@ where
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
-            chain_spec,
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
@@ -1701,7 +1693,6 @@ where
         config: ZoneSequencerAddOnsConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
         zone_provider: N::Provider,
-        chain_spec: Arc<ZoneChainSpec>,
         task_executor: &reth_tasks::TaskExecutor,
         l1_rpc_url: String,
         portal_address: Address,
@@ -1712,7 +1703,6 @@ where
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
-            chain_spec,
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
