@@ -576,6 +576,9 @@ pub enum Error {
     /// Production block pre-execution changes could not be applied.
     #[error("failed to apply pre-execution changes in zone block {block_index}")]
     BlockPreExecution { block_index: usize },
+    /// A canonical parent Zone header must carry its zero base fee.
+    #[error("zone block {block_index} parent header is missing its base fee")]
+    MissingParentBaseFee { block_index: usize },
     /// The ZoneInbox system transaction failed while advancing Tempo.
     #[error("failed to execute advanceTempo in zone block {block_index}")]
     AdvanceTempoExecution { block_index: usize },
