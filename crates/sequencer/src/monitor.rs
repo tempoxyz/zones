@@ -334,8 +334,14 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     "Prepared anchor invalidation escaped the rebuild loop; retrying on the next monitor tick"
                 );
             }
-            Err(BatchSubmitError::ProverHardforkChanged { .. }) => {
-                unreachable!("prover hardfork changes are handled by the rebuild loop")
+            Err(BatchSubmitError::ProverHardforkChanged { proved, current }) => {
+                error!(
+                    from = scan_from,
+                    to = latest_zone_block,
+                    %proved,
+                    %current,
+                    "Prover hardfork change escaped the rebuild loop; retrying on the next monitor tick"
+                );
             }
             Err(BatchSubmitError::Other(error)) => {
                 error!(
