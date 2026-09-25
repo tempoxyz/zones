@@ -675,11 +675,13 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-    use evm2::evm::{CacheDB, Db};
+    use evm2::{
+        PendingState,
+        evm::{AccountInfo, CacheDB, Db, StateChangeSource},
+    };
     use reth_evm::{ConfigureEvm, Database as _, DynDatabase};
-    use reth_execution_types::BundleSource;
+    use reth_execution_types::{BlockState, BundleSource};
     use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
-    use revm::{database::BundleState, primitives::HashMap, state::AccountInfo};
     use std::sync::Arc;
     use tempo_primitives::TempoHeader;
     use zone_evm::ZoneEvmConfig;
@@ -1010,19 +1012,15 @@ mod tests {
         )
         .unwrap();
         let mut database = CacheDB::new(Db::new(database));
-        let state = BundleState::new(
-            vec![(
-                address,
-                None,
-                Some(AccountInfo {
-                    balance: U256::from(42),
-                    ..Default::default()
-                }),
-                HashMap::<U256, (U256, U256)>::default(),
-            )],
-            Vec::<Vec<(Address, Option<Option<AccountInfo>>, Vec<(U256, U256)>)>>::new(),
-            Vec::new(),
-        );
+        let mut changes = PendingState::default();
+        let account = AccountInfo {
+            balance: U256::from(42),
+            ..Default::default()
+        };
+        changes.insert_account(address, None, Some(account));
+        let mut state = BlockState::new();
+        changes.visit(&mut state.transaction_sink()).unwrap();
+        let state = state.into_bundle();
         database.commit_source(&BundleSource(&state));
 
         assert_eq!(
@@ -1033,7 +1031,7 @@ mod tests {
             U256::from(42)
         );
         assert_eq!(database.db.inner_mut().get_account(&address).unwrap(), None);
-        assert_eq!(state.state().len(), 1);
+        assert!(state.state().contains_key(&address));
 
         let expected_account = TrieAccount {
             nonce: 0,

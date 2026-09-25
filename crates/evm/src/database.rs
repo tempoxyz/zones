@@ -164,6 +164,7 @@ pub enum ZoneDbError {
 mod tests {
     use super::*;
     use evm2::evm::InMemoryDB;
+    use reth_execution_types::{BlockState, BundleSource};
     use zone_precompiles::{
         storage::L1StateError, tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
         test_utils::MockL1Reader as TestL1,
@@ -238,17 +239,26 @@ mod tests {
         let l1 = TestL1::default();
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, l1_value);
         let mut inner = test_db(anchor);
+        inner.insert_account_info(&TIP403_REGISTRY_ADDRESS, Default::default());
         inner.insert_account_storage(&TIP403_REGISTRY_ADDRESS, &slot, &local);
         let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
         db.l1_state().begin_transaction(U256::from(anchor));
         let observed = DynDatabase::get_storage(&mut db, &TIP403_REGISTRY_ADDRESS, &slot).unwrap();
         assert_eq!(observed, l1_value);
 
+        let account = db.get_account(&TIP403_REGISTRY_ADDRESS).unwrap();
         let mut state = PendingState::default();
+        state.insert_account(TIP403_REGISTRY_ADDRESS, account.clone(), account);
         state.insert_storage(TIP403_REGISTRY_ADDRESS, slot, observed, observed);
         validate_pending_state(&state).unwrap();
 
+        // Consume the transition through the same bundle stream used by block execution.
+        let mut block = BlockState::new();
+        state.visit(&mut block.transaction_sink()).unwrap();
+        let state = block.into_bundle();
+        assert!(!state.state().contains_key(&TIP403_REGISTRY_ADDRESS));
         let mut inner = db.into_inner();
+        inner.commit_source(&BundleSource(&state));
         assert_eq!(
             DynDatabase::get_storage(&mut inner, &TIP403_REGISTRY_ADDRESS, &slot).unwrap(),
             local

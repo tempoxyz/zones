@@ -483,7 +483,7 @@ mod tests {
             |_, _| panic!("fatal admission must not execute the precompile"),
         );
         assert!(
-            matches!(error, Err(PrecompileError::Fatal(error)) if error.to_string().contains("boom"))
+            matches!(error, Err(PrecompileError::Fatal(error)) if error.to_string() == "boom")
         );
     }
 }

@@ -10,18 +10,17 @@
 mod database;
 mod executor;
 mod fee_manager;
-mod opcode_config;
 pub mod precompiles;
-mod validation;
+mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::{ZoneBlockExecutor, ZoneTxResult};
-pub use validation::validate_transaction;
+pub use zone_evm::validate_transaction;
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
-    opcode_config::{zone_execution_config, zone_tx_registry},
     precompiles::{L1StorageReader, ZonePrecompiles},
+    zone_evm::{zone_execution_config, zone_tx_registry},
 };
 use alloy_primitives::{Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};

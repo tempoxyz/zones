@@ -106,9 +106,10 @@ mod tests {
             reason: "unavailable".into(),
         };
         assert!(
-            ZonePrecompileError::from(l1_error)
-                .into_precompile_result()
-                .is_err(),
+            matches!(
+                ZonePrecompileError::from(l1_error).into_precompile_result(),
+                Err(PrecompileError::Fatal(_))
+            ),
             "L1 state failures must remain fatal"
         );
     }

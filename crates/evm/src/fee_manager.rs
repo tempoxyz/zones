@@ -127,31 +127,16 @@ mod tests {
         bytecode::Bytecode,
         evm::{AccountInfo, InMemoryDB},
     };
-    use reth_chainspec::EthChainSpec as _;
     use reth_evm::BlockExecutorFactory;
     use reth_primitives_traits::Recovered;
-    use tempo_chainspec::spec::DEV;
     use tempo_evm::TempoEvmEnv;
     use tempo_primitives::{
         TempoTxEnvelope,
         transaction::{TempoSignature, TempoTransaction},
     };
-    use zone_chainspec::ZoneChainSpec;
-    use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, test_utils::MockL1Reader, zone_fee_manager};
-    use zone_primitives::constants::zone_chain_id;
+    use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, zone_fee_manager};
 
-    use crate::{ZoneEvm, ZoneEvmConfig};
-
-    fn test_evm(db: InMemoryDB) -> ZoneEvm<'static> {
-        let mut genesis = DEV.genesis().clone();
-        genesis.config.chain_id = zone_chain_id(DEV.chain().id(), 1).unwrap();
-        ZoneEvmConfig::new(
-            std::sync::Arc::new(ZoneChainSpec::from_genesis(genesis).unwrap()),
-            MockL1Reader::default(),
-            Address::ZERO,
-        )
-        .evm_with_env(db, TempoEvmEnv::default())
-    }
+    use crate::zone_evm::tests::config;
 
     fn tx_env(fee_token: Option<Address>) -> TempoTxEnv {
         Recovered::new_unchecked(
@@ -178,7 +163,7 @@ mod tests {
             &zone_fee_manager::slots::DEFAULT_FEE_TOKEN,
             &U256::from_be_slice(default_token.as_slice()),
         );
-        let mut evm = test_evm(db);
+        let mut evm = config().evm_with_env(db, TempoEvmEnv::default());
 
         assert_eq!(
             resolve_fee_token(
@@ -211,7 +196,7 @@ mod tests {
             &initialized_token,
             AccountInfo::default().with_code(Bytecode::new_raw(Bytes::from_static(&[0xef]))),
         );
-        let mut evm = test_evm(db);
+        let mut evm = config().evm_with_env(db, TempoEvmEnv::default());
         let manager = ZoneProtocolFeeManager::new();
 
         assert!(
