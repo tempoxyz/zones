@@ -29,7 +29,7 @@ use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
 use crate::{
     ZoneSequencerProvider,
     abi::{
-        self, BatchSubmitted, BlockTransition, DepositQueueTransition, IVerifier, IZoneOutbox,
+        self, BatchSubmitted, BlockTransition, DepositQueueTransition, IZoneOutbox,
         LegacyBatchSubmitted, LegacyTempoAdvanced, TempoAdvanced, TokenEnablementTransition,
         ZonePortal,
     },
@@ -53,6 +53,7 @@ use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::IZoneVerifier;
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_prover::{ProofBundle, VerifierMode};
@@ -339,7 +340,7 @@ impl BatchSubmitter {
             .await
             .wrap_err("verifier preflight call failed")
             .and_then(|output| {
-                IVerifier::verifyCall::abi_decode_returns(&output).map_err(Into::into)
+                IZoneVerifier::verifyCall::abi_decode_returns(&output).map_err(Into::into)
             });
         Ok(Some(verdict))
     }
@@ -377,7 +378,20 @@ impl BatchSubmitter {
         let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
         let batch = &prepared.batch;
         let (verifier_config, proof) = settlement_proof(verifier_mode, proof_bundle)?;
-        let (block_transition, deposit_transition, token_transition) = batch.transitions();
+        let block_transition = BlockTransition {
+            prevBlockHash: batch.prev_block_hash,
+            nextBlockHash: batch.next_block_hash,
+        };
+        let deposit_transition = DepositQueueTransition {
+            prevProcessedHash: batch.prev_processed_deposit_hash,
+            nextProcessedHash: batch.next_processed_deposit_hash,
+            prevDepositNumber: batch.prev_deposit_number,
+            nextDepositNumber: batch.next_deposit_number,
+        };
+        let token_transition = TokenEnablementTransition {
+            prevProcessedTokenCount: batch.prev_processed_token_count,
+            nextProcessedTokenCount: batch.next_processed_token_count,
+        };
 
         let signer = self.signer.as_ref();
         let metadata = self
@@ -1283,34 +1297,6 @@ pub struct BatchData {
     pub withdrawal_batch_index: u64,
 }
 
-impl BatchData {
-    /// Block, deposit, and token-enablement transitions, as passed to the portal and verifier.
-    fn transitions(
-        &self,
-    ) -> (
-        BlockTransition,
-        DepositQueueTransition,
-        TokenEnablementTransition,
-    ) {
-        (
-            BlockTransition {
-                prevBlockHash: self.prev_block_hash,
-                nextBlockHash: self.next_block_hash,
-            },
-            DepositQueueTransition {
-                prevProcessedHash: self.prev_processed_deposit_hash,
-                nextProcessedHash: self.next_processed_deposit_hash,
-                prevDepositNumber: self.prev_deposit_number,
-                nextDepositNumber: self.next_deposit_number,
-            },
-            TokenEnablementTransition {
-                prevProcessedTokenCount: self.prev_processed_token_count,
-                nextProcessedTokenCount: self.next_processed_token_count,
-            },
-        )
-    }
-}
-
 /// Immutable Tempo anchor selected for one settlement attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchAnchor {
@@ -1387,19 +1373,29 @@ impl PreparedBatch {
 
     /// The Nitro `verify` call T13 `submitBatch` makes for this batch. Portal
     /// advancement is reconciled separately before submission.
-    fn verify_call(&self, zone_id: u32, proof: Bytes) -> IVerifier::verifyCall {
+    fn verify_call(&self, zone_id: u32, proof: Bytes) -> IZoneVerifier::verifyCall {
         let batch = &self.batch;
-        let (block_transition, deposit_transition, token_transition) = batch.transitions();
-        IVerifier::verifyCall {
+        IZoneVerifier::verifyCall {
             zoneId: zone_id,
             tempoBlockNumber: batch.tempo_block_number,
             anchorBlockNumber: self.anchor_block_number(),
             anchorBlockHash: self.anchor.block_hash(),
             expectedWithdrawalBatchIndex: batch.withdrawal_batch_index,
             nextZoneHeight: U256::from(batch.zone_height),
-            blockTransition: block_transition,
-            depositQueueTransition: deposit_transition,
-            tokenEnablementTransition: token_transition,
+            blockTransition: IZoneVerifier::BlockTransition {
+                prevBlockHash: batch.prev_block_hash,
+                nextBlockHash: batch.next_block_hash,
+            },
+            depositQueueTransition: IZoneVerifier::DepositQueueTransition {
+                prevProcessedHash: batch.prev_processed_deposit_hash,
+                nextProcessedHash: batch.next_processed_deposit_hash,
+                prevDepositNumber: batch.prev_deposit_number,
+                nextDepositNumber: batch.next_deposit_number,
+            },
+            tokenEnablementTransition: IZoneVerifier::TokenEnablementTransition {
+                prevProcessedTokenCount: batch.prev_processed_token_count,
+                nextProcessedTokenCount: batch.next_processed_token_count,
+            },
             withdrawalQueueHash: batch.withdrawal_queue_hash,
             verifierConfig: Bytes::from_static(VerifierMode::NitroV1.config()),
             proof,
@@ -2637,7 +2633,10 @@ mod tests {
 
     #[test]
     fn verify_call_matches_the_native_verifier_abi_and_portal_arguments() {
-        assert_eq!(IVerifier::verifyCall::SELECTOR, [0xeb, 0xb2, 0xdd, 0xc9]);
+        assert_eq!(
+            IZoneVerifier::verifyCall::SELECTOR,
+            [0xeb, 0xb2, 0xdd, 0xc9]
+        );
         let mut prepared = test_prepared_batch(20, 100);
         prepared.anchor = BatchAnchor::Ancestry {
             block_number: 150,
