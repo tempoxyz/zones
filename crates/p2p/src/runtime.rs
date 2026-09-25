@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,9 +24,9 @@ use crate::{
     capabilities::PeerCapabilities,
     identity::{Ed25519Identity, Secp256k1Identity},
     network::{
-        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
-        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL,
-        SETTLEMENT_SIGNATURE_CHANNEL, TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
+        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
+        MAX_TRANSACTION_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
+        TRANSACTION_CHANNEL,
     },
     protocol::EncodedBlock,
     routing::{RoutingMembership, RoutingPolicy},
@@ -82,6 +82,7 @@ pub struct P2pConfig {
     listen: SocketAddr,
     bypass_ip_check: bool,
     leadership: LeadershipSchedule,
+    storage_directory: Option<PathBuf>,
 }
 
 impl P2pConfig {
@@ -122,6 +123,7 @@ impl P2pConfig {
             listen,
             bypass_ip_check,
             leadership,
+            storage_directory: None,
         })
     }
 
@@ -178,6 +180,13 @@ impl P2pConfig {
     /// Zone ID included in each block attestation.
     pub fn zone_id(&self) -> u32 {
         self.zone_id
+    }
+
+    /// Sets the Commonware runtime's storage directory, including its startup lock file.
+    /// Defaults to Commonware's temporary directory when not configured.
+    pub fn with_storage_directory(mut self, directory: PathBuf) -> Self {
+        self.storage_directory = Some(directory);
+        self
     }
 }
 
@@ -386,10 +395,13 @@ fn run(
     events: mpsc::Sender<P2pEvent>,
     backfill: BackfillNodeChannels,
 ) -> eyre::Result<()> {
-    let runtime_config = commonware_runtime::tokio::Config::default()
+    let mut runtime_config = commonware_runtime::tokio::Config::default()
         .with_tcp_nodelay(Some(true))
         .with_worker_threads(2)
         .with_catch_panics(true);
+    if let Some(directory) = &config.storage_directory {
+        runtime_config = runtime_config.with_storage_directory(directory.clone());
+    }
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
         let local_ed25519_public_key = config.ed25519_public_key();
         let leadership = config.leadership();
@@ -404,33 +416,28 @@ fn run(
         )?;
         oracle.track(0, peers);
         let (block_sender, block_receiver) =
-            commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
+            commonware.register(BLOCK_CHANNEL, network::block_quota());
         let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
             SETTLEMENT_PROPOSAL_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
         let (settlement_signature_sender, settlement_signature_receiver) = commonware.register(
             SETTLEMENT_SIGNATURE_CHANNEL,
             network::settlement_quota(),
-            BLOCK_BACKLOG,
         );
 
         // The backfill request and responses are on separate channels
         let (backfill_request_sender, backfill_request_receiver) = commonware.register(
             BACKFILL_REQUEST_CHANNEL,
             network::backfill_request_quota(),
-            BLOCK_BACKLOG,
         );
         let (backfill_response_sender, backfill_response_receiver) = commonware.register(
             BACKFILL_RESPONSE_CHANNEL,
             network::backfill_response_quota(),
-            BLOCK_BACKLOG,
         );
         let (transaction_sender, transaction_receiver) = commonware.register(
             TRANSACTION_CHANNEL,
             network::transaction_quota(),
-            TRANSACTION_BACKLOG,
         );
         let mut network_task = commonware.start();
 
@@ -871,6 +878,10 @@ mod tests {
             self.blocked.lock().unwrap().push(peer);
             Feedback::Ok
         }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            panic!("receiver tests do not subscribe to blocked peers")
+        }
     }
 
     fn mock_receiver() -> (
@@ -1018,6 +1029,7 @@ mod tests {
             secp256k1_identity: Some(secp256k1_identity(41)),
             listen: available_address(),
             bypass_ip_check: false,
+            storage_directory: None,
             leadership: manifest.leadership_schedule(),
         };
 
@@ -1164,6 +1176,7 @@ mod tests {
             secp256k1_identity: Some(secp256k1_identity(301 + index as u64)),
             listen: addresses[index],
             bypass_ip_check: false,
+            storage_directory: None,
             leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
         };
         let mut leader = spawn_p2p(config(0), network_id).unwrap();
@@ -1189,11 +1202,11 @@ mod tests {
                     false, network_id,
                 ).unwrap();
                 oracle.track(0, peers);
-                let (_, mut blocks) = network.register(network::BLOCK_CHANNEL, network::block_quota(), 128);
-                let (mut requests, _) = network.register(network::BACKFILL_REQUEST_CHANNEL, network::backfill_request_quota(), 128);
-                let (mut responses, mut backfill) = network.register(network::BACKFILL_RESPONSE_CHANNEL, network::backfill_response_quota(), 128);
+                let (_, mut blocks) = network.register(network::BLOCK_CHANNEL, network::block_quota());
+                let (mut requests, _) = network.register(network::BACKFILL_REQUEST_CHANNEL, network::backfill_request_quota());
+                let (mut responses, mut backfill) = network.register(network::BACKFILL_RESPONSE_CHANNEL, network::backfill_response_quota());
                 let _remaining = [network::TRANSACTION_CHANNEL, network::SETTLEMENT_PROPOSAL_CHANNEL, network::SETTLEMENT_SIGNATURE_CHANNEL]
-                    .map(|channel| network.register(channel, network::settlement_quota(), 128));
+                    .map(|channel| network.register(channel, network::settlement_quota()));
                 let mut network_task = network.start();
                 let mut advertise = false;
                 let mut announcements = tokio::time::interval(ANNOUNCEMENT_INTERVAL);
@@ -1416,6 +1429,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -1762,6 +1776,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 21)),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
@@ -1974,6 +1989,7 @@ mod tests {
                             .then(|| secp256k1_identity(index as u64 + 31)),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
@@ -2147,6 +2163,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 51)),
                         listen: addresses[index],
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2246,6 +2263,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity),
                         listen,
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2336,6 +2354,7 @@ mod tests {
                     secp256k1_identity: Some(secp256k1_identity(index as u64 + 61)),
                     listen: addresses[index],
                     bypass_ip_check: false,
+                    storage_directory: None,
                     leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
                 },
                 network_id,
@@ -2423,6 +2442,7 @@ mod tests {
                     secp256k1_identity: Some(secp256k1_identity(63)),
                     listen: addresses[2],
                     bypass_ip_check: false,
+                    storage_directory: None,
                     leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
                 },
                 network_id,
@@ -2517,6 +2537,7 @@ mod tests {
                         secp256k1_identity: Some(secp256k1_identity(index as u64 + 71)),
                         listen: addresses[index],
                         bypass_ip_check: false,
+                        storage_directory: None,
                         leadership: crate::LeadershipSchedule::seeded(
                             manifest.bootstrap_leadership(),
                         ),
@@ -2572,6 +2593,7 @@ mod tests {
                 secp256k1_identity: Some(secp256k1_identity(71)),
                 listen: addresses[0],
                 bypass_ip_check: false,
+                storage_directory: None,
                 leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
             },
             network_id,
