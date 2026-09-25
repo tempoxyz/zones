@@ -637,8 +637,8 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         assert!(token.is_initialized()?);
         assert_eq!(token.name()?, "Example Dollar");
         assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
-        assert!(token.has_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?);
-        assert!(token.has_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?);
+        assert!(token.has_role_internal(ZONE_INBOX_ADDRESS, ISSUER_ROLE)?);
+        assert!(token.has_role_internal(ZONE_OUTBOX_ADDRESS, ISSUER_ROLE)?);
         assert_eq!(
             StorageCtx.sload(TIP403_REGISTRY_ADDRESS, binding_slot)?,
             anchored_policy
@@ -697,7 +697,7 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
 }
 
 #[test]
-fn non_canonical_encrypted_deposit_is_rejected() {
+fn non_canonical_deposits_are_rejected() {
     let deposit = Deposit {
         token: Address::ZERO,
         sender: Address::ZERO,
@@ -712,26 +712,35 @@ fn non_canonical_encrypted_deposit_is_rejected() {
             tag: [0; 16].into(),
         },
     };
-    let canonical = deposit.abi_encode();
-    let mut non_canonical = canonical.clone();
-    non_canonical.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let bounce_back = WithdrawalBounceBackDeposit {
+        token: Address::ZERO,
+        to: Address::ZERO,
+        amount: 0,
+    };
+    for (deposit_type, canonical) in [
+        (DepositType::Deposit, deposit.abi_encode()),
+        (DepositType::WithdrawalBounceBack, bounce_back.abi_encode()),
+    ] {
+        let mut non_canonical = canonical.clone();
+        non_canonical.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
-    assert!(
-        decode_deposits(vec![QueuedDeposit {
-            depositType: DepositType::Deposit,
-            rejected: false,
-            depositData: canonical.into(),
-        }])
-        .is_ok()
-    );
-    assert!(
-        decode_deposits(vec![QueuedDeposit {
-            depositType: DepositType::Deposit,
-            rejected: false,
-            depositData: non_canonical.into(),
-        }])
-        .is_err()
-    );
+        assert!(
+            decode_deposits(vec![QueuedDeposit {
+                depositType: deposit_type,
+                rejected: false,
+                depositData: canonical.into(),
+            }])
+            .is_ok()
+        );
+        assert!(
+            decode_deposits(vec![QueuedDeposit {
+                depositType: deposit_type,
+                rejected: false,
+                depositData: non_canonical.into(),
+            }])
+            .is_err()
+        );
+    }
 }
 
 #[test]

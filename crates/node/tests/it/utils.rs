@@ -43,6 +43,7 @@ use tempo_chainspec::{
 };
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, ITIP403Registry, TIP403_REGISTRY_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -228,6 +229,29 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
                 .with_storage(storage),
         );
     }
+
+    // The T13 native verifier shadows its Solidity stub. Run that same stub at an ordinary
+    // address and redirect only submitBatch's proof call; certificate domains stay canonical.
+    let mock_verifier = genesis.alloc[&ZONE_VERIFIER_ADDRESS].clone();
+    genesis.alloc.insert(
+        address!("000000000000000000000000000000000000beef"),
+        mock_verifier,
+    );
+    let portal = genesis.alloc.get_mut(&ZONE_PORTAL_IMPL_ADDRESS).unwrap();
+    let mut code = portal.code.as_ref().unwrap().to_vec();
+    // (2**160 - 1) & sload(16): this unique sequence loads the proof-call target.
+    // Replace PUSH1 0x10; SLOAD with PUSH2 0xBEEF, preserving all jump offsets.
+    const VERIFIER_LOAD: [u8; 13] = alloy_primitives::hex!("600160a01b6001900360105416");
+    let mut matches = code
+        .windows(VERIFIER_LOAD.len())
+        .enumerate()
+        .filter_map(|(offset, bytes)| (bytes == VERIFIER_LOAD).then_some(offset));
+    let offset = matches
+        .next()
+        .ok_or_else(|| eyre::eyre!("portal verifier load changed"))?;
+    eyre::ensure!(matches.next().is_none(), "ambiguous portal verifier load");
+    code[offset + 9..offset + 12].copy_from_slice(&[0x61, 0xbe, 0xef]);
+    portal.code = Some(code.into());
 
     // The native factory requires the initial token's TIP-403 policy binding to exist.
     let token_policy_slot = keccak256(
@@ -2562,7 +2586,7 @@ impl L1TestNode {
 
         // Admin can grant ISSUER_ROLE to self
         let receipt = IRolesAuth::new(token, &provider)
-            .grantRole(*ISSUER_ROLE, self.dev_address())
+            .grantRole(ISSUER_ROLE, self.dev_address())
             .send()
             .await?
             .get_receipt()
@@ -2742,26 +2766,6 @@ impl L1TestNode {
     /// Start an L1 dev node with the default configuration (500ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
-    }
-
-    /// Start in T12 with the legacy shared runtimes; normal block execution installs T13.
-    pub(crate) async fn start_with_t13(activation: u64) -> eyre::Result<Self> {
-        use reth_chainspec::EthChainSpec as _;
-        use tempo_contracts::precompiles::initial_zone_factory_state;
-        Self::start_with(|cfg| {
-            let mut genesis = cfg.chain.genesis().clone();
-            genesis
-                .config
-                .extra_fields
-                .insert_value("t13Time".into(), activation)
-                .unwrap();
-            for account in initial_zone_factory_state(l1_dev_signer().address()) {
-                genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
-            }
-            cfg.chain = Arc::new(TempoChainSpec::from_genesis(genesis));
-            cfg.dev.block_time = None;
-        })
-        .await
     }
 
     /// Start an L1 dev node, applying a closure to customise the [`NodeConfig`]
@@ -5350,8 +5354,7 @@ impl L1Fixture {
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
-            encryption_key_rotations: vec![],
-            leader_transitions: vec![],
+            ..Default::default()
         };
         queue.enqueue(header, events);
     }

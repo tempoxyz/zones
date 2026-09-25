@@ -411,10 +411,17 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
-- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
-  the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
-  extended while active. Proof-verified batch submission continues so settlement remains current
-  and an expired pause does not require recovery across the full pause interval.
+- `pause()`: Pause all new deposits, Zone withdrawal requests, Zone block production, and L1
+  withdrawal processing for the public `PAUSE_DURATION` constant of 30 days. The pause expires
+  automatically and cannot be extended while active. The leader stops producing Zone blocks no
+  later than the first block anchored at or after the finalized Tempo block that emitted
+  `PortalPaused`; a block already being built may finish. Followers do not check the pause and
+  import whatever the leader produces. Because automatic expiry emits no event, the leader also
+  polls `paused()` at the latest finalized Tempo block, and reads it at startup before producing
+  blocks. Proof-verified batch submission for blocks produced before the pause continues. After
+  the pause clears, the Zone catches up on the Tempo blocks finalized during the pause. Historical
+  catch-up requires an L1 endpoint that serves the missed finalized headers, receipts, and
+  anchored state.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
