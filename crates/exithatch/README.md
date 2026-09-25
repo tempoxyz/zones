@@ -12,8 +12,9 @@ helpers. Stateful execution lives in the Zone inbox and outbox precompiles.
 
 1. **Request on L1.** The account signs an authorization and encrypts it with
    the Zone's published encryption key. `ZonePortal.requestForcedExit` collects
-   compensation from the fee payer, pays the portal admin, and appends the
-   request to the shared inbox. The fee payer may differ from the account.
+   compensation from the fee payer, pays the portal admin (or parks the
+   payment as a claimable refund if the admin can't receive it), and appends
+   the request to the shared inbox. The fee payer may differ from the account.
 2. **Execute on the Zone.** The inbox verifies the decryption witness, decrypts
    the request, and checks authorization, the admission deadline, replay, and
    applicable policies. A successful request burns the account's full liquid
