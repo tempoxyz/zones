@@ -435,10 +435,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
-    // Local observer policy must never gate settlement jobs or alter L1 fork dispatch.
-    if matches!(job.anchor, ProverAnchor::Finalized(_))
-        && let Some(verifier) = &context.config.shadow_proof_verifier
-    {
+    if let Some(verifier) = &context.config.shadow_proof_verifier {
         let started = Instant::now();
         let result = async {
             let bundle = proof_bundle
