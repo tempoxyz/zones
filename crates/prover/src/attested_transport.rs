@@ -9,7 +9,7 @@ mod tests;
 
 use std::{collections::BTreeMap, io, path::Path, sync::Arc, time::Duration};
 
-use alloy_primitives::hex;
+use alloy_primitives::FixedBytes;
 use rcgen::{CertificateParams, KeyPair, date_time_ymd};
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
@@ -34,18 +34,21 @@ const SERVER_NAME: &str = "tempo-zone-prover.invalid";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CERT_BYTES: usize = 4096;
 const MAX_POLICY_BYTES: usize = 64 * 1024;
+const NONCE_LEN: usize = 32;
+const DEFAULT_MAX_AGE_SECS: u64 = 300;
+const MAX_FUTURE_SKEW_SECS: u64 = 300;
 
 /// Approved deployment measurements; zero PCRs (Nitro debug mode) are never accepted.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Policy {
-    pcrs: BTreeMap<u8, Vec<String>>,
+    pcrs: BTreeMap<u8, Vec<FixedBytes<SHA384_SIZE>>>,
     #[serde(default = "default_max_age_seconds")]
     max_age_seconds: u64,
 }
 
 fn default_max_age_seconds() -> u64 {
-    300
+    DEFAULT_MAX_AGE_SECS
 }
 
 /// Remote prover address with a required, validated Nitro policy.
@@ -65,22 +68,17 @@ impl RemoteProverConfig {
             !address.trim().is_empty() && bytes.len() <= MAX_POLICY_BYTES,
             "invalid prover address or policy size",
         )?;
-        let mut policy: Policy = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        let policy: Policy = serde_json::from_slice(bytes).map_err(io::Error::other)?;
         require(
             policy.max_age_seconds > 0 && (0..=2).all(|i| policy.pcrs.contains_key(&i)),
             "policy must include PCR0-2 and positive freshness",
         )?;
-        for (index, values) in &mut policy.pcrs {
+        for (index, values) in &policy.pcrs {
             require(*index < 32 && !values.is_empty(), "invalid PCR allowlist")?;
-            for value in values {
-                let decoded = hex::decode(value.strip_prefix("0x").unwrap_or(value))
-                    .map_err(io::Error::other)?;
-                require(
-                    decoded.len() == SHA384_SIZE && decoded.iter().any(|b| *b != 0),
-                    "PCR must be a nonzero SHA-384 measurement",
-                )?;
-                *value = hex::encode(decoded);
-            }
+            require(
+                values.iter().all(|value| !value.is_zero()),
+                "PCR must be a nonzero SHA-384 measurement",
+            )?;
         }
         Ok(Self { address, policy })
     }
@@ -154,7 +152,7 @@ impl AttestedServer {
             let mut magic = [0; 8];
             stream.read_exact(&mut magic).await?;
             require(&magic == MAGIC, "invalid attestation bootstrap")?;
-            let mut nonce = [0; 32];
+            let mut nonce = [0; NONCE_LEN];
             stream.read_exact(&mut nonce).await?;
             let binding = certificate_binding(&self.certificate);
             let attester = self.attester.clone();
@@ -176,7 +174,7 @@ async fn connect_stream<T: AsyncRead + AsyncWrite + Unpin>(
     root: &[u8],
 ) -> io::Result<ClientTlsStream<T>> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut nonce = [0; 32];
+    let mut nonce = [0; NONCE_LEN];
     provider
         .secure_random
         .fill(&mut nonce)
@@ -238,15 +236,15 @@ fn verify_evidence(
     )?;
     let now_ms = now.saturating_mul(1000);
     require(
-        doc.timestamp <= now_ms.saturating_add(300_000)
+        doc.timestamp <= now_ms.saturating_add(MAX_FUTURE_SKEW_SECS * 1000)
             && now_ms.saturating_sub(doc.timestamp) <= policy.max_age_seconds.saturating_mul(1000),
         "attestation is stale or in the future",
     )?;
     for (index, allowed) in &policy.pcrs {
         require(
-            doc.pcrs
-                .iter()
-                .any(|pcr| pcr.index == *index && allowed.contains(&hex::encode(&pcr.value))),
+            doc.pcrs.iter().any(|pcr| {
+                pcr.index == *index && allowed.iter().any(|a| a.as_slice() == pcr.value)
+            }),
             "attestation PCR mismatch",
         )?;
     }

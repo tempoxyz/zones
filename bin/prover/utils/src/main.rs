@@ -423,11 +423,8 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         args.output.as_ref().zip(output_bytes),
     );
 
-    if let Some(target) = &args.target {
-        let policy = args
-            .attestation_policy
-            .as_deref()
-            .ok_or_eyre("--attestation-policy is required with --target")?;
+    // Clap requires the target and policy together.
+    if let Some((target, policy)) = args.target.as_ref().zip(args.attestation_policy.as_deref()) {
         let remote = RemoteProverConfig::from_policy_file(target.clone(), policy)?;
         let started = start_phase("target prover");
         let bytes = send_to_prover(&remote, request, &output).await?;
@@ -468,7 +465,7 @@ async fn prove_with_connection<IO: tokio::io::AsyncRead + tokio::io::AsyncWrite 
     };
     let started = start_phase("target prover");
     let stream = connect.await.wrap_err("authenticate target prover")?;
-    let (_, response) = exchange_connected(&args.target, stream, request).await?;
+    let (_, response) = exchange_with_prover(&args.target, stream, request).await?;
     timings.record("target prover", started, ());
     let started = start_phase("validate response");
     validate_proof_response(&response, &request_id)?;
@@ -530,24 +527,6 @@ fn validate_proof_response<'a>(
 }
 
 async fn exchange_with_prover(
-    remote: &RemoteProverConfig,
-    request: VerifyRequest,
-) -> Result<(usize, VerifyResponse)> {
-    let target = remote.address();
-    let started = Instant::now();
-    info!(target, "connecting to prover");
-    let stream = remote
-        .connect()
-        .await
-        .wrap_err_with(|| format!("connect to target prover at {target}"))?;
-    info!(
-        elapsed_ms = started.elapsed().as_millis(),
-        "connected to prover"
-    );
-    exchange_connected(target, stream, request).await
-}
-
-async fn exchange_connected(
     target: &str,
     stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     request: VerifyRequest,
@@ -582,8 +561,19 @@ async fn send_to_prover(
     request: VerifyRequest,
     expected_output: &BatchOutput,
 ) -> Result<usize> {
+    let target = remote.address();
+    let started = Instant::now();
+    info!(target, "connecting to prover");
+    let stream = remote
+        .connect()
+        .await
+        .wrap_err_with(|| format!("connect to target prover at {target}"))?;
+    info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "connected to prover"
+    );
     let expected_id = request.request_id.clone();
-    let (request_bytes, response) = exchange_with_prover(remote, request).await?;
+    let (request_bytes, response) = exchange_with_prover(target, stream, request).await?;
     validate_proof_response(&response, &expected_id)?;
     let VerifyResponse::Ok { output, .. } = response else {
         unreachable!("successful validation requires an ok response")

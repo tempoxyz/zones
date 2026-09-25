@@ -14321,7 +14321,6 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "aws-lc-rs",
- "ciborium",
  "futures",
  "minicbor",
  "minicbor-serde",

@@ -38,6 +38,5 @@ aws-lc-rs.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
-ciborium = "=0.2.2"
 reth-trie-common.workspace = true
 tempo-primitives.workspace = true

@@ -23,9 +23,9 @@ and certificate binding before using that certificate as its only rustls trust a
 TLS verification checks the `tempo-zone-prover.invalid` name and proves possession of the private
 key. Session resumption and early data are disabled. No witness is sent before authentication.
 The host proxy forwards bootstrap bytes and TLS ciphertext without interpreting either.
-The enclave accepts up to four concurrent connections so a stalled handshake cannot block every
-client, but receives and executes only one request at a time to bound multi-GiB witness memory.
-Excess connections are rejected; the bootstrap adds one round trip before each TLS handshake.
+The enclave serves one connection at a time, which bounds multi-GiB witness memory; a stalled
+handshake delays other clients by at most the handshake timeout. The bootstrap adds one round trip
+before each TLS handshake.
 Both endpoints bound the complete handshake to ten seconds (including TCP connect on the client).
 The server authenticates itself; this does not add client authorization or prevent host denial of
 service. The batch attestation used for on-chain settlement remains separate and unchanged.

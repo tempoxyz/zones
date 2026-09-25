@@ -1,10 +1,5 @@
 use std::{future::Future, io, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::Semaphore,
-};
-
 use alloy_genesis::Genesis;
 use clap::{Args, Parser};
 use tempo_chainspec::TempoChainSpec;
@@ -132,9 +127,7 @@ impl Cli {
     }
 }
 
-const MAX_CONNECTIONS: usize = 4;
-
-#[derive(Clone, Copy, Debug, Args)]
+#[derive(Debug, Args)]
 struct Timeouts {
     /// Deadline for receiving one complete logical request.
     #[arg(long = "request-timeout-secs", env = "SPF_REQUEST_TIMEOUT_SECS", default_value = "300", value_parser = non_zero_secs)]
@@ -178,9 +171,6 @@ async fn serve_tcp(
         response_timeout_secs = timeouts.response.as_secs(),
         "SPF TCP service listening"
     );
-    let specs = Arc::new(specs);
-    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let execution = Arc::new(Semaphore::new(1));
     loop {
         let (connection, _peer) = match listener.accept().await {
             Ok(connection) => connection,
@@ -189,15 +179,7 @@ async fn serve_tcp(
                 continue;
             }
         };
-        let _ = spawn_connection(
-            connection,
-            &tls,
-            maximum,
-            &specs,
-            timeouts,
-            &connections,
-            &execution,
-        );
+        handle_connection(connection, &tls, maximum, &specs, &timeouts).await;
     }
 }
 
@@ -248,9 +230,6 @@ mod linux {
             response_timeout_secs = timeouts.response.as_secs(),
             "SPF enclave service listening"
         );
-        let specs = Arc::new(specs);
-        let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-        let execution = Arc::new(Semaphore::new(1));
         loop {
             let connection = match listener.accept().await {
                 Ok((connection, _peer)) => connection,
@@ -259,59 +238,14 @@ mod linux {
                     continue;
                 }
             };
-            let _ = spawn_connection(
-                connection,
-                &tls,
-                maximum,
-                &specs,
-                timeouts,
-                &connections,
-                &execution,
-            );
+            handle_connection(connection, &tls, maximum, &specs, &timeouts).await;
         }
     }
 }
 
-/// Starts a bounded connection task, or rejects it when all slots are occupied.
-/// The connection permit lasts through the response; dropping the handle does not cancel the task.
-fn spawn_connection<T>(
-    connection: T,
-    tls: &AttestedServer,
-    maximum: usize,
-    specs: &Arc<TrustedChainSpecs>,
-    timeouts: Timeouts,
-    connections: &Arc<Semaphore>,
-    execution: &Arc<Semaphore>,
-) -> Option<tokio::task::JoinHandle<()>>
-where
-    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let Ok(permit) = Arc::clone(connections).try_acquire_owned() else {
-        tracing::warn!("prover connection limit reached");
-        return None;
-    };
-    let tls = tls.clone();
-    let specs = Arc::clone(specs);
-    let execution = Arc::clone(execution);
-    Some(tokio::spawn(async move {
-        let _permit = permit;
-        let connection = match tls.accept(connection).await {
-            Ok(connection) => connection,
-            Err(error) => {
-                error!(%error, "rejected attested TLS connection");
-                return;
-            }
-        };
-        // Do not receive a multi-GiB witness while another request is being processed.
-        let Ok(_execution) = execution.acquire().await else {
-            return;
-        };
-        handle_connection(connection, maximum, &specs, &timeouts).await;
-    }))
-}
-
 async fn handle_connection<T>(
     stream: T,
+    tls: &AttestedServer,
     maximum: usize,
     specs: &TrustedChainSpecs,
     timeouts: &Timeouts,
@@ -321,6 +255,13 @@ async fn handle_connection<T>(
     use std::time::Instant;
 
     use tracing::{info, warn};
+    let stream = match tls.accept(stream).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            error!(%error, "rejected attested TLS connection");
+            return;
+        }
+    };
     let mut connection = ProverConnection::new(stream, maximum);
     let started = Instant::now();
     let request: VerifyRequest = match timed(connection.receive(), timeouts.request).await {
@@ -500,8 +441,6 @@ fn nitro_attestation_fields(
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt as _;
-
     use alloy_consensus::Header;
     use alloy_primitives::{B256, Bytes};
     use reth_trie_common::EMPTY_ROOT_HASH;
@@ -512,62 +451,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[tokio::test]
-    async fn stalled_bootstrap_does_not_block_another_connection() {
-        let tls = AttestedServer::new(|_, _| Ok(vec![1])).unwrap();
-        let specs = Arc::new(TrustedChainSpecs::default());
-        let connections = Arc::new(Semaphore::new(2));
-        let execution = Arc::new(Semaphore::new(1));
-        let (_idle_client, idle_server) = tokio::io::duplex(64);
-        let timeouts = Timeouts {
-            request: Duration::from_secs(1),
-            response: Duration::from_secs(1),
-        };
-        let idle = spawn_connection(
-            idle_server,
-            &tls,
-            1024,
-            &specs,
-            timeouts,
-            &connections,
-            &execution,
-        )
-        .unwrap();
-        let (mut bad_client, bad_server) = tokio::io::duplex(64);
-        let bad = spawn_connection(
-            bad_server,
-            &tls,
-            1024,
-            &specs,
-            timeouts,
-            &connections,
-            &execution,
-        )
-        .unwrap();
-        let (_rejected_client, rejected_server) = tokio::io::duplex(64);
-        assert!(
-            spawn_connection(
-                rejected_server,
-                &tls,
-                1024,
-                &specs,
-                timeouts,
-                &connections,
-                &execution
-            )
-            .is_none()
-        );
-        bad_client.write_all(b"badmagic").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), bad)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(connections.available_permits(), 1);
-        idle.abort();
-        assert!(idle.await.unwrap_err().is_cancelled());
-        assert_eq!(connections.available_permits(), 2);
-    }
 
     #[test]
     fn rejects_unsupported_protocol_version() {

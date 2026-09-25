@@ -2,7 +2,7 @@ use aws_lc_rs::{
     rand::SystemRandom,
     signature::{ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair},
 };
-use ciborium::Value;
+use minicbor::Encoder;
 use rcgen::{
     BasicConstraints, CertifiedIssuer, DnType, IsCa, KeyUsagePurpose, PKCS_ECDSA_P384_SHA384,
 };
@@ -45,48 +45,6 @@ impl TestNsm {
         }
     }
 
-    fn attest(&self, nonce: &[u8], binding: &[u8], timestamp: u64, pcr: u8) -> Vec<u8> {
-        let payload = encode(Value::Map(vec![
-            ("module_id".into(), "test-enclave".into()),
-            ("digest".into(), "SHA384".into()),
-            ("timestamp".into(), timestamp.into()),
-            (
-                "pcrs".into(),
-                Value::Map(
-                    (0..=2)
-                        .map(|index| (Value::from(index), Value::Bytes(vec![pcr; 48])))
-                        .collect(),
-                ),
-            ),
-            ("certificate".into(), Value::Bytes(self.leaf.clone())),
-            (
-                "cabundle".into(),
-                Value::Array(vec![Value::Bytes(self.root.clone())]),
-            ),
-            ("nonce".into(), Value::Bytes(nonce.to_vec())),
-            ("user_data".into(), Value::Bytes(binding.to_vec())),
-        ]));
-        let protected = encode(Value::Map(vec![(1.into(), (-35).into())]));
-        let signature = self
-            .key
-            .sign(
-                &SystemRandom::new(),
-                &encode(Value::Array(vec![
-                    "Signature1".into(),
-                    Value::Bytes(protected.clone()),
-                    Value::Bytes(vec![]),
-                    Value::Bytes(payload.clone()),
-                ])),
-            )
-            .unwrap();
-        encode(Value::Array(vec![
-            Value::Bytes(protected),
-            Value::Map(vec![]),
-            Value::Bytes(payload),
-            Value::Bytes(signature.as_ref().to_vec()),
-        ]))
-    }
-
     fn server(self: &Arc<Self>) -> AttestedServer {
         let nsm = self.clone();
         AttestedServer::new(move |nonce, binding| {
@@ -94,17 +52,53 @@ impl TestNsm {
         })
         .unwrap()
     }
+
+    /// Signed NSM attestation document: COSE_Sign1 over the CBOR payload, using ES384.
+    fn attest(&self, nonce: &[u8], binding: &[u8], timestamp: u64, pcr: u8) -> Vec<u8> {
+        let payload = cbor(|p| {
+            p.map(8)?;
+            p.str("module_id")?.str("test-enclave")?;
+            p.str("digest")?.str("SHA384")?;
+            p.str("timestamp")?.u64(timestamp)?;
+            p.str("pcrs")?.map(3)?;
+            for index in 0..=2u8 {
+                p.u8(index)?.bytes(&[pcr; SHA384_SIZE])?;
+            }
+            p.str("certificate")?.bytes(&self.leaf)?;
+            p.str("cabundle")?.array(1)?.bytes(&self.root)?;
+            p.str("nonce")?.bytes(nonce)?;
+            p.str("user_data")?.bytes(binding)
+        });
+        // Protected header {alg: ES384 (ECDSA P-384 + SHA-384, COSE id -35)}.
+        let protected = cbor(|p| p.map(1)?.u8(1)?.i8(-35));
+        let sig_structure = cbor(|p| {
+            p.array(4)?.str("Signature1")?.bytes(&protected)?;
+            p.bytes(&[])?.bytes(&payload)
+        });
+        let signature = self
+            .key
+            .sign(&SystemRandom::new(), &sig_structure)
+            .expect("ECDSA P-384 signing");
+        cbor(|p| {
+            p.array(4)?.bytes(&protected)?.map(0)?;
+            p.bytes(&payload)?.bytes(signature.as_ref())
+        })
+    }
 }
 
-fn encode(value: Value) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(&value, &mut bytes).unwrap();
-    bytes
+fn cbor<E: std::fmt::Debug>(
+    encode: impl FnOnce(&mut Encoder<Vec<u8>>) -> Result<&mut Encoder<Vec<u8>>, E>,
+) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encode(&mut encoder).expect("encoding into a Vec cannot fail");
+    encoder.into_writer()
 }
 
 fn policy() -> Policy {
     Policy {
-        pcrs: (0..=2).map(|i| (i, vec!["11".repeat(48)])).collect(),
+        pcrs: (0..=2)
+            .map(|i| (i, vec![FixedBytes::repeat_byte(0x11)]))
+            .collect(),
         max_age_seconds: 300,
     }
 }
@@ -188,10 +182,10 @@ async fn attestation_does_not_replace_tls_key_possession() {
     let impostor = nsm.server();
     let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
     let serve = async {
-        let mut hello = [0; 40];
+        let mut hello = [0; MAGIC.len() + NONCE_LEN];
         server_io.read_exact(&mut hello).await.unwrap();
         let doc = nsm.attest(
-            &hello[8..],
+            &hello[MAGIC.len()..],
             &certificate_binding(&legitimate.certificate),
             UnixTime::now().as_secs() * 1000,
             0x11,
@@ -225,7 +219,7 @@ async fn rejects_invalid_evidence_before_sending_tls_or_witness_bytes() {
     let server = nsm.server();
     let (client, mut peer) = tokio::io::duplex(64 * 1024);
     let serve = async {
-        let mut hello = [0; 40];
+        let mut hello = [0; MAGIC.len() + NONCE_LEN];
         peer.read_exact(&mut hello).await.unwrap();
         write_frame(&mut peer, &server.certificate, MAX_CERT_BYTES)
             .await

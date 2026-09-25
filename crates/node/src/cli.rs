@@ -258,10 +258,13 @@ async fn configure_sequencing(
         || p2p_config
             .as_ref()
             .is_some_and(|config| !config.is_rpc_only());
-    let remote_prover = load_remote_prover_config(
-        args.prover_address.clone(),
-        args.prover_attestation_policy.as_deref(),
-    )?;
+    // Clap requires the address and policy together.
+    let remote_prover = args
+        .prover_address
+        .clone()
+        .zip(args.prover_attestation_policy.as_deref())
+        .map(|(address, policy)| RemoteProverConfig::from_policy_file(address, policy))
+        .transpose()?;
     if rpc_only && args.sequencer_key_file.is_some() {
         return Err(eyre::eyre!(
             "this node is `rpc_only` in the manifest, so --sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
@@ -597,21 +600,6 @@ pub struct ZoneArgs {
         requires_all = ["enable_prover", "prover_address"]
     )]
     pub prover_attestation_policy: Option<PathBuf>,
-}
-
-fn load_remote_prover_config(
-    address: Option<String>,
-    policy: Option<&std::path::Path>,
-) -> eyre::Result<Option<RemoteProverConfig>> {
-    match (address, policy) {
-        (None, None) => Ok(None),
-        (Some(address), Some(policy)) => RemoteProverConfig::from_policy_file(address, policy)
-            .map(Some)
-            .map_err(Into::into),
-        _ => Err(eyre::eyre!(
-            "--sequencer.prover-address and --sequencer.prover-attestation-policy must be provided together"
-        )),
-    }
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
