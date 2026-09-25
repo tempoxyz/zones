@@ -1,4 +1,8 @@
-//! Backpressured SPF validation and Nitro proof generation for settlement batches.
+//! Backpressured SPF validation, Nitro proof generation and verification for Zone batches.
+
+mod verification;
+
+use verification::{ProofVerification, verifier_call, verify_proof};
 
 use std::{
     collections::BTreeMap,
@@ -67,8 +71,9 @@ pub struct SettlementProverConfig {
     /// Remote Nitro prover TCP address. When absent, execute the SPF in-process.
     /// Settlement requires a remote NSM attestation; shadow validation does not.
     pub prover_address: Option<String>,
-    /// Optional local Nitro verification policy for finalized shadow jobs only.
-    pub shadow_proof_verifier: Option<ShadowProofVerifier>,
+    /// Optional pinned PCR policy for local verification. Without it, remote proofs are
+    /// checked against the portal's L1 verifier after T13.
+    pub proof_verifier: Option<ShadowProofVerifier>,
 }
 
 impl fmt::Debug for SettlementProverConfig {
@@ -80,7 +85,7 @@ impl fmt::Debug for SettlementProverConfig {
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
             .field("prover_address", &self.prover_address)
-            .field("shadow_proof_verifier", &self.shadow_proof_verifier)
+            .field("proof_verifier", &self.proof_verifier)
             .finish()
     }
 }
@@ -234,7 +239,7 @@ fn spawn_prover<P: ZoneSequencerProvider>(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
         prover_address = ?config.prover_address,
-        shadow_proof_verification = config.shadow_proof_verifier.is_some(),
+        shadow_proof_verification = config.proof_verifier.is_some(),
         queue_capacity,
         "Prover enabled"
     );
@@ -435,42 +440,45 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         .output_validation_duration_seconds
         .record(started.elapsed().as_secs_f64());
 
-    if let Some(verifier) = &context.config.shadow_proof_verifier {
+    if let Some(bundle) = &proof_bundle {
         let started = Instant::now();
-        let result = async {
-            let bundle = proof_bundle
-                .clone()
-                .ok_or_eyre("shadow proof verification requires a remote Nitro proof")?;
-            // A newly generated attestation needs the current verification time, not the
-            // historical batch/anchor time. Never accept time supplied by the prover.
-            let timestamp = context
-                .l1_provider
-                .get_header_by_number(BlockNumberOrTag::Latest)
-                .await?
-                .ok_or_eyre("missing current Tempo header for Nitro verification")?
-                .timestamp();
-            let verifier = verifier.clone();
-            let output = output.clone();
-            tokio::task::spawn_blocking(move || {
-                verifier.verify(&public_inputs, &output, &bundle, timestamp)
-            })
-            .await
-            .context("Nitro verification worker panicked")?
-            .map_err(eyre::Report::new)
-        }
+        let call = verifier_call(&public_inputs, &output, bundle);
+        let result = verify_proof(
+            &context.l1_provider,
+            context.config.proof_verifier.as_ref(),
+            context.config.parent_chain_id,
+            call,
+        )
         .await;
         metrics
             .proof_verification_duration_seconds
             .record(started.elapsed().as_secs_f64());
-        record_proof_verification(result, metrics)?;
-        info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
-                "Shadow Nitro proof verified against pinned enclave measurements");
+        match result {
+            Ok(ProofVerification::Verified) => {
+                metrics.proof_verification_success_total.increment(1);
+                info!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
+                    local = context.config.proof_verifier.is_some(), "Nitro proof verified");
+            }
+            Ok(ProofVerification::SkippedBeforeT13) => {
+                metrics.proof_verification_skipped_total.increment(1);
+                debug!(target: "zone::sequencer::prover", zone_from = job.from, zone_to = job.to,
+                    "On-chain proof verification skipped before T13");
+            }
+            Ok(ProofVerification::Rejected) => {
+                metrics.proof_verification_failure_total.increment(1);
+                bail!("verifier rejected the proof");
+            }
+            Err(error) => {
+                metrics.proof_verification_error_total.increment(1);
+                return Err(error);
+            }
+        }
+    } else if context.config.proof_verifier.is_some() {
+        bail!("local proof verification requires a remote Nitro proof");
     }
 
     if job.response.is_some() && proof_bundle.is_none() {
-        return Err(eyre::eyre!(
-            "attested settlement requires a remote prover with Nitro NSM support"
-        ));
+        bail!("attested settlement requires a remote prover with Nitro NSM support");
     }
     Ok((stats, proof_bundle))
 }
@@ -624,23 +632,6 @@ async fn build_witness<P: ZoneSequencerProvider>(
     };
 
     Ok((witness, stats))
-}
-
-fn record_proof_verification(result: Result<bool>, metrics: &ProverMetrics) -> Result<()> {
-    match result {
-        Ok(true) => {
-            metrics.proof_verification_success_total.increment(1);
-            Ok(())
-        }
-        Ok(false) => {
-            metrics.proof_verification_failure_total.increment(1);
-            Err(eyre::eyre!("native Nitro verifier rejected shadow proof"))
-        }
-        Err(error) => {
-            metrics.proof_verification_error_total.increment(1);
-            Err(error.wrap_err("could not verify shadow Nitro proof"))
-        }
-    }
 }
 
 /// Require an L1-settled range to close exactly one withdrawal snapshot at its final block.
@@ -1326,24 +1317,6 @@ mod tests {
     use zone_spf::{
         BlockTransition, DepositQueueTransition, LastBatchCommitment, TokenEnablementTransition,
     };
-
-    #[test]
-    fn proof_verification_reports_rejections_and_operational_errors() {
-        let metrics = ProverMetrics::default();
-        assert!(record_proof_verification(Ok(true), &metrics).is_ok());
-        let rejected = record_proof_verification(Ok(false), &metrics).unwrap_err();
-        assert_eq!(
-            rejected.to_string(),
-            "native Nitro verifier rejected shadow proof"
-        );
-        let unavailable =
-            record_proof_verification(Err(eyre::eyre!("L1 unavailable")), &metrics).unwrap_err();
-        assert_eq!(
-            unavailable.to_string(),
-            "could not verify shadow Nitro proof"
-        );
-        assert_eq!(unavailable.root_cause().to_string(), "L1 unavailable");
-    }
 
     struct StubDebugApi(ZoneExecutionWitness);
 

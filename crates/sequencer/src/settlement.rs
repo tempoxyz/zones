@@ -36,7 +36,6 @@ use crate::{
     attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
-use alloy_contract::CallBuilder;
 use alloy_eips::BlockHashOrNumber;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -53,7 +52,6 @@ use reth_storage_api::BlockNumReader;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::IZoneVerifier;
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 use zone_prover::{ProofBundle, VerifierMode};
@@ -311,38 +309,6 @@ impl BatchSubmitter {
     pub async fn prepare_batch(&self, batch: BatchData) -> Result<PreparedBatch> {
         let anchor = self.resolve_batch_anchor(batch.tempo_block_number).await?;
         Ok(PreparedBatch { batch, anchor })
-    }
-
-    /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier, made as T13
-    /// `submitBatch` would make it (`from` the portal, same arguments).
-    ///
-    /// Returns `None` before T13. The inner result contains the verdict or a
-    /// simulation failure; the outer error indicates preflight setup failed.
-    /// Portal advancement is handled separately by the submission reconciliation.
-    pub(crate) async fn simulate(
-        &self,
-        batch: &PreparedBatch,
-        proof: &ProofBundle,
-    ) -> Result<Option<Result<bool>>> {
-        if SettlementAbi::from_l1(&self.l1_provider).await? != SettlementAbi::T13 {
-            return Ok(None);
-        }
-        let signer = self
-            .signer
-            .as_ref()
-            .map_or(Address::ZERO, PrivateKeySigner::address);
-        let metadata = self.read_submission_metadata(signer).await?;
-        let call = batch.verify_call(metadata.stable.zone_id, proof.proof.clone());
-        let verdict = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
-            .to(metadata.verifier)
-            .from(self.portal_address)
-            .call()
-            .await
-            .wrap_err("verifier preflight call failed")
-            .and_then(|output| {
-                IZoneVerifier::verifyCall::abi_decode_returns(&output).map_err(Into::into)
-            });
-        Ok(Some(verdict))
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
@@ -1369,37 +1335,6 @@ impl PreparedBatch {
     /// Returns the L1 block whose hash the portal passes to the verifier.
     pub const fn anchor_block_number(&self) -> u64 {
         self.anchor.block_number(self.batch.tempo_block_number)
-    }
-
-    /// The Nitro `verify` call T13 `submitBatch` makes for this batch. Portal
-    /// advancement is reconciled separately before submission.
-    fn verify_call(&self, zone_id: u32, proof: Bytes) -> IZoneVerifier::verifyCall {
-        let batch = &self.batch;
-        IZoneVerifier::verifyCall {
-            zoneId: zone_id,
-            tempoBlockNumber: batch.tempo_block_number,
-            anchorBlockNumber: self.anchor_block_number(),
-            anchorBlockHash: self.anchor.block_hash(),
-            expectedWithdrawalBatchIndex: batch.withdrawal_batch_index,
-            nextZoneHeight: U256::from(batch.zone_height),
-            blockTransition: IZoneVerifier::BlockTransition {
-                prevBlockHash: batch.prev_block_hash,
-                nextBlockHash: batch.next_block_hash,
-            },
-            depositQueueTransition: IZoneVerifier::DepositQueueTransition {
-                prevProcessedHash: batch.prev_processed_deposit_hash,
-                nextProcessedHash: batch.next_processed_deposit_hash,
-                prevDepositNumber: batch.prev_deposit_number,
-                nextDepositNumber: batch.next_deposit_number,
-            },
-            tokenEnablementTransition: IZoneVerifier::TokenEnablementTransition {
-                prevProcessedTokenCount: batch.prev_processed_token_count,
-                nextProcessedTokenCount: batch.next_processed_token_count,
-            },
-            withdrawalQueueHash: batch.withdrawal_queue_hash,
-            verifierConfig: Bytes::from_static(VerifierMode::NitroV1.config()),
-            proof,
-        }
     }
 }
 
@@ -2629,83 +2564,6 @@ mod tests {
         assert_eq!(second.stable.zone_id, 42);
         assert_eq!(second.stable.chain_id, 42431);
         assert!(asserter.read_q().is_empty());
-    }
-
-    #[test]
-    fn verify_call_matches_the_native_verifier_abi_and_portal_arguments() {
-        assert_eq!(
-            IZoneVerifier::verifyCall::SELECTOR,
-            [0xeb, 0xb2, 0xdd, 0xc9]
-        );
-        let mut prepared = test_prepared_batch(20, 100);
-        prepared.anchor = BatchAnchor::Ancestry {
-            block_number: 150,
-            block_hash: B256::repeat_byte(0xaa),
-            ancestry_headers: Vec::new(),
-        };
-        let call = prepared.verify_call(42, Bytes::from_static(&[0xbb]));
-        assert_eq!(
-            (call.zoneId, call.anchorBlockNumber, call.anchorBlockHash),
-            (42, 150, B256::repeat_byte(0xaa))
-        );
-        assert_eq!(call.expectedWithdrawalBatchIndex, 1);
-        assert_eq!(call.nextZoneHeight, U256::from(20));
-        assert_eq!(call.verifierConfig.as_ref(), VerifierMode::NitroV1.config());
-        assert_eq!(call.proof.as_ref(), [0xbb]);
-    }
-
-    #[tokio::test]
-    async fn verifier_preflight_returns_only_decoded_verdicts() {
-        let batch = test_prepared_batch(20, 100);
-        // (hardfork, portal withdrawal index, verifier response, expected)
-        for (fork, portal_index, response, expected) in [
-            ("T12", None, None, Some(None)),
-            ("T13", Some(0), Some(Ok(abi_word(true))), Some(Some(true))),
-            ("T13", Some(0), Some(Ok(abi_word(false))), Some(Some(false))),
-            ("T13", Some(0), Some(Ok(Bytes::new())), None),
-            (
-                "T13",
-                Some(0),
-                Some(Err("execution reverted: out of gas")),
-                None,
-            ),
-            ("T13", Some(1), Some(Ok(abi_word(true))), Some(Some(true))),
-        ] {
-            let asserter = Asserter::new();
-            asserter.push_success(&serde_json::json!({ "active": fork }));
-            if let Some(index) = portal_index {
-                asserter.push_success(&abi_encode_multicall(vec![
-                    abi_word(index),
-                    abi_word(1_u64),
-                    abi_word(U256::from(1)),
-                    abi_word(true),
-                    abi_word(Address::repeat_byte(0x44)),
-                    abi_word(42_u32),
-                    abi_word(U256::from(42431)),
-                ]));
-            }
-            match response {
-                Some(Ok(output)) => asserter.push_success(&output),
-                Some(Err(message)) => asserter.push_failure_msg(message),
-                None => {}
-            }
-            let submitter =
-                BatchSubmitter::new(Address::repeat_byte(0x22), mock_l1(asserter.clone()));
-
-            let proof = ProofBundle {
-                verifier_config: Bytes::new(),
-                proof: Bytes::from_static(&[1]),
-            };
-            let result = submitter.simulate(&batch, &proof).await;
-            match expected {
-                Some(verdict) => assert_eq!(result.unwrap().transpose().unwrap(), verdict),
-                None => assert!(
-                    result.unwrap().unwrap().is_err(),
-                    "simulation failures must not become a verdict"
-                ),
-            }
-            assert!(asserter.read_q().is_empty());
-        }
     }
 
     #[test]

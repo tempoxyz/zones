@@ -15,7 +15,7 @@ tempo-zone-contracts = { workspace = true, features = ["std"] }
 zone-spf.workspace = true
 
 tempo-chainspec.workspace = true
-tempo-precompiles = { workspace = true, features = ["test-utils"] }
+tempo-precompiles.workspace = true
 
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true

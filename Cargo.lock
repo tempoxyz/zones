@@ -14322,6 +14322,7 @@ dependencies = [
  "tempo-alloy",
  "tempo-chainspec",
  "tempo-contracts",
+ "tempo-precompiles",
  "tempo-primitives",
  "tempo-zone-contracts",
  "tokio",

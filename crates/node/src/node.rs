@@ -917,7 +917,7 @@ where
                     l1_provider.clone(),
                 )),
                 prover_address: config.prover_address.clone(),
-                shadow_proof_verifier: None,
+                proof_verifier: None,
             });
 
         let shadow_prover_config =
@@ -935,7 +935,7 @@ where
                         .prover_runtime
                         .remote_address()
                         .map(ToOwned::to_owned),
-                    shadow_proof_verifier: config.proof_verifier.clone(),
+                    proof_verifier: config.proof_verifier.clone(),
                 });
 
         if let (Some(runtime_config), Some(submissions)) =
