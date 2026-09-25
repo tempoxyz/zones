@@ -15,7 +15,7 @@ use tempo_zone_contracts::ZonePortal;
 use tokio::sync::mpsc;
 use tracing::info;
 use zone_p2p::{P2pCommand, P2pPeerId};
-use zone_prover::NITRO_VERIFIER_CONFIG_V1;
+use zone_prover::VerifierMode;
 
 use crate::{
     BatchAnchorConfig, PreparedBatch, SettlementAbi,
@@ -71,10 +71,11 @@ impl SettlementManager {
         }
     }
 
-    /// Prepare and collect the certificate for one exact batch and anchor.
+    /// Prepare and collect the certificate for one exact batch, anchor, and verifier mode.
     pub async fn prepare(
         &self,
         prepared: &PreparedBatch,
+        verifier_mode: VerifierMode,
     ) -> Result<SettlementCertificate, BatchSubmitError> {
         let status = self.settlement_status().await?;
         if status.portal_zone_height >= U256::from(prepared.batch.zone_height) {
@@ -84,7 +85,7 @@ impl SettlementManager {
         let mut threshold = status.threshold;
 
         self.validate_anchor(prepared).await?;
-        let attestation = settlement_attestation(self.domain, &config, prepared);
+        let attestation = settlement_attestation(self.domain, &config, prepared, verifier_mode);
         let signed =
             SignedSettlementAttestation::sign(attestation.clone(), self.domain, &self.signer)?;
         let digest = self.domain.settlement_digest(&attestation);
@@ -262,6 +263,7 @@ fn settlement_attestation(
     domain: AttestationDomain,
     config: &SettlementConfig,
     prepared: &PreparedBatch,
+    verifier_mode: VerifierMode,
 ) -> SettlementAttestation {
     let batch = &prepared.batch;
     SettlementAttestation {
@@ -288,7 +290,7 @@ fn settlement_attestation(
             batch.next_processed_token_count,
         ),
         withdrawalQueueHash: batch.withdrawal_queue_hash,
-        verifierConfigHash: keccak256(NITRO_VERIFIER_CONFIG_V1),
+        verifierConfigHash: verifier_mode.config_hash(),
     }
 }
 
@@ -401,5 +403,54 @@ mod tests {
         drop(request);
 
         assert!(pending.subscribe(digest).is_ok());
+    }
+
+    #[test]
+    fn fallback_requires_signatures_for_the_new_verifier_digest() {
+        let prepared = PreparedBatch {
+            batch: crate::BatchData {
+                zone_height: 120,
+                tempo_block_number: 100,
+                prev_block_hash: B256::repeat_byte(1),
+                next_block_hash: B256::repeat_byte(2),
+                prev_processed_deposit_hash: B256::ZERO,
+                next_processed_deposit_hash: B256::ZERO,
+                prev_deposit_number: 0,
+                next_deposit_number: 0,
+                prev_processed_token_count: 0,
+                next_processed_token_count: 0,
+                withdrawal_queue_hash: B256::ZERO,
+                withdrawal_batch_index: 1,
+            },
+            anchor: crate::BatchAnchor::Direct {
+                block_hash: B256::repeat_byte(3),
+            },
+        };
+        let config = SettlementConfig {
+            abi: SettlementAbi::T13,
+            sequencer_set_version: 1,
+            verifier: Address::repeat_byte(4),
+        };
+        let signer = PrivateKeySigner::random();
+        let nitro = settlement_attestation(domain(), &config, &prepared, VerifierMode::NitroV1);
+        let fallback = settlement_attestation(domain(), &config, &prepared, VerifierMode::NoProof);
+        assert_eq!(
+            fallback.verifierConfigHash,
+            VerifierMode::NoProof.config_hash()
+        );
+        let nitro_digest = domain().settlement_digest(&nitro);
+        let fallback_digest = domain().settlement_digest(&fallback);
+        assert_ne!(nitro_digest, fallback_digest);
+
+        let pending = PendingSettlements::default();
+        let nitro_request = pending.subscribe(nitro_digest).unwrap();
+        drop(nitro_request);
+        let mut fallback_request = pending.subscribe(fallback_digest).unwrap();
+        let stale = SignedSettlementAttestation::sign(nitro, domain(), &signer).unwrap();
+        assert!(pending.route(nitro_digest, stale).is_err());
+        assert!(fallback_request.receiver.try_recv().is_err());
+        let fresh = SignedSettlementAttestation::sign(fallback, domain(), &signer).unwrap();
+        pending.route(fallback_digest, fresh.clone()).unwrap();
+        assert_eq!(fallback_request.receiver.try_recv().unwrap(), fresh);
     }
 }

@@ -28,12 +28,13 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::{mpsc, oneshot},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_prover::{
-    DEFAULT_MAX_REQUEST_BYTES, ErrorCode, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
-    ProverConnection, VerifyRequest, VerifyResponse, attested_transport::RemoteProverConfig,
+    DEFAULT_MAX_REQUEST_BYTES, NITRO_VERIFIER_CONFIG_V1, PROTOCOL_VERSION, ProofBundle,
+    ProverConnection, VerifierMode, VerifyRequest, VerifyResponse,
+    attested_transport::RemoteProverConfig,
 };
 use zone_rpc::ZoneDebugApi;
 use zone_spf::{
@@ -51,13 +52,6 @@ const SETTLEMENT_PROVER_QUEUE_CAPACITY: usize = 2;
 /// Number of finalized follower candidates allowed to wait behind validation.
 pub const SHADOW_PROVER_QUEUE_CAPACITY: usize = 5;
 const RPC_CONCURRENCY: usize = 8;
-
-/// Typed error context for an SPF rejection or a mismatch in its output.
-/// Errors without this context mean validation could not complete and must not
-/// count as a rejected candidate (for example, when the remote prover restarts).
-#[derive(Debug, thiserror::Error)]
-#[error("prover validation failed")]
-struct ValidationFailure;
 
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
@@ -311,22 +305,8 @@ fn spawn_prover<P: ZoneSequencerProvider>(
                     );
                     Ok(proof_bundle)
                 }
-                Err(err) if err.is::<ValidationFailure>() => {
-                    metrics.validation_failure_total.increment(1);
-                    error!(
-                        target: "zone::sequencer::prover",
-                        zone_from = job.from,
-                        zone_to = job.to,
-                        prev_block_hash = %job.batch.prev_block_hash,
-                        next_block_hash = %job.batch.next_block_hash,
-                        elapsed_ms = started.elapsed().as_millis(),
-                        error = ?err,
-                        "Prover rejected batch"
-                    );
-                    Err(err)
-                }
                 Err(err) => {
-                    metrics.operational_failure_total.increment(1);
+                    metrics.failure_total.increment(1);
                     warn!(
                         target: "zone::sequencer::prover",
                         zone_from = job.from,
@@ -361,6 +341,7 @@ impl SettlementProver {
         to: u64,
         prepared: PreparedBatch,
     ) -> Result<ProofBundle> {
+        let unavailable = || eyre::eyre!("settlement prover is unavailable");
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ProverJob {
@@ -372,20 +353,24 @@ impl SettlementProver {
                 response: Some(response),
             })
             .await
-            .map_err(|_| eyre::eyre!("settlement prover worker is unavailable"))?;
-        receiver
-            .await
-            .map_err(|_| eyre::eyre!("settlement prover worker dropped its response"))?
+            .map_err(|_| unavailable())?;
+        receiver.await.map_err(|_| unavailable())?
+    }
+
+    /// Answer the first proving request with `result`.
+    #[cfg(test)]
+    pub(crate) fn fixed(result: Result<ProofBundle>) -> Self {
+        Self::fixed_after(std::future::ready(result))
     }
 
     #[cfg(test)]
-    pub(crate) fn failing(message: &'static str) -> Self {
+    pub(crate) fn fixed_after(
+        result: impl Future<Output = Result<ProofBundle>> + Send + 'static,
+    ) -> Self {
         let (sender, mut receiver) = mpsc::channel::<ProverJob>(1);
         tokio::spawn(async move {
-            while let Some(job) = receiver.recv().await {
-                if let Some(response) = job.response {
-                    let _ = response.send(Err(eyre::eyre!(message)));
-                }
+            if let Some(response) = receiver.recv().await.and_then(|job| job.response) {
+                let _ = response.send(result.await);
             }
         });
         Self { sender }
@@ -421,6 +406,47 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     proofs: Option<&ProofCollectorHandle>,
     metrics: &ProverMetrics,
 ) -> Result<(ValidationStats, Option<ProofBundle>)> {
+    let (witness, stats) = build_witness(context, job, proofs, metrics).await?;
+    let batch = &job.batch;
+
+    let started = Instant::now();
+    let (output, proof_bundle) = if let Some(remote) = &context.config.remote_prover {
+        let (output, proof_bundle) =
+            verify_remotely(remote, context.config.zone_id, job, witness, metrics).await?;
+        (output, Some(proof_bundle))
+    } else {
+        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
+        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, witness))
+            .await
+            .context("SPF worker panicked")?
+            .context("SPF rejected generated witness")?;
+        (output, None)
+    };
+    metrics
+        .spf_execution_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+
+    let started = Instant::now();
+    compare_output(&output, batch, batch.prev_block_hash)?;
+    metrics
+        .output_validation_duration_seconds
+        .record(started.elapsed().as_secs_f64());
+
+    if job.response.is_some() && proof_bundle.is_none() {
+        return Err(eyre::eyre!(
+            "attested settlement requires a remote prover with Nitro NSM support"
+        ));
+    }
+    Ok((stats, proof_bundle))
+}
+
+/// Collect and assemble the SPF witness for a candidate batch.
+async fn build_witness<P: ZoneSequencerProvider>(
+    context: &ProverContext<P>,
+    job: &ProverJob,
+    proofs: Option<&ProofCollectorHandle>,
+    metrics: &ProverMetrics,
+) -> Result<(BatchWitness, ValidationStats)> {
     let batch = &job.batch;
     ensure!(
         batch.zone_height == job.to,
@@ -562,34 +588,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_state_nodes: witness.tempo_state_witness.node_pool.len(),
     };
 
-    let started = Instant::now();
-    let (output, proof_bundle) = if let Some(remote) = &context.config.remote_prover {
-        let (output, proof_bundle) =
-            verify_remotely(remote, context.config.zone_id, job, witness, metrics).await?;
-        (output, Some(proof_bundle))
-    } else {
-        let spf_config = SpfConfig::new(context.config.chain_spec.clone());
-        let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, witness))
-            .await
-            .context("SPF worker panicked")?
-            .context("SPF rejected generated witness")
-            .context(ValidationFailure)?;
-        (output, None)
-    };
-    metrics
-        .spf_execution_duration_seconds
-        .record(started.elapsed().as_secs_f64());
-
-    let started = Instant::now();
-    compare_output(&output, batch, batch.prev_block_hash).context(ValidationFailure)?;
-    metrics
-        .output_validation_duration_seconds
-        .record(started.elapsed().as_secs_f64());
-
-    if job.response.is_some() && proof_bundle.is_none() {
-        bail!("attested settlement requires a remote prover with Nitro NSM support");
-    }
-    Ok((stats, proof_bundle))
+    Ok((witness, stats))
 }
 
 /// Require an L1-settled range to close exactly one withdrawal snapshot at its final block.
@@ -675,8 +674,10 @@ async fn verify_remotely(
         );
     }
     let response: VerifyResponse = response_result
-        .wrap_err_with(|| format!("read response from remote prover at {address}"))?
-        .ok_or_else(|| eyre::eyre!("remote prover closed the connection without a response"))?;
+        .wrap_err_with(|| format!("read response from remote prover at {address}"))
+        .and_then(|response| {
+            response.ok_or_eyre("remote prover closed the connection without a response")
+        })?;
 
     match response {
         VerifyResponse::Ok {
@@ -685,14 +686,7 @@ async fn verify_remotely(
             output,
             proof_bundle,
         } => {
-            ensure!(
-                version == PROTOCOL_VERSION,
-                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-            );
-            ensure!(
-                request_id == expected_id,
-                "remote prover response request ID {request_id} does not match {expected_id}"
-            );
+            validate_response_header(version, Some(&request_id), &expected_id)?;
             validate_proof_bundle(&proof_bundle)?;
             Ok((*output, proof_bundle))
         }
@@ -702,37 +696,41 @@ async fn verify_remotely(
             code,
             message,
         } => {
-            ensure!(
-                version == PROTOCOL_VERSION,
-                "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
-            );
-            if let Some(response_id) = request_id {
-                ensure!(
-                    response_id == expected_id,
-                    "remote prover error request ID {response_id} does not match {expected_id}",
-                );
-            }
-            let error = eyre::eyre!("remote prover rejected request ({code:?}): {message}");
-            Err(if code == ErrorCode::VerificationFailed {
-                error.wrap_err(ValidationFailure)
-            } else {
-                error
-            })
+            validate_response_header(version, request_id.as_deref(), &expected_id)?;
+            Err(eyre::eyre!(
+                "remote prover rejected request ({code:?}): {message}"
+            ))
         }
     }
 }
 
-fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
+fn validate_response_header(
+    version: u16,
+    request_id: Option<&str>,
+    expected_id: &str,
+) -> Result<()> {
     ensure!(
-        proof_bundle.verifier_config.as_ref() == NITRO_VERIFIER_CONFIG_V1,
+        version == PROTOCOL_VERSION,
+        "remote prover responded with protocol version {version}; expected {PROTOCOL_VERSION}"
+    );
+    if let Some(request_id) = request_id {
+        ensure!(
+            request_id == expected_id,
+            "remote prover response request ID {request_id} does not match {expected_id}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_proof_bundle(proof_bundle: &ProofBundle) -> Result<()> {
+    let mode = VerifierMode::try_from(proof_bundle.verifier_config.as_ref())?;
+    ensure!(
+        mode == VerifierMode::NitroV1,
         "remote prover returned unsupported verifier config 0x{}; expected 0x{}",
         alloy_primitives::hex::encode(&proof_bundle.verifier_config),
         alloy_primitives::hex::encode(NITRO_VERIFIER_CONFIG_V1),
     );
-    ensure!(
-        !proof_bundle.proof.is_empty(),
-        "remote prover returned an empty Nitro proof"
-    );
+    mode.validate_proof_shape(&proof_bundle.proof)?;
     Ok(())
 }
 

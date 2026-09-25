@@ -19,6 +19,7 @@ tempo-nitro-attestation = { workspace = true, features = ["aws-lc"] }
 
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
+keccak-const.workspace = true
 
 futures.workspace = true
 minicbor.workspace = true

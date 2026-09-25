@@ -14366,6 +14366,7 @@ dependencies = [
  "alloy-sol-types",
  "aws-lc-rs",
  "futures",
+ "keccak-const",
  "minicbor",
  "minicbor-serde",
  "rcgen",
@@ -14430,6 +14431,7 @@ version = "0.3.1"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
+ "alloy-contract",
  "alloy-eips",
  "alloy-network",
  "alloy-primitives",
@@ -14462,7 +14464,6 @@ dependencies = [
  "tempo-contracts",
  "tempo-primitives",
  "tempo-zone-contracts",
- "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tokio-util",

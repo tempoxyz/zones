@@ -164,7 +164,12 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
     };
     for legacy in [deposit_batch, interval_batch] {
         submitter
-            .submit_batch(&submitter.prepare_batch(legacy).await?, None, None)
+            .submit_batch(
+                &submitter.prepare_batch(legacy).await?,
+                None,
+                None,
+                zone_prover::VerifierMode::NitroV1,
+            )
             .await
             .map_err(|err| eyre::eyre!("legacy settlement: {err:?}"))?;
     }
@@ -302,8 +307,9 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
 
     let batch = batch_from_output(end, zone.tempo_block_number().await?, &output);
     let prepared = submitter.prepare_batch(batch).await?;
+    // This harness has no Nitro attestation service. Use `NoProof` explicitly.
     let settled = submitter
-        .submit_batch(&prepared, None, None)
+        .submit_batch(&prepared, None, None, zone_prover::VerifierMode::NoProof)
         .await
         .map_err(|err| eyre::eyre!("T13 settlement: {err:?}"))?;
     assert_eq!(settled.lastProcessedEnabledTokenCount, 3);
@@ -321,7 +327,10 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
         output.block_transition.nextBlockHash
     );
     assert!(
-        submitter.submit_batch(&prepared, None, None).await.is_err(),
+        submitter
+            .submit_batch(&prepared, None, None, zone_prover::VerifierMode::NoProof)
+            .await
+            .is_err(),
         "settlement cannot replay"
     );
     assert_eq!(portal.withdrawalBatchIndex().call().await?, 3);
