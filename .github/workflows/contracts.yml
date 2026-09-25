@@ -38,23 +38,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
           persist-credentials: false
 
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/actions/setup-mold@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/actions/setup-mold@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: v0.15.0
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/setup-foundry@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,7 +84,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/setup-foundry@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -135,7 +135,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: tempoxyz/gh-actions/actions/setup-foundry@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/setup-foundry@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
 
@@ -155,7 +155,7 @@ jobs:
       MIN_BRANCHES: "60"
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -195,18 +195,18 @@ jobs:
 
       - name: Setup Rust
         if: steps.forge-cache.outputs.cache-hit != 'true'
-        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           toolchain: stable
       - name: Setup mold
         if: steps.forge-cache.outputs.cache-hit != 'true'
-        uses: tempoxyz/gh-actions/actions/setup-mold@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/setup-mold@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
       - name: Setup sccache
         if: steps.forge-cache.outputs.cache-hit != 'true'
-        uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: v0.15.0
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         if: steps.forge-cache.outputs.cache-hit != 'true'
         with:
           workspaces: foundry
@@ -318,9 +318,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
 
       - name: Decide whether the needed jobs succeeded or failed
-        uses: tempoxyz/gh-actions/actions/check-needs@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/check-needs@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           jobs: ${{ toJSON(needs) }}

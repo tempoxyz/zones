@@ -67,10 +67,10 @@ jobs:
       pr-number: ${{ steps.request.outputs.pr-number }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
       - name: Mint benchmark repository read token
         id: benchmark-token
-        uses: tempoxyz/gh-actions/actions/github-sts@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/github-sts@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           scope: tempoxyz/tempo-multi-region-benchmark
           policy: bench-e2e-multi-region
@@ -146,10 +146,10 @@ jobs:
       BENCH_RESULTS_PATH: ${{ github.workspace }}/zones-prover-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/secure-runner@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
       - name: Mint benchmark repository read token
         id: benchmark-token
-        uses: tempoxyz/gh-actions/actions/github-sts@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/github-sts@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           scope: tempoxyz/tempo-multi-region-benchmark
           policy: bench-e2e-multi-region
@@ -171,7 +171,7 @@ jobs:
             }
       - name: Mint Earn read token
         id: earn-token
-        uses: tempoxyz/gh-actions/actions/github-sts@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+        uses: tempoxyz/gh-actions/actions/github-sts@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           scope: tempoxyz/earn
           policy: zones-read
@@ -218,22 +218,22 @@ jobs:
       - name: Initialize Earn fixture dependencies
         working-directory: earn
         run: git submodule update --init lib/forge-std lib/openzeppelin-contracts lib/openzeppelin-contracts-upgradeable
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/actions/setup-mold@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/actions/setup-mold@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: v0.15.0
-      - uses: tempoxyz/gh-actions/actions/setup-foundry@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: nightly-fc14f674bd853bc817c308a5202faa5be8df05e7
-      - uses: tempoxyz/gh-actions/actions/setup-terraform@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+      - uses: tempoxyz/gh-actions/actions/setup-terraform@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           version: 1.14.7
-      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
       - name: Configure AWS benchmark role
-        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
+        uses: tempoxyz/gh-actions/vendor/aws-actions/configure-aws-credentials@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
         with:
           role-to-assume: arn:aws:iam::934822761402:role/benchmark-runner
           aws-region: ${{ env.BENCH_REGION }}

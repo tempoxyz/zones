@@ -24,7 +24,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: tempoxyz/gh-actions/.github/workflows/rust-build-binaries.yml@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+    uses: tempoxyz/gh-actions/.github/workflows/rust-build-binaries.yml@bd66336ead0e97e3939428f526dc61fb43db0996 # 2026-09-25T20-13-44Z-bd66336e
     with:
       binaries: tempo-zone
       profile: ${{ inputs.profile || 'maxperf' }}
