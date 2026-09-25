@@ -88,6 +88,32 @@ impl ProverAddresses {
         self.validate_startup_at(provider, chain_spec, now).await
     }
 
+    /// Observe the schedule every minute, including while the node is idle or a standby.
+    /// Run for the node's lifetime, independently of individual prover workers.
+    pub async fn monitor_upgrade_readiness(&self, chain_spec: Arc<ZoneChainSpec>) {
+        self.monitor_upgrade_readiness_with_gauge(
+            chain_spec,
+            crate::metrics::ProverMetrics::default().missing_hardfork_prover,
+        )
+        .await;
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        provider: &DynProvider<TempoNetwork>,
+        chain_spec: &impl TempoHardforks,
+    ) -> Result<(&str, TempoHardfork)> {
+        let hardfork = active_l1_hardfork(provider, chain_spec).await?;
+        Ok((self.address_for(hardfork)?, hardfork))
+    }
+
+    fn address_for(&self, hardfork: TempoHardfork) -> Result<&str> {
+        self.0
+            .get(&hardfork)
+            .map(String::as_str)
+            .ok_or_else(|| eyre::eyre!("no prover configured for active L1 hardfork {hardfork}"))
+    }
+
     async fn validate_startup_at(
         &self,
         provider: &DynProvider<TempoNetwork>,
@@ -117,23 +143,6 @@ impl ProverAddresses {
         })
     }
 
-    fn record_upgrade_readiness(&self, chain_spec: &impl TempoHardforks, now: u64, gauge: &Gauge) {
-        let active = chain_spec.tempo_hardfork_at(now);
-        let missing = !self.0.contains_key(&active)
-            || self
-                .missing_upcoming_hardfork(chain_spec, active, now)
-                .is_some();
-        gauge.set(if missing { 1.0 } else { 0.0 });
-    }
-
-    /// Observe the schedule every minute, including while the node is idle or a standby.
-    /// Run for the node's lifetime, independently of individual prover workers.
-    pub async fn monitor_upgrade_readiness(&self, chain_spec: Arc<ZoneChainSpec>) {
-        let gauge = crate::metrics::ProverMetrics::default().missing_hardfork_prover;
-        self.monitor_upgrade_readiness_with_gauge(chain_spec, gauge)
-            .await;
-    }
-
     async fn monitor_upgrade_readiness_with_gauge(
         &self,
         chain_spec: Arc<ZoneChainSpec>,
@@ -154,20 +163,13 @@ impl ProverAddresses {
         }
     }
 
-    fn address_for(&self, hardfork: TempoHardfork) -> Result<&str> {
-        self.0
-            .get(&hardfork)
-            .map(String::as_str)
-            .ok_or_else(|| eyre::eyre!("no prover configured for active L1 hardfork {hardfork}"))
-    }
-
-    pub(crate) async fn resolve(
-        &self,
-        provider: &DynProvider<TempoNetwork>,
-        chain_spec: &impl TempoHardforks,
-    ) -> Result<(&str, TempoHardfork)> {
-        let hardfork = active_l1_hardfork(provider, chain_spec).await?;
-        Ok((self.address_for(hardfork)?, hardfork))
+    fn record_upgrade_readiness(&self, chain_spec: &impl TempoHardforks, now: u64, gauge: &Gauge) {
+        let active = chain_spec.tempo_hardfork_at(now);
+        let missing = !self.0.contains_key(&active)
+            || self
+                .missing_upcoming_hardfork(chain_spec, active, now)
+                .is_some();
+        gauge.set(if missing { 1.0 } else { 0.0 });
     }
 }
 

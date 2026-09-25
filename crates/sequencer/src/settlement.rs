@@ -111,6 +111,7 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
+/// How often a quorum wait rechecks whether another leader has advanced the portal.
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
