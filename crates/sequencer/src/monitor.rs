@@ -547,13 +547,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    /// Prove and preflight while collecting a Nitro certificate, then submit.
+    /// Prove and preflight, while collecting a Nitro certificate, then submit.
     ///
     /// A prover error, verifier rejection, or verifier simulation failure selects
     /// [`VerifierMode::NoProof`] for this batch and requires a fresh certificate.
     /// Preflight setup and certificate collection errors do not trigger fallback.
-    /// Submission has its own retry and reconciliation logic. Without a configured
-    /// prover, the Nitro-with-empty-proof compatibility path remains in use.
+    /// Submission has its own retry and reconciliation logic.
     async fn prove_and_submit_batch(
         &mut self,
         from: u64,
@@ -634,17 +633,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             withdrawals,
         )
         .await
-    }
-
-    async fn prepare_certificate(
-        &self,
-        prepared: &PreparedBatch,
-        verifier_mode: VerifierMode,
-    ) -> Result<Option<SettlementCertificate>, BatchSubmitError> {
-        match &self.config.settlements {
-            Some(settlements) => settlements.prepare(prepared, verifier_mode).await.map(Some),
-            None => Ok(None),
-        }
     }
 
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
@@ -906,6 +894,17 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             .set(last_submitted_zone_block as f64);
         self.update_submission_lag();
         Ok(last_submitted_zone_block)
+    }
+
+    async fn prepare_certificate(
+        &self,
+        prepared: &PreparedBatch,
+        verifier_mode: VerifierMode,
+    ) -> Result<Option<SettlementCertificate>, BatchSubmitError> {
+        match &self.config.settlements {
+            Some(settlements) => settlements.prepare(prepared, verifier_mode).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     async fn build_portal_resync_snapshot(&self) -> Result<PortalResyncSnapshot> {

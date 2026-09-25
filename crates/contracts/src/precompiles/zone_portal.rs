@@ -415,10 +415,7 @@ crate::sol! {
         function claimRefund(address token) external returns (uint128 amount);
     }
 
-    /// Verifier interface called by T13 `ZonePortal.submitBatch` (`msg.sender` = portal).
-    /// Mirrors Tempo's TIP-1098 `IZoneVerifier` (selector `0xebb2ddc9`). The pinned
-    /// Tempo revision predates this binding; its T13 stub uses `0xe57a6366`.
-    /// Use the upstream binding after upgrading the Tempo runtime and dependencies together.
+    /// TODO: import from upstream Tempo on the next version bump
     #[derive(Debug, PartialEq, Eq)]
     interface IVerifier {
         function verify(
