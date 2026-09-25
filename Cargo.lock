@@ -11776,11 +11776,9 @@ dependencies = [
 [[package]]
 name = "tempo-nitro-attestation"
 version = "1.14.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=009c9f5b014e7bd3ecc3d3ec412f72e8b544a392#009c9f5b014e7bd3ecc3d3ec412f72e8b544a392"
+source = "git+https://github.com/tempoxyz/tempo?rev=1f3b3a3dee82e53fdf76c0a8a65655a14c0d20e6#1f3b3a3dee82e53fdf76c0a8a65655a14c0d20e6"
 dependencies = [
  "arrayvec",
- "aws-lc-rs",
- "hex-literal",
  "minicbor",
  "minicbor-serde",
  "serde",
@@ -11791,9 +11789,11 @@ dependencies = [
 [[package]]
 name = "tempo-nitro-attestation"
 version = "1.14.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=1f3b3a3dee82e53fdf76c0a8a65655a14c0d20e6#1f3b3a3dee82e53fdf76c0a8a65655a14c0d20e6"
+source = "git+https://github.com/tempoxyz/tempo?rev=74a90898202afe9d0bcea1544248f95bd02da2f6#74a90898202afe9d0bcea1544248f95bd02da2f6"
 dependencies = [
  "arrayvec",
+ "aws-lc-rs",
+ "hex-literal",
  "minicbor",
  "minicbor-serde",
  "serde",
@@ -14376,7 +14376,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempo-chainspec",
- "tempo-nitro-attestation 1.14.0 (git+https://github.com/tempoxyz/tempo?rev=009c9f5b014e7bd3ecc3d3ec412f72e8b544a392)",
+ "tempo-nitro-attestation 1.14.0 (git+https://github.com/tempoxyz/tempo?rev=74a90898202afe9d0bcea1544248f95bd02da2f6)",
  "tempo-primitives",
  "tempo-zone-contracts",
  "thiserror 2.0.18",
