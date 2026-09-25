@@ -36,7 +36,7 @@ updates:
         update-types: ["minor", "patch"]
 
   - package-ecosystem: docker
-    directory: /
+    directory: /docker
     schedule:
       interval: weekly
     labels:
