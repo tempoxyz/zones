@@ -4457,6 +4457,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-literal"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e712f64ec3850b98572bffac52e2c6f282b29fe6c5fa6d42334b30be438d95c1"
+
+[[package]]
 name = "hickory-net"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11677,9 +11683,11 @@ dependencies = [
 [[package]]
 name = "tempo-nitro-attestation"
 version = "1.14.0"
-source = "git+https://github.com/tempoxyz/tempo?rev=a31ce53704d7f95c9cecc3e2263bcc6646a20767#a31ce53704d7f95c9cecc3e2263bcc6646a20767"
+source = "git+https://github.com/tempoxyz/tempo?rev=009c9f5b014e7bd3ecc3d3ec412f72e8b544a392#009c9f5b014e7bd3ecc3d3ec412f72e8b544a392"
 dependencies = [
  "arrayvec",
+ "aws-lc-rs",
+ "hex-literal",
  "minicbor",
  "minicbor-serde",
  "serde",
@@ -14314,11 +14322,9 @@ dependencies = [
  "alloy-sol-types",
  "aws-lc-rs",
  "ciborium",
- "const-hex",
  "futures",
  "minicbor",
  "minicbor-serde",
- "rand 0.8.7",
  "rcgen",
  "reth-trie-common",
  "rustls",

@@ -4,13 +4,12 @@
 //! measured enclave binds its own certificate (never a caller-supplied key) to that challenge.
 //! Only after verification do we trust that certificate for TLS and expose the encrypted stream.
 
-mod nitro;
 #[cfg(test)]
 mod tests;
 
 use std::{collections::BTreeMap, io, path::Path, sync::Arc, time::Duration};
 
-use rand::RngCore as _;
+use alloy_primitives::hex;
 use rcgen::{CertificateParams, KeyPair, date_time_ymd};
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
@@ -18,7 +17,7 @@ use rustls::{
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use tempo_nitro_attestation::{MAX_DOCUMENT_SIZE, SHA384_SIZE};
+use tempo_nitro_attestation::{AWS_NITRO_ROOT_DER, AwsLcP384, MAX_DOCUMENT_SIZE, SHA384_SIZE};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
     net::TcpStream,
@@ -28,8 +27,6 @@ use tokio_rustls::{
     TlsAcceptor, TlsConnector, client::TlsStream as ClientTlsStream,
     server::TlsStream as ServerTlsStream,
 };
-
-use nitro::{AWS_NITRO_ROOT_DER, AwsLcP384};
 
 const MAGIC: &[u8; 8] = b"TZRATLS2";
 const CONTEXT: &[u8] = b"tempo-zone-prover/tls-bootstrap/v1\0";
@@ -76,13 +73,13 @@ impl RemoteProverConfig {
         for (index, values) in &mut policy.pcrs {
             require(*index < 32 && !values.is_empty(), "invalid PCR allowlist")?;
             for value in values {
-                let decoded = const_hex::decode(value.strip_prefix("0x").unwrap_or(value))
+                let decoded = hex::decode(value.strip_prefix("0x").unwrap_or(value))
                     .map_err(io::Error::other)?;
                 require(
                     decoded.len() == SHA384_SIZE && decoded.iter().any(|b| *b != 0),
                     "PCR must be a nonzero SHA-384 measurement",
                 )?;
-                *value = const_hex::encode(decoded);
+                *value = hex::encode(decoded);
             }
         }
         Ok(Self { address, policy })
@@ -178,10 +175,12 @@ async fn connect_stream<T: AsyncRead + AsyncWrite + Unpin>(
     policy: &Policy,
     root: &[u8],
 ) -> io::Result<ClientTlsStream<T>> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut nonce = [0; 32];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(io::Error::other)?;
+    provider
+        .secure_random
+        .fill(&mut nonce)
+        .map_err(|error| io::Error::other(rustls::Error::from(error)))?;
     stream.write_all(MAGIC).await?;
     stream.write_all(&nonce).await?;
     stream.flush().await?;
@@ -201,13 +200,11 @@ async fn connect_stream<T: AsyncRead + AsyncWrite + Unpin>(
     roots
         .add(CertificateDer::from(cert))
         .map_err(io::Error::other)?;
-    let mut config = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(io::Error::other)?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let mut config = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(io::Error::other)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     config.resumption = rustls::client::Resumption::disabled();
     TlsConnector::from(Arc::new(config))
         .connect(
@@ -249,7 +246,7 @@ fn verify_evidence(
         require(
             doc.pcrs
                 .iter()
-                .any(|pcr| pcr.index == *index && allowed.contains(&const_hex::encode(&pcr.value))),
+                .any(|pcr| pcr.index == *index && allowed.contains(&hex::encode(&pcr.value))),
             "attestation PCR mismatch",
         )?;
     }

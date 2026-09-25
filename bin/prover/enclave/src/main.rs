@@ -458,7 +458,6 @@ where
     })
 }
 
-#[cfg(target_os = "linux")]
 fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
     nitro_attestation_fields(digest.to_vec(), None)
 }
@@ -489,11 +488,6 @@ fn nitro_attestation_fields(user_data: Vec<u8>, nonce: Option<Vec<u8>>) -> Resul
         Response::Error(code) => Err(format!("Nitro attestation request failed: {code:?}")),
         _ => Err("Nitro Secure Module returned an unexpected response".into()),
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn nitro_attestation(_digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
-    Err("Nitro attestation is supported only on Linux".into())
 }
 
 #[cfg(not(target_os = "linux"))]
