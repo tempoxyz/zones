@@ -168,22 +168,70 @@ impl ProverAddresses {
     }
 }
 
+/// The live fork and the next scheduled activation returned by Tempo L1.
+#[derive(Debug)]
+pub(crate) struct L1ForkSchedule {
+    pub(crate) active: TempoHardfork,
+    next_activation: Option<(String, u64)>,
+}
+
+impl L1ForkSchedule {
+    /// Return the next activation still ahead of the local clock.
+    pub(crate) fn next_activation_after(&self, now: Duration) -> Option<(String, Duration)> {
+        self.next_activation
+            .as_ref()
+            .and_then(|(fork, activation)| {
+                Duration::from_secs(*activation)
+                    .checked_sub(now)
+                    .filter(|delay| !delay.is_zero())
+                    .map(|delay| (fork.clone(), delay))
+            })
+    }
+}
+
 /// Read the live L1 policy, rejecting unknown forks rather than silently using an older prover.
-pub(crate) async fn active_l1_hardfork(
+pub(crate) async fn l1_fork_schedule(
     provider: &DynProvider<TempoNetwork>,
-) -> Result<TempoHardfork> {
+) -> Result<L1ForkSchedule> {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ForkInfo {
+        name: String,
+        activation_time: u64,
+        active: bool,
+    }
+
     #[derive(Debug, serde::Deserialize)]
     struct ForkSchedule {
         active: String,
+        #[serde(default)]
+        schedule: Vec<ForkInfo>,
     }
+
     let schedule: ForkSchedule = provider
         .raw_request("tempo_forkSchedule".into(), ())
         .await
         .wrap_err("failed reading the live Tempo L1 hardfork")?;
-    schedule
+    let active = schedule
         .active
         .parse()
-        .map_err(|_| eyre::eyre!("unsupported active L1 hardfork {:?}", schedule.active))
+        .map_err(|_| eyre::eyre!("unsupported active L1 hardfork {:?}", schedule.active))?;
+    let next_activation = schedule
+        .schedule
+        .into_iter()
+        .filter(|fork| !fork.active)
+        .min_by_key(|fork| fork.activation_time)
+        .map(|fork| (fork.name, fork.activation_time));
+    Ok(L1ForkSchedule {
+        active,
+        next_activation,
+    })
+}
+
+pub(crate) async fn active_l1_hardfork(
+    provider: &DynProvider<TempoNetwork>,
+) -> Result<TempoHardfork> {
+    Ok(l1_fork_schedule(provider).await?.active)
 }
 
 #[cfg(test)]
@@ -191,6 +239,38 @@ mod tests {
     use super::*;
     use alloy_provider::ProviderBuilder;
     use alloy_transport::mock::Asserter;
+
+    #[test]
+    fn next_activation_uses_the_remaining_fractional_second() {
+        let schedule = L1ForkSchedule {
+            active: TempoHardfork::T12,
+            next_activation: Some(("T13".to_owned(), 2_000)),
+        };
+        assert_eq!(
+            schedule.next_activation_after(Duration::from_millis(1_999_500)),
+            Some(("T13".to_owned(), Duration::from_millis(500)))
+        );
+        assert_eq!(
+            schedule.next_activation_after(Duration::from_secs(2_000)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_future_fork_does_not_block_the_current_prover() {
+        let asserter = Asserter::new();
+        asserter.push_success(&serde_json::json!({
+            "active": "T12",
+            "schedule": [{ "name": "future", "activationTime": u64::MAX, "active": false }]
+        }));
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter)
+            .erased();
+        assert_eq!(
+            active_l1_hardfork(&provider).await.unwrap(),
+            TempoHardfork::T12
+        );
+    }
 
     #[derive(Default)]
     struct RecordedGauge(std::sync::Mutex<Vec<f64>>);

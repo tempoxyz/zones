@@ -23,7 +23,13 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, future::Future, sync::OnceLock, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    future::Future,
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     ZoneSequencerProvider,
@@ -33,7 +39,7 @@ use crate::{
         ZonePortal,
     },
     attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
-    prover_config::active_l1_hardfork,
+    prover_config::{active_l1_hardfork, l1_fork_schedule},
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_eips::BlockHashOrNumber;
@@ -365,24 +371,36 @@ impl BatchSubmitter {
         Ok(())
     }
 
-    /// Stop certificate preparation if the completed proof's hardfork becomes stale.
+    /// Stop certificate preparation at the next scheduled prover hardfork.
     pub(crate) async fn wait_for_prover_hardfork<T>(
         &self,
         expected: Option<TempoHardfork>,
         preparation: impl Future<Output = Result<T, BatchSubmitError>>,
     ) -> Result<T, BatchSubmitError> {
         let watch_hardfork = async {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                if let Err(error) = self.validate_live_prover_hardfork(expected).await {
-                    return error;
-                }
+            let proved = expected.expect("hardfork watcher only runs for a remote proof");
+            let schedule = l1_fork_schedule(&self.l1_provider).await?;
+            if schedule.active != proved {
+                return Ok::<_, BatchSubmitError>(BatchSubmitError::ProverHardforkChanged {
+                    proved,
+                    current: schedule.active,
+                });
             }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(eyre::Report::from)?;
+            let Some((next_fork, delay)) = schedule.next_activation_after(now) else {
+                return std::future::pending().await;
+            };
+            tokio::time::sleep(delay).await;
+            let current = next_fork
+                .parse()
+                .map_err(|_| eyre::eyre!("unsupported scheduled L1 hardfork {next_fork:?}"))?;
+            Ok(BatchSubmitError::ProverHardforkChanged { proved, current })
         };
         tokio::select! {
             result = preparation => result,
-            error = watch_hardfork, if expected.is_some() => Err(error),
+            error = watch_hardfork, if expected.is_some() => Err(error?),
         }
     }
 
@@ -2050,6 +2068,43 @@ mod tests {
         assert!(matches!(
             result,
             Err(BatchSubmitError::ProverHardforkChanged { .. })
+        ));
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quorum_wait_checks_at_the_scheduled_activation() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let l1 = Asserter::new();
+        l1.push_success(&serde_json::json!({
+            "active": "T12",
+            "schedule": [{ "name": "T13", "activationTime": now + 3, "active": false }]
+        }));
+        let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
+        let wait = tokio::spawn(async move {
+            submitter
+                .wait_for_prover_hardfork(
+                    Some(TempoHardfork::T12),
+                    std::future::pending::<Result<(), BatchSubmitError>>(),
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(l1.read_q().is_empty());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert!(l1.read_q().is_empty());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(
+            wait.await.unwrap(),
+            Err(BatchSubmitError::ProverHardforkChanged {
+                proved: TempoHardfork::T12,
+                current: TempoHardfork::T13,
+            })
         ));
         assert!(l1.read_q().is_empty());
     }
