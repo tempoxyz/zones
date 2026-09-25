@@ -104,13 +104,12 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_primitives::constants::{decode_l1_chain_id, zone_chain_id};
-use zone_prover::attested_transport::RemoteProverConfig;
 use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
-    BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, SettlementManager,
-    SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
-    attestation::AttestationDomain, create_proof_collector, spawn_shadow_prover,
-    spawn_zone_sequencer,
+    BatchAnchorConfig, ProofCollectorConfig, ProofCollectorHandle, ProverAddresses,
+    SettlementManager, SettlementProverConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    ZoneSequencerConfig, attestation::AttestationDomain, create_proof_collector,
+    spawn_shadow_prover, spawn_zone_sequencer,
 };
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
@@ -210,9 +209,8 @@ pub struct ZoneSequencerAddOnsConfig {
     ///
     /// Implies enable_proof_persistence.
     pub enable_prover: bool,
-    /// Authenticated remote Nitro prover. Required for proof-gated settlement; when absent, the
-    /// SPF runs in-process but settlement fails because no NSM attestation can be produced.
-    pub remote_prover: Option<RemoteProverConfig>,
+    /// Authenticated remote Nitro prover endpoints. Required for proof-gated settlement.
+    pub prover_addresses: Option<ProverAddresses>,
 }
 
 impl ZoneSequencerAddOnsConfig {
@@ -229,12 +227,12 @@ impl ZoneSequencerAddOnsConfig {
 pub enum ProverRuntime {
     /// Execute the SPF in this process.
     InProcess,
-    /// Send witnesses to an authenticated remote Nitro prover.
-    Remote(RemoteProverConfig),
+    /// Route witnesses to an attested endpoint assigned to the live L1 hardfork.
+    Remote(ProverAddresses),
 }
 
 impl ProverRuntime {
-    fn remote_config(&self) -> Option<&RemoteProverConfig> {
+    fn remote_addresses(&self) -> Option<&ProverAddresses> {
         match self {
             Self::InProcess => None,
             Self::Remote(config) => Some(config),
@@ -687,7 +685,7 @@ where
                     zone_id: config.zone_id,
                     batch_anchor_config: config.batch_anchor_config,
                     prover_runtime: config
-                        .remote_prover
+                        .prover_addresses
                         .clone()
                         .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
                 })
@@ -798,6 +796,7 @@ where
                 Self::start_p2p(
                     config.with_storage_directory(ctx.config.datadir().data_dir().join("p2p")),
                     &l1_provider,
+                    ctx.node.provider().chain_spec(),
                     l1_chain_id,
                     genesis_zone_id,
                     self.portal_address,
@@ -914,7 +913,7 @@ where
                     handle.eth_handlers().api.clone(),
                     l1_provider.clone(),
                 )),
-                remote_prover: config.remote_prover.clone(),
+                prover_addresses: config.prover_addresses.clone(),
             });
 
         let shadow_prover_config =
@@ -928,8 +927,22 @@ where
                         handle.eth_handlers().api.clone(),
                         l1_provider.clone(),
                     )),
-                    remote_prover: config.prover_runtime.remote_config().cloned(),
+                    prover_addresses: config.prover_runtime.remote_addresses().cloned(),
                 });
+
+        let readiness_config = if rpc_only {
+            shadow_prover_config.as_ref()
+        } else {
+            prover_config.as_ref()
+        };
+        if let Some(config) = readiness_config
+            && let Some(addresses) = config.prover_addresses.clone()
+        {
+            let chain_spec = config.chain_spec.clone();
+            task_executor.spawn_critical_task("prover-upgrade-readiness", async move {
+                addresses.monitor_upgrade_readiness(chain_spec).await;
+            });
+        }
 
         if let (Some(runtime_config), Some(submissions)) =
             (shadow_prover_config, finalized_batch_submissions)
@@ -992,6 +1005,7 @@ where
             let sequencer = match self.sequencer_config.take() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
                     config,
+                    provider.chain_spec(),
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
@@ -1306,6 +1320,7 @@ where
     async fn start_p2p(
         config: P2pConfig,
         l1_provider: &DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         l1_chain_id: u64,
         genesis_zone_id: u32,
         portal_address: Address,
@@ -1335,6 +1350,7 @@ where
             config.block_attestation_signer(),
             config.block_attestation_addresses(),
             l1_provider.clone(),
+            chain_spec,
             anchor_config,
         );
         let schedule = config.leadership();
@@ -1354,6 +1370,7 @@ where
                 signer,
                 attestation.addresses.clone(),
                 attestation.l1_provider.clone(),
+                attestation.chain_spec.clone(),
                 attestation.anchor_config,
                 commands.clone(),
             )
@@ -1491,6 +1508,7 @@ where
     /// Build the leader-generation sequencer dependencies (activated only while leader).
     fn build_leader_sequencer_deps(
         config: ZoneSequencerAddOnsConfig,
+        chain_spec: Arc<ZoneChainSpec>,
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
@@ -1498,6 +1516,7 @@ where
         prover_config: Option<SettlementProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
+            chain_spec,
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
@@ -1690,6 +1709,7 @@ where
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
+            chain_spec: zone_provider.chain_spec(),
             portal_address,
             l1_rpc_url,
             retry_connection_interval,

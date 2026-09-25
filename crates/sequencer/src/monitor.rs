@@ -32,13 +32,16 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
-use zone_prover::{ProofBundle, VerifierMode};
+#[cfg(test)]
+use zone_prover::ProofBundle;
+use zone_prover::VerifierMode;
 
 use crate::{
     SettlementManager, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX},
     attestation::SettlementCertificate,
-    prover::SettlementProver,
+    prover::{SettlementProof, SettlementProver},
+    prover_config::active_l1_hardfork,
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -60,6 +63,8 @@ const RESTART_BACKOFF: Duration = Duration::from_secs(5);
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
+    /// Zone chainspec containing the inherited Tempo hardfork schedule.
+    pub chain_spec: Arc<zone_chainspec::ZoneChainSpec>,
     /// ZoneOutbox contract address on Zone L2.
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
@@ -190,6 +195,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
+            config.chain_spec.clone(),
             signer,
             config.batch_anchor_config,
         );
@@ -326,6 +332,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     to = latest_zone_block,
                     %error,
                     "Prepared anchor invalidation escaped the rebuild loop; retrying on the next monitor tick"
+                );
+            }
+            Err(BatchSubmitError::ProverHardforkChanged { proved, current }) => {
+                error!(
+                    from = scan_from,
+                    to = latest_zone_block,
+                    %proved,
+                    %current,
+                    "Prover hardfork change escaped the rebuild loop; retrying on the next monitor tick"
                 );
             }
             Err(BatchSubmitError::Other(error)) => {
@@ -504,6 +519,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         };
 
         loop {
+            if shutdown.is_cancelled() {
+                return Err(BatchSubmitError::Cancelled);
+            }
             let prepared = self
                 .batch_submitter
                 .prepare_batch(batch_data.clone())
@@ -542,6 +560,11 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                     return Ok(());
                 }
+                Err(BatchSubmitError::ProverHardforkChanged { proved, current }) => {
+                    self.metrics.prover_hardfork_rebuild_total.increment(1);
+                    warn!(%proved, %current, zone_from = from, zone_to = to,
+                        "L1 prover policy changed; rebuilding the settlement attempt");
+                }
                 result => return result,
             }
         }
@@ -566,15 +589,19 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 match &self.settlement_prover {
                     Some(prover) => {
                         match prover.prove(from, last_zone_block, batch.clone()).await {
-                            Ok(proof) => match self.batch_submitter.simulate(batch, &proof).await {
-                                Ok(Some(Err(error))) => Ok(ControlFlow::Break(("verifier", error))),
-                                Ok(Some(Ok(false))) => Ok(ControlFlow::Break((
-                                    "verifier",
-                                    eyre::eyre!("verifier rejected the proof"),
-                                ))),
-                                Ok(_) => Ok(ControlFlow::Continue(Some(proof))),
-                                Err(error) => Err(BatchSubmitError::from(error)),
-                            },
+                            Ok(proof) => {
+                                match self.batch_submitter.simulate(batch, &proof.bundle).await {
+                                    Ok(Some(Err(error))) => {
+                                        Ok(ControlFlow::Break(("verifier", error)))
+                                    }
+                                    Ok(Some(Ok(false))) => Ok(ControlFlow::Break((
+                                        "verifier",
+                                        eyre::eyre!("verifier rejected the proof"),
+                                    ))),
+                                    Ok(_) => Ok(ControlFlow::Continue(Some(proof))),
+                                    Err(error) => Err(BatchSubmitError::from(error)),
+                                }
+                            }
                             Err(error) => Ok(ControlFlow::Break(("prover", error))),
                         }
                     }
@@ -651,7 +678,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     async fn submit_batch_with_retry(
         &mut self,
         prepared: &PreparedBatch,
-        proof_bundle: Option<&ProofBundle>,
+        proof_bundle: Option<&SettlementProof>,
         settlement: (VerifierMode, Option<SettlementCertificate>),
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
@@ -799,11 +826,36 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     }
                     return Ok(());
                 }
-                Err(error @ BatchSubmitError::PreparedAnchorInvalid(_)) => return Err(error),
+                Err(
+                    error @ (BatchSubmitError::PreparedAnchorInvalid(_)
+                    | BatchSubmitError::ProverHardforkChanged { .. }),
+                ) => return Err(error),
                 Err(BatchSubmitError::Other(e)) => {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
+                    // Check if the failure is due to a changed L1 hardfork.
+                    // It means we shouldn't retry the batch submission, and instead the full batch re-proving
+                    // is needed.
+                    if let Some(proved) = proof_bundle.map(|proof| proof.hardfork) {
+                        match active_l1_hardfork(
+                            self.batch_submitter.l1_provider(),
+                            self.config.chain_spec.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(current) if current != proved => {
+                                return Err(BatchSubmitError::ProverHardforkChanged {
+                                    proved,
+                                    current,
+                                });
+                            }
+                            Err(error) => {
+                                warn!(%error, "Failed checking L1 hardfork after batch submission error");
+                            }
+                            Ok(_) => {}
+                        }
+                    }
                     if attempt < MAX_RETRIES {
                         self.metrics.batch_submit_retry_total.increment(1);
                         warn!(
@@ -1057,12 +1109,14 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Signed, TxLegacy};
+    use alloy_consensus::{Header as ConsensusHeader, Signed, TxLegacy};
     use alloy_primitives::{Bytes, Log, Signature, U256};
     use alloy_provider::Provider as _;
+    use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_sol_types::{SolEvent, SolValue};
     use alloy_transport::mock::Asserter;
     use reth_provider::test_utils::MockEthProvider;
+    use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{
         Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
     };
@@ -1071,6 +1125,25 @@ mod tests {
         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased()
+    }
+
+    fn mock_l1_header(timestamp: u64) -> serde_json::Value {
+        serde_json::to_value(TempoHeaderResponse {
+            inner: RpcHeader {
+                hash: B256::ZERO,
+                inner: TempoHeader {
+                    inner: ConsensusHeader {
+                        timestamp,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        })
+        .unwrap()
     }
 
     type TestZoneProvider = MockEthProvider<TempoPrimitives>;
@@ -1137,7 +1210,16 @@ mod tests {
         zone_provider: TestZoneProvider,
     ) -> ZoneMonitor<TestZoneProvider> {
         let portal_address = Address::repeat_byte(0x11);
+        let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t13Time".into(), 1_000)
+            .unwrap();
         let config = ZoneMonitorConfig {
+            chain_spec: Arc::new(zone_chainspec::ZoneChainSpec {
+                inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
+            }),
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),
@@ -1146,13 +1228,14 @@ mod tests {
             settlements: None,
         };
         let l1_provider = mock_provider(l1);
+        let chain_spec = config.chain_spec.clone();
 
         ZoneMonitor {
             config,
             metrics: crate::metrics::ZoneMonitorMetrics::default(),
             provider: zone_provider,
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider),
+            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, chain_spec),
             withdrawal_notify: Arc::new(Notify::new()),
             repair_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
@@ -1195,11 +1278,14 @@ mod tests {
     async fn verifier_simulation_failure_enters_no_proof_submission_path() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover = Some(SettlementProver::fixed(Ok(ProofBundle {
-            verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
-            proof: Bytes::from_static(&[1]),
+        monitor.settlement_prover = Some(SettlementProver::fixed(Ok(SettlementProof {
+            bundle: ProofBundle {
+                verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+                proof: Bytes::from_static(&[1]),
+            },
+            hardfork: tempo_chainspec::hardfork::TempoHardfork::T13,
         })));
-        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&mock_l1_header(1_000));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(0),
             abi_encode_u64(1),
@@ -1255,6 +1341,7 @@ mod tests {
             PrivateKeySigner::random(),
             Default::default(),
             mock_provider(l1.clone()),
+            monitor.config.chain_spec.clone(),
             BatchAnchorConfig::default(),
             commands,
         );
@@ -1269,7 +1356,7 @@ mod tests {
             timestamp_millis: 0,
         };
         // Collect Nitro signatures concurrently with proving, then fail preflight.
-        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&mock_l1_header(1_000));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(1),
             abi_encode_u64(2),
@@ -1278,7 +1365,7 @@ mod tests {
         ]));
         l1.push_success(&serde_json::json!("0x7b"));
         l1.push_success(&header);
-        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&mock_l1_header(1_000));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(0),
             abi_encode_u64(1),
@@ -1289,7 +1376,7 @@ mod tests {
             abi_encode_u64(42431),
         ]));
         l1.push_failure_msg("execution reverted: out of gas");
-        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&mock_l1_header(1_000));
         l1.push_success(&abi_encode_multicall(vec![
             abi_encode_u64(1),
             abi_encode_u64(2),
@@ -1324,9 +1411,12 @@ mod tests {
             VerifierMode::NitroV1.config_hash()
         );
         proof_tx
-            .send(Ok(ProofBundle {
-                verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
-                proof: Bytes::from_static(&[1]),
+            .send(Ok(SettlementProof {
+                bundle: ProofBundle {
+                    verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+                    proof: Bytes::from_static(&[1]),
+                },
+                hardfork: tempo_chainspec::hardfork::TempoHardfork::T13,
             }))
             .unwrap();
         let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
@@ -1384,10 +1474,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submission_error_rebuilds_on_hardfork_change() {
+        use tempo_chainspec::hardfork::TempoHardfork;
+        use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
+
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        let batch = BatchData {
+            zone_height: 20,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0xbb),
+            next_block_hash: B256::repeat_byte(0xcc),
+            prev_processed_deposit_hash: B256::ZERO,
+            next_processed_deposit_hash: B256::ZERO,
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 1,
+        };
+        // The first attempt fails after selecting the ABI, then L1 activates T13.
+        l1.push_success(&abi_encode_b256(batch.prev_block_hash));
+        l1.push_success(&mock_l1_header(999));
+        l1.push_failure_msg("submission metadata temporarily unavailable");
+        l1.push_success(&mock_l1_header(1_000));
+        let proof = SettlementProof {
+            bundle: ProofBundle {
+                verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
+                proof: vec![1].into(),
+            },
+            hardfork: TempoHardfork::T12,
+        };
+        let error = monitor
+            .submit_batch_with_retry(
+                &prepared(batch),
+                Some(&proof),
+                (VerifierMode::NitroV1, None),
+                20,
+                Vec::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BatchSubmitError::ProverHardforkChanged {
+                proved: TempoHardfork::T12,
+                current: TempoHardfork::T13,
+            }
+        ));
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
     async fn new_returns_error_when_startup_l1_read_fails() {
         let l1 = Asserter::new();
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
+            chain_spec: Arc::new(zone_chainspec::ZoneChainSpec {
+                inner: tempo_chainspec::spec::DEV.clone(),
+            }),
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),

@@ -17,6 +17,10 @@ pub(crate) struct SequencerMetrics {
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_prover")]
 pub(crate) struct ProverMetrics {
+    /// 1 when the current or next-72-hour chainspec hardfork has no configured prover endpoint.
+    /// Refreshed every minute, independently of proving activity.
+    pub(crate) missing_hardfork_prover: Gauge,
+
     /// Time a finalized batch candidate spends waiting for the prover worker.
     pub(crate) queue_duration_seconds: Histogram,
 
@@ -169,9 +173,11 @@ pub(crate) struct ZoneMonitorMetrics {
     /// Retry attempts for batch submissions.
     pub batch_submit_retry_total: Counter,
 
+    /// Settlement attempts rebuilt because the live L1 prover hardfork changed.
+    pub prover_hardfork_rebuild_total: Counter,
+
     /// Batches that selected the proofless verifier after proving or preflight failed.
     pub batch_no_proof_fallback_total: Counter,
-
     /// Number of times local monitor state was resynced from the portal.
     pub resync_from_portal_total: Counter,
 

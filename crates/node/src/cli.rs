@@ -17,7 +17,6 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
-use zone_prover::attested_transport::RemoteProverConfig;
 
 use crate::{
     ProverRuntime, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig,
@@ -26,7 +25,7 @@ use crate::{
 use zone_checker::{CheckerConfig, CheckerExEx, CheckerMode};
 use zone_sequencer::{
     BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
-    MAX_WITHDRAWAL_BATCH_GAS, WithdrawalBatchLimits,
+    HardforkProverAddress, MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses, WithdrawalBatchLimits,
 };
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
@@ -258,13 +257,6 @@ async fn configure_sequencing(
         || p2p_config
             .as_ref()
             .is_some_and(|config| !config.is_rpc_only());
-    // Clap requires the address and policy together.
-    let remote_prover = args
-        .prover_address
-        .clone()
-        .zip(args.prover_attestation_policy.as_deref())
-        .map(|(address, policy)| RemoteProverConfig::from_policy_file(address, policy))
-        .transpose()?;
     if rpc_only && args.sequencer_key_file.is_some() {
         return Err(eyre::eyre!(
             "this node is `rpc_only` in the manifest, so --sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
@@ -274,8 +266,15 @@ async fn configure_sequencing(
         !args.enable_prover || should_sequence_blocks || rpc_only,
         "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
     );
+    let policy = args
+        .prover_attestation_policy
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()?
+        .unwrap_or_default();
+    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone(), &policy)?;
     eyre::ensure!(
-        !args.enable_prover || !should_sequence_blocks || remote_prover.is_some(),
+        !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
         "settlement proving requires --sequencer.prover-address and --sequencer.prover-attestation-policy"
     );
 
@@ -299,13 +298,14 @@ async fn configure_sequencing(
                 max_in_flight_batches: args.withdrawal_max_in_flight_batches,
             },
             enable_prover: args.enable_prover,
-            remote_prover: remote_prover.clone(),
+            prover_addresses: prover_addresses.clone(),
         });
     } else if args.enable_prover {
         node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
             zone_id,
             batch_anchor_config: BatchAnchorConfig::default(),
-            prover_runtime: remote_prover.map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
+            prover_runtime: prover_addresses
+                .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
         });
     }
     if let Some(config) = p2p_config {
@@ -583,21 +583,22 @@ pub struct ZoneArgs {
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
-    /// Send witnesses to a remote Nitro prover capable of producing settlement attestations.
+    /// Route to an immutable prover release for each exact live L1 hardfork. Repeat per hardfork.
     #[arg(
         long = "sequencer.prover-address",
         env = "SEQUENCER_PROVER_ADDRESS",
-        value_name = "HOST:PORT",
+        value_name = "HARDFORK=HOST:PORT",
+        value_delimiter = ',',
         requires_all = ["enable_prover", "prover_attestation_policy"]
     )]
-    pub prover_address: Option<String>,
+    pub prover_addresses: Vec<HardforkProverAddress>,
 
-    /// JSON allowlist used to authenticate the remote prover's Nitro attestation.
+    /// JSON PCR allowlist shared by the configured hardfork prover endpoints.
     #[arg(
         long = "sequencer.prover-attestation-policy",
         env = "SEQUENCER_PROVER_ATTESTATION_POLICY",
         value_name = "PATH",
-        requires_all = ["enable_prover", "prover_address"]
+        requires_all = ["enable_prover", "prover_addresses"]
     )]
     pub prover_attestation_policy: Option<PathBuf>,
 }
@@ -720,6 +721,53 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn prover_addresses_accept_repeated_and_comma_separated_assignments() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer.enable-prover",
+            "--sequencer.prover-attestation-policy",
+            "policy.json",
+        ];
+        for flags in [
+            vec![
+                "--sequencer.prover-address",
+                "T12=old:5000",
+                "--sequencer.prover-address",
+                "T13=new:5000",
+            ],
+            vec!["--sequencer.prover-address", "T12=old:5000,T13=new:5000"],
+        ] {
+            let args = ZoneArgsParser::try_parse_from(common.into_iter().chain(flags))
+                .unwrap()
+                .zone;
+            assert_eq!(args.prover_addresses.len(), 2);
+            assert!(args.prover_attestation_policy.is_some());
+        }
+        let missing_policy = ZoneArgsParser::try_parse_from(
+            common[..common.len() - 2]
+                .iter()
+                .copied()
+                .chain(["--sequencer.prover-address", "T12=old:5000"]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing_policy.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let error = ZoneArgsParser::try_parse_from(
+            common
+                .into_iter()
+                .chain(["--sequencer.prover-address", "old:5000"]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

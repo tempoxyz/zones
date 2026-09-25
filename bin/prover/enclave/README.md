@@ -132,3 +132,61 @@ this change; coordinate client/server upgrades because plaintext clients are no 
 The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
 `PROVER_EIF_PATH`, `ENCLAVE_NAME`, `ENCLAVE_CPU_COUNT`, `ENCLAVE_MEMORY_MIB`, `ENCLAVE_CID`,
 `PROVER_TCP_PORT`, `PROVER_VSOCK_PORT`, and `MONITOR_INTERVAL_SECONDS` as runtime configuration.
+
+### Upgrading across an L1 hardfork
+
+Keep separate deployments of the currently approved EIF and the next hardfork's EIF. Pin each
+host image by digest, retain its commit-specific PCR measurements, and verify those measurements
+against the PCR policy shipped in the corresponding L1 release. Do not repoint an existing
+endpoint to a different EIF during the transition. The node does not authenticate an endpoint's
+advertised release; L1 remains responsible for checking the attestation's PCRs.
+
+Configure the node with one exact `--sequencer.prover-address` assignment per L1 hardfork.
+For example, a T12/T13 transition uses:
+
+```sh
+--sequencer.enable-prover \
+--sequencer.prover-address T12=prover-t12:5000 \
+--sequencer.prover-address T13=prover-t13:5000 \
+--sequencer.prover-attestation-policy /path/to/prover-policy.json
+```
+
+The equivalent address setting is
+`SEQUENCER_PROVER_ADDRESS=T12=prover-t12:5000,T13=prover-t13:5000`; also set
+`SEQUENCER_PROVER_ATTESTATION_POLICY` to the policy file path. The TLS policy applies to every
+configured endpoint, so include the approved measurements for both releases during the transition;
+the L1 verifier still enforces the hardfork-specific settlement measurement.
+Use the actual forks supported by the node binary; a future T14 assignment requires a binary
+whose Tempo dependency recognizes T14. Assign the same endpoint explicitly to adjacent forks
+when the accepted prover image is unchanged. The readiness gauge checks assignments for the
+current L1 hardfork and every later Tempo fork in the node's chainspec activating within the
+next 72 hours (inclusive). Forks more than 72 hours away are not included. This checks configured
+addresses, not endpoint connectivity or PCRs. Missing assignments for the live L1 fork and
+unknown L1 forks stop proving; there is no fallback to an older endpoint.
+
+Before activation, bring up the next deployment and exercise it on historical and mixed-fork
+witnesses. The new prover must preserve historical execution rules so it can attest unsettled
+pre-upgrade batches after old PCRs are retired. The node hardfork settlement integration test
+exercises SPF recovery across the T12/T13 transition; repeat that validation for each new STF release.
+
+The sequencer selects an endpoint using the live L1 hardfork when it sends a proving request,
+not the hardfork of the batch's imported L1 block. It rechecks the selected fork before
+settlement, during quorum waits, and before broadcast. A fork change rebuilds the attempt with
+a fresh proof; retries reconcile portal progress before deciding to submit again. Remote shadow
+proving also uses the live fork's endpoint to validate historical submissions.
+
+When colocating releases, use distinct `ENCLAVE_NAME`, `ENCLAVE_CID`, and `PROVER_TCP_PORT`
+settings and reserve enough Nitro CPU and memory for both. Separate hosts can use the defaults.
+Retain the old deployment through the operational reorg window, then retire it after the new
+fork is stable. Retaining a deployment does not extend acceptance of its PCRs on L1.
+
+Watch `tempo_zone_monitor_prover_hardfork_rebuild_total`, settlement lag, and the
+`Selected remote prover` log (endpoint, hardfork, Zone range) during the transition.
+
+`tempo_zone_prover_missing_hardfork_prover` is refreshed immediately and every 60 seconds for
+nodes with remote provers, including when idle, a standby, or busy proving a batch. It is `1` if
+the chainspec's current Tempo fork or any fork activating within the next 72 hours has no configured endpoint, and `0`
+otherwise. The check uses wall-clock time and the local chainspec, so it continues without L1 RPC
+or prover connectivity. It stays `1` after an unconfigured fork activates. Alert on a value of `1`
+and configure the missing endpoint before activation. The monitor runs for the node's lifetime,
+independently of prover workers.

@@ -24,7 +24,12 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use crate::{
     ZoneSequencerProvider,
@@ -34,6 +39,8 @@ use crate::{
         ZonePortal,
     },
     attestation::{AttestationDomain, SettlementAttestation, SettlementCertificate},
+    prover::SettlementProof,
+    prover_config::active_l1_hardfork,
 };
 use alloy_consensus::{Transaction, TxReceipt as _, transaction::TxHashRef as _};
 use alloy_contract::CallBuilder;
@@ -56,6 +63,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::IZoneVerifier;
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
+use zone_chainspec::ZoneChainSpec;
 use zone_prover::{ProofBundle, VerifierMode};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
@@ -65,6 +73,11 @@ pub enum BatchSubmitError {
     Cancelled,
     PortalAdvanced,
     PreparedAnchorInvalid(eyre::Report),
+    /// The attestation was generated using a prover selected under a different L1 policy.
+    ProverHardforkChanged {
+        proved: TempoHardfork,
+        current: TempoHardfork,
+    },
     Other(eyre::Report),
 }
 
@@ -82,6 +95,10 @@ impl fmt::Display for BatchSubmitError {
                 formatter.write_str("portal already committed the batch height")
             }
             Self::PreparedAnchorInvalid(error) => error.fmt(formatter),
+            Self::ProverHardforkChanged { proved, current } => write!(
+                formatter,
+                "prover hardfork changed from {proved} to {current}; regenerate the proof"
+            ),
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -228,6 +245,8 @@ pub struct BatchSubmitter {
     /// (EIP-2935 window check). The same provider backs the `portal` contract
     /// instance.
     l1_provider: DynProvider<TempoNetwork>,
+    /// Canonical Tempo fork activations inherited by this Zone.
+    chain_spec: Arc<ZoneChainSpec>,
     /// ZonePortal contract instance for calling `submitBatch` and reading
     /// on-chain state such as `blockHash()`.
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
@@ -253,19 +272,30 @@ impl BatchSubmitter {
     /// Create a batch submitter without a certificate signer.
     ///
     /// This is useful for read-only operations and tests. Batch submission returns an error.
-    pub fn new(portal_address: Address, l1_provider: DynProvider<TempoNetwork>) -> Self {
-        Self::with_anchor_config(portal_address, l1_provider, BatchAnchorConfig::default())
+    pub fn new(
+        portal_address: Address,
+        l1_provider: DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
+    ) -> Self {
+        Self::with_anchor_config(
+            portal_address,
+            l1_provider,
+            chain_spec,
+            BatchAnchorConfig::default(),
+        )
     }
 
     /// Create a new batch submitter with custom EIP-2935 anchor limits.
     pub fn with_anchor_config(
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
         Self::with_optional_signer_and_anchor_config(
             portal_address,
             l1_provider,
+            chain_spec,
             None,
             anchor_config,
         )
@@ -275,12 +305,14 @@ impl BatchSubmitter {
     pub fn with_signer_and_anchor_config(
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         signer: PrivateKeySigner,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
         Self::with_optional_signer_and_anchor_config(
             portal_address,
             l1_provider,
+            chain_spec,
             Some(signer),
             anchor_config,
         )
@@ -289,6 +321,7 @@ impl BatchSubmitter {
     pub(crate) fn with_optional_signer_and_anchor_config(
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         signer: Option<PrivateKeySigner>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
@@ -296,6 +329,7 @@ impl BatchSubmitter {
         Self {
             portal_address,
             l1_provider,
+            chain_spec,
             portal,
             stable_portal_metadata: OnceLock::new(),
             signer,
@@ -324,7 +358,9 @@ impl BatchSubmitter {
         batch: &PreparedBatch,
         proof: &ProofBundle,
     ) -> Result<Option<Result<bool>>> {
-        if SettlementAbi::from_l1(&self.l1_provider).await? != SettlementAbi::T13 {
+        if SettlementAbi::from_l1(&self.l1_provider, self.chain_spec.as_ref()).await?
+            != SettlementAbi::T13
+        {
             return Ok(None);
         }
         let signer = self
@@ -367,17 +403,28 @@ impl BatchSubmitter {
         next_block_hash = %prepared.batch.next_block_hash,
         withdrawal_queue_hash = %prepared.batch.withdrawal_queue_hash,
         withdrawal_batch_index = prepared.batch.withdrawal_batch_index,
+        prover_hardfork = ?proof_bundle.map(|proof| proof.hardfork),
     ))]
     pub async fn submit_batch(
         &self,
         prepared: &PreparedBatch,
-        proof_bundle: Option<&ProofBundle>,
+        proof_bundle: Option<&SettlementProof>,
         certificate: Option<&SettlementCertificate>,
         verifier_mode: VerifierMode,
     ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
-        let settlement_abi = SettlementAbi::from_l1(&self.l1_provider).await?;
+        let active = active_l1_hardfork(&self.l1_provider, self.chain_spec.as_ref()).await?;
+        if let Some(proved) = proof_bundle.map(|proof| proof.hardfork)
+            && proved != active
+        {
+            return Err(BatchSubmitError::ProverHardforkChanged {
+                proved,
+                current: active,
+            });
+        }
+        let settlement_abi = SettlementAbi::from_hardfork(active);
         let batch = &prepared.batch;
-        let (verifier_config, proof) = settlement_proof(verifier_mode, proof_bundle)?;
+        let (verifier_config, proof) =
+            settlement_proof(verifier_mode, proof_bundle.map(|proof| &proof.bundle))?;
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -1238,7 +1285,7 @@ pub struct WithdrawalPage {
     pub batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
 }
 
-/// Settlement ABI selected by the fork rules of the batch's imported Tempo block.
+/// Settlement ABI selected by the live L1 hardfork at submission time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementAbi {
     /// Pre-T13 selector and EIP-712 statement.
@@ -1249,12 +1296,21 @@ pub enum SettlementAbi {
 
 impl SettlementAbi {
     /// Resolve the settlement selector and attestation format from the live Tempo L1 hardfork.
-    pub async fn from_l1(provider: &DynProvider<TempoNetwork>) -> Result<Self> {
-        let t13_active = provider
-            .is_hardfork_active(TempoHardfork::T13)
-            .await
-            .wrap_err("failed reading the live Tempo L1 hardfork")?;
-        Ok(if t13_active { Self::T13 } else { Self::Legacy })
+    pub async fn from_l1(
+        provider: &DynProvider<TempoNetwork>,
+        chain_spec: &ZoneChainSpec,
+    ) -> Result<Self> {
+        Ok(Self::from_hardfork(
+            active_l1_hardfork(provider, chain_spec).await?,
+        ))
+    }
+
+    fn from_hardfork(hardfork: TempoHardfork) -> Self {
+        if hardfork >= TempoHardfork::T13 {
+            Self::T13
+        } else {
+            Self::Legacy
+        }
     }
 
     /// Hash the token transition exactly as the selected settlement statement expects.
@@ -1959,6 +2015,43 @@ mod tests {
             .erased()
     }
 
+    fn test_chain_spec() -> Arc<ZoneChainSpec> {
+        Arc::new(ZoneChainSpec {
+            inner: tempo_chainspec::spec::DEV.clone(),
+        })
+    }
+
+    fn chain_spec_with_t13(activation: u64) -> Arc<ZoneChainSpec> {
+        let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t13Time".into(), activation)
+            .unwrap();
+        Arc::new(ZoneChainSpec {
+            inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
+        })
+    }
+
+    fn mock_fork_header(timestamp: u64) -> serde_json::Value {
+        let header = TempoHeaderResponse {
+            inner: RpcHeader {
+                hash: B256::ZERO,
+                inner: TempoHeader {
+                    inner: ConsensusHeader {
+                        timestamp,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        };
+        serde_json::to_value(header).unwrap()
+    }
+
     #[test]
     fn settlement_bindings_keep_legacy_and_t13_selectors_distinct() {
         let legacy: [u8; 4] = keccak256(
@@ -1972,19 +2065,59 @@ mod tests {
 
     #[tokio::test]
     async fn settlement_abi_follows_live_l1_hardfork() {
+        let chain_spec = chain_spec_with_t13(1_000);
         let legacy = Asserter::new();
-        legacy.push_success(&serde_json::json!({ "active": "T12" }));
+        legacy.push_success(&mock_fork_header(999));
         assert_eq!(
-            SettlementAbi::from_l1(&mock_l1(legacy)).await.unwrap(),
+            SettlementAbi::from_l1(&mock_l1(legacy), &chain_spec)
+                .await
+                .unwrap(),
             SettlementAbi::Legacy
         );
 
         let t13 = Asserter::new();
-        t13.push_success(&serde_json::json!({ "active": "T13" }));
+        t13.push_success(&mock_fork_header(1_000));
         assert_eq!(
-            SettlementAbi::from_l1(&mock_l1(t13)).await.unwrap(),
+            SettlementAbi::from_l1(&mock_l1(t13), &chain_spec)
+                .await
+                .unwrap(),
             SettlementAbi::T13
         );
+    }
+
+    #[tokio::test]
+    async fn stale_prover_policy_is_rejected_before_submission() {
+        // This also covers reorgs: a T13 proof cannot be sent while T12 is active again.
+        for (proved, timestamp) in [(TempoHardfork::T12, 1_000), (TempoHardfork::T13, 999)] {
+            let l1 = Asserter::new();
+            l1.push_success(&mock_fork_header(timestamp));
+            let proof = SettlementProof {
+                bundle: ProofBundle {
+                    verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+                    proof: Bytes::new(),
+                },
+                hardfork: proved,
+            };
+            let submitter = BatchSubmitter::new(
+                Address::repeat_byte(0x11),
+                mock_l1(l1.clone()),
+                chain_spec_with_t13(1_000),
+            );
+            let error = submitter
+                .submit_batch(
+                    &test_prepared_batch(120, 100),
+                    Some(&proof),
+                    None,
+                    VerifierMode::NitroV1,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                BatchSubmitError::ProverHardforkChanged { .. }
+            ));
+            assert!(l1.read_q().is_empty());
+        }
     }
 
     #[test]
@@ -2315,7 +2448,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
         *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
@@ -2362,7 +2495,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
         *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
@@ -2401,7 +2534,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
 
         let (header, hash) = mock_l1_header(100, B256::ZERO);
         asserter.push_success(&100_u64);
@@ -2420,7 +2553,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
 
         asserter.push_success(&100_u64);
         let err = match submitter.resolve_batch_anchor(101).await {
@@ -2438,7 +2571,7 @@ mod tests {
     async fn prepared_anchor_survives_forward_head_drift() {
         let asserter = Asserter::new();
         let provider = mock_l1(asserter.clone());
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
         let (header, hash) = mock_l1_header(162_196, B256::ZERO);
         let mut prepared = test_prepared_batch(120, 160_000);
         prepared.anchor = BatchAnchor::Ancestry {
@@ -2463,6 +2596,7 @@ mod tests {
         let submitter = BatchSubmitter::with_anchor_config(
             Address::ZERO,
             provider,
+            test_chain_spec(),
             BatchAnchorConfig::new(10, 4).unwrap(),
         );
         let mut prepared = test_prepared_batch(120, 90);
@@ -2489,7 +2623,8 @@ mod tests {
 
     #[test]
     fn certificate_must_commit_the_prepared_anchor_exactly() {
-        let submitter = BatchSubmitter::new(Address::ZERO, mock_l1(Asserter::new()));
+        let submitter =
+            BatchSubmitter::new(Address::ZERO, mock_l1(Asserter::new()), test_chain_spec());
         let prepared = test_prepared_batch(120, 100);
         let batch = &prepared.batch;
         let metadata = PortalSubmissionMetadata {
@@ -2594,7 +2729,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider);
+        let submitter = BatchSubmitter::new(portal_address, provider, test_chain_spec());
 
         asserter.push_success(&abi_encode_multicall(vec![
             abi_word(7_u64),
@@ -2672,7 +2807,7 @@ mod tests {
             ("T13", Some(1), Some(Ok(abi_word(true))), Some(Some(true))),
         ] {
             let asserter = Asserter::new();
-            asserter.push_success(&serde_json::json!({ "active": fork }));
+            asserter.push_success(&mock_fork_header(if fork == "T12" { 999 } else { 1_000 }));
             if let Some(index) = portal_index {
                 asserter.push_success(&abi_encode_multicall(vec![
                     abi_word(index),
@@ -2689,8 +2824,11 @@ mod tests {
                 Some(Err(message)) => asserter.push_failure_msg(message),
                 None => {}
             }
-            let submitter =
-                BatchSubmitter::new(Address::repeat_byte(0x22), mock_l1(asserter.clone()));
+            let submitter = BatchSubmitter::new(
+                Address::repeat_byte(0x22),
+                mock_l1(asserter.clone()),
+                chain_spec_with_t13(1_000),
+            );
 
             let proof = ProofBundle {
                 verifier_config: Bytes::new(),
@@ -2713,7 +2851,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(Asserter::new())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
         let batch = BatchData {
             zone_height: 1,
             tempo_block_number: 1,
@@ -2759,7 +2897,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, test_chain_spec());
 
         let cached_header = CachedAncestryHeader {
             parent_hash: B256::ZERO,
@@ -2855,7 +2993,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
             .connect_mocked_client(Asserter::new())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider);
+        let submitter = BatchSubmitter::new(portal_address, provider, test_chain_spec());
 
         let event = BatchSubmitted {
             withdrawalBatchIndex: 7,
@@ -2921,7 +3059,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider);
+        let submitter = BatchSubmitter::new(portal_address, provider, test_chain_spec());
 
         asserter.push_success(&10_000_u64);
         let logs: Vec<_> = [99_u64, 100, 101]
