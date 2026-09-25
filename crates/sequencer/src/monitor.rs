@@ -21,7 +21,7 @@
 //! number that IS within the EIP-2935 window, and the proof must include a
 //! block header chain linking that anchor back to `tempoBlockNumber`.
 
-use std::{sync::Arc, time::Duration};
+use std::{ops::ControlFlow, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
@@ -32,12 +32,13 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tokio_util::sync;
 use tracing::{debug, error, info, instrument, warn};
-
-use alloy_sol_types::{ContractError, SolInterface as _};
+#[cfg(test)]
+use zone_prover::ProofBundle;
+use zone_prover::VerifierMode;
 
 use crate::{
     SettlementManager, ZoneSequencerProvider,
-    abi::{self, NO_QUEUE_INDEX, ZonePortal},
+    abi::{self, NO_QUEUE_INDEX},
     attestation::SettlementCertificate,
     prover::{SettlementProof, SettlementProver},
     resolve_portal_zone_anchor,
@@ -562,56 +563,98 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
+    /// Prove and preflight, while collecting a Nitro certificate, then submit.
+    ///
+    /// A prover error, verifier rejection, or verifier simulation failure selects
+    /// [`VerifierMode::NoProof`] for this batch and requires a fresh certificate.
+    /// Preflight setup and certificate collection errors do not trigger fallback.
+    /// Submission has its own retry and reconciliation logic.
     async fn prove_and_submit_batch(
         &mut self,
         from: u64,
-        prepared: &PreparedBatch,
+        batch: &PreparedBatch,
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
-        let proof = async {
-            match &self.settlement_prover {
-                Some(prover) => prover
-                    .prove(from, last_zone_block, prepared.clone())
-                    .await
-                    .map(Some)
-                    .map_err(BatchSubmitError::from),
-                None => Ok::<_, BatchSubmitError>(None),
-            }
-        };
-        let settlement = async {
-            match &self.config.settlements {
-                Some(settlements) => settlements.prepare(prepared).await.map(Some),
-                None => Ok(None),
-            }
-        };
-        let preparation = async {
-            tokio::pin!(proof, settlement);
-            tokio::select! {
-                proof_bundle = &mut proof => {
-                    let proof_bundle = proof_bundle?;
-                    let certificate = self.batch_submitter.race_l1_hardfork(
-                        proof_bundle.as_ref().map(|proof| proof.hardfork),
-                        settlement,
-                    ).await?;
-                    Ok::<_, BatchSubmitError>((proof_bundle, certificate))
+        let nitro_attempt = async {
+            let proof = async {
+                match &self.settlement_prover {
+                    Some(prover) => {
+                        match prover.prove(from, last_zone_block, batch.clone()).await {
+                            Ok(proof) => {
+                                match self.batch_submitter.simulate(batch, &proof.bundle).await {
+                                    Ok(Some(Err(error))) => {
+                                        Ok(ControlFlow::Break(("verifier", error)))
+                                    }
+                                    Ok(Some(Ok(false))) => Ok(ControlFlow::Break((
+                                        "verifier",
+                                        eyre::eyre!("verifier rejected the proof"),
+                                    ))),
+                                    Ok(_) => Ok(ControlFlow::Continue(Some(proof))),
+                                    Err(error) => Err(BatchSubmitError::from(error)),
+                                }
+                            }
+                            Err(error) => Ok(ControlFlow::Break(("prover", error))),
+                        }
+                    }
+                    None => Ok(ControlFlow::Continue(None)),
                 }
-                certificate = &mut settlement => {
-                    let certificate = certificate?;
-                    Ok((proof.await?, certificate))
+            };
+            tokio::pin!(proof);
+
+            let certificate = self.prepare_certificate(batch, VerifierMode::NitroV1);
+            tokio::pin!(certificate);
+
+            // Poll both concurrently. `NoProof` fallback decision doesn't wait for `Nitro` quorum.
+            let (proof, certificate) = tokio::select! {
+                result = &mut proof => match result? {
+                    ControlFlow::Break(cause) => return Ok(ControlFlow::Break(cause)),
+                    ControlFlow::Continue(proof) => {
+                        let certificate = self.batch_submitter.race_l1_hardfork(
+                            proof.as_ref().map(|proof| proof.hardfork),
+                            certificate,
+                        ).await?;
+                        (proof, certificate)
+                    },
+                },
+                result = &mut certificate => {
+                    let certificate = result?;
+                    match proof.await? {
+                        ControlFlow::Break(cause) => return Ok(ControlFlow::Break(cause)),
+                        ControlFlow::Continue(proof) => (proof, certificate),
+                    }
                 }
-            }
+            };
+
+            Ok::<_, BatchSubmitError>(ControlFlow::Continue((proof, certificate)))
         };
-        let (proof_bundle, certificate) = tokio::select! {
-            biased;
+
+        let (verifier_mode, proof_bundle, certificate) = match tokio::select! {
+            biased; // Prefer cancellation if shutdown and preparation are both ready.
             () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
-            result = preparation => result?,
+            result = nitro_attempt => result?,
+        } {
+            ControlFlow::Continue((proof, certificate)) => {
+                (VerifierMode::NitroV1, proof, certificate)
+            }
+            ControlFlow::Break((reason, cause)) => {
+                warn!(reason, %cause, "Settling batch with the `NoProof` verifier fallback");
+                self.metrics.batch_no_proof_fallback_total.increment(1);
+                // Dropping preparation releases the Nitro signature route before the fallback.
+                let certificate = tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
+                    result = self.prepare_certificate(batch, VerifierMode::NoProof) => result?,
+                };
+                (VerifierMode::NoProof, None, certificate)
+            }
         };
+
         self.submit_batch_with_retry(
-            prepared,
+            batch,
             proof_bundle.as_ref(),
-            certificate.as_ref(),
+            (verifier_mode, certificate),
             last_zone_block,
             withdrawals,
         )
@@ -629,18 +672,17 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// - Signals the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
-    /// On failure (after [`MAX_RETRIES`] attempts with [`INITIAL_RETRY_DELAY`]
-    /// doubling each time): resyncs the local submission anchor from the
-    /// portal-confirmed zone block so the next poll starts from accepted
-    /// on-chain state.
+    /// The verifier mode, proof, and certificate never change across attempts. Each attempt
+    /// first reconciles with the portal; after [`MAX_RETRIES`] failures, the anchor is resynced.
     async fn submit_batch_with_retry(
         &mut self,
         prepared: &PreparedBatch,
         proof_bundle: Option<&SettlementProof>,
-        certificate: Option<&SettlementCertificate>,
+        settlement: (VerifierMode, Option<SettlementCertificate>),
         last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
     ) -> std::result::Result<(), BatchSubmitError> {
+        let (verifier_mode, certificate) = settlement;
         let batch_data = &prepared.batch;
         let mut delay = INITIAL_RETRY_DELAY;
 
@@ -695,8 +737,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 .submit_batch(
                     prepared,
                     proof_bundle.map(|proof| &proof.bundle),
-                    certificate,
+                    certificate.as_ref(),
                     proof_bundle.map(|proof| proof.hardfork),
+                    verifier_mode,
                 )
                 .await
             {
@@ -809,10 +852,8 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                         delay *= 2;
                     } else {
                         self.metrics.batch_submit_failure_total.increment(1);
-                        let revert_reason = decode_portal_revert(&e);
                         error!(
                             error = %e,
-                            revert_reason,
                             last_zone_block,
                             tempo_block_number = batch_data.tempo_block_number,
                             prev_block_hash = %batch_data.prev_block_hash,
@@ -888,6 +929,17 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             .set(last_submitted_zone_block as f64);
         self.update_submission_lag();
         Ok(last_submitted_zone_block)
+    }
+
+    async fn prepare_certificate(
+        &self,
+        prepared: &PreparedBatch,
+        verifier_mode: VerifierMode,
+    ) -> Result<Option<SettlementCertificate>, BatchSubmitError> {
+        match &self.config.settlements {
+            Some(settlements) => settlements.prepare(prepared, verifier_mode).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     async fn build_portal_resync_snapshot(&self) -> Result<PortalResyncSnapshot> {
@@ -1035,20 +1087,6 @@ pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
             }
         }
     })
-}
-
-/// Try to decode a ZonePortal revert reason from an eyre error chain.
-///
-/// Extracts hex-encoded revert data from the error's display string and decodes
-/// it using alloy's `ContractError`, which handles standard `Revert(string)`,
-/// `Panic(uint256)`, and ZonePortal custom errors (`NotSequencer`, etc.).
-fn decode_portal_revert(err: &eyre::Report) -> Option<String> {
-    let msg = format!("{err}");
-    let start = msg.find("data: \"0x")? + "data: \"".len();
-    let end = msg[start..].find('"')? + start;
-    let bytes = alloy_primitives::hex::decode(&msg[start..end]).ok()?;
-    let error = ContractError::<ZonePortal::ZonePortalErrors>::abi_decode(&bytes).ok()?;
-    Some(error.to_string())
 }
 
 #[cfg(test)]
@@ -1202,14 +1240,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn attestation_failure_prevents_submit_batch() {
-        let l1 = Asserter::new();
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        monitor.settlement_prover = Some(SettlementProver::failing(
-            "remote prover rejected request (AttestationUnavailable): NSM unavailable",
-        ));
-        let batch_data = BatchData {
+    fn test_batch_data() -> BatchData {
+        BatchData {
             zone_height: 20,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0xbb),
@@ -1222,8 +1254,188 @@ mod tests {
             next_processed_token_count: 0,
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_simulation_failure_enters_no_proof_submission_path() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover = Some(SettlementProver::fixed(Ok(SettlementProof {
+            bundle: ProofBundle {
+                verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+                proof: Bytes::from_static(&[1]),
+            },
+            hardfork: tempo_chainspec::hardfork::TempoHardfork::T13,
+        })));
+        l1.push_success(&mock_l1_header(1_000));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(0),
+            abi_encode_u64(1),
+            abi_encode_u64(1),
+            abi_encode_u64(1),
+            abi_encode_u64(0),
+            abi_encode_u64(42),
+            abi_encode_u64(42431),
+        ]));
+        l1.push_failure_msg("execution reverted: out of gas");
+        // The fallback must reach the submission loop. Fail its portal reads so the
+        // test does not need a signer or a successful L1 transaction.
+        for _ in 0..MAX_RETRIES {
+            l1.push_failure_msg("portal read failed");
+        }
+        l1.push_failure_msg("resync failed");
+
+        let error = monitor
+            .prove_and_submit_batch(
+                11,
+                &prepared(test_batch_data()),
+                20,
+                Vec::new(),
+                &sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to resync after exhausting")
+        );
+        assert!(l1.read_q().is_empty(), "fallback must reach submission");
+    }
+
+    #[tokio::test]
+    async fn simulation_failure_collects_no_proof_quorum_until_leader_demotion() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        let (proof_tx, proof_rx) = tokio::sync::oneshot::channel();
+        monitor.settlement_prover = Some(SettlementProver::fixed_after(async move {
+            proof_rx.await.expect("send proof after the Nitro proposal")
+        }));
+        let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
+        let settlements = SettlementManager::new(
+            crate::attestation::AttestationDomain {
+                l1_chain_id: 1337,
+                portal_address: monitor.config.portal_address,
+                zone_id: 7,
+            },
+            None,
+            PrivateKeySigner::random(),
+            Default::default(),
+            mock_provider(l1.clone()),
+            monitor.config.chain_spec.clone(),
+            BatchAnchorConfig::default(),
+            commands,
+        );
+        monitor.config.settlements = Some(settlements);
+        let header = tempo_alloy::rpc::TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header {
+                hash: B256::ZERO,
+                inner: TempoHeader::default(),
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
         };
-        let prepared = prepared(batch_data);
+        // Collect Nitro signatures concurrently with proving, then fail preflight.
+        l1.push_success(&mock_l1_header(1_000));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(1),
+            abi_encode_u64(2),
+            Address::ZERO.abi_encode().into(),
+            abi_encode_u64(0),
+        ]));
+        l1.push_success(&serde_json::json!("0x7b"));
+        l1.push_success(&header);
+        l1.push_success(&mock_l1_header(1_000));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(0),
+            abi_encode_u64(1),
+            abi_encode_u64(2),
+            abi_encode_u64(1),
+            abi_encode_u64(0),
+            abi_encode_u64(42),
+            abi_encode_u64(42431),
+        ]));
+        l1.push_failure_msg("execution reverted: out of gas");
+        l1.push_success(&mock_l1_header(1_000));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(1),
+            abi_encode_u64(2),
+            Address::ZERO.abi_encode().into(),
+            abi_encode_u64(0),
+        ]));
+        l1.push_success(&serde_json::json!("0x7b"));
+        l1.push_success(&header);
+        let shutdown = sync::CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            monitor
+                .prove_and_submit_batch(
+                    11,
+                    &prepared(test_batch_data()),
+                    20,
+                    Vec::new(),
+                    &task_shutdown,
+                )
+                .await
+        });
+        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
+            panic!("expected a Nitro settlement proposal");
+        };
+        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
+        assert_eq!(
+            attestation.verifierConfigHash,
+            VerifierMode::NitroV1.config_hash()
+        );
+        proof_tx
+            .send(Ok(SettlementProof {
+                bundle: ProofBundle {
+                    verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
+                    proof: Bytes::from_static(&[1]),
+                },
+                hardfork: tempo_chainspec::hardfork::TempoHardfork::T13,
+            }))
+            .unwrap();
+        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
+            panic!("expected a NoProof settlement proposal");
+        };
+        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
+        assert_eq!(
+            attestation.verifierConfigHash,
+            VerifierMode::NoProof.config_hash()
+        );
+        assert!(!task.is_finished(), "a second signature is still required");
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(BatchSubmitError::Cancelled)));
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validation_failure_enters_no_proof_submission_path() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        monitor.settlement_prover =
+            Some(SettlementProver::fixed(Err(eyre::eyre!("invalid proof"))));
+        let prepared = prepared(test_batch_data());
+        // Fail the fallback's submission reads so the test needs no L1 signer.
+        for _ in 0..MAX_RETRIES {
+            l1.push_failure_msg("portal read failed");
+        }
+        l1.push_failure_msg("resync failed");
 
         let error = monitor
             .prove_and_submit_batch(
@@ -1236,11 +1448,12 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("AttestationUnavailable"));
         assert!(
-            l1.read_q().is_empty(),
-            "submitBatch must not issue any L1 request after proving fails"
+            error
+                .to_string()
+                .contains("failed to resync after exhausting")
         );
+        assert!(l1.read_q().is_empty(), "fallback must reach submission");
     }
 
     #[tokio::test]
@@ -1278,7 +1491,13 @@ mod tests {
             hardfork: TempoHardfork::T12,
         };
         let error = monitor
-            .submit_batch_with_retry(&prepared(batch), Some(&proof), None, 20, Vec::new())
+            .submit_batch_with_retry(
+                &prepared(batch),
+                Some(&proof),
+                (VerifierMode::NitroV1, None),
+                20,
+                Vec::new(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1537,7 +1756,13 @@ mod tests {
         };
 
         monitor
-            .submit_batch_with_retry(&prepared(batch_data.clone()), None, None, 20, Vec::new())
+            .submit_batch_with_retry(
+                &prepared(batch_data.clone()),
+                None,
+                (VerifierMode::NitroV1, None),
+                20,
+                Vec::new(),
+            )
             .await
             .unwrap();
 
@@ -1589,7 +1814,7 @@ mod tests {
             .submit_batch_with_retry(
                 &prepared(batch_data),
                 None,
-                None,
+                (VerifierMode::NitroV1, None),
                 pending_boundary,
                 Vec::new(),
             )
@@ -1632,7 +1857,13 @@ mod tests {
         };
 
         let error = monitor
-            .submit_batch_with_retry(&prepared(batch_data), None, None, 20, Vec::new())
+            .submit_batch_with_retry(
+                &prepared(batch_data),
+                None,
+                (VerifierMode::NitroV1, None),
+                20,
+                Vec::new(),
+            )
             .await
             .unwrap_err();
 

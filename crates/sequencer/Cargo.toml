@@ -34,6 +34,7 @@ reth-storage-api.workspace = true
 # alloy
 alloy-chains.workspace = true
 alloy-consensus.workspace = true
+alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
@@ -55,7 +56,6 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schnellru.workspace = true
-thiserror.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

@@ -18,6 +18,7 @@ tempo-chainspec.workspace = true
 
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
+keccak-const.workspace = true
 
 futures.workspace = true
 minicbor.workspace = true

@@ -19,7 +19,7 @@ use tempo_zone_contracts::{
 };
 use tracing::info;
 use zone_chainspec::ZoneChainSpec;
-use zone_prover::NITRO_VERIFIER_CONFIG_V1;
+use zone_prover::VerifierMode;
 
 use zone_sequencer::{
     BatchAnchorConfig, SettlementAbi,
@@ -271,6 +271,7 @@ pub(crate) async fn build_settlement_attestation<P>(
     number: u64,
     context: &AttestationContext,
     anchor: (u64, B256),
+    verifier_mode: VerifierMode,
 ) -> eyre::Result<Option<SettlementAttestation>>
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
@@ -343,7 +344,7 @@ where
         tokenEnablementTransitionHash: settlement_abi
             .token_transition_hash(previous_token_count, commitments.processed_token_count),
         withdrawalQueueHash: withdrawal_queue_hash,
-        verifierConfigHash: alloy_primitives::keccak256(NITRO_VERIFIER_CONFIG_V1),
+        verifierConfigHash: verifier_mode.config_hash(),
     }))
 }
 
@@ -657,13 +658,6 @@ mod tests {
         let mut previous_tip = B256::ZERO;
         let mut previous_deposit = B256::ZERO;
         for number in 1_u64..=2 {
-            l1.push_success(&serde_json::json!({ "active": "T13" }));
-            // The only portal values supplied are signing configuration. Neither the submitted
-            // zone tip nor the submitted batch index is read, even for the second boundary.
-            let metadata: Vec<Bytes> =
-                vec![1_u64.abi_encode().into(), verifier.abi_encode().into()];
-            l1.push_success(&Bytes::from((U256::ZERO, metadata).abi_encode_params()));
-            l1.push_success(&104_u64);
             let header = tempo_alloy::rpc::TempoHeaderResponse {
                 inner: alloy_rpc_types_eth::Header {
                     hash: l1_header.hash_slow(),
@@ -674,6 +668,13 @@ mod tests {
                 timestamp_millis: 0,
             };
             l1.push_success(&header);
+            // The only portal values supplied are signing configuration. Neither the submitted
+            // zone tip nor the submitted batch index is read, even for the second boundary.
+            let metadata: Vec<Bytes> =
+                vec![1_u64.abi_encode().into(), verifier.abi_encode().into()];
+            l1.push_success(&Bytes::from((U256::ZERO, metadata).abi_encode_params()));
+            l1.push_success(&104_u64);
+            l1.push_success(&header);
             l1.push_success(&header);
 
             let attestation = build_settlement_attestation(
@@ -681,6 +682,7 @@ mod tests {
                 number,
                 &context,
                 (104, l1_header.hash_slow()),
+                VerifierMode::NitroV1,
             )
             .await
             .unwrap()
@@ -735,6 +737,7 @@ mod tests {
                 number,
                 &context,
                 (104, l1_header.hash_slow()),
+                VerifierMode::NitroV1,
             )
             .await
             .unwrap_err();
