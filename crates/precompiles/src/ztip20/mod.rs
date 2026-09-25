@@ -144,7 +144,6 @@ impl CallRules for TIP20Rules {
 mod tests {
     use super::*;
     use alloy::primitives::{Address, B256, Bytes, U256, address};
-    use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
     use tempo_chainspec::hardfork::TempoHardfork;
@@ -165,8 +164,8 @@ mod tests {
     use crate::{
         TempoState,
         test_utils::{
-            MockL1Reader, TestContext, call_precompile, test_context, test_env,
-            test_storage_provider,
+            MockL1Reader, TestContext, TestPrecompiles, call_precompile, test_context,
+            test_precompiles, test_storage_provider,
         },
     };
 
@@ -211,7 +210,7 @@ mod tests {
         spender: Address,
         sequencer: Address,
         l1_reader: MockL1Reader,
-        precompile: DynPrecompile,
+        precompile: TestPrecompiles,
     }
 
     impl PrecompileHarness {
@@ -251,8 +250,8 @@ mod tests {
                 })?;
             }
 
-            let env = test_env(&ctx);
-            let precompile = crate::create_tip20_precompile(token, &env);
+            let precompile =
+                test_precompiles(&ctx, crate::L1State::new(l1_reader.clone(), PORTAL_ADDRESS));
 
             Ok(Self {
                 ctx,
@@ -275,7 +274,7 @@ mod tests {
         ) -> PrecompileResult {
             call_precompile(
                 &mut self.ctx,
-                &self.precompile,
+                &mut self.precompile,
                 caller,
                 &calldata,
                 gas,
@@ -337,13 +336,15 @@ mod tests {
             &rules,
             IRolesAuth::hasRoleCall {
                 account,
-                role: ISSUER_ROLE,
+                role: (*ISSUER_ROLE).into(),
             },
             caller,
         );
         assert_allowed(
             &rules,
-            IRolesAuth::getRoleAdminCall { role: ISSUER_ROLE },
+            IRolesAuth::getRoleAdminCall {
+                role: (*ISSUER_ROLE).into(),
+            },
             caller,
         );
     }
@@ -450,7 +451,7 @@ mod tests {
     fn role_mutations_are_disallowed() {
         let caller = Address::repeat_byte(0x11);
         let account = Address::repeat_byte(0x22);
-        let role = ISSUER_ROLE;
+        let role = (*ISSUER_ROLE).into();
         let rules = rules();
 
         assert_unauthorized(&rules, IRolesAuth::grantRoleCall { role, account }, caller);
@@ -599,8 +600,8 @@ mod tests {
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let spender = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
-        let env = test_env(&ctx);
-        let precompile = crate::create_tip20_precompile(token, &env);
+        let mut precompile =
+            test_precompiles(&ctx, crate::L1State::new(Default::default(), Address::ZERO));
         let calldata: Bytes = ITIP20::approveCall {
             spender,
             amount: U256::from(1u64),
@@ -610,7 +611,7 @@ mod tests {
 
         let result = call_precompile(
             &mut ctx,
-            &precompile,
+            &mut precompile,
             caller,
             &calldata,
             TIP20_FIXED_TRANSFER_GAS,

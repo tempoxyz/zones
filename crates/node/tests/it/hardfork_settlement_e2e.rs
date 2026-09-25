@@ -332,7 +332,6 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
 
 /// Predeploy a T12 portal whose mock verifier storage survives the canonical T13 runtime upgrade.
 fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result<Address> {
-    use revm::state::Bytecode;
     use tempo_contracts::precompiles::{IZoneFactory, initial_zone_factory_state};
     use tempo_precompiles::zone_factory::{
         ZoneFactory, ZoneInfoStorageHandler, ZonePortalStorage, slots,
@@ -370,7 +369,7 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
     storage.set_timestamp(U256::from(genesis.timestamp));
     for (&address, account) in &genesis.alloc {
         if let Some(code) = &account.code {
-            storage.set_code(address, Bytecode::new_legacy(code.clone()))?;
+            storage.set_code(address, code.clone())?;
         }
         if let Some(slots) = &account.storage {
             for (&slot, &value) in slots {

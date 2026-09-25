@@ -4,15 +4,21 @@
 //! discarded; only exact-L1 reads populate the cache shared with canonical execution.
 
 use crate::builder::build_advance_tempo_tx_owned;
-use alloy_evm::block::BlockExecutor;
 use alloy_primitives::B256;
-use reth_errors::ProviderError;
-use reth_evm::{ConfigureEvm, Database, execute::BlockBuilder};
+use evm2::evm::{CacheDB, Db};
+use reth_evm::{
+    BlockExecutor as _, ConfigureEvm, database::StateProviderDatabase, execute::BlockBuilder,
+};
 use reth_primitives_traits::SealedHeader;
-use reth_revm::{State, cancelled::ManualCancel, database::StateProviderDatabase};
-use reth_storage_api::StateProviderFactory;
+use reth_storage_api::{StateProvider as _, StateProviderFactory};
 use reth_tasks::TaskExecutor;
-use std::{error::Error, sync::Arc};
+use std::{
+    error::Error,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::DepositType;
@@ -65,7 +71,7 @@ where
             let context = context.clone();
             let cancel = handle.cancel.clone();
             pool.spawn(move || {
-                if !cancel.is_cancelled() {
+                if !cancel.load(Ordering::Relaxed) {
                     let _ = context.prewarm_deposit(partial);
                 }
             });
@@ -78,12 +84,12 @@ where
         &self,
         partial: PreparedL1Block,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let state =
-            StateProviderDatabase::new(self.provider.state_by_block_hash(self.parent_hash)?);
-        let mut db = State::builder()
-            .with_database(Box::new(state) as Box<dyn Database<Error = ProviderError>>)
-            .with_bundle_update()
-            .build();
+        let state = StateProviderDatabase::new(
+            self.provider
+                .state_by_block_hash(self.parent_hash)?
+                .into_evm_state_provider(),
+        );
+        let mut db = CacheDB::new(Db::new(state));
 
         let mut worker = self.evm_config.builder_for_next_block(
             &mut db,
@@ -106,11 +112,11 @@ where
 /// Cancels queued work that has not started when dropped.
 #[derive(Debug, Default)]
 pub(crate) struct AdvanceTempoPrewarming {
-    cancel: ManualCancel,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Drop for AdvanceTempoPrewarming {
     fn drop(&mut self) {
-        self.cancel.clone().cancel();
+        self.cancel.store(true, Ordering::Relaxed);
     }
 }
