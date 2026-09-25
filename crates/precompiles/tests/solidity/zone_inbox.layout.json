@@ -36,11 +36,19 @@
             "type": "t_bytes32"
           },
           {
-            "astId": 20,
+            "astId": 16,
+            "contract": "tests/solidity/zone_inbox.sol:ZoneInboxStorage",
+            "label": "processedEnabledTokenCount",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_uint64"
+          },
+          {
+            "astId": 22,
             "contract": "tests/solidity/zone_inbox.sol:ZoneInboxStorage",
             "label": "forcedExitNonces",
             "offset": 0,
-            "slot": "4",
+            "slot": "5",
             "type": "t_mapping(t_address,t_mapping(t_uint256,t_bool))"
           }
         ],

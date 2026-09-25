@@ -99,12 +99,28 @@ impl ZoneInbox {
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
         let deposits = decode_deposits(call.deposits)?;
+        // TODO: Replace temporary T13 with the coordinated post-prover Tempo fork before merge.
+        // Reject the whole transition before anchoring L1 or changing any inbox state.
+        let has_forced_exits = deposits
+            .iter()
+            .any(|entry| matches!(entry, DecodedQueuedDeposit::ForcedExit(_)));
+        if has_forced_exits && !self.storage.spec().is_t13() {
+            return Err(ZonePrecompileError::MalformedCalldata);
+        }
 
         let mut tempo_state = TempoState::new();
 
         // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
         tempo_state.finalize_checkpoints(l1, &[call.header])?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
+
+        // Activation is authenticated at the imported L1 anchor, including historical replay.
+        if has_forced_exits {
+            let portal = crate::forced_exit_storage::ForcedExitPortalStorage::new(l1.portal());
+            if l1.read_l1(&portal.forced_exit_version)? != 1 {
+                return Err(ZonePrecompileError::MalformedCalldata);
+            }
+        }
 
         let has_token_enablements = !call.enabledTokens.is_empty();
         let enabled_token_count = call.enabledTokens.len();
@@ -170,8 +186,6 @@ impl ZoneInbox {
 
             match queued {
                 DecodedQueuedDeposit::ForcedExit(entry) => {
-                    // Admission currently accepts only v1 forced exits. If there's ever a new version
-                    // add a check here to make sure it is processed with the correct logic.
                     let decryption = decryptions
                         .next()
                         .ok_or_else(ZoneInboxError::missing_decryption_data)?;

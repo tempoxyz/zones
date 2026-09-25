@@ -27,9 +27,10 @@ impl ZoneInbox {
         // 1. Bind the authenticated outer entry and its global inbox position to admission.
         let portal = ForcedExitPortalStorage::new(l1.portal());
         let metadata = &portal.forced_exit_requests[entry.requestId];
+        // Checkpoint-only imports can defer this entry to a later execution anchor.
         if l1.read_l1(&metadata.token)? != entry.token
             || l1.read_l1(&metadata.deposit_number)? != deposit_number
-            || entry.requestedAtBlock != TempoState::new().tempo_block_number()?
+            || entry.requestedAtBlock > TempoState::new().tempo_block_number()?
         {
             return Err(ZonePrecompileError::MalformedCalldata);
         }

@@ -5,6 +5,7 @@ import {
     BlockTransition,
     DepositQueueTransition,
     IZonePortal,
+    TokenEnablementTransition,
     Withdrawal,
     ZONE_VERIFIER_ADDRESS
 } from "../../src/runtime/interfaces/IZone.sol";
@@ -17,7 +18,7 @@ contract ForcedExitSettlementTest is ForcedExitTest {
 
     uint256 constant SIGNER_KEY = 0xabc123;
     string constant TYPE =
-        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 tokenEnablementTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)";
 
     function setUp() public override {
         sequencer = vm.addr(SIGNER_KEY);
@@ -75,6 +76,14 @@ contract ForcedExitSettlementTest is ForcedExitTest {
                 getBlockHash(tempo),
                 keccak256(abi.encode(b)),
                 keccak256(abi.encode(d)),
+                keccak256(
+                    abi.encode(
+                        TokenEnablementTransition(
+                            portal.lastProcessedEnabledTokenCount(),
+                            uint64(portal.enabledTokenCount())
+                        )
+                    )
+                ),
                 queue,
                 keccak256("")
             )
@@ -88,14 +97,16 @@ contract ForcedExitSettlementTest is ForcedExitTest {
         signatures[0] = abi.encodePacked(r, s, v);
         (BlockTransition memory b, DepositQueueTransition memory d) = transitions(processed);
         uint256 height = portal.zoneHeight() + 1;
+        TokenEnablementTransition memory tokens = TokenEnablementTransition(
+            portal.lastProcessedEnabledTokenCount(), uint64(portal.enabledTokenCount())
+        );
         vm.prank(sequencer);
-        portal.submitBatch(tempo, 0, b, d, queue, "", "", height, signatures);
+        portal.submitBatch(tempo, 0, b, d, tokens, queue, "", "", height, signatures);
     }
 
     function test_activated_forced_requests_use_existing_selector_statement_and_event() public {
-        portal.setTestVersion(1);
         uint64 count =
-            (portal.MAX_DEPOSITS_PER_TEMPO_BLOCK() - 20) / portal.FORCED_EXIT_ADMISSION_WEIGHT();
+            (portal.MAX_UNPROCESSED_DEPOSITS() - 20) / portal.FORCED_EXIT_ADMISSION_WEIGHT();
         for (uint64 i; i < count; ++i) {
             request(384);
         }
@@ -124,14 +135,13 @@ contract ForcedExitSettlementTest is ForcedExitTest {
             IZonePortal.submitBatch.selector,
             bytes4(
                 keccak256(
-                    "submitBatch(uint64,uint64,(bytes32,bytes32),(bytes32,bytes32,uint64,uint64),bytes32,bytes,bytes,uint256,bytes[])"
+                    "submitBatch(uint64,uint64,(bytes32,bytes32),(bytes32,bytes32,uint64,uint64),(uint64,uint64),bytes32,bytes,bytes,uint256,bytes[])"
                 )
             )
         );
     }
 
     function test_forced_withdrawals_use_ordinary_delivery_and_bounceback() public {
-        portal.setTestVersion(1);
         request(384);
         request(384);
         vm.prank(pathUSDAdmin);
