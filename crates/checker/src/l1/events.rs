@@ -43,6 +43,11 @@ pub(crate) enum L1PortalEvent {
         amount: u128,
         bounceback_fee: u128,
     },
+    /// Forced-exit compensation the admin could not receive, parked as a claimable refund.
+    ForcedExitCompensationPending {
+        token: Address,
+        amount: u128,
+    },
     RefundClaimed {
         token: Address,
         amount: u128,
@@ -135,6 +140,17 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         }
         ZonePortal::ForcedExitRequested::SIGNATURE_HASH => {
             ignored!(ZonePortal::ForcedExitRequested, "ForcedExitRequested")
+        }
+        ZonePortal::ForcedExitCompensationPending::SIGNATURE_HASH => {
+            let e = decode_event::<ZonePortal::ForcedExitCompensationPending>(
+                log,
+                "ForcedExitCompensationPending",
+                block,
+            )?;
+            L1PortalEvent::ForcedExitCompensationPending {
+                token: e.token,
+                amount: e.amount,
+            }
         }
         ZonePortal::WithdrawalProcessed::SIGNATURE_HASH => {
             let e =
@@ -368,6 +384,14 @@ mod tests {
         }
         .encode_log_data())
     }
+    fn compensation_pending() -> alloy_rpc_types_eth::Log {
+        log(ZonePortal::ForcedExitCompensationPending {
+            admin: Address::repeat_byte(19),
+            token: Address::repeat_byte(20),
+            amount: 100_000,
+        }
+        .encode_log_data())
+    }
     fn refund() -> alloy_rpc_types_eth::Log {
         log(ZonePortal::RefundClaimed {
             recipient: Address::repeat_byte(17),
@@ -398,11 +422,12 @@ mod tests {
                 withdrawal_bounce(),
                 deposit_bounce(),
                 pending(),
+                compensation_pending(),
                 refund(),
             ],
         )])
         .unwrap();
-        assert_eq!(events.len(), 7);
+        assert_eq!(events.len(), 8);
         assert!(matches!(
             events[0],
             L1PortalEvent::DepositMade {
@@ -426,6 +451,13 @@ mod tests {
         ));
         assert!(matches!(
             events[6],
+            L1PortalEvent::ForcedExitCompensationPending {
+                amount: 100_000,
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[7],
             L1PortalEvent::RefundClaimed { amount: 42, .. }
         ));
     }

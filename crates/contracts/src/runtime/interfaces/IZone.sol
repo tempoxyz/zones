@@ -475,6 +475,13 @@ interface IZonePortal {
     function activateForcedExits() external;
 
     event ForcedExitsActivated(uint64 version);
+
+    /// @notice Emitted when forced-exit compensation cannot be paid to the admin and is parked in
+    ///         `refunds` for `claimRefund`.
+    event ForcedExitCompensationPending(
+        address indexed admin, address indexed token, uint128 amount
+    );
+
     /// @notice Remaining weighted admission units, including the withdrawal reserve.
     /// @dev Each withdrawal may require one unit for a callback deposit or bounce-back.
     function remainingDepositCapacity() external view returns (uint64);
@@ -489,7 +496,8 @@ interface IZonePortal {
     /// @notice Queue an encrypted root authorization; processing is performed by the Zone.
     /// @dev Requires activated forced exits, an unpaused portal, an eligible fee payer, an enabled
     ///      token, a valid bounded envelope/key, and shared public inbox capacity.
-    ///      Collects 100_000 base units from msg.sender and immediately pays the portal admin.
+    ///      Collects 100_000 base units from msg.sender and immediately pays the portal admin. If
+    ///      that payout fails, the compensation is parked in `refunds[token][admin]` instead.
     function requestForcedExit(
         address token,
         uint256 keyIndex,
@@ -641,6 +649,7 @@ interface IZonePortal {
     error InvalidForcedExitCiphertextLength(uint256 actual);
     error ForcedExitsNotActivated();
     error ForcedExitsAlreadyActivated();
+    error ForcedExitCompensationRejected();
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);

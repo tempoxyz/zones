@@ -164,7 +164,8 @@ contract ZonePortal is IZonePortal {
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
-    /// @notice Refunds parked after a deposit bounce-back transfer reverts on Tempo.
+    /// @notice Refunds parked after a deposit bounce-back or forced-exit compensation transfer
+    ///         fails on Tempo.
     mapping(address token => mapping(address owner => uint128 amount)) public refunds;
 
     /// @notice Withdrawal queue (zone→Tempo): unbounded FIFO
@@ -1078,9 +1079,14 @@ contract ZonePortal is IZonePortal {
         // Require direct receipt before paying the admin from the portal's balance.
         // A diverted inbound transfer must not spend existing deposit backing.
         (bool authorized,) = TIP403_REGISTRY.validateReceivePolicy(token, msg.sender, address(this));
-        if (!authorized) revert CallbackRejected();
+        if (!authorized) revert ForcedExitCompensationRejected();
         ITIP20(token).transferFrom(msg.sender, address(this), FORCED_EXIT_COMPENSATION);
-        if (!_tryTransfer(token, admin, FORCED_EXIT_COMPENSATION)) revert CallbackRejected();
+        // The admin must not be able to block forced exits by refusing compensation, so a failed
+        // payout is parked for claimRefund instead of reverting admission.
+        if (!_tryTransfer(token, admin, FORCED_EXIT_COMPENSATION)) {
+            refunds[token][admin] += FORCED_EXIT_COMPENSATION;
+            emit ForcedExitCompensationPending(admin, token, FORCED_EXIT_COMPENSATION);
+        }
 
         requestId = forcedExitCount + 1;
         ForcedExit memory entry = ForcedExit({

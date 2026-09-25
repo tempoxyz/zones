@@ -146,6 +146,7 @@ crate::sol! {
         // -- Events --
         event ForcedExitsActivated(uint64 version);
         event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
+        event ForcedExitCompensationPending(address indexed admin, address indexed token, uint128 amount);
 
         event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
@@ -290,6 +291,7 @@ crate::sol! {
         error InvalidForcedExitCiphertextLength(uint256 actual);
         error ForcedExitsNotActivated();
         error ForcedExitsAlreadyActivated();
+        error ForcedExitCompensationRejected();
         error InvalidProofOfPossession();
         error DepositTooSmall();
         error TokenEnablementBlockCapacityExceeded(uint64 maximum);
