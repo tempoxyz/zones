@@ -37,7 +37,7 @@ jobs:
       contents: read
       pull-requests: read
       statuses: write
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95 # 2026-09-23T08-07-21Z-b35994a2
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@9714ff353c4199ff9f498205ef7b3319869dd51d
     with:
       required-labels: |
         cyclops
