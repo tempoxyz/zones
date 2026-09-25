@@ -9,8 +9,9 @@
 //! # POC limitations
 //!
 //! Proof validation is **skipped** by the pre-T11 stub verifier. When a settlement prover is
-//! configured, direct and ancestry submissions carry its Nitro NSM attestation. The unconfigured
-//! compatibility path continues to submit empty proof bytes.
+//! configured, submissions normally carry its Nitro NSM attestation, but may use `NoProof` when
+//! proving fails, the verifier rejects a proof, or its simulation fails. The unconfigured
+//! compatibility path still submits an empty proof with `Nitro` mode for stub verifiers.
 //!
 //! # Anchor modes
 //!
@@ -314,13 +315,13 @@ impl BatchSubmitter {
     /// Preflight the Nitro `proof` with an `eth_call` to the portal's verifier, made as T13
     /// `submitBatch` would make it (`from` the portal, same arguments).
     ///
-    /// Returns `None` before T13 or for a stale withdrawal batch index. The inner
-    /// result contains the verdict or a simulation failure; the outer error indicates
-    /// preflight setup (hardfork or portal metadata) failed.
-    pub async fn verifier_accepts(
+    /// Returns `None` before T13. The inner result contains the verdict or a
+    /// simulation failure; the outer error indicates preflight setup failed.
+    /// Portal advancement is handled separately by the submission reconciliation.
+    pub(crate) async fn simulate(
         &self,
-        prepared: &PreparedBatch,
-        proof: &Bytes,
+        batch: &PreparedBatch,
+        proof: &ProofBundle,
     ) -> Result<Option<Result<bool>>> {
         if SettlementAbi::from_l1(&self.l1_provider).await? != SettlementAbi::T13 {
             return Ok(None);
@@ -330,13 +331,7 @@ impl BatchSubmitter {
             .as_ref()
             .map_or(Address::ZERO, PrivateKeySigner::address);
         let metadata = self.read_submission_metadata(signer).await?;
-        // A stale index has no verdict (actual submission will reconcile).
-        if metadata.withdrawal_batch_index.checked_add(1)
-            != Some(prepared.batch.withdrawal_batch_index)
-        {
-            return Ok(None);
-        }
-        let call = prepared.verify_call(metadata.stable.zone_id, proof.clone());
+        let call = batch.verify_call(metadata.stable.zone_id, proof.proof.clone());
         let verdict = CallBuilder::new_raw(&self.l1_provider, call.abi_encode().into())
             .to(metadata.verifier)
             .from(self.portal_address)
@@ -1390,8 +1385,8 @@ impl PreparedBatch {
         self.anchor.block_number(self.batch.tempo_block_number)
     }
 
-    /// The Nitro `verify` call T13 `submitBatch` makes for this batch. Assumes
-    /// `withdrawal_batch_index` was validated as portal index + 1.
+    /// The Nitro `verify` call T13 `submitBatch` makes for this batch. Portal
+    /// advancement is reconciled separately before submission.
     fn verify_call(&self, zone_id: u32, proof: Bytes) -> IVerifier::verifyCall {
         let batch = &self.batch;
         let (block_transition, deposit_transition, token_transition) = batch.transitions();
@@ -2662,7 +2657,7 @@ mod tests {
 
     #[tokio::test]
     async fn verifier_preflight_returns_only_decoded_verdicts() {
-        let prepared = test_prepared_batch(20, 100);
+        let batch = test_prepared_batch(20, 100);
         // (hardfork, portal withdrawal index, verifier response, expected)
         for (fork, portal_index, response, expected) in [
             ("T12", None, None, Some(None)),
@@ -2675,7 +2670,7 @@ mod tests {
                 Some(Err("execution reverted: out of gas")),
                 None,
             ),
-            ("T13", Some(1), None, Some(None)),
+            ("T13", Some(1), Some(Ok(abi_word(true))), Some(Some(true))),
         ] {
             let asserter = Asserter::new();
             asserter.push_success(&serde_json::json!({ "active": fork }));
@@ -2698,9 +2693,11 @@ mod tests {
             let submitter =
                 BatchSubmitter::new(Address::repeat_byte(0x22), mock_l1(asserter.clone()));
 
-            let result = submitter
-                .verifier_accepts(&prepared, &Bytes::from_static(&[1]))
-                .await;
+            let proof = ProofBundle {
+                verifier_config: Bytes::new(),
+                proof: Bytes::from_static(&[1]),
+            };
+            let result = submitter.simulate(&batch, &proof).await;
             match expected {
                 Some(verdict) => assert_eq!(result.unwrap().transpose().unwrap(), verdict),
                 None => assert!(

@@ -286,7 +286,7 @@ async fn test_t13_migrates_and_settles_existing_portal() -> eyre::Result<()> {
 
     let batch = batch_from_output(end, zone.tempo_block_number().await?, &output);
     let prepared = submitter.prepare_batch(batch).await?;
-    // This harness has no Nitro attestation service; T13 requires the explicit proofless mode.
+    // This harness has no Nitro attestation service. Use `NoProof` explicitly.
     let settled = submitter
         .submit_batch(&prepared, None, None, zone_prover::VerifierMode::NoProof)
         .await
