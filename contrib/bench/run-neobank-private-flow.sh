@@ -716,6 +716,13 @@ esac
 private_flow_parent_block="$(cast block-number --rpc-url "$ZONE_RPC_URL")"
 [[ "$private_flow_parent_block" =~ ^[0-9]+$ ]] ||
     die "could not read the Zone head before the measured private flow"
+if [[ -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]]; then
+    mkdir -p "$(dirname -- "$ZONES_BENCH_SETTLEMENT_START_FILE")"
+    settlement_start_index="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'withdrawalBatchIndex()(uint64)')"
+    jq -n --argjson batch_index "$settlement_start_index" --argjson timestamp "$(date +%s)" \
+        '{batch_index:$batch_index,timestamp:$timestamp}' \
+        >"$ZONES_BENCH_SETTLEMENT_START_FILE"
+fi
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"

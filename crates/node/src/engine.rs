@@ -129,6 +129,9 @@ trait AvailableBlockDrain {
     /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
     fn apply_permit(&self, block: &mut Self::Block) -> Option<EngineExit>;
 
+    /// Returns whether a finalized Portal pause currently forbids producing another block.
+    fn production_paused(&self) -> bool;
+
     /// Completes and consumes one block.
     async fn advance_one(
         &mut self,
@@ -137,12 +140,12 @@ trait AvailableBlockDrain {
     ) -> eyre::Result<()>;
 }
 
-/// Drain available blocks until the queue is empty, cancellation is observed, or the
-/// leadership permit halts production.
+/// Drain available blocks until the queue is empty, cancellation is observed, the Portal is
+/// paused, or the leadership permit halts production.
 ///
-/// Cancellation and the permit are checked only before starting a new advance. An advance
-/// already in flight is always allowed to finish so its queue confirmation and canonical head
-/// remain consistent.
+/// Cancellation, the pause, and the permit are checked only before starting a new advance. An
+/// advance already in flight is always allowed to finish so its queue confirmation and canonical
+/// head remain consistent.
 async fn drain_all_available<D>(
     drain: &mut D,
     stop: &CancellationToken,
@@ -159,6 +162,12 @@ where
         };
         if let Some(exit) = drain.apply_permit(&mut block) {
             return Ok(Some(exit));
+        }
+        // The subscriber publishes a pause before enqueueing its block. Reading the gate after
+        // selecting the candidate therefore stops before the pause block itself. The block stays
+        // queued and is produced once the pause clears.
+        if drain.production_paused() {
+            return Ok(None);
         }
         drain.advance_one(block, stop).await?;
     }
@@ -500,6 +509,10 @@ impl AvailableBlockDrain for ZoneEngine {
             .and_then(|permit| block.apply_permit(permit))
     }
 
+    fn production_paused(&self) -> bool {
+        self.l1_block_tracker.portal_paused()
+    }
+
     async fn advance_one(
         &mut self,
         block: Self::Block,
@@ -625,7 +638,10 @@ fn zone_timestamp_millis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        sync::atomic::{AtomicBool, Ordering},
+    };
     use tokio::sync::oneshot;
 
     #[test]
@@ -918,6 +934,7 @@ mod tests {
         release_first: Option<oneshot::Receiver<()>>,
         /// Blocks (by value) the permit rejects, with the exit it produces.
         denied: Vec<(u64, EngineExit)>,
+        portal_paused: Arc<AtomicBool>,
     }
 
     impl AvailableBlockDrain for PausedDrain {
@@ -932,6 +949,10 @@ mod tests {
                 .iter()
                 .find(|(denied, _)| *denied == *block)
                 .map(|(_, exit)| exit.clone())
+        }
+
+        fn production_paused(&self) -> bool {
+            self.portal_paused.load(Ordering::Relaxed)
         }
 
         async fn advance_one(
@@ -966,6 +987,7 @@ mod tests {
             first_started: Some(first_started),
             release_first: Some(release_first),
             denied: Vec::new(),
+            portal_paused: Arc::default(),
         };
 
         let task = tokio::spawn(async move {
@@ -1002,6 +1024,7 @@ mod tests {
                     epoch: 7,
                 },
             )],
+            portal_paused: Arc::default(),
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -1028,6 +1051,7 @@ mod tests {
             first_started: None,
             release_first: None,
             denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
+            portal_paused: Arc::default(),
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -1036,6 +1060,50 @@ mod tests {
         assert_eq!(exit, Some(EngineExit::Fenced { tempo_anchor: 5 }));
         assert!(drain.advanced.is_empty());
         assert_eq!(drain.pending, [5]);
+    }
+
+    #[tokio::test]
+    async fn portal_pause_finishes_the_in_flight_block_then_retains_the_backlog() {
+        let stop = CancellationToken::new();
+        let (first_started, started) = oneshot::channel();
+        let (release, release_first) = oneshot::channel();
+        let portal_paused = Arc::new(AtomicBool::new(false));
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2, 3]),
+            advanced: Vec::new(),
+            first_started: Some(first_started),
+            release_first: Some(release_first),
+            denied: Vec::new(),
+            portal_paused: portal_paused.clone(),
+        };
+
+        let task = tokio::spawn(async move {
+            let exit = drain_all_available(&mut drain, &stop)
+                .await
+                .expect("drain succeeds");
+            (drain, exit)
+        });
+
+        started.await.expect("the first block starts");
+        portal_paused.store(true, Ordering::Relaxed);
+        release
+            .send(())
+            .expect("the first block is still in flight");
+
+        // A pause does not stop the engine loop; the backlog stays queued.
+        let (mut drain, exit) = task.await.expect("drain task succeeds");
+        assert_eq!(exit, None);
+        assert_eq!(drain.advanced, [1]);
+        assert_eq!(drain.pending, [2, 3]);
+
+        // Resume or expiry clears the gate and the next drain catches up.
+        portal_paused.store(false, Ordering::Relaxed);
+        let exit = drain_all_available(&mut drain, &CancellationToken::new())
+            .await
+            .expect("drain succeeds");
+        assert_eq!(exit, None);
+        assert_eq!(drain.advanced, [1, 2, 3]);
+        assert!(drain.pending.is_empty());
     }
 
     #[test]
