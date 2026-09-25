@@ -52,6 +52,7 @@ impl std::fmt::Debug for SettlementManager {
 }
 
 impl SettlementManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         domain: AttestationDomain,
         pinned_sequencer_set_version: Option<u64>,
