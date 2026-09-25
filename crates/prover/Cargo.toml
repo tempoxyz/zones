@@ -18,10 +18,12 @@ tempo-chainspec.workspace = true
 
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
+keccak-const.workspace = true
 
 futures.workspace = true
+minicbor.workspace = true
+minicbor-serde.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["codec"] }
@@ -31,4 +33,5 @@ alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 reth-trie-common.workspace = true
+serde_json.workspace = true
 tempo-primitives.workspace = true

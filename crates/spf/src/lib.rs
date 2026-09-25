@@ -6,7 +6,6 @@
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_primitives::{B256, U256, keccak256};
-use alloy_rlp::Decodable as _;
 use reth_chainspec::EthChainSpec as _;
 use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
@@ -388,12 +387,8 @@ fn validate_tempo_anchor(
     let mut previous_number = tempo_block_number;
     let mut previous_hash = tempo_block_hash;
     for (index, encoded_header) in ancestry_headers.iter().enumerate() {
-        let mut encoded = encoded_header.as_ref();
-        let header = TempoHeader::decode(&mut encoded)
+        let header: TempoHeader = alloy_rlp::decode_exact(encoded_header)
             .map_err(|_| Error::TempoAncestryHeaderDecoding { index })?;
-        if !encoded.is_empty() {
-            return Err(Error::TempoAncestryHeaderDecoding { index });
-        }
         let expected_number = previous_number
             .checked_add(1)
             .ok_or(Error::TempoAncestryBlockNumberOverflow)?;
@@ -1368,8 +1363,30 @@ mod tests {
         public_inputs.anchor_block_hash = anchor_hash;
 
         assert_eq!(
-            validate_tempo_anchor(7, checkpoint_hash, &public_inputs, &[anchor_rlp]),
+            validate_tempo_anchor(
+                7,
+                checkpoint_hash,
+                &public_inputs,
+                std::slice::from_ref(&anchor_rlp)
+            ),
             Ok(())
+        );
+
+        for len in 0..anchor_rlp.len() {
+            assert_eq!(
+                validate_tempo_anchor(
+                    7,
+                    checkpoint_hash,
+                    &public_inputs,
+                    &[anchor_rlp.slice(..len)]
+                ),
+                Err(Error::TempoAncestryHeaderDecoding { index: 0 })
+            );
+        }
+        let trailing = Bytes::from([anchor_rlp.as_ref(), &[0x80]].concat());
+        assert_eq!(
+            validate_tempo_anchor(7, checkpoint_hash, &public_inputs, &[trailing]),
+            Err(Error::TempoAncestryHeaderDecoding { index: 0 })
         );
     }
 }

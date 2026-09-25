@@ -411,10 +411,17 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
-- `pause()`: Pause all new deposits, Zone withdrawal requests, and L1 withdrawal processing for
-  the public `PAUSE_DURATION` constant of 30 days. The pause expires automatically and cannot be
-  extended while active. Proof-verified batch submission continues so settlement remains current
-  and an expired pause does not require recovery across the full pause interval.
+- `pause()`: Pause all new deposits, Zone withdrawal requests, Zone block production, and L1
+  withdrawal processing for the public `PAUSE_DURATION` constant of 30 days. The pause expires
+  automatically and cannot be extended while active. The leader stops producing Zone blocks no
+  later than the first block anchored at or after the finalized Tempo block that emitted
+  `PortalPaused`; a block already being built may finish. Followers do not check the pause and
+  import whatever the leader produces. Because automatic expiry emits no event, the leader also
+  polls `paused()` at the latest finalized Tempo block, and reads it at startup before producing
+  blocks. Proof-verified batch submission for blocks produced before the pause continues. After
+  the pause clears, the Zone catches up on the Tempo blocks finalized during the pause. Historical
+  catch-up requires an L1 endpoint that serves the missed finalized headers, receipts, and
+  anchored state.
 - `resume()`: Allow the admin to resume those flows before the bounded pause expires. Resuming
   remains available after `Capability.PausePortal` is abdicated.
 - `abdicate(Capability.PausePortal)`: Permanently disable future portal-wide pauses after one
@@ -760,7 +767,7 @@ The function writes `withdrawalQueueHash` and `withdrawalBatchIndex` to `lastBat
 
 A successful call emits `BatchFinalized(withdrawalQueueHash, withdrawalBatchIndex)`. This event is the authoritative zone-side batch boundary consumed by the sequencer; “finalized” means sealed on the zone and does not imply that the batch has been submitted to or accepted by Tempo. Acceptance on Tempo is indicated separately by the portal's `BatchSubmitted` event. For an empty batch, `withdrawalQueueHash` is zero while `withdrawalBatchIndex` still advances.
 
-Batch cadence is deterministic, and only a full `advanceTempo` block can close a batch. A full block closes the batch when it contains pending withdrawals, when its zone block number is a multiple of the configured interval, or when it follows a nonempty prefix of checkpoint-only blocks. The default interval is 120 zone blocks (~1 minute at Tempo's expected 500 ms block interval). A checkpoint-only block never closes a batch, even when its number is an interval multiple; the following block closes it instead. Other intermediate zone blocks do not call `finalizeWithdrawalBatch`.
+Batch cadence is deterministic, and only a full `advanceTempo` block can close a batch. A full block closes the batch when it processes deposits, when it contains pending withdrawals, when its zone block number is a multiple of the configured interval, or when it follows a nonempty prefix of checkpoint-only blocks. Settling deposit-only batches advances the portal's processed-deposit cursor and reopens deposit capacity without waiting for withdrawals or the interval. The shared block executor, including STF replay, rejects a post-T13 block whose `TempoAdvanced.depositsProcessed` is nonzero without same-block finalization; legacy pre-T13 blocks retain their previous validity rules. The default interval is 120 zone blocks (~1 minute at Tempo's expected 500 ms block interval). A checkpoint-only block never closes a batch, even when its number is an interval multiple; the following block closes it instead. Other intermediate zone blocks do not call `finalizeWithdrawalBatch`.
 
 ### Withdrawal Queue
 
@@ -1502,7 +1509,7 @@ The Nitro verifier MUST validate the COSE signature and certificate chain, enfor
 
 The settlement prover runs the state transition function inside a Nitro Enclave. The parent node collects the complete `BatchWitness`; the enclave performs no RPC or filesystem reads while handling it. A configured settlement sequencer MUST use a remote attesting prover. In-process execution is available for observational shadow validation but does not produce a settlement proof.
 
-The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by UTF-8 JSON. The request contains `version`, a caller-selected `requestId`, and `witness`. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification independently of the witness and derive the portal from its zone ID.
+The service accepts one request and returns one response per connection. Each frame is a four-byte big-endian payload length followed by CBOR and is bounded by a configurable limit of 2 GiB by default. The request contains `version`, a caller-selected `requestId`, and `witness`; byte-heavy witness fields use CBOR byte strings rather than human-readable hex. Decoding is schema-driven and rejects unknown, duplicate, or trailing request data. A successful response echoes the version and request ID and contains both `BatchOutput` and `ProofBundle`. The prover accepts only chain specifications configured by its operator; a witness cannot supply its own trusted chain schedule. A production deployment MUST select the canonical per-zone chain specification independently of the witness and derive the portal from its zone ID.
 
 Errors use stable machine-readable categories: `malformed_request`, `unsupported_version`, `unsupported_chain`, `verification_failed`, `attestation_unavailable`, `request_too_large`, `truncated_frame`, and `internal_error`. A successful state transition for which the Nitro Secure Module cannot produce an attestation returns `attestation_unavailable`, not an unattested success.
 

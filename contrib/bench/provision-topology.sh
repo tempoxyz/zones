@@ -969,6 +969,13 @@ provision_up() {
         --zone-gas-rate 0 \
         --bounceback-gas 0
 
+    local -a prover_args=()
+    if [[ -n "${ZONES_BENCH_PROVER_ADDRESS:-}" ]]; then
+        [[ "$ZONES_BENCH_PROVER_ADDRESS" =~ ^[^[:space:]:]+:[0-9]+$ ]] \
+            || die "ZONES_BENCH_PROVER_ADDRESS must be HOST:PORT"
+        prover_args=(--sequencer.enable-prover --sequencer.prover-address "$ZONES_BENCH_PROVER_ADDRESS")
+    fi
+
     # The pinned Reth revision predates the retained-branch pruning fix. Its
     # default sparse-trie pruning can make a multi-transaction Zone payload
     # disagree with the root obtained during final validation.
@@ -992,6 +999,7 @@ provision_up() {
         --ipcdisable \
         --engine.disable-sparse-trie-cache-pruning \
         --sequencer \
+        "${prover_args[@]}" \
         --sequencer-key-file <(printf '%s\n' "$sequencer_key")
     unset sequencer_key owner_key admin_key
 
