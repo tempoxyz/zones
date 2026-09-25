@@ -325,7 +325,7 @@ where
                 let witness = ExecutionWitnessRecord::new(&db)
                     .with_additional_state(spf_storage_targets(&db.cache.block_hashes))
                     .into_execution_witness(
-                        &db.db.inner().0,
+                        &db.db.inner().0.0,
                         eth_api.provider(),
                         block_number,
                         mode,
@@ -1271,10 +1271,10 @@ where
                         .committed()
                         .blocks_iter()
                         .filter_map(move |block| {
-                            match api
-                                .converter()
-                                .convert_header(block.clone_sealed_header(), block.rlp_length())
-                            {
+                            match api.converter().convert_header(
+                                block.clone_sealed_header(),
+                                Some(block.rlp_length()),
+                            ) {
                                 Ok(header) => Some(header),
                                 Err(err) => {
                                     tracing::error!(

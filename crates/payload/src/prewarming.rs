@@ -10,7 +10,7 @@ use reth_evm::{
     BlockExecutor as _, ConfigureEvm, database::StateProviderDatabase, execute::BlockBuilder,
 };
 use reth_primitives_traits::SealedHeader;
-use reth_storage_api::StateProviderFactory;
+use reth_storage_api::{StateProvider as _, StateProviderFactory};
 use reth_tasks::TaskExecutor;
 use std::{
     error::Error,
@@ -84,8 +84,11 @@ where
         &self,
         partial: PreparedL1Block,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let state =
-            StateProviderDatabase::new(self.provider.state_by_block_hash(self.parent_hash)?);
+        let state = StateProviderDatabase::new(
+            self.provider
+                .state_by_block_hash(self.parent_hash)?
+                .into_evm_state_provider(),
+        );
         let mut db = CacheDB::new(Db::new(state));
 
         let mut worker = self.evm_config.builder_for_next_block(

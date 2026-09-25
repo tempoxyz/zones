@@ -209,7 +209,8 @@ where
             );
         }
 
-        let db = StateProviderDatabase::new(state_provider.as_ref());
+        let evm_state_provider = state_provider.as_ref().into_evm_state_provider();
+        let db = StateProviderDatabase::new(evm_state_provider);
         let db = cached_reads.as_db_mut(db);
 
         let chain_spec = self.provider.chain_spec();
