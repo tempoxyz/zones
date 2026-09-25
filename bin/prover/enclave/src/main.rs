@@ -71,8 +71,7 @@ impl Cli {
         #[cfg(target_os = "linux")]
         linux::verify_entropy_configuration()?;
         let tls = AttestedServer::new(|nonce, user_data| {
-            nitro_attestation_fields(user_data.to_vec(), Some(nonce.to_vec()))
-                .map_err(io::Error::other)
+            nitro_attestation(user_data, Some(nonce)).map_err(io::Error::other)
         })?;
 
         if self.use_tcp {
@@ -243,6 +242,9 @@ mod linux {
     }
 }
 
+/// Serves one attested connection to completion. The accept loop awaits this, so connections are
+/// handled one at a time to bound witness memory. I/O is time-bounded; SPF execution is not.
+/// Failures are logged, never returned.
 async fn handle_connection<T>(
     stream: T,
     tls: &AttestedServer,
@@ -360,7 +362,9 @@ fn process_request(request: VerifyRequest, specs: &TrustedChainSpecs) -> VerifyR
 
     let public_inputs = request.witness.public_inputs.clone();
     match prove_zone_batch(&config, request.witness) {
-        Ok(output) => match build_proof_bundle(&public_inputs, &output, nitro_attestation) {
+        Ok(output) => match build_proof_bundle(&public_inputs, &output, |digest| {
+            nitro_attestation(digest.as_slice(), None)
+        }) {
             Ok(proof_bundle) => VerifyResponse::Ok {
                 version: PROTOCOL_VERSION,
                 request_id: request.request_id,
@@ -399,12 +403,8 @@ where
     })
 }
 
-fn nitro_attestation(digest: alloy_primitives::B256) -> Result<Vec<u8>, String> {
-    nitro_attestation_fields(digest.to_vec(), None)
-}
-
 #[cfg(target_os = "linux")]
-fn nitro_attestation_fields(user_data: Vec<u8>, nonce: Option<Vec<u8>>) -> Result<Vec<u8>, String> {
+fn nitro_attestation(user_data: &[u8], nonce: Option<&[u8]>) -> Result<Vec<u8>, String> {
     use aws_nitro_enclaves_nsm_api::{
         api::{Request, Response},
         driver::{nsm_exit, nsm_init, nsm_process_request},
@@ -418,8 +418,8 @@ fn nitro_attestation_fields(user_data: Vec<u8>, nonce: Option<Vec<u8>>) -> Resul
     let response = nsm_process_request(
         descriptor,
         Request::Attestation {
-            user_data: Some(ByteBuf::from(user_data)),
-            nonce: nonce.map(ByteBuf::from),
+            user_data: Some(ByteBuf::from(user_data.to_vec())),
+            nonce: nonce.map(|nonce| ByteBuf::from(nonce.to_vec())),
             public_key: None,
         },
     );
@@ -432,10 +432,7 @@ fn nitro_attestation_fields(user_data: Vec<u8>, nonce: Option<Vec<u8>>) -> Resul
 }
 
 #[cfg(not(target_os = "linux"))]
-fn nitro_attestation_fields(
-    _user_data: Vec<u8>,
-    _nonce: Option<Vec<u8>>,
-) -> Result<Vec<u8>, String> {
+fn nitro_attestation(_user_data: &[u8], _nonce: Option<&[u8]>) -> Result<Vec<u8>, String> {
     Err("Nitro attestation is supported only on Linux".into())
 }
 

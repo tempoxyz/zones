@@ -70,8 +70,9 @@ Protocol/version mismatches, missing proofs, and prover errors fail the command 
 the output file. The TLS connection is authenticated before the witness is sent; submit the saved proof
 and its public commitments to the on-chain verifier to check the batch attestation.
 
-`prove` logs reading the witness, connecting and sending to the prover, waiting for its response,
-validating the response, and writing the proof. It prints phase durations and total elapsed time.
+`prove` logs reading the witness, sending it after authenticating the prover, waiting for its
+response, validating the response, and writing the proof. It prints phase durations and total
+elapsed time.
 
 ## Verify a saved proof
 
