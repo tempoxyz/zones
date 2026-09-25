@@ -439,27 +439,29 @@ impl DecodedQueuedDeposit {
     }
 }
 
-fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
-    // Nested deposits must match their canonical L1 event encoding on every hardfork.
-    let config = AbiDecoderConfig::new().strict(true);
+impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
+    type Error = ZonePrecompileError;
 
-    deposits
-        .into_iter()
-        .map(|queued| {
-            match queued.depositType {
-                DepositType::WithdrawalBounceBack => {
-                    WithdrawalBounceBackDeposit::abi_decode_with_config(&queued.depositData, config)
-                        .map(DecodedQueuedDeposit::WithdrawalBounceBack)
-                }
-                DepositType::Deposit => {
-                    Deposit::abi_decode_with_config(&queued.depositData, config)
-                        .map(DecodedQueuedDeposit::Deposit)
-                }
-                _ => return Err(ZonePrecompileError::MalformedCalldata),
+    fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
+        // Nested deposits must match their canonical L1 event encoding on every hardfork.
+        let config = AbiDecoderConfig::new().strict(true);
+
+        match queued.depositType {
+            DepositType::WithdrawalBounceBack => {
+                WithdrawalBounceBackDeposit::abi_decode_with_config(&queued.depositData, config)
+                    .map(Self::WithdrawalBounceBack)
             }
-            .map_err(|_| ZonePrecompileError::MalformedCalldata)
-        })
-        .collect()
+            DepositType::Deposit => {
+                Deposit::abi_decode_with_config(&queued.depositData, config).map(Self::Deposit)
+            }
+            _ => return Err(ZonePrecompileError::MalformedCalldata),
+        }
+        .map_err(|_| ZonePrecompileError::MalformedCalldata)
+    }
+}
+
+fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
+    deposits.into_iter().map(TryInto::try_into).collect()
 }
 
 fn recover_encrypted_payload(
@@ -486,6 +488,7 @@ fn recover_encrypted_payload(
         &deposit.keyIndex,
         &deposit.encrypted.ephemeralPubkeyX,
         &deposit.sender,
+        None,
     );
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     aes_gcm::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;

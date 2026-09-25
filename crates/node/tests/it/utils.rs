@@ -2533,16 +2533,7 @@ impl L1TestNode {
         )
         .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
 
-        Ok((
-            key_index,
-            tempo_zone_contracts::DepositPayload {
-                ephemeralPubkeyX: enc.eph_pub_x,
-                ephemeralPubkeyYParity: enc.eph_pub_y_parity,
-                ciphertext: enc.ciphertext.into(),
-                nonce: alloy_primitives::FixedBytes(enc.nonce),
-                tag: alloy_primitives::FixedBytes(enc.tag),
-            },
-        ))
+        Ok((key_index, enc))
     }
 
     /// Transfer a specific TIP-20 token from the dev account to a recipient on L1.
@@ -3427,7 +3418,7 @@ impl ZoneAccount {
         recipient: Address,
         memo: B256,
     ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
-        use tempo_zone_contracts::{DepositPayload, ZonePortal};
+        use tempo_zone_contracts::ZonePortal;
         use zone_precompiles::ecies;
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
@@ -3449,16 +3440,7 @@ impl ZoneAccount {
         )
         .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
 
-        Ok((
-            key_index,
-            DepositPayload {
-                ephemeralPubkeyX: enc.eph_pub_x,
-                ephemeralPubkeyYParity: enc.eph_pub_y_parity,
-                ciphertext: enc.ciphertext.into(),
-                nonce: alloy_primitives::FixedBytes(enc.nonce),
-                tag: alloy_primitives::FixedBytes(enc.tag),
-            },
-        ))
+        Ok((key_index, enc))
     }
 
     /// Approve the ZoneOutbox, then request a withdrawal on L2.

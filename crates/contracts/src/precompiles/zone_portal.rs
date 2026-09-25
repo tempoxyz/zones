@@ -2,7 +2,8 @@
 
 pub use ZonePortal::{
     BatchSubmitted_0 as LegacyBatchSubmitted, BatchSubmitted_1 as BatchSubmitted, BlockTransition,
-    Deposit, DepositPayload, DepositQueueTransition, TokenEnablementTransition, Withdrawal,
+    Deposit, DepositPayload, DepositQueueTransition, ForcedExit, ForcedExitAuthorization,
+    ForcedExitMetadata, ForcedExitReason, TokenEnablementTransition, Withdrawal,
     ZonePortalErrors as ZonePortalError, submitBatch_0Call as legacySubmitBatchCall,
     submitBatch_1Call as submitBatchCall,
 };
@@ -67,6 +68,43 @@ crate::sol! {
             DepositPayload encrypted;
         }
 
+        /// @notice Root authorization encrypted inside a forced-exit request.
+        struct ForcedExitAuthorization {
+            address account;
+            uint256 zoneChainId;
+            address token;
+            address recipient;
+            uint256 nonce;
+            uint64 admitBefore;
+        }
+
+        /// @notice Complete public entry committed to the mixed inbox queue.
+        struct ForcedExit {
+            uint64 requestId;
+            address token;
+            uint256 keyIndex;
+            DepositPayload encrypted;
+            address feePayer;
+            uint64 requestedAtBlock;
+            uint64 requestedAtTime;
+        }
+
+        /// @notice TIP-1012 internal execution reason assignments; never published in L1 settlement.
+        enum ForcedExitReason {
+            None,
+            InvalidPayload,
+            InvalidAuthorization,
+            NonceAlreadyConsumed,
+            BalanceOverflow,
+            PolicyRejected
+        }
+
+        /// @notice Admission identity authenticated by Zone inbox execution.
+        struct ForcedExitMetadata {
+            address token;
+            uint64 depositNumber;
+        }
+
         struct EncryptionKeyEntry {
             bytes32 x;
             uint8 yParity;
@@ -90,6 +128,15 @@ crate::sol! {
             uint64 nextDepositNumber;
         }
 
+        function requestForcedExit(address token, uint256 keyIndex, DepositPayload encrypted)
+            external returns (uint64 requestId, uint64 depositNumber);
+        function forcedExitVersion() external view returns (uint64);
+        function activateForcedExits() external;
+        /// Remaining weighted admission units, including the withdrawal reserve.
+        function remainingDepositCapacity() external view returns (uint64);
+        function forcedExitCount() external view returns (uint64);
+        function forcedExitRequests(uint64 requestId) external view returns (address token, uint64 depositNumber);
+        function FORCED_EXIT_COMPENSATION() external view returns (uint128);
         /// Processed prefix transition for the portal's append-only enabled-token array.
         struct TokenEnablementTransition {
             uint64 prevProcessedTokenCount;
@@ -97,6 +144,9 @@ crate::sol! {
         }
 
         // -- Events --
+        event ForcedExitsActivated(uint64 version);
+        event ForcedExitRequested(uint64 indexed depositNumber, ForcedExit entry);
+        event ForcedExitCompensationPending(address indexed admin, address indexed token, uint128 amount);
 
         event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
@@ -238,6 +288,10 @@ crate::sol! {
         error NoEncryptionKeyAtBlock(uint64 blockNumber);
         error InvalidEphemeralPubkey();
         error InvalidCiphertextLength(uint256 actual, uint256 expected);
+        error InvalidForcedExitCiphertextLength(uint256 actual);
+        error ForcedExitsNotActivated();
+        error ForcedExitsAlreadyActivated();
+        error ForcedExitCompensationRejected();
         error InvalidProofOfPossession();
         error DepositTooSmall();
         error TokenEnablementBlockCapacityExceeded(uint64 maximum);
@@ -759,7 +813,8 @@ impl Withdrawal {
         plaintext
     }
 
-    /// Compute the authenticated sender tag for one user withdrawal.
+    /// Compute the authenticated sender tag for an ordinary or forced withdrawal.
+    /// Forced requests supply the private signed-payload hash in the `tx_hash` position.
     ///
     /// The fallback nonce is public on L1 and unique per user withdrawal, so including it keeps
     /// multiple withdrawals from the same private transaction unlinkable. Deposit bounce-backs

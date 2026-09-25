@@ -74,9 +74,7 @@ use tempo_contracts::precompiles::{
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
 };
-use tempo_zone_contracts::{
-    DepositPayload, IZoneInbox, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
+use tempo_zone_contracts::{IZoneInbox, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
 const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
@@ -703,7 +701,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
         .normalized_y_parity()
         .ok_or_else(|| eyre!("unexpected yParity {:#x}", key.yParity))?;
 
-    let enc = encrypt_deposit(
+    let payload = encrypt_deposit(
         &key.x,
         y_parity,
         to,
@@ -713,14 +711,6 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
         key_index,
     )
     .ok_or_else(|| eyre!("ECIES encryption failed"))?;
-
-    let payload = DepositPayload {
-        ephemeralPubkeyX: enc.eph_pub_x,
-        ephemeralPubkeyYParity: enc.eph_pub_y_parity,
-        ciphertext: Bytes::from(enc.ciphertext),
-        nonce: enc.nonce.into(),
-        tag: enc.tag.into(),
-    };
 
     let receipt = portal
         .deposit(token, amount, key_index, payload, tempo_refund_recipient)
