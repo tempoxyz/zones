@@ -209,8 +209,7 @@ pub struct ZoneSequencerAddOnsConfig {
     ///
     /// Implies enable_proof_persistence.
     pub enable_prover: bool,
-    /// Remote Nitro prover endpoints. Required when proof-gated settlement is enabled;
-    /// startup validates assignments for the current L1 fork and forks scheduled within 72 hours.
+    /// Remote Nitro prover endpoints. Required when proof-gated settlement is enabled.
     pub prover_addresses: Option<ProverAddresses>,
 }
 
@@ -692,27 +691,6 @@ where
                 })
         });
         let rpc_only = self.p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
-        // Validate before launching workers, including when the node has no batch to prove yet.
-        let prover_addresses = if rpc_only {
-            effective_shadow_prover_config
-                .as_ref()
-                .and_then(|config| config.prover_runtime.remote_addresses())
-        } else {
-            self.sequencer_config
-                .as_ref()
-                .filter(|config| config.enable_prover)
-                .map(|config| {
-                    config.prover_addresses.as_ref().ok_or_else(|| {
-                        eyre::eyre!("settlement proving requires a remote prover configuration")
-                    })
-                })
-                .transpose()?
-        };
-        if let Some(addresses) = prover_addresses {
-            addresses
-                .validate_startup(&l1_provider, chain_spec.as_ref())
-                .await?;
-        }
         let mut finalized_batch_submission_sender = None;
         let mut finalized_batch_submissions = None;
         if rpc_only && effective_shadow_prover_config.is_some() {

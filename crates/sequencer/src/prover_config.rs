@@ -16,7 +16,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoHardforks, hardfork::TempoHardfork};
 use zone_chainspec::ZoneChainSpec;
 
-/// Startup and monitoring require endpoints for forks activating within 72 hours, inclusive.
+/// Readiness monitors endpoints for forks activating within 72 hours, inclusive.
 const PROVER_UPGRADE_LOOKAHEAD_SECS: u64 = 72 * 60 * 60;
 const PROVER_UPGRADE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -76,18 +76,6 @@ impl ProverAddresses {
         Ok(Some(Self(addresses)))
     }
 
-    /// Require a prover for the live L1 fork and every later fork scheduled within 72 hours.
-    /// Uses the node's chainspec and wall-clock time, including overdue forks on a lagging L1.
-    /// This checks routing configuration, not endpoint connectivity or Nitro measurements.
-    pub async fn validate_startup(
-        &self,
-        provider: &DynProvider<TempoNetwork>,
-        chain_spec: &impl TempoHardforks,
-    ) -> Result<()> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        self.validate_startup_at(provider, chain_spec, now).await
-    }
-
     /// Observe the schedule every minute, including while the node is idle or a standby.
     /// Run for the node's lifetime, independently of individual prover workers.
     pub async fn monitor_upgrade_readiness(&self, chain_spec: Arc<ZoneChainSpec>) {
@@ -112,21 +100,6 @@ impl ProverAddresses {
             .get(&hardfork)
             .map(String::as_str)
             .ok_or_else(|| eyre::eyre!("no prover configured for active L1 hardfork {hardfork}"))
-    }
-
-    async fn validate_startup_at(
-        &self,
-        provider: &DynProvider<TempoNetwork>,
-        chain_spec: &impl TempoHardforks,
-        now: u64,
-    ) -> Result<()> {
-        let (_, active) = self.resolve(provider, chain_spec).await?;
-        if let Some((fork, activation)) = self.missing_upcoming_hardfork(chain_spec, active, now) {
-            eyre::bail!(
-                "startup requires a prover for L1 hardfork {fork}, scheduled at {activation} within the next 72 hours (or overdue)"
-            );
-        }
-        Ok(())
     }
 
     fn missing_upcoming_hardfork(
@@ -312,74 +285,6 @@ mod tests {
         tempo_chainspec::TempoChainSpec::from_genesis(genesis)
     }
 
-    #[tokio::test]
-    async fn startup_requires_upcoming_forks_including_the_72_hour_boundary() {
-        let now = 100_000;
-        for activation in [
-            now - 1,
-            now,
-            now + 1,
-            now + 48 * 60 * 60,
-            now + 72 * 60 * 60,
-        ] {
-            let asserter = Asserter::new();
-            asserter.push_success(&mock_l1_header(0));
-            asserter.push_success(&mock_l1_header(0));
-            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect_mocked_client(asserter)
-                .erased();
-            let config = ProverAddresses::new(vec!["T12=current:5000".parse().unwrap()])
-                .unwrap()
-                .unwrap();
-            let spec = scheduled_t13(activation);
-            let error = config
-                .validate_startup_at(&provider, &spec, now)
-                .await
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("startup requires a prover for L1 hardfork T13")
-            );
-            routed()
-                .validate_startup_at(&provider, &spec, now)
-                .await
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn startup_checks_every_fork_in_the_window() {
-        let now = 100_000;
-        let mut genesis = scheduled_t13(now + 200).inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t12Time".into(), now + 100)
-            .unwrap();
-        let spec = tempo_chainspec::TempoChainSpec::from_genesis(genesis);
-        let asserter = Asserter::new();
-        asserter.push_success(&mock_l1_header(0));
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased();
-        let config = ProverAddresses::new(vec![
-            "T11=current:5000".parse().unwrap(),
-            "T12=next:5000".parse().unwrap(),
-        ])
-        .unwrap()
-        .unwrap();
-        let error = config
-            .validate_startup_at(&provider, &spec, now)
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("startup requires a prover for L1 hardfork T13")
-        );
-    }
-
     fn routed() -> ProverAddresses {
         ProverAddresses::new(vec![
             "T12=old:5000".parse().unwrap(),
@@ -405,26 +310,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_allows_forks_beyond_72_hours() {
-        let asserter = Asserter::new();
-        asserter.push_success(&mock_l1_header(0));
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_mocked_client(asserter)
-            .erased();
-        let config = ProverAddresses::new(vec!["T12=current:5000".parse().unwrap()])
-            .unwrap()
-            .unwrap();
-        config
-            .validate_startup_at(
-                &provider,
-                &scheduled_t13(100_000 + 72 * 60 * 60 + 1),
-                100_000,
-            )
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
     async fn missing_fork_and_rpc_failure_never_fall_back() {
         let asserter = Asserter::new();
         asserter.push_success(&mock_l1_header(100_001));
@@ -437,7 +322,7 @@ mod tests {
             .unwrap();
         assert!(
             config
-                .validate_startup_at(&provider, &scheduled_t13(100_001), 100_000)
+                .resolve(&provider, &scheduled_t13(100_001))
                 .await
                 .unwrap_err()
                 .to_string()

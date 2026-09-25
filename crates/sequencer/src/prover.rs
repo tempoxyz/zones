@@ -93,9 +93,9 @@ pub(crate) struct SettlementProver {
 
 /// Locally tracked routing policy for an attestation; not part of the proof wire format.
 #[derive(Debug, Clone)]
-pub(crate) struct SettlementProof {
-    pub(crate) bundle: ProofBundle,
-    pub(crate) hardfork: TempoHardfork,
+pub struct SettlementProof {
+    pub bundle: ProofBundle,
+    pub hardfork: TempoHardfork,
 }
 
 /// Detached validation worker for accepted L1 submissions.

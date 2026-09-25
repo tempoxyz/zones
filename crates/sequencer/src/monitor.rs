@@ -41,6 +41,7 @@ use crate::{
     abi::{self, NO_QUEUE_INDEX},
     attestation::SettlementCertificate,
     prover::{SettlementProof, SettlementProver},
+    prover_config::active_l1_hardfork,
     resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitError, BatchSubmitter, FinalizedBatchLog,
@@ -610,13 +611,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let (proof, certificate) = tokio::select! {
                 result = &mut proof => match result? {
                     ControlFlow::Break(cause) => return Ok(ControlFlow::Break(cause)),
-                    ControlFlow::Continue(proof) => {
-                        let certificate = self.batch_submitter.race_l1_hardfork(
-                            proof.as_ref().map(|proof| proof.hardfork),
-                            certificate,
-                        ).await?;
-                        (proof, certificate)
-                    },
+                    ControlFlow::Continue(proof) => (proof, certificate.await?),
                 },
                 result = &mut certificate => {
                     let certificate = result?;
@@ -734,13 +729,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch(
-                    prepared,
-                    proof_bundle.map(|proof| &proof.bundle),
-                    certificate.as_ref(),
-                    proof_bundle.map(|proof| proof.hardfork),
-                    verifier_mode,
-                )
+                .submit_batch(prepared, proof_bundle, certificate.as_ref(), verifier_mode)
                 .await
             {
                 Ok(event) => {
@@ -839,6 +828,28 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
+                    // Check if the failure is due to a changed L1 hardfork.
+                    // It means we shouldn't retry the batch submission, and instead the full batch re-proving
+                    // is needed.
+                    if let Some(proved) = proof_bundle.map(|proof| proof.hardfork) {
+                        match active_l1_hardfork(
+                            self.batch_submitter.l1_provider(),
+                            self.config.chain_spec.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(current) if current != proved => {
+                                return Err(BatchSubmitError::ProverHardforkChanged {
+                                    proved,
+                                    current,
+                                });
+                            }
+                            Err(error) => {
+                                warn!(%error, "Failed checking L1 hardfork after batch submission error");
+                            }
+                            Ok(_) => {}
+                        }
+                    }
                     if attempt < MAX_RETRIES {
                         self.metrics.batch_submit_retry_total.increment(1);
                         warn!(
@@ -1457,7 +1468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submission_retry_returns_stale_proof_for_rebuilding() {
+    async fn submission_error_rebuilds_on_hardfork_change() {
         use tempo_chainspec::hardfork::TempoHardfork;
         use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
 
@@ -1477,11 +1488,10 @@ mod tests {
             withdrawal_queue_hash: B256::ZERO,
             withdrawal_batch_index: 1,
         };
-        // The first attempt fails after selecting the ABI. Before retry, L1 activates T13.
+        // The first attempt fails after selecting the ABI, then L1 activates T13.
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
         l1.push_success(&mock_l1_header(999));
         l1.push_failure_msg("submission metadata temporarily unavailable");
-        l1.push_success(&abi_encode_b256(batch.prev_block_hash));
         l1.push_success(&mock_l1_header(1_000));
         let proof = SettlementProof {
             bundle: ProofBundle {

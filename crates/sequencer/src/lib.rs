@@ -43,8 +43,8 @@ pub use proofs::{
     ProofCollectorConfig, ProofCollectorHandle, StoredBlockProof, create_proof_collector,
 };
 pub use prover::{
-    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProverConfig, ShadowProofAnchor, ShadowProver,
-    ShadowProverConfig, spawn_shadow_prover,
+    SHADOW_PROVER_QUEUE_CAPACITY, SettlementProof, SettlementProverConfig, ShadowProofAnchor,
+    ShadowProver, ShadowProverConfig, spawn_shadow_prover,
 };
 pub use prover_config::{HardforkProverAddress, ProverAddresses};
 pub use settlement::{
