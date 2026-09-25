@@ -131,8 +131,8 @@ Use the actual forks supported by the node binary; a future T14 assignment requi
 whose Tempo dependency recognizes T14. Assign the same endpoint explicitly to adjacent forks
 when the accepted prover image is unchanged. At startup, sequencers with proving enabled and
 remote shadow provers require an assignment for the current L1 hardfork and every later Tempo
-fork in the node's chainspec activating within 24 hours of startup (inclusive). Overdue forks
-not yet active on a lagging L1 also require an assignment. Forks more than 24 hours away do not.
+fork in the node's chainspec activating within 72 hours of startup (inclusive). Overdue forks
+not yet active on a lagging L1 also require an assignment. Forks more than 72 hours away do not.
 This checks the live fork and configured addresses, not endpoint connectivity or PCRs. Missing
 assignments and unknown L1 forks stop proving; there is no fallback to an older endpoint.
 
@@ -157,7 +157,7 @@ Watch `tempo_zone_monitor_prover_hardfork_rebuild_total`, settlement lag, and th
 
 `tempo_zone_prover_missing_hardfork_prover` is refreshed immediately and every 60 seconds for
 nodes with remote provers, including when idle, a standby, or busy proving a batch. It is `1` if
-the chainspec's current Tempo fork or any fork activating within the next 24 hours has no configured endpoint, and `0`
+the chainspec's current Tempo fork or any fork activating within the next 72 hours has no configured endpoint, and `0`
 otherwise. The check uses wall-clock time and the local chainspec, so it continues without L1 RPC
 or prover connectivity. It stays `1` after an unconfigured fork activates. Alert on a value of `1`
 and configure the missing endpoint before activation. The monitor runs for the node's lifetime,

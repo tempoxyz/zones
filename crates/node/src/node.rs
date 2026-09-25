@@ -210,7 +210,7 @@ pub struct ZoneSequencerAddOnsConfig {
     /// Implies enable_proof_persistence.
     pub enable_prover: bool,
     /// Remote Nitro prover endpoints. Required when proof-gated settlement is enabled;
-    /// startup validates assignments for the current L1 fork and forks scheduled within 24 hours.
+    /// startup validates assignments for the current L1 fork and forks scheduled within 72 hours.
     pub prover_addresses: Option<ProverAddresses>,
 }
 

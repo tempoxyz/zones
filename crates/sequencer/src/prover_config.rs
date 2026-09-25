@@ -16,8 +16,8 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoHardforks, hardfork::TempoHardfork};
 use zone_chainspec::ZoneChainSpec;
 
-/// Startup and monitoring require endpoints for forks activating within one day, inclusive.
-const PROVER_UPGRADE_LOOKAHEAD_SECS: u64 = 24 * 60 * 60;
+/// Startup and monitoring require endpoints for forks activating within 72 hours, inclusive.
+const PROVER_UPGRADE_LOOKAHEAD_SECS: u64 = 72 * 60 * 60;
 const PROVER_UPGRADE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// One explicit hardfork-to-prover assignment, written as `T13=HOST:PORT`.
@@ -76,7 +76,7 @@ impl ProverAddresses {
         Ok(Some(Self(addresses)))
     }
 
-    /// Require a prover for the live L1 fork and every later fork scheduled within 24 hours.
+    /// Require a prover for the live L1 fork and every later fork scheduled within 72 hours.
     /// Uses the node's chainspec and wall-clock time, including overdue forks on a lagging L1.
     /// This checks routing configuration, not endpoint connectivity or Nitro measurements.
     pub async fn validate_startup(
@@ -97,7 +97,7 @@ impl ProverAddresses {
         let (_, active) = self.resolve(provider, chain_spec).await?;
         if let Some((fork, activation)) = self.missing_upcoming_hardfork(chain_spec, active, now) {
             eyre::bail!(
-                "startup requires a prover for L1 hardfork {fork}, scheduled at {activation} within the next 24 hours (or overdue)"
+                "startup requires a prover for L1 hardfork {fork}, scheduled at {activation} within the next 72 hours (or overdue)"
             );
         }
         Ok(())
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn metric_detects_entry_into_the_window_and_remains_set_after_activation() {
-        let activation = 200_000;
+        let activation = 400_000;
         let spec = scheduled_t13(activation);
         let addresses = ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()])
             .unwrap()
@@ -311,9 +311,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_requires_upcoming_forks_including_the_24_hour_boundary() {
+    async fn startup_requires_upcoming_forks_including_the_72_hour_boundary() {
         let now = 100_000;
-        for activation in [now - 1, now, now + 1, now + PROVER_UPGRADE_LOOKAHEAD_SECS] {
+        for activation in [
+            now - 1,
+            now,
+            now + 1,
+            now + 48 * 60 * 60,
+            now + 72 * 60 * 60,
+        ] {
             let asserter = Asserter::new();
             asserter.push_success(&mock_l1_header(0));
             asserter.push_success(&mock_l1_header(0));
@@ -397,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_allows_forks_beyond_24_hours() {
+    async fn startup_allows_forks_beyond_72_hours() {
         let asserter = Asserter::new();
         asserter.push_success(&mock_l1_header(0));
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -409,7 +415,7 @@ mod tests {
         config
             .validate_startup_at(
                 &provider,
-                &scheduled_t13(100_000 + PROVER_UPGRADE_LOOKAHEAD_SECS + 1),
+                &scheduled_t13(100_000 + 72 * 60 * 60 + 1),
                 100_000,
             )
             .await

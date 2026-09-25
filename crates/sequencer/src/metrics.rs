@@ -17,7 +17,7 @@ pub(crate) struct SequencerMetrics {
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_prover")]
 pub(crate) struct ProverMetrics {
-    /// 1 when the current or next-24-hour chainspec hardfork has no configured prover endpoint.
+    /// 1 when the current or next-72-hour chainspec hardfork has no configured prover endpoint.
     /// Refreshed every minute, independently of proving activity.
     pub(crate) missing_hardfork_prover: Gauge,
 
