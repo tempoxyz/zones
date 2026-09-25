@@ -637,8 +637,7 @@ fn record_proof_verification(result: Result<bool>, metrics: &ProverMetrics) -> R
         }
         Ok(false) => {
             metrics.proof_verification_failure_total.increment(1);
-            Err(eyre::eyre!("native Nitro verifier rejected shadow proof")
-                .wrap_err(ValidationFailure))
+            Err(eyre::eyre!("native Nitro verifier rejected shadow proof"))
         }
         Err(error) => {
             metrics.proof_verification_error_total.increment(1);
@@ -1332,14 +1331,21 @@ mod tests {
     };
 
     #[test]
-    fn rejected_proofs_are_validation_failures_and_transport_errors_are_not() {
+    fn proof_verification_reports_rejections_and_operational_errors() {
         let metrics = ProverMetrics::default();
         assert!(record_proof_verification(Ok(true), &metrics).is_ok());
         let rejected = record_proof_verification(Ok(false), &metrics).unwrap_err();
-        assert!(rejected.is::<ValidationFailure>());
+        assert_eq!(
+            rejected.to_string(),
+            "native Nitro verifier rejected shadow proof"
+        );
         let unavailable =
             record_proof_verification(Err(eyre::eyre!("L1 unavailable")), &metrics).unwrap_err();
-        assert!(!unavailable.is::<ValidationFailure>());
+        assert_eq!(
+            unavailable.to_string(),
+            "could not verify shadow Nitro proof"
+        );
+        assert_eq!(unavailable.root_cause().to_string(), "L1 unavailable");
     }
 
     struct StubDebugApi(ZoneExecutionWitness);

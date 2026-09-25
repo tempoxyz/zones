@@ -3,7 +3,7 @@
 use std::str::FromStr;
 
 use alloy_primitives::{FixedBytes, U256};
-use tempo_shadow_precompiles::{
+use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{PrecompileStorageProvider, StorageCtx, hashmap::HashMapStorageProvider},
     zone_factory::portal_address,
