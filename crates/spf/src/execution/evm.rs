@@ -343,7 +343,8 @@ fn decode_user_transactions(
     block_index: usize,
     transactions: &[Bytes],
 ) -> Result<Vec<Recovered<TempoTxEnvelope>>, Error> {
-    let mut decoded = Vec::with_capacity(transactions.len());
+    // Not using with_capacity because input is untrusted.
+    let mut decoded = Vec::new();
     for (transaction_index, encoded_transaction) in transactions.iter().enumerate() {
         let transaction =
             TempoTxEnvelope::decode_2718_exact(encoded_transaction).map_err(|_| {
