@@ -152,6 +152,9 @@ fn from_zone_actions<'a>(actions: impl Iterator<Item = &'a L2BridgeAction>) -> V
                 token,
                 principal,
                 ..
+            }
+            | L2BridgeAction::ForcedWithdrawalRequested {
+                token, principal, ..
             } => effects.push(Effect::Liability {
                 token,
                 kind: LiabilityKind::Withdrawal,
@@ -247,6 +250,25 @@ mod tests {
                     change: BalanceChange::Credit(amount),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn forced_withdrawal_creates_principal_liability() {
+        let token = Address::repeat_byte(1);
+        let principal = U256::from(100);
+        let action = L2BridgeAction::ForcedWithdrawalRequested {
+            withdrawal_index: 1,
+            token,
+            principal,
+        };
+        assert_eq!(
+            from_zone_actions([&action].into_iter()),
+            vec![Effect::Liability {
+                token,
+                kind: LiabilityKind::Withdrawal,
+                change: BalanceChange::Credit(principal),
+            }]
         );
     }
 

@@ -138,6 +138,9 @@ fn decode_portal_event(log: &Log, block: u64) -> eyre::Result<Option<L1PortalEve
         ZonePortal::BatchSubmitted_1::SIGNATURE_HASH => {
             ignored!(ZonePortal::BatchSubmitted_1, "BatchSubmitted_1")
         }
+        ZonePortal::ForcedExitsActivated::SIGNATURE_HASH => {
+            ignored!(ZonePortal::ForcedExitsActivated, "ForcedExitsActivated")
+        }
         ZonePortal::ForcedExitRequested::SIGNATURE_HASH => {
             ignored!(ZonePortal::ForcedExitRequested, "ForcedExitRequested")
         }
@@ -418,6 +421,7 @@ mod tests {
                 deposit(),
                 token(),
                 batch(U256::ONE),
+                log(ZonePortal::ForcedExitsActivated { version: 1 }.encode_log_data()),
                 withdrawal(),
                 withdrawal_bounce(),
                 deposit_bounce(),
@@ -481,16 +485,24 @@ mod tests {
 
     #[test]
     fn reject_malformed_known_event() {
-        let bad = log(alloy_primitives::LogData::new_unchecked(
-            vec![ZonePortal::DepositMade::SIGNATURE_HASH],
-            vec![0xde, 0xad].into(),
-        ));
-        assert!(
-            collect(&[receipt(true, B256::ZERO, vec![bad])])
-                .unwrap_err()
-                .to_string()
-                .contains("malformed DepositMade")
-        );
+        for (topic, name) in [
+            (ZonePortal::DepositMade::SIGNATURE_HASH, "DepositMade"),
+            (
+                ZonePortal::ForcedExitsActivated::SIGNATURE_HASH,
+                "ForcedExitsActivated",
+            ),
+        ] {
+            let bad = log(alloy_primitives::LogData::new_unchecked(
+                vec![topic],
+                vec![0xde, 0xad].into(),
+            ));
+            assert!(
+                collect(&[receipt(true, B256::ZERO, vec![bad])])
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("malformed {name}"))
+            );
+        }
     }
 
     #[test]
