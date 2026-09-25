@@ -56,6 +56,7 @@ blocks after the portal's latest commitment through the current Zone tip.
 cargo run --release -p tempo-zone-prover-utils -- prove \
   --input witness.json \
   --target "$PROVER_TARGET" \
+  --attestation-policy prover-attestation-policy.json \
   --output proof.json
 ```
 
@@ -66,11 +67,12 @@ request, and saves the complete successful response as JSON, including `output` 
 key are needed, and the witness is not replayed locally.
 
 Protocol/version mismatches, missing proofs, and prover errors fail the command without writing
-the output file. A saved response is not independently authenticated by the CLI; submit the proof
-and its public commitments to the on-chain verifier to check the attestation.
+the output file. The TLS connection is authenticated before the witness is sent; submit the saved proof
+and its public commitments to the on-chain verifier to check the batch attestation.
 
-`prove` logs reading the witness, connecting and sending to the prover, waiting for its response,
-validating the response, and writing the proof. It prints phase durations and total elapsed time.
+`prove` logs reading the witness, sending it after authenticating the prover, waiting for its
+response, validating the response, and writing the proof. It prints phase durations and total
+elapsed time.
 
 ## Verify a saved proof
 
@@ -93,3 +95,19 @@ the command.
 
 Like `generate-input`, `verify` logs each phase and prints phase durations and total elapsed time.
 Set `--log-filter tempo_zone_prover_utils=debug` to inspect all named verifier arguments.
+
+The policy pins PCR0–2 and limits evidence age; each PCR may list multiple deployment values:
+
+```json
+{
+  "pcrs": {
+    "0": ["<96 lowercase-or-uppercase hex characters>"],
+    "1": ["<96 hex characters>"],
+    "2": ["<96 hex characters>"]
+  },
+  "max_age_seconds": 300
+}
+```
+
+The command authenticates Nitro-attested TLS before sending the witness and only writes successful
+responses. The saved batch proof is still verified on-chain during settlement.

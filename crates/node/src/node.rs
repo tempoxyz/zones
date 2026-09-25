@@ -209,7 +209,7 @@ pub struct ZoneSequencerAddOnsConfig {
     ///
     /// Implies enable_proof_persistence.
     pub enable_prover: bool,
-    /// Remote Nitro prover endpoints. Required when proof-gated settlement is enabled.
+    /// Authenticated remote Nitro prover endpoints. Required for proof-gated settlement.
     pub prover_addresses: Option<ProverAddresses>,
 }
 
@@ -227,7 +227,7 @@ impl ZoneSequencerAddOnsConfig {
 pub enum ProverRuntime {
     /// Execute the SPF in this process.
     InProcess,
-    /// Route witnesses to the endpoint assigned to the live L1 hardfork.
+    /// Route witnesses to an attested endpoint assigned to the live L1 hardfork.
     Remote(ProverAddresses),
 }
 
@@ -235,7 +235,7 @@ impl ProverRuntime {
     fn remote_addresses(&self) -> Option<&ProverAddresses> {
         match self {
             Self::InProcess => None,
-            Self::Remote(address) => Some(address),
+            Self::Remote(config) => Some(config),
         }
     }
 }

@@ -266,10 +266,16 @@ async fn configure_sequencing(
         !args.enable_prover || should_sequence_blocks || rpc_only,
         "--sequencer.enable-prover requires a sequencer or an rpc_only P2P follower"
     );
-    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone())?;
+    let policy = args
+        .prover_attestation_policy
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()?
+        .unwrap_or_default();
+    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone(), &policy)?;
     eyre::ensure!(
         !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
-        "settlement proving requires --sequencer.prover-address for Nitro attestation"
+        "settlement proving requires --sequencer.prover-address and --sequencer.prover-attestation-policy"
     );
 
     if should_sequence_blocks {
@@ -583,9 +589,18 @@ pub struct ZoneArgs {
         env = "SEQUENCER_PROVER_ADDRESS",
         value_name = "HARDFORK=HOST:PORT",
         value_delimiter = ',',
-        requires = "enable_prover"
+        requires_all = ["enable_prover", "prover_attestation_policy"]
     )]
     pub prover_addresses: Vec<HardforkProverAddress>,
+
+    /// JSON PCR allowlist shared by the configured hardfork prover endpoints.
+    #[arg(
+        long = "sequencer.prover-attestation-policy",
+        env = "SEQUENCER_PROVER_ATTESTATION_POLICY",
+        value_name = "PATH",
+        requires_all = ["enable_prover", "prover_addresses"]
+    )]
+    pub prover_attestation_policy: Option<PathBuf>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -652,7 +667,7 @@ mod tests {
         Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, parse_l1_rpc_url,
         parse_portal_address, validate_deprecated_zone_id, validate_p2p_transaction_size_limit,
     };
-    use zone_sequencer::{MAX_WITHDRAWAL_BATCH_GAS, ProverAddresses};
+    use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
     struct ZoneArgsParser {
@@ -717,6 +732,8 @@ mod tests {
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
             "--sequencer.enable-prover",
+            "--sequencer.prover-attestation-policy",
+            "policy.json",
         ];
         for flags in [
             vec![
@@ -731,12 +748,19 @@ mod tests {
                 .unwrap()
                 .zone;
             assert_eq!(args.prover_addresses.len(), 2);
-            assert!(
-                ProverAddresses::new(args.prover_addresses)
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(args.prover_attestation_policy.is_some());
         }
+        let missing_policy = ZoneArgsParser::try_parse_from(
+            common[..common.len() - 2]
+                .iter()
+                .copied()
+                .chain(["--sequencer.prover-address", "T12=old:5000"]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing_policy.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
         let error = ZoneArgsParser::try_parse_from(
             common
                 .into_iter()
