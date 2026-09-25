@@ -588,7 +588,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             tokio::select! {
                 proof_bundle = &mut proof => {
                     let proof_bundle = proof_bundle?;
-                    let certificate = self.batch_submitter.wait_for_prover_hardfork(
+                    let certificate = self.batch_submitter.race_l1_hardfork(
                         proof_bundle.as_ref().map(|proof| proof.hardfork),
                         settlement,
                     ).await?;
@@ -689,7 +689,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let submit_started = std::time::Instant::now();
             match self
                 .batch_submitter
-                .submit_batch_for_hardfork(
+                .submit_batch(
                     prepared,
                     proof_bundle.map(|proof| &proof.bundle),
                     certificate,

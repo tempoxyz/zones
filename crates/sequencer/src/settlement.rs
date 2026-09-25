@@ -347,65 +347,9 @@ impl BatchSubmitter {
         next_block_hash = %prepared.batch.next_block_hash,
         withdrawal_queue_hash = %prepared.batch.withdrawal_queue_hash,
         withdrawal_batch_index = prepared.batch.withdrawal_batch_index,
+        prover_hardfork = ?prover_hardfork,
     ))]
     pub async fn submit_batch(
-        &self,
-        prepared: &PreparedBatch,
-        proof_bundle: Option<&ProofBundle>,
-        certificate: Option<&SettlementCertificate>,
-    ) -> std::result::Result<BatchSubmitted, BatchSubmitError> {
-        self.submit_batch_for_hardfork(prepared, proof_bundle, certificate, None)
-            .await
-    }
-
-    async fn validate_live_prover_hardfork(
-        &self,
-        expected: Option<TempoHardfork>,
-    ) -> std::result::Result<(), BatchSubmitError> {
-        if let Some(proved) = expected {
-            let current = active_l1_hardfork(&self.l1_provider).await?;
-            if proved != current {
-                return Err(BatchSubmitError::ProverHardforkChanged { proved, current });
-            }
-        }
-        Ok(())
-    }
-
-    /// Stop certificate preparation at the next scheduled prover hardfork.
-    pub(crate) async fn wait_for_prover_hardfork<T>(
-        &self,
-        expected: Option<TempoHardfork>,
-        preparation: impl Future<Output = Result<T, BatchSubmitError>>,
-    ) -> Result<T, BatchSubmitError> {
-        let watch_hardfork = async {
-            let proved = expected.expect("hardfork watcher only runs for a remote proof");
-            let schedule = l1_fork_schedule(&self.l1_provider).await?;
-            if schedule.active != proved {
-                return Ok::<_, BatchSubmitError>(BatchSubmitError::ProverHardforkChanged {
-                    proved,
-                    current: schedule.active,
-                });
-            }
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(eyre::Report::from)?;
-            let Some((next_fork, delay)) = schedule.next_activation_after(now) else {
-                return std::future::pending().await;
-            };
-            tokio::time::sleep(delay).await;
-            let current = next_fork
-                .parse()
-                .map_err(|_| eyre::eyre!("unsupported scheduled L1 hardfork {next_fork:?}"))?;
-            Ok(BatchSubmitError::ProverHardforkChanged { proved, current })
-        };
-        tokio::select! {
-            result = preparation => result,
-            error = watch_hardfork, if expected.is_some() => Err(error?),
-        }
-    }
-
-    /// Submit an attestation only while its locally selected prover policy is still active.
-    pub(crate) async fn submit_batch_for_hardfork(
         &self,
         prepared: &PreparedBatch,
         proof_bundle: Option<&ProofBundle>,
@@ -515,9 +459,11 @@ impl BatchSubmitter {
             "Submitting batch to ZonePortal on L1"
         );
 
-        // Quorum collection and nonce lookup can cross activation. Never knowingly broadcast
-        // an attestation selected under the retired policy. Inclusion races are handled by retry.
-        self.validate_live_prover_hardfork(prover_hardfork).await?;
+        if let Some(prover_hardfork) = prover_hardfork {
+            // Quorum collection and nonce lookup can cross activation. Never knowingly broadcast
+            // an attestation selected under the retired policy. Inclusion races are handled by retry.
+            self.validate_live_l1_hardfork(prover_hardfork).await?;
+        }
         let receipt = match settlement_abi {
             SettlementAbi::Legacy => {
                 let mut submission = self
@@ -587,6 +533,51 @@ impl BatchSubmitter {
         );
 
         Ok(event)
+    }
+
+    /// Validate that the live L1 hardfork matches the proved hardfork.
+    async fn validate_live_l1_hardfork(
+        &self,
+        proved: TempoHardfork,
+    ) -> std::result::Result<(), BatchSubmitError> {
+        let current = active_l1_hardfork(&self.l1_provider).await?;
+        if proved != current {
+            return Err(BatchSubmitError::ProverHardforkChanged { proved, current });
+        }
+        Ok(())
+    }
+
+    /// Stop certificate preparation at the next scheduled L1 hardfork.
+    pub(crate) async fn race_l1_hardfork<T>(
+        &self,
+        expected: Option<TempoHardfork>,
+        preparation: impl Future<Output = Result<T, BatchSubmitError>>,
+    ) -> Result<T, BatchSubmitError> {
+        let watch_hardfork = async {
+            let proved = expected.expect("hardfork watcher only runs for a remote proof");
+            let schedule = l1_fork_schedule(&self.l1_provider).await?;
+            if schedule.active != proved {
+                return Ok::<_, BatchSubmitError>(BatchSubmitError::ProverHardforkChanged {
+                    proved,
+                    current: schedule.active,
+                });
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(eyre::Report::from)?;
+            let Some((next_fork, delay)) = schedule.next_activation_after(now) else {
+                return std::future::pending().await;
+            };
+            tokio::time::sleep(delay).await;
+            let current = next_fork
+                .parse()
+                .map_err(|_| eyre::eyre!("unsupported scheduled L1 hardfork {next_fork:?}"))?;
+            Ok(BatchSubmitError::ProverHardforkChanged { proved, current })
+        };
+        tokio::select! {
+            result = preparation => result,
+            error = watch_hardfork, if expected.is_some() => Err(error?),
+        }
     }
 
     fn sign_settlement_attestation(
@@ -2017,7 +2008,7 @@ mod tests {
             l1.push_success(&serde_json::json!({ "active": active }));
             let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
             let error = submitter
-                .submit_batch_for_hardfork(&test_prepared_batch(120, 100), None, None, Some(proved))
+                .submit_batch(&test_prepared_batch(120, 100), None, None, Some(proved))
                 .await
                 .unwrap_err();
             assert!(matches!(
@@ -2036,12 +2027,12 @@ mod tests {
         }
         let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
         submitter
-            .validate_live_prover_hardfork(Some(TempoHardfork::T12))
+            .validate_live_l1_hardfork(TempoHardfork::T12)
             .await
             .unwrap();
         assert!(matches!(
             submitter
-                .validate_live_prover_hardfork(Some(TempoHardfork::T12))
+                .validate_live_l1_hardfork(TempoHardfork::T12)
                 .await,
             Err(BatchSubmitError::ProverHardforkChanged {
                 proved: TempoHardfork::T12,
@@ -2058,7 +2049,7 @@ mod tests {
         let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            submitter.wait_for_prover_hardfork(
+            submitter.race_l1_hardfork(
                 Some(TempoHardfork::T12),
                 std::future::pending::<Result<(), BatchSubmitError>>(),
             ),
@@ -2086,7 +2077,7 @@ mod tests {
         let submitter = BatchSubmitter::new(Address::repeat_byte(0x11), mock_l1(l1.clone()));
         let wait = tokio::spawn(async move {
             submitter
-                .wait_for_prover_hardfork(
+                .race_l1_hardfork(
                     Some(TempoHardfork::T12),
                     std::future::pending::<Result<(), BatchSubmitError>>(),
                 )
