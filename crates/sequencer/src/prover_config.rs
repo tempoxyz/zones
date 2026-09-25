@@ -7,7 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use alloy_consensus::BlockHeader as _;
 use alloy_provider::{DynProvider, Provider as _};
+use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::{Context as _, Result, ensure};
 use reth_metrics::metrics::Gauge;
 use tempo_alloy::TempoNetwork;
@@ -92,7 +94,7 @@ impl ProverAddresses {
         chain_spec: &impl TempoHardforks,
         now: u64,
     ) -> Result<()> {
-        let (_, active) = self.resolve(provider).await?;
+        let (_, active) = self.resolve(provider, chain_spec).await?;
         if let Some((fork, activation)) = self.missing_upcoming_hardfork(chain_spec, active, now) {
             eyre::bail!(
                 "startup requires a prover for L1 hardfork {fork}, scheduled at {activation} within the next 24 hours (or overdue)"
@@ -162,113 +164,76 @@ impl ProverAddresses {
     pub(crate) async fn resolve(
         &self,
         provider: &DynProvider<TempoNetwork>,
+        chain_spec: &impl TempoHardforks,
     ) -> Result<(&str, TempoHardfork)> {
-        let hardfork = active_l1_hardfork(provider).await?;
+        let hardfork = active_l1_hardfork(provider, chain_spec).await?;
         Ok((self.address_for(hardfork)?, hardfork))
     }
 }
 
-/// The live fork and the next scheduled activation returned by Tempo L1.
-#[derive(Debug)]
-pub(crate) struct L1ForkSchedule {
-    pub(crate) active: TempoHardfork,
-    next_activation: Option<(String, u64)>,
-}
-
-impl L1ForkSchedule {
-    /// Return the next activation still ahead of the local clock.
-    pub(crate) fn next_activation_after(&self, now: Duration) -> Option<(String, Duration)> {
-        self.next_activation
-            .as_ref()
-            .and_then(|(fork, activation)| {
-                Duration::from_secs(*activation)
-                    .checked_sub(now)
-                    .filter(|delay| !delay.is_zero())
-                    .map(|delay| (fork.clone(), delay))
-            })
-    }
-}
-
-/// Read the live L1 policy, rejecting unknown forks rather than silently using an older prover.
-pub(crate) async fn l1_fork_schedule(
-    provider: &DynProvider<TempoNetwork>,
-) -> Result<L1ForkSchedule> {
-    #[derive(Debug, serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ForkInfo {
-        name: String,
-        activation_time: u64,
-        active: bool,
-    }
-
-    #[derive(Debug, serde::Deserialize)]
-    struct ForkSchedule {
-        active: String,
-        #[serde(default)]
-        schedule: Vec<ForkInfo>,
-    }
-
-    let schedule: ForkSchedule = provider
-        .raw_request("tempo_forkSchedule".into(), ())
-        .await
-        .wrap_err("failed reading the live Tempo L1 hardfork")?;
-    let active = schedule
-        .active
-        .parse()
-        .map_err(|_| eyre::eyre!("unsupported active L1 hardfork {:?}", schedule.active))?;
-    let next_activation = schedule
-        .schedule
-        .into_iter()
-        .filter(|fork| !fork.active)
-        .min_by_key(|fork| fork.activation_time)
-        .map(|fork| (fork.name, fork.activation_time));
-    Ok(L1ForkSchedule {
-        active,
-        next_activation,
-    })
-}
-
+/// Resolve the active L1 fork from its latest block timestamp and the Zone chainspec.
+///
+/// The local clock can pass an activation while L1 is stalled, so it cannot select a prover.
 pub(crate) async fn active_l1_hardfork(
     provider: &DynProvider<TempoNetwork>,
+    chain_spec: &impl TempoHardforks,
 ) -> Result<TempoHardfork> {
-    Ok(l1_fork_schedule(provider).await?.active)
+    let header = provider
+        .get_header_by_number(BlockNumberOrTag::Latest)
+        .await
+        .wrap_err("failed reading the latest Tempo L1 header")?
+        .ok_or_else(|| eyre::eyre!("latest Tempo L1 header is unavailable"))?;
+    Ok(chain_spec.tempo_hardfork_at(header.timestamp()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header as ConsensusHeader;
     use alloy_provider::ProviderBuilder;
+    use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_transport::mock::Asserter;
+    use tempo_alloy::rpc::TempoHeaderResponse;
+    use tempo_primitives::TempoHeader;
 
-    #[test]
-    fn next_activation_uses_the_remaining_fractional_second() {
-        let schedule = L1ForkSchedule {
-            active: TempoHardfork::T12,
-            next_activation: Some(("T13".to_owned(), 2_000)),
+    fn mock_l1_header(timestamp: u64) -> serde_json::Value {
+        let header = TempoHeaderResponse {
+            inner: RpcHeader {
+                hash: Default::default(),
+                inner: TempoHeader {
+                    inner: ConsensusHeader {
+                        timestamp,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
         };
-        assert_eq!(
-            schedule.next_activation_after(Duration::from_millis(1_999_500)),
-            Some(("T13".to_owned(), Duration::from_millis(500)))
-        );
-        assert_eq!(
-            schedule.next_activation_after(Duration::from_secs(2_000)),
-            None
-        );
+        serde_json::to_value(header).unwrap()
     }
 
     #[tokio::test]
-    async fn unknown_future_fork_does_not_block_the_current_prover() {
+    async fn active_fork_uses_latest_l1_block_timestamp() {
         let asserter = Asserter::new();
-        asserter.push_success(&serde_json::json!({
-            "active": "T12",
-            "schedule": [{ "name": "future", "activationTime": u64::MAX, "active": false }]
-        }));
+        asserter.push_success(&mock_l1_header(999));
+        asserter.push_success(&mock_l1_header(1_000));
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased();
         assert_eq!(
-            active_l1_hardfork(&provider).await.unwrap(),
+            active_l1_hardfork(&provider, &scheduled_t13(1_000))
+                .await
+                .unwrap(),
             TempoHardfork::T12
+        );
+        assert_eq!(
+            active_l1_hardfork(&provider, &scheduled_t13(1_000))
+                .await
+                .unwrap(),
+            TempoHardfork::T13
         );
     }
 
@@ -350,8 +315,8 @@ mod tests {
         let now = 100_000;
         for activation in [now - 1, now, now + 1, now + PROVER_UPGRADE_LOOKAHEAD_SECS] {
             let asserter = Asserter::new();
-            asserter.push_success(&serde_json::json!({ "active": "T12" }));
-            asserter.push_success(&serde_json::json!({ "active": "T12" }));
+            asserter.push_success(&mock_l1_header(0));
+            asserter.push_success(&mock_l1_header(0));
             let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
                 .connect_mocked_client(asserter)
                 .erased();
@@ -386,7 +351,7 @@ mod tests {
             .unwrap();
         let spec = tempo_chainspec::TempoChainSpec::from_genesis(genesis);
         let asserter = Asserter::new();
-        asserter.push_success(&serde_json::json!({ "active": "T11" }));
+        asserter.push_success(&mock_l1_header(0));
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased();
@@ -434,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn startup_allows_forks_beyond_24_hours() {
         let asserter = Asserter::new();
-        asserter.push_success(&serde_json::json!({ "active": "T12" }));
+        asserter.push_success(&mock_l1_header(0));
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased();
@@ -454,7 +419,7 @@ mod tests {
     #[tokio::test]
     async fn missing_fork_and_rpc_failure_never_fall_back() {
         let asserter = Asserter::new();
-        asserter.push_success(&serde_json::json!({ "active": "T13" }));
+        asserter.push_success(&mock_l1_header(100_001));
         asserter.push_failure_msg("L1 unavailable");
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
@@ -470,32 +435,39 @@ mod tests {
                 .to_string()
                 .contains("no prover configured for active L1 hardfork T13")
         );
-        assert!(config.resolve(&provider).await.is_err());
+        assert!(
+            config
+                .resolve(&provider, &scheduled_t13(100_001))
+                .await
+                .is_err()
+        );
         assert!(asserter.read_q().is_empty());
     }
 
     #[tokio::test]
     async fn routing_follows_activation_and_reorg_without_caching() {
         let asserter = Asserter::new();
-        for active in ["T12", "T13", "T12", "future"] {
-            asserter.push_success(&serde_json::json!({ "active": active }));
+        for timestamp in [999, 1_000, 999] {
+            asserter.push_success(&mock_l1_header(timestamp));
         }
+        asserter.push_failure_msg("L1 unavailable");
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased();
         let config = routed();
+        let spec = scheduled_t13(1_000);
         assert_eq!(
-            config.resolve(&provider).await.unwrap(),
+            config.resolve(&provider, &spec).await.unwrap(),
             ("old:5000", TempoHardfork::T12)
         );
         assert_eq!(
-            config.resolve(&provider).await.unwrap(),
+            config.resolve(&provider, &spec).await.unwrap(),
             ("new:5000", TempoHardfork::T13)
         );
         assert_eq!(
-            config.resolve(&provider).await.unwrap(),
+            config.resolve(&provider, &spec).await.unwrap(),
             ("old:5000", TempoHardfork::T12)
         );
-        assert!(config.resolve(&provider).await.is_err());
+        assert!(config.resolve(&provider, &spec).await.is_err());
     }
 }

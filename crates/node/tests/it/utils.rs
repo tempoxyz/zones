@@ -3657,6 +3657,9 @@ pub(crate) async fn spawn_sequencer_with_config(
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {
+        chain_spec: std::sync::Arc::new(zone_chainspec::ZoneChainSpec {
+            inner: tempo_chainspec::spec::DEV.clone(),
+        }),
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),

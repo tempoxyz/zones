@@ -1,6 +1,6 @@
 //! Batch-boundary settlement attestation construction and validation.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
@@ -18,6 +18,7 @@ use tempo_zone_contracts::{
     ZonePortal,
 };
 use tracing::info;
+use zone_chainspec::ZoneChainSpec;
 use zone_prover::NITRO_VERIFIER_CONFIG_V1;
 
 use zone_sequencer::{
@@ -35,6 +36,7 @@ pub(crate) struct AttestationContext {
     pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
+    pub(crate) chain_spec: Arc<ZoneChainSpec>,
     pub(crate) anchor_config: BatchAnchorConfig,
 }
 
@@ -45,6 +47,7 @@ impl AttestationContext {
         signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
         l1_provider: DynProvider<TempoNetwork>,
+        chain_spec: Arc<ZoneChainSpec>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
         Self {
@@ -53,6 +56,7 @@ impl AttestationContext {
             signer,
             addresses,
             l1_provider,
+            chain_spec,
             anchor_config,
         }
     }
@@ -295,7 +299,7 @@ where
         withdrawal_batch_index == expected_batch_index,
         "zone withdrawal batch index {withdrawal_batch_index} does not follow previous zone batch index {previous_batch_index}"
     );
-    let settlement_abi = SettlementAbi::from_l1(&context.l1_provider).await?;
+    let settlement_abi = SettlementAbi::from_l1(&context.l1_provider, &context.chain_spec).await?;
 
     let portal = ZonePortal::new(context.domain.portal_address, context.l1_provider.clone());
     let (set_version, verifier) = context
@@ -638,6 +642,9 @@ mod tests {
             ProviderBuilder::new_with_network::<TempoNetwork>()
                 .connect_mocked_client(l1.clone())
                 .erased(),
+            Arc::new(ZoneChainSpec {
+                inner: tempo_chainspec::spec::DEV.clone(),
+            }),
             BatchAnchorConfig::default(),
         );
         (provider, context, l1, l1_header)

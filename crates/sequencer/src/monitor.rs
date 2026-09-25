@@ -61,6 +61,8 @@ const RESTART_BACKOFF: Duration = Duration::from_secs(5);
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
+    /// Zone chainspec containing the inherited Tempo hardfork schedule.
+    pub chain_spec: Arc<zone_chainspec::ZoneChainSpec>,
     /// ZoneOutbox contract address on Zone L2.
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
@@ -191,6 +193,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
+            config.chain_spec.clone(),
             signer,
             config.batch_anchor_config,
         );
@@ -1051,12 +1054,14 @@ fn decode_portal_revert(err: &eyre::Report) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Signed, TxLegacy};
+    use alloy_consensus::{Header as ConsensusHeader, Signed, TxLegacy};
     use alloy_primitives::{Bytes, Log, Signature, U256};
     use alloy_provider::Provider as _;
+    use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_sol_types::{SolEvent, SolValue};
     use alloy_transport::mock::Asserter;
     use reth_provider::test_utils::MockEthProvider;
+    use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{
         Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
     };
@@ -1065,6 +1070,25 @@ mod tests {
         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
             .erased()
+    }
+
+    fn mock_l1_header(timestamp: u64) -> serde_json::Value {
+        serde_json::to_value(TempoHeaderResponse {
+            inner: RpcHeader {
+                hash: B256::ZERO,
+                inner: TempoHeader {
+                    inner: ConsensusHeader {
+                        timestamp,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        })
+        .unwrap()
     }
 
     type TestZoneProvider = MockEthProvider<TempoPrimitives>;
@@ -1131,7 +1155,16 @@ mod tests {
         zone_provider: TestZoneProvider,
     ) -> ZoneMonitor<TestZoneProvider> {
         let portal_address = Address::repeat_byte(0x11);
+        let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t13Time".into(), 1_000)
+            .unwrap();
         let config = ZoneMonitorConfig {
+            chain_spec: Arc::new(zone_chainspec::ZoneChainSpec {
+                inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
+            }),
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),
@@ -1140,13 +1173,14 @@ mod tests {
             settlements: None,
         };
         let l1_provider = mock_provider(l1);
+        let chain_spec = config.chain_spec.clone();
 
         ZoneMonitor {
             config,
             metrics: crate::metrics::ZoneMonitorMetrics::default(),
             provider: zone_provider,
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider),
+            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, chain_spec),
             withdrawal_notify: Arc::new(Notify::new()),
             repair_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
@@ -1232,10 +1266,10 @@ mod tests {
         };
         // The first attempt fails after selecting the ABI. Before retry, L1 activates T13.
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
-        l1.push_success(&serde_json::json!({ "active": "T12" }));
+        l1.push_success(&mock_l1_header(999));
         l1.push_failure_msg("submission metadata temporarily unavailable");
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
-        l1.push_success(&serde_json::json!({ "active": "T13" }));
+        l1.push_success(&mock_l1_header(1_000));
         let proof = SettlementProof {
             bundle: ProofBundle {
                 verifier_config: NITRO_VERIFIER_CONFIG_V1.to_vec().into(),
@@ -1262,6 +1296,9 @@ mod tests {
         let l1 = Asserter::new();
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
+            chain_spec: Arc::new(zone_chainspec::ZoneChainSpec {
+                inner: tempo_chainspec::spec::DEV.clone(),
+            }),
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
             poll_interval: Duration::from_secs(1),
