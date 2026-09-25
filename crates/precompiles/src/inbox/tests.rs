@@ -492,8 +492,8 @@ fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()>
         &calldata,
         GAS,
         false,
-        ZONE_INBOX_ADDRESS,
         Address::repeat_byte(0x44),
+        ZONE_INBOX_ADDRESS,
     )?;
     assert!(output.is_revert());
     assert_eq!(

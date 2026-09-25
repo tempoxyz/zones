@@ -534,8 +534,8 @@ mod tests {
             Address::ZERO,
             TempoStateAbi::tempoBlockHashCall {}.abi_encode(),
             true,
-            TEMPO_STATE_ADDRESS,
             address!("0x000000000000000000000000000000000000dEaD"),
+            TEMPO_STATE_ADDRESS,
         )?;
 
         assert!(output.is_revert());

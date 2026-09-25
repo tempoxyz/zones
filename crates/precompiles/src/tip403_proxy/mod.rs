@@ -140,8 +140,8 @@ mod tests {
         let output = harness.call_as(
             &call,
             u64::MAX,
-            TIP403_REGISTRY_ADDRESS,
             Address::repeat_byte(0x44),
+            TIP403_REGISTRY_ADDRESS,
         )?;
 
         assert!(output.is_revert());

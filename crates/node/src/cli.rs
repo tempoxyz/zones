@@ -702,12 +702,10 @@ mod tests {
                 tempo_evm::TempoEvmEnv::default(),
             );
             assert_eq!(
-                evm.database_as::<
-                    zone_evm::L1OverlayDB<
-                        evm2::evm::InMemoryDB,
-                        zone_l1::state::L1StateProvider,
-                    >,
-                >()
+                evm.database_as::<zone_evm::L1OverlayDB<
+                    evm2::evm::Db<evm2::evm::InMemoryDB>,
+                    zone_l1::state::L1StateProvider,
+                >>()
                 .expect("zone database")
                 .l1_state()
                 .portal(),
