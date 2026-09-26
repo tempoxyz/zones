@@ -93,3 +93,25 @@ the command.
 
 Like `generate-input`, `verify` logs each phase and prints phase durations and total elapsed time.
 Set `--log-filter tempo_zone_prover_utils=debug` to inspect all named verifier arguments.
+
+## Decode a saved proof
+
+```bash
+cargo run --release -p tempo-zone-prover-utils -- decode-proof \
+  --input proof.json | jq '.payload | {timestamp, pcrs, user_data}'
+```
+
+Accepts both the current `{"ok": {...}}` response and the legacy flat response with
+`proofBundle` at the root. Decodes the Nitro COSE_Sign1 envelope into `protected`,
+`unprotected`, `payload`, and `signature` JSON fields, including the embedded CBOR
+attestation payload. Byte strings are `0x`-prefixed hex; integer map keys (such as
+PCR indices and COSE header labels) become JSON object keys. Certificates remain
+hex-encoded DER. Both tagged and untagged COSE_Sign1 envelopes are accepted.
+Decoding uses the prover's shared CBOR decoder with the Nitro document schema
+and integer algorithm headers; missing required or unknown document fields are
+rejected. Optional `public_key`, `user_data`, and `nonce` fields appear as `null`
+when absent.
+
+Pretty-printed JSON goes to stdout, or to `--output decoded-proof.json`.
+This command inspects the document; it does not verify signatures, certificate
+trust, PCR policy, or the binding to a witness. No RPC connection is needed.

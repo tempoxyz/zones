@@ -37,6 +37,7 @@ use zone_spf::{
     ZoneStateWitness, prove_zone_batch,
 };
 
+mod decode_proof;
 mod verifier_request;
 mod verify;
 
@@ -75,6 +76,8 @@ enum Command {
     Prove(ProveArgs),
     /// Verify a saved proof against the native L1 verifier using eth_call.
     Verify(verify::VerifyArgs),
+    /// Decode a saved Nitro proof into JSON without verifying its signature.
+    DecodeProof(decode_proof::DecodeProofArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -197,6 +200,7 @@ async fn main() -> Result<()> {
         Command::GenerateInput(args) => generate_input(args).await,
         Command::Prove(args) => prove(args).await,
         Command::Verify(args) => verify::run(args).await,
+        Command::DecodeProof(args) => decode_proof::run(args),
     }
 }
 

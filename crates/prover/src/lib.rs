@@ -8,7 +8,9 @@ mod verification;
 pub use verification::{ShadowProofVerificationError, ShadowProofVerifier};
 
 pub use chainspec::{TrustedChainSpecError, TrustedChainSpecs};
-pub use connection::{ProverConnection, ProverConnectionError, request_error_response};
+pub use connection::{
+    ProverConnection, ProverConnectionError, decode_exact, request_error_response,
+};
 pub use protocol::{
     ErrorCode, NITRO_VERIFIER_CONFIG_V1, NITRO_VERIFIER_CONFIG_V1_HASH, NO_PROOF_FALLBACK_VERIFIER,
     NO_PROOF_FALLBACK_VERIFIER_HASH, NitroBatchAttestation, PROTOCOL_VERSION, ProofBundle,
