@@ -1,4 +1,4 @@
-//! Inbox-only building block. Authorization and replay processing are connected in PR3.
+//! Atomic debit and withdrawal construction for authenticated inbox requests.
 use super::*;
 use crate::error::ZonePrecompileError;
 use tempo_precompiles::{tip20::Recipient, tip403_registry::TIP403Registry};
@@ -44,8 +44,7 @@ impl ForcedWithdrawalError {
 
 impl ZoneOutbox {
     /// Debit an already root-authorized full balance and enqueue a plain withdrawal atomically.
-    /// No ABI selector exposes this operation. PR3 calls it after authorization and replay checks.
-    #[allow(dead_code)]
+    /// No ABI selector exposes this operation. The inbox checks authorization and replay first.
     pub(crate) fn request_forced_withdrawal<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,

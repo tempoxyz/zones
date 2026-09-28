@@ -14044,6 +14044,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "const-hex",
+ "exithatch",
  "eyre",
  "futures",
  "jsonrpsee",
