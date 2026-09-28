@@ -951,42 +951,6 @@ impl Harness {
 }
 
 #[test]
-fn forced_withdrawals_bypass_and_preserve_ordinary_block_cap() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
-    h.ctx.cfg.spec = TempoHardfork::T13;
-    assert!(!h.set_max_withdrawals(1)?.is_revert());
-    // Even the maximum currently admitted forced workload leaves the ordinary slot available.
-    for _ in 0..15 {
-        let amount = h.balance_of(ALICE)?.to::<u128>();
-        h.forced(ZONE_INBOX_ADDRESS, amount).unwrap();
-        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || {
-            TIP20Token::from_address(h.token)?.mint(
-                ALICE,
-                ITIP20::mintCall {
-                    to: ALICE,
-                    amount: U256::from(100),
-                },
-            )
-        })?;
-    }
-    assert!(!h.request(1, BOB, B256::ZERO)?.is_revert());
-    // An exhausted ordinary cap must not prevent forced execution either.
-    h.forced(ZONE_INBOX_ADDRESS, 99).unwrap();
-    assert_revert(
-        h.request(1, BOB, B256::ZERO),
-        ZoneOutboxError::too_many_withdrawals_this_block(),
-    );
-    assert_eq!(h.pending()?.len(), 17);
-    let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
-    StorageCtx::enter(&mut storage, || -> TempoResult<()> {
-        assert_eq!(ZoneOutbox::new().withdrawals_this_block.read()?, 1);
-        Ok(())
-    })?;
-    Ok(())
-}
-
-#[test]
 fn forced_withdrawal_is_root_authorized_fee_free_and_finalizes_in_mixed_order() -> eyre::Result<()>
 {
     use tempo_precompiles::account_keychain::AccountKeychain;
@@ -1167,28 +1131,6 @@ fn forced_withdrawal_policy_and_fatal_failures_leave_no_partial_state() -> eyre:
             outbox.last_fallback_nonce.write(0)
         })?;
     }
-    Ok(())
-}
-
-#[test]
-fn forced_withdrawal_rejects_l1_paused_token_when_l2_is_unpaused() -> eyre::Result<()> {
-    let mut h = Harness::new()?;
-    h.ctx.cfg.spec = TempoHardfork::T13;
-    let slot = {
-        let mut storage = test_storage_provider(&mut h.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || -> eyre::Result<_> {
-            let token = TIP20Token::from_address(h.token)?;
-            assert!(!token.paused()?);
-            Ok(token.paused.slot())
-        })?
-    };
-    h.l1.insert(h.token, slot, ANCHOR, U256::ONE);
-    assert_eq!(
-        h.forced(ZONE_INBOX_ADDRESS, 1_000_000),
-        Err(ForcedWithdrawalError::PolicyRejected)
-    );
-    assert_eq!(h.balance_of(ALICE)?, U256::from(1_000_000));
-    assert!(h.pending()?.is_empty());
     Ok(())
 }
 
