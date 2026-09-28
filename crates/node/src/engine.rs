@@ -669,6 +669,11 @@ mod tests {
             .extra_fields
             .insert_value("t13Time".into(), activation)
             .unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t14Time".into(), u64::MAX)
+            .unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
     }
 

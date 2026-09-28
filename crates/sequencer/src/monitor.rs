@@ -1216,6 +1216,11 @@ mod tests {
             .extra_fields
             .insert_value("t13Time".into(), 1_000)
             .unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t14Time".into(), u64::MAX)
+            .unwrap();
         let config = ZoneMonitorConfig {
             chain_spec: Arc::new(zone_chainspec::ZoneChainSpec {
                 inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),

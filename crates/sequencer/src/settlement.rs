@@ -2028,6 +2028,11 @@ mod tests {
             .extra_fields
             .insert_value("t13Time".into(), activation)
             .unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t14Time".into(), u64::MAX)
+            .unwrap();
         Arc::new(ZoneChainSpec {
             inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
         })

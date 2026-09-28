@@ -270,12 +270,11 @@ async fn configure_sequencing(
         .prover_attestation_policy
         .as_deref()
         .map(std::fs::read)
-        .transpose()?
-        .unwrap_or_default();
-    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone(), &policy)?;
+        .transpose()?;
+    let prover_addresses = ProverAddresses::new(args.prover_addresses.clone(), policy.as_deref())?;
     eyre::ensure!(
         !args.enable_prover || !should_sequence_blocks || prover_addresses.is_some(),
-        "settlement proving requires --sequencer.prover-address and --sequencer.prover-attestation-policy"
+        "settlement proving requires --sequencer.prover-address"
     );
 
     if should_sequence_blocks {
@@ -589,11 +588,11 @@ pub struct ZoneArgs {
         env = "SEQUENCER_PROVER_ADDRESS",
         value_name = "HARDFORK=HOST:PORT",
         value_delimiter = ',',
-        requires_all = ["enable_prover", "prover_attestation_policy"]
+        requires = "enable_prover"
     )]
     pub prover_addresses: Vec<HardforkProverAddress>,
 
-    /// JSON PCR allowlist shared by the configured hardfork prover endpoints.
+    /// Optional JSON PCR allowlist override. Defaults to the Tempo verifier's hardfork policy.
     #[arg(
         long = "sequencer.prover-attestation-policy",
         env = "SEQUENCER_PROVER_ATTESTATION_POLICY",
@@ -750,17 +749,16 @@ mod tests {
             assert_eq!(args.prover_addresses.len(), 2);
             assert!(args.prover_attestation_policy.is_some());
         }
-        let missing_policy = ZoneArgsParser::try_parse_from(
+        let default_policy = ZoneArgsParser::try_parse_from(
             common[..common.len() - 2]
                 .iter()
                 .copied()
                 .chain(["--sequencer.prover-address", "T12=old:5000"]),
         )
-        .unwrap_err();
-        assert_eq!(
-            missing_policy.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+        .unwrap()
+        .zone;
+        assert_eq!(default_policy.prover_addresses.len(), 1);
+        assert!(default_policy.prover_attestation_policy.is_none());
         let error = ZoneArgsParser::try_parse_from(
             common
                 .into_iter()

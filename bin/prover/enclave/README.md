@@ -124,9 +124,11 @@ not require a wall clock: certificate validity spans 2024–9999 and the client 
 timestamps and fresh nonces. Clients require an accurate wall clock. The default maximum evidence
 age is 300 seconds, with at most 300 seconds of future clock skew.
 
-Remote clients must supply a PCR0–2 allowlist with `--sequencer.prover-attestation-policy` (node)
-or `--attestation-policy` (prover utils); see the [policy example](../utils/README.md). Debug-mode
-zero PCRs are rejected. Rebuild the EIF and distribute its trusted measurements when deploying
+The node uses the Tempo verifier's hardfork-specific PCR0–2 tuple to authenticate the enclave.
+Until approved measurements are populated in Tempo, remote node proving fails closed unless an
+explicit `--sequencer.prover-attestation-policy` override is supplied. The prover utils still
+require `--attestation-policy`; see the [policy example](../utils/README.md). Debug-mode zero PCRs
+are rejected. Rebuild the EIF and distribute its trusted measurements when deploying
 this change; coordinate client/server upgrades because plaintext clients are no longer accepted.
 
 The host image launches the enclave in non-debug mode and exposes TCP port `5000`. It accepts
@@ -137,29 +139,32 @@ The host image launches the enclave in non-debug mode and exposes TCP port `5000
 
 Keep separate deployments of the currently approved EIF and the next hardfork's EIF. Pin each
 host image by digest, retain its commit-specific PCR measurements, and verify those measurements
-against the PCR policy shipped in the corresponding L1 release. Do not repoint an existing
-endpoint to a different EIF during the transition. The node does not authenticate an endpoint's
-advertised release; L1 remains responsible for checking the attestation's PCRs.
+against the hardfork policy compiled into the corresponding Tempo release. Do not repoint an
+existing endpoint to a different EIF during the transition. The node does not authenticate an
+endpoint's advertised release; L1 remains responsible for checking the batch attestation's PCRs.
 
 Configure the node with one exact `--sequencer.prover-address` assignment per L1 hardfork.
-For example, a T12/T13 transition uses:
+For example, after both forks' measurements have been approved in Tempo, a T13/T14 transition uses:
 
 ```sh
 --sequencer.enable-prover \
---sequencer.prover-address T12=prover-t12:5000 \
 --sequencer.prover-address T13=prover-t13:5000 \
---sequencer.prover-attestation-policy /path/to/prover-policy.json
+--sequencer.prover-address T14=prover-t14:5000
 ```
 
 The equivalent address setting is
-`SEQUENCER_PROVER_ADDRESS=T12=prover-t12:5000,T13=prover-t13:5000`; also set
-`SEQUENCER_PROVER_ATTESTATION_POLICY` to the policy file path. The TLS policy applies to every
-configured endpoint, so include the approved measurements for both releases during the transition;
-the L1 verifier still enforces the hardfork-specific settlement measurement.
-Use the actual forks supported by the node binary; a future T14 assignment requires a binary
-whose Tempo dependency recognizes T14. Assign the same endpoint explicitly to adjacent forks
-when the accepted prover image is unchanged. The readiness gauge checks assignments for the
-current L1 hardfork and every later Tempo fork in the node's chainspec activating within the
+`SEQUENCER_PROVER_ADDRESS=T13=prover-t13:5000,T14=prover-t14:5000`. Each endpoint uses the PCR
+policy for its assigned Tempo hardfork. If a fork has no approved PCRs compiled into Tempo, the
+node refuses to start with that assignment rather than send witnesses without authentication.
+For devnets or independently staged EIFs, `--sequencer.prover-attestation-policy` (or
+`SEQUENCER_PROVER_ATTESTATION_POLICY`) explicitly overrides the compiled policy for all endpoints;
+include both deployments' measurements during an upgrade. This override does not change what the
+L1 verifier accepts for settlement.
+Use the actual forks supported by the node binary; a future fork assignment requires a binary
+whose Tempo dependency recognizes it. Pre-T13 forks without native verifier measurements, such
+as T12, need the explicit file override while their prover endpoint remains configured.
+Assign the same endpoint explicitly to adjacent forks when the accepted prover image is unchanged.
+The readiness gauge checks assignments for the current L1 hardfork and every later Tempo fork in the node's chainspec activating within the
 next 72 hours (inclusive). Forks more than 72 hours away are not included. This checks configured
 addresses, not endpoint connectivity or PCRs. Missing assignments for the live L1 fork and
 unknown L1 forks stop proving; there is no fallback to an older endpoint.

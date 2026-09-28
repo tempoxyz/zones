@@ -56,26 +56,31 @@ pub struct ProverAddresses(BTreeMap<TempoHardfork, RemoteProverConfig>);
 
 impl ProverAddresses {
     /// Build a configuration, rejecting duplicate assignments.
-    pub fn new(assignments: Vec<HardforkProverAddress>, policy: &[u8]) -> Result<Option<Self>> {
+    pub fn new(
+        assignments: Vec<HardforkProverAddress>,
+        policy: Option<&[u8]>,
+    ) -> Result<Option<Self>> {
         if assignments.is_empty() {
             return Ok(None);
         }
         let mut addresses = BTreeMap::new();
         for assignment in assignments {
+            let HardforkProverAddress { hardfork, address } = assignment;
             ensure!(
-                !assignment.address.trim().is_empty(),
+                !address.trim().is_empty(),
                 "prover address must not be empty"
             );
-            ensure!(
-                addresses
-                    .insert(
-                        assignment.hardfork,
-                        RemoteProverConfig::from_policy_json(assignment.address, policy)?,
-                    )
-                    .is_none(),
-                "duplicate prover address for {}",
-                assignment.hardfork
+            let prev = addresses.insert(
+                hardfork,
+                if let Some(policy) = policy {
+                    RemoteProverConfig::from_policy_json(address, policy)?
+                } else {
+                    let pcrs = tempo_precompiles::zone_verifier::approved_pcrs(hardfork)
+                        .ok_or_else(|| eyre::eyre!("no approved prover PCRs for {hardfork:?}"))?;
+                    RemoteProverConfig::from_pcrs(address, pcrs)?
+                },
             );
+            ensure!(prev.is_none(), "duplicate prover address for {hardfork}");
         }
         Ok(Some(Self(addresses)))
     }
@@ -241,9 +246,10 @@ mod tests {
     fn metric_detects_entry_into_the_window_and_remains_set_after_activation() {
         let activation = 400_000;
         let spec = scheduled_t13(activation);
-        let addresses = ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], &policy())
-            .unwrap()
-            .unwrap();
+        let addresses =
+            ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], Some(&policy()))
+                .unwrap()
+                .unwrap();
         let recorded = Arc::new(RecordedGauge::default());
         let gauge = Gauge::from_arc(recorded.clone());
         for now in [
@@ -290,6 +296,11 @@ mod tests {
             .extra_fields
             .insert_value("t13Time".into(), timestamp)
             .unwrap();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t14Time".into(), u64::MAX)
+            .unwrap();
         tempo_chainspec::TempoChainSpec::from_genesis(genesis)
     }
 
@@ -299,7 +310,7 @@ mod tests {
                 "T12=old:5000".parse().unwrap(),
                 "T13=new:5000".parse().unwrap(),
             ],
-            &policy(),
+            Some(&policy()),
         )
         .unwrap()
         .unwrap()
@@ -317,11 +328,11 @@ mod tests {
             "new:5000"
         );
         assert!(config.config_for(TempoHardfork::T11).is_err());
-        assert!(ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], b"{}").is_err());
+        assert!(ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], Some(b"{}")).is_err());
         assert!(
             ProverAddresses::new(
                 vec!["T13=a:1".parse().unwrap(), "T13=b:2".parse().unwrap()],
-                &policy(),
+                Some(&policy()),
             )
             .is_err()
         );
@@ -338,7 +349,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let config = ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], &policy())
+        let config = ProverAddresses::new(vec!["T12=old:5000".parse().unwrap()], Some(&policy()))
             .unwrap()
             .unwrap();
         assert!(

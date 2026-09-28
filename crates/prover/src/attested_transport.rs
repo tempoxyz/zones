@@ -63,12 +63,28 @@ impl RemoteProverConfig {
         Self::from_policy_json(address, &std::fs::read(path)?)
     }
 
+    /// Parse a JSON PCR allowlist override for remote prover authentication.
     pub fn from_policy_json(address: String, bytes: &[u8]) -> io::Result<Self> {
-        require(
-            !address.trim().is_empty() && bytes.len() <= MAX_POLICY_BYTES,
-            "invalid prover address or policy size",
-        )?;
-        let policy: Policy = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        require(bytes.len() <= MAX_POLICY_BYTES, "invalid policy size")?;
+        let policy = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+        Self::new(address, policy)
+    }
+
+    /// Use the exact PCR0/1/2 tuple approved by the Tempo verifier.
+    pub fn from_pcrs(address: String, pcrs: [[u8; SHA384_SIZE]; 3]) -> io::Result<Self> {
+        let policy = Policy {
+            pcrs: pcrs
+                .into_iter()
+                .enumerate()
+                .map(|(index, pcr)| (index as u8, vec![FixedBytes::from(pcr)]))
+                .collect(),
+            max_age_seconds: DEFAULT_MAX_AGE_SECS,
+        };
+        Self::new(address, policy)
+    }
+
+    fn new(address: String, policy: Policy) -> io::Result<Self> {
+        require(!address.trim().is_empty(), "invalid prover address")?;
         require(
             policy.max_age_seconds > 0 && (0..=2).all(|i| policy.pcrs.contains_key(&i)),
             "policy must include PCR0-2 and positive freshness",
