@@ -1953,6 +1953,7 @@ mod tests {
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::{Block, TempoHeader, TempoPrimitives};
+    use zone_chainspec::test_utils::set_tempo_fork;
 
     fn mock_l1(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -1968,16 +1969,7 @@ mod tests {
 
     fn chain_spec_with_t13(activation: u64) -> Arc<ZoneChainSpec> {
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), serde_json::Value::Null)
-            .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)
-            .unwrap();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         Arc::new(ZoneChainSpec {
             inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
         })

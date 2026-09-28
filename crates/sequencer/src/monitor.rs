@@ -1098,9 +1098,11 @@ mod tests {
     use alloy_transport::mock::Asserter;
     use reth_provider::test_utils::MockEthProvider;
     use tempo_alloy::rpc::TempoHeaderResponse;
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_primitives::{
         Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
     };
+    use zone_chainspec::test_utils::set_tempo_fork;
 
     fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -1196,16 +1198,7 @@ mod tests {
     ) -> ZoneMonitor<TestZoneProvider> {
         let portal_address = Address::repeat_byte(0x11);
         let mut genesis = tempo_chainspec::spec::DEV.inner.genesis.clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), serde_json::Value::Null)
-            .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), 1_000)
-            .unwrap();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, 1_000);
         let config = ZoneMonitorConfig {
             chain_spec: Arc::new(zone_chainspec::ZoneChainSpec {
                 inner: Arc::new(tempo_chainspec::TempoChainSpec::from_genesis(genesis)),
@@ -1441,7 +1434,6 @@ mod tests {
 
     #[tokio::test]
     async fn submission_error_rebuilds_on_hardfork_change() {
-        use tempo_chainspec::hardfork::TempoHardfork;
         use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
 
         let l1 = Asserter::new();

@@ -646,11 +646,14 @@ fn zone_timestamp_millis(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_chainspec::EthChainSpec as _;
     use std::{
         collections::VecDeque,
         sync::atomic::{AtomicBool, Ordering},
     };
+    use tempo_chainspec::hardfork::TempoHardfork;
     use tokio::sync::oneshot;
+    use zone_chainspec::test_utils::set_tempo_fork;
 
     #[test]
     fn zone_timestamp_uses_l1_timestamp_as_a_lower_bound() {
@@ -666,22 +669,13 @@ mod tests {
     fn zone_timestamp_allows_parent_timestamp_when_catching_up_in_same_millisecond() {
         assert_eq!(zone_timestamp_millis(1_000, 2_000, 2_000), 2_000);
     }
+
     fn t13_spec(activation: u64) -> ZoneChainSpec {
-        use reth_chainspec::EthChainSpec as _;
         let mut genesis = tempo_chainspec::spec::DEV.genesis().clone();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t14Time".into(), serde_json::Value::Null)
-            .unwrap();
+        set_tempo_fork(&mut genesis, TempoHardfork::T13, activation);
         genesis.config.chain_id =
             zone_primitives::constants::zone_chain_id(tempo_chainspec::spec::DEV.chain().id(), 1)
                 .unwrap();
-        genesis
-            .config
-            .extra_fields
-            .insert_value("t13Time".into(), activation)
-            .unwrap();
         ZoneChainSpec::from_genesis(genesis).unwrap()
     }
 

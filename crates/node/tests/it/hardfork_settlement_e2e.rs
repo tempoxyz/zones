@@ -25,6 +25,7 @@ use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
+use zone_chainspec::test_utils::set_tempo_fork;
 use zone_rpc::types::ZoneExecutionWitness;
 use zone_sequencer::{BatchData, BatchSubmitter};
 use zone_spf::{
@@ -357,14 +358,7 @@ fn init_migration_portal(genesis: &mut Genesis, activation: u64) -> eyre::Result
     let signer = signer_at(0)?;
     let admin = signer_at(2)?.address();
     let user = signer_at(1)?.address();
-    genesis
-        .config
-        .extra_fields
-        .insert_value("t13Time".into(), activation)?;
-    genesis
-        .config
-        .extra_fields
-        .insert_value("t14Time".into(), serde_json::Value::Null)?;
+    set_tempo_fork(genesis, TempoHardfork::T13, activation);
     for account in initial_zone_factory_state(signer.address()) {
         genesis.alloc.get_mut(&account.address).unwrap().code = Some(account.code);
     }
