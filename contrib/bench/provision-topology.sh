@@ -973,7 +973,18 @@ provision_up() {
     if [[ -n "${ZONES_BENCH_PROVER_ADDRESS:-}" ]]; then
         [[ "$ZONES_BENCH_PROVER_ADDRESS" =~ ^[^[:space:]:]+:[0-9]+$ ]] \
             || die "ZONES_BENCH_PROVER_ADDRESS must be HOST:PORT"
-        prover_args=(--sequencer.enable-prover --sequencer.prover-address "$ZONES_BENCH_PROVER_ADDRESS")
+        local prover_address="$ZONES_BENCH_PROVER_ADDRESS"
+        local zone_help
+        zone_help="$("$ZONE_BIN" node --help)"
+        if [[ "$zone_help" == *HARDFORK=HOST:PORT* ]]; then
+            # Newer Zone binaries route by the active L1 fork. The snapshot schedules
+            # later forks in year 2100, so this benchmark needs one assignment.
+            local hardfork
+            hardfork="$(jq -er '.config.tempo.hardfork | select(test("^t[0-9]+[a-z]*$"))' "$state_a_root/manifest.json")" \
+                || die "verified L1 snapshot has no Tempo hardfork"
+            prover_address="T${hardfork#t}=$prover_address"
+        fi
+        prover_args=(--sequencer.enable-prover --sequencer.prover-address "$prover_address")
     fi
 
     # The pinned Reth revision predates the retained-branch pruning fix. Its
