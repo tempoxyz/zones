@@ -1176,21 +1176,132 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proof_failure_prepares_no_proof_fallback() {
+    async fn proof_verification_failure_enters_no_proof_submission_path() {
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
         monitor.settlement_prover = Some(SettlementProver::fixed(Err(eyre::eyre!(
             "execution reverted: out of gas"
         ))));
+        for _ in 0..MAX_RETRIES {
+            l1.push_failure_msg("portal read failed");
+        }
 
         let ready = monitor
             .batch_preparer()
             .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
             .await
             .unwrap();
-
         assert_eq!(ready.verifier_mode, VerifierMode::NoProof);
         assert!(ready.proof.is_none());
+
+        let error = monitor.submit_ready_batch(ready).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("batch submission failed after 3 retries")
+        );
+        assert!(l1.read_q().is_empty(), "fallback must reach submission");
+    }
+
+    #[tokio::test]
+    async fn unconfigured_prover_collects_no_proof_quorum() {
+        assert_no_proof_quorum(None).await;
+    }
+
+    #[tokio::test]
+    async fn proof_verification_setup_failure_collects_no_proof_quorum_until_leader_demotion() {
+        let proof = Some(Err(eyre::eyre!("failed to read portal verifier")));
+        assert_no_proof_quorum(proof).await;
+    }
+
+    async fn assert_no_proof_quorum(proof: Option<eyre::Result<SettlementProof>>) {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        let proof_tx = proof.map(|proof| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            monitor.settlement_prover = Some(SettlementProver::fixed_after(async move {
+                rx.await.expect("release proof after the Nitro proposal");
+                proof
+            }));
+            tx
+        });
+        let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
+        let settlements = SettlementManager::new(
+            crate::attestation::AttestationDomain {
+                l1_chain_id: 1337,
+                portal_address: monitor.config.portal_address,
+                zone_id: 7,
+            },
+            None,
+            PrivateKeySigner::random(),
+            Default::default(),
+            mock_provider(l1.clone()),
+            monitor.config.chain_spec.clone(),
+            BatchAnchorConfig::default(),
+            commands,
+        );
+        monitor.config.settlements = Some(settlements);
+        let header = tempo_alloy::rpc::TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header {
+                hash: B256::ZERO,
+                inner: TempoHeader::default(),
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        };
+        // `NoProof` prepares once. A configured prover also prepares a Nitro certificate first.
+        for _ in 0..(1 + usize::from(proof_tx.is_some())) {
+            l1.push_success(&mock_l1_header(1_000));
+            l1.push_success(&abi_encode_multicall(vec![
+                abi_encode_u64(1),
+                abi_encode_u64(2),
+                Address::ZERO.abi_encode().into(),
+                abi_encode_u64(0),
+            ]));
+            l1.push_success(&serde_json::json!("0x7b"));
+            l1.push_success(&header);
+        }
+
+        let task = tokio::spawn(async move {
+            monitor
+                .batch_preparer()
+                .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
+                .await
+        });
+        if let Some(proof_tx) = proof_tx {
+            // Fail proving after the Nitro proposal, forcing a fresh `NoProof` quorum.
+            let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
+                panic!("expected a Nitro settlement proposal");
+            };
+            let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
+            assert_eq!(
+                attestation.verifierConfigHash,
+                VerifierMode::NitroV1.config_hash()
+            );
+            proof_tx.send(()).unwrap();
+        }
+        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
+            panic!("expected a NoProof settlement proposal");
+        };
+        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
+        assert_eq!(
+            attestation.verifierConfigHash,
+            VerifierMode::NoProof.config_hash()
+        );
+        assert!(!task.is_finished(), "a second signature is still required");
+        // Leader demotion drops the monitor run future, which aborts its preparation task.
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
         assert!(l1.read_q().is_empty());
     }
 
@@ -1223,109 +1334,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unconfigured_prover_collects_no_proof_quorum() {
-        assert_no_proof_quorum(None).await;
-    }
-
-    #[tokio::test]
-    async fn proof_failure_collects_no_proof_quorum() {
-        let proof = Some(Err(eyre::eyre!("failed to read portal verifier")));
-        assert_no_proof_quorum(proof).await;
-    }
-
-    async fn assert_no_proof_quorum(proof: Option<eyre::Result<SettlementProof>>) {
-        let l1 = Asserter::new();
-        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        let proof_tx = proof.map(|proof| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            monitor.settlement_prover = Some(SettlementProver::fixed_after(async move {
-                rx.await.expect("release proof after the Nitro proposal");
-                proof
-            }));
-            tx
-        });
-        let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
-        monitor.config.settlements = Some(SettlementManager::new(
-            crate::attestation::AttestationDomain {
-                l1_chain_id: 1337,
-                portal_address: monitor.config.portal_address,
-                zone_id: 7,
-            },
-            None,
-            PrivateKeySigner::random(),
-            Default::default(),
-            mock_provider(l1.clone()),
-            monitor.config.chain_spec.clone(),
-            BatchAnchorConfig::default(),
-            commands,
-        ));
-        let header = TempoHeaderResponse {
-            inner: RpcHeader {
-                hash: B256::ZERO,
-                inner: TempoHeader::default(),
-                total_difficulty: None,
-                size: None,
-            },
-            timestamp_millis: 0,
-        };
-        for _ in 0..(1 + usize::from(proof_tx.is_some())) {
-            l1.push_success(&mock_l1_header(1_000));
-            l1.push_success(&abi_encode_multicall(vec![
-                abi_encode_u64(1),
-                abi_encode_u64(2),
-                Address::ZERO.abi_encode().into(),
-                abi_encode_u64(0),
-            ]));
-            l1.push_success(&serde_json::json!("0x7b"));
-            l1.push_success(&header);
-        }
-
-        let task = tokio::spawn(async move {
-            monitor
-                .batch_preparer()
-                .prepare_artifacts(11, prepared(test_batch_data()), Vec::new())
-                .await
-        });
-        if let Some(proof_tx) = proof_tx {
-            let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
-                panic!("expected a Nitro settlement proposal");
-            };
-            let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
-            assert_eq!(
-                attestation.verifierConfigHash,
-                VerifierMode::NitroV1.config_hash()
-            );
-            proof_tx.send(()).unwrap();
-        }
-        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
-            panic!("expected a NoProof settlement proposal");
-        };
-        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
-        assert_eq!(
-            attestation.verifierConfigHash,
-            VerifierMode::NoProof.config_hash()
-        );
-        assert!(!task.is_finished(), "a second signature is still required");
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
     async fn submission_error_invalidates_pipeline_on_hardfork_change() {
         use zone_prover::{NITRO_VERIFIER_CONFIG_V1, ProofBundle};
 
         let l1 = Asserter::new();
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        let batch = test_batch_data();
+        let batch = BatchData {
+            zone_height: 20,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0xbb),
+            next_block_hash: B256::repeat_byte(0xcc),
+            prev_processed_deposit_hash: B256::ZERO,
+            next_processed_deposit_hash: B256::ZERO,
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 1,
+        };
+        // The first attempt fails after selecting the ABI, then L1 activates T13.
         l1.push_success(&abi_encode_b256(batch.prev_block_hash));
         l1.push_success(&mock_l1_header(999));
         l1.push_failure_msg("submission metadata temporarily unavailable");
@@ -1400,7 +1428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refill_withdrawal_cache_does_not_change_submission_cursor() {
+    async fn refill_withdrawal_cache_does_not_resync_the_portal_anchor() {
         let l1 = Asserter::new();
         let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
         let zone = mock_zone_provider(portal_hash, 42, B256::repeat_byte(0x33));
@@ -1411,6 +1439,7 @@ mod tests {
         ]));
 
         let monitor = test_monitor(l1.clone(), zone);
+        let old_cursor = monitor.preparation_cursor;
         let old_last_submitted = monitor.submitted_zone_block();
         monitor.withdrawal_store.lock().add_withdrawal(
             3,
@@ -1431,7 +1460,12 @@ mod tests {
 
         let store = monitor.withdrawal_store.lock();
         assert_eq!(store.batch_count(), 0);
+        assert_eq!(monitor.preparation_cursor.block_hash, old_cursor.block_hash);
         assert_eq!(monitor.submitted_zone_block(), old_last_submitted);
+        assert_eq!(
+            monitor.preparation_cursor.processed_deposit_hash,
+            old_cursor.processed_deposit_hash
+        );
         assert!(l1.read_q().is_empty());
     }
 
@@ -1442,11 +1476,24 @@ mod tests {
         l1.push_success(&abi_encode_b256(portal_hash));
 
         let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
-        let mut batch = test_batch_data();
-        batch.prev_block_hash = B256::repeat_byte(0x99);
+        let old_cursor = monitor.preparation_cursor;
+        let batch_data = BatchData {
+            zone_height: 20,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0x99),
+            next_block_hash: B256::repeat_byte(0x55),
+            prev_processed_deposit_hash: B256::repeat_byte(0x77),
+            next_processed_deposit_hash: B256::repeat_byte(0x66),
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            prev_processed_token_count: 0,
+            next_processed_token_count: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 8,
+        };
 
         let error = monitor
-            .submit_ready_batch(ready_batch(batch))
+            .submit_ready_batch(ready_batch(batch_data.clone()))
             .await
             .unwrap_err();
 
@@ -1456,6 +1503,19 @@ mod tests {
                 .contains("invalidating prepared batch pipeline")
         );
         assert_eq!(monitor.submitted_zone_block(), 10);
+        assert_eq!(monitor.preparation_cursor.block_hash, old_cursor.block_hash);
+        assert_eq!(
+            monitor.preparation_cursor.processed_deposit_hash,
+            old_cursor.processed_deposit_hash
+        );
+        assert_ne!(
+            monitor.preparation_cursor.block_hash,
+            batch_data.next_block_hash
+        );
+        assert_ne!(
+            monitor.preparation_cursor.processed_deposit_hash,
+            batch_data.next_processed_deposit_hash
+        );
         assert!(l1.read_q().is_empty());
     }
 }
