@@ -568,7 +568,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
-    /// Prove and preflight, while collecting a Nitro certificate, then submit.
+    /// Collect a certificate and submit, proving and preflighting when a prover is configured.
     ///
     /// Any proving or proof verification failure selects [`VerifierMode::NoProof`] for
     /// this batch and requires a fresh certificate. Certificate collection errors do not
@@ -582,16 +582,18 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawals: Vec<abi::Withdrawal>,
         shutdown: &sync::CancellationToken,
     ) -> std::result::Result<(), BatchSubmitError> {
-        let nitro_attempt = async {
-            let proof = async {
-                match &self.settlement_prover {
-                    Some(prover) => prover
-                        .prove(from, last_zone_block, batch.clone())
-                        .await
-                        .map(Some),
-                    None => Ok(None),
-                }
+        let preparation = async {
+            let Some(prover) = &self.settlement_prover else {
+                let certificate = self
+                    .prepare_certificate(batch, VerifierMode::NoProof)
+                    .await?;
+                return Ok(ControlFlow::Continue((
+                    VerifierMode::NoProof,
+                    None,
+                    certificate,
+                )));
             };
+            let proof = prover.prove(from, last_zone_block, batch.clone());
             tokio::pin!(proof);
 
             let certificate = self.prepare_certificate(batch, VerifierMode::NitroV1);
@@ -612,17 +614,19 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                 }
             };
 
-            Ok::<_, BatchSubmitError>(ControlFlow::Continue((proof, certificate)))
+            Ok::<_, BatchSubmitError>(ControlFlow::Continue((
+                VerifierMode::NitroV1,
+                Some(proof),
+                certificate,
+            )))
         };
 
         let (verifier_mode, proof_bundle, certificate) = match tokio::select! {
             biased; // Prefer cancellation if shutdown and preparation are both ready.
             () = shutdown.cancelled() => return Err(BatchSubmitError::Cancelled),
-            result = nitro_attempt => result?,
+            result = preparation => result?,
         } {
-            ControlFlow::Continue((proof, certificate)) => {
-                (VerifierMode::NitroV1, proof, certificate)
-            }
+            ControlFlow::Continue(attempt) => attempt,
             ControlFlow::Break(cause) => {
                 warn!(error = ?cause, "Settling batch with the `NoProof` verifier fallback");
                 self.metrics.batch_no_proof_fallback_total.increment(1);
@@ -1293,6 +1297,79 @@ mod tests {
                 .contains("failed to resync after exhausting")
         );
         assert!(l1.read_q().is_empty(), "fallback must reach submission");
+    }
+
+    #[tokio::test]
+    async fn unconfigured_prover_collects_no_proof_quorum() {
+        let l1 = Asserter::new();
+        let mut monitor = test_monitor(l1.clone(), TestZoneProvider::new());
+        let (commands, mut proposals) = tokio::sync::mpsc::channel(1);
+        let settlements = SettlementManager::new(
+            crate::attestation::AttestationDomain {
+                l1_chain_id: 1337,
+                portal_address: monitor.config.portal_address,
+                zone_id: 7,
+            },
+            None,
+            PrivateKeySigner::random(),
+            Default::default(),
+            mock_provider(l1.clone()),
+            monitor.config.chain_spec.clone(),
+            BatchAnchorConfig::default(),
+            commands,
+        );
+        monitor.config.settlements = Some(settlements);
+        let header = tempo_alloy::rpc::TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header {
+                hash: B256::ZERO,
+                inner: TempoHeader::default(),
+                total_difficulty: None,
+                size: None,
+            },
+            timestamp_millis: 0,
+        };
+        l1.push_success(&mock_l1_header(1_000));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(1),
+            abi_encode_u64(2),
+            Address::ZERO.abi_encode().into(),
+            abi_encode_u64(0),
+        ]));
+        l1.push_success(&serde_json::json!("0x7b"));
+        l1.push_success(&header);
+        let shutdown = sync::CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            monitor
+                .prove_and_submit_batch(
+                    11,
+                    &prepared(test_batch_data()),
+                    20,
+                    Vec::new(),
+                    &task_shutdown,
+                )
+                .await
+        });
+        let proposal = tokio::time::timeout(Duration::from_secs(1), proposals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let zone_p2p::P2pCommand::BroadcastSettlementProposal(encoded) = proposal else {
+            panic!("expected a NoProof settlement proposal");
+        };
+        let attestation = crate::attestation::SettlementAttestation::decode(&encoded).unwrap();
+        assert_eq!(
+            attestation.verifierConfigHash,
+            VerifierMode::NoProof.config_hash()
+        );
+        assert!(!task.is_finished(), "a second signature is still required");
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(BatchSubmitError::Cancelled)));
+        assert!(l1.read_q().is_empty());
     }
 
     #[tokio::test]

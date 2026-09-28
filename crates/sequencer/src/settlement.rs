@@ -8,10 +8,10 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is **skipped** by the pre-T11 stub verifier. When a settlement prover is
+//! Proof validation is **skipped** by the pre-T13 stub verifier. When a settlement prover is
 //! configured, submissions normally carry its Nitro NSM attestation, but may use `NoProof` when
-//! proving fails, the verifier rejects a proof, or its simulation fails. The unconfigured
-//! compatibility path still submits an empty proof with `Nitro` mode for stub verifiers.
+//! proving fails, the verifier rejects a proof, or its simulation fails. Without a prover,
+//! submissions use `NoProof` with an empty proof.
 //!
 //! # Anchor modes
 //!
@@ -1457,8 +1457,6 @@ fn settlement_proof(
 ) -> Result<(Bytes, Bytes)> {
     let config = Bytes::from_static(verifier_mode.config());
     let Some(bundle) = proof_bundle else {
-        // Without a prover, let the on-chain verifier decide whether an empty proof is valid.
-        // This preserves settlement against the stub verifier used by integration fixtures.
         return Ok((config, Bytes::new()));
     };
     eyre::ensure!(
@@ -2708,6 +2706,10 @@ mod tests {
 
     #[test]
     fn settlement_proof_enforces_verifier_mode_shape() {
+        let (verifier_config, proof) = settlement_proof(VerifierMode::NoProof, None).unwrap();
+        assert_eq!(verifier_config.as_ref(), &[2]);
+        assert!(proof.is_empty());
+
         let empty_nitro = ProofBundle {
             verifier_config: Bytes::from_static(VerifierMode::NitroV1.config()),
             proof: Bytes::new(),
