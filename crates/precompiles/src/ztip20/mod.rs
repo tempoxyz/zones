@@ -21,6 +21,12 @@ use crate::{
 alloy_sol_types::sol! {
     /// Returned instead of the upstream balance error that reveal the user balance to the spender.
     error InsufficientBalance();
+
+    // Temporary ABI until the pinned Tempo dependency includes TIP-1006.
+    // Then move burnAt into the exhaustive ITIP20 admin-call match below.
+    interface ITIP1006 {
+        function burnAt(address from, uint256 amount) external;
+    }
 }
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
@@ -51,6 +57,10 @@ impl CallRules for TIP20Rules {
 
     /// Apply zone privacy and selector restrictions before upstream execution.
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        if ITIP1006::ITIP1006Calls::abi_decode(data).is_ok() {
+            return CallCheck::Revert(Unauthorized {}.abi_encode().into());
+        }
+
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
@@ -144,7 +154,7 @@ mod tests {
     use revm::precompile::PrecompileResult;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
-        PATH_USD_ADDRESS,
+        PATH_USD_ADDRESS, Precompile,
         storage::{Handler, StorageCtx},
         test_util::TIP20Setup,
         tip20::{
@@ -421,6 +431,14 @@ mod tests {
         assert_unauthorized(
             &rules,
             ITIP20::burnBlockedCall {
+                from: account,
+                amount: U256::ONE,
+            },
+            caller,
+        );
+        assert_unauthorized(
+            &rules,
+            ITIP1006::burnAtCall {
                 from: account,
                 amount: U256::ONE,
             },
@@ -833,6 +851,72 @@ mod tests {
             U256::from(123_456u64)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn burn_at_reverts_without_changing_balances_or_supply() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new()?;
+        for caller in [
+            harness.alice,
+            harness.sequencer,
+            ZONE_INBOX_ADDRESS,
+            ZONE_OUTBOX_ADDRESS,
+        ] {
+            for amount in [U256::ZERO, U256::ONE, U256::MAX] {
+                let calldata = ITIP1006::burnAtCall {
+                    from: harness.alice,
+                    amount,
+                }
+                .abi_encode();
+                let result = harness.call(caller, calldata.into(), 100_000, false)?;
+                assert!(result.is_revert());
+                assert_eq!(result.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+            }
+        }
+
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(1_000_000u64));
+        assert_eq!(
+            harness.balance_of(ZONE_OUTBOX_ADDRESS)?,
+            U256::from(10_000u64)
+        );
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            assert_eq!(
+                TIP20Token::from_address(harness.token)?.total_supply()?,
+                U256::from(1_010_000u64)
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn malformed_burn_at_calldata_uses_upstream_dispatch() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new()?;
+        let calldata = ITIP1006::burnAtCall {
+            from: harness.alice,
+            amount: U256::ONE,
+        }
+        .abi_encode();
+        for len in [0, 3, 4, calldata.len() - 1] {
+            let data = &calldata[..len];
+            assert!(matches!(
+                rules().admit(data, harness.alice),
+                CallCheck::Continue
+            ));
+            let expected = {
+                let mut storage = test_storage_provider(&mut harness.ctx, 100_000, false);
+                StorageCtx::enter(&mut storage, || {
+                    TIP20Token::from_address(harness.token)
+                        .expect("token must exist")
+                        .call(data, harness.alice)
+                })?
+            };
+            let result =
+                harness.call(harness.alice, Bytes::copy_from_slice(data), 100_000, false)?;
+            assert!(result.is_revert());
+            assert_eq!(result.bytes, expected.bytes);
+        }
         Ok(())
     }
 }
