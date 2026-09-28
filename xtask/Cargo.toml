@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+exithatch = { workspace = true, features = ["std"] }
 tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
@@ -61,3 +62,6 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 # crypto (for encryption key registration)
 k256.workspace = true
+
+[dev-dependencies]
+jsonrpsee.workspace = true

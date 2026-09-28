@@ -5,11 +5,8 @@
 //! Zone EVM database adapter: `finalizeTempo` selects the child anchor used by sequencer
 //! admission and every subsequent deposit, policy, and portal read.
 //!
-//! Runtime execution processes a contiguous prefix of the portal deposit queue and reads its
-//! canonical head at the selected child anchor. The batch proof, not this precompile, proves that
-//! the post-state processed hash is an ancestor of that head by validating the unprocessed suffix.
-//! Observing the head read in the execution witness is not sufficient without that explicit proof
-//! constraint.
+//! Runtime execution processes every portal queue entry through the canonical head read at the
+//! selected child anchor, and requires the resulting processed hash to equal that head.
 
 mod dispatch;
 mod forced;
@@ -221,12 +218,8 @@ impl ZoneInbox {
             return Err(ZoneInboxError::extra_decryption_data().into());
         }
 
-        // Step 3: Bind the canonical Tempo queue head into the execution witness.
-        //
-        // `current_hash` may be an ancestor of this value when the sequencer processes only a
-        // bounded prefix of pending deposits. The batch proof validates that hashing the
-        // unprocessed suffix from `current_hash` reaches `tempo_current_hash`; requiring equality
-        // here would incorrectly forbid partial processing.
+        // Step 3: Require the processed hash to equal the canonical Tempo queue head at the
+        // imported anchor. Every entry queued by that anchor must be processed in this call.
         //
         // NOTE: A zero portal denotes the explicit no-L1 mode used by local development and offline
         // execution. There is no canonical queue to bind in that mode.
