@@ -21,12 +21,6 @@ use crate::{
 alloy_sol_types::sol! {
     /// Returned instead of the upstream balance error that reveal the user balance to the spender.
     error InsufficientBalance();
-
-    // Temporary ABI until the pinned Tempo dependency includes TIP-1006.
-    // Then move burnAt into the exhaustive ITIP20 admin-call match below.
-    interface ITIP1006 {
-        function burnAt(address from, uint256 amount) external;
-    }
 }
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
@@ -57,10 +51,6 @@ impl CallRules for TIP20Rules {
 
     /// Apply zone privacy and selector restrictions before upstream execution.
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        if ITIP1006::ITIP1006Calls::abi_decode(data).is_ok() {
-            return CallCheck::Revert(Unauthorized {}.abi_encode().into());
-        }
-
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
@@ -101,7 +91,8 @@ impl CallRules for TIP20Rules {
                 | ITIP20::ITIP20Calls::setNextQuoteToken(_)
                 | ITIP20::ITIP20Calls::completeQuoteTokenUpdate(_)
                 | ITIP20::ITIP20Calls::changeTransferPolicyId(_)
-                | ITIP20::ITIP20Calls::burnBlocked(_) => {
+                | ITIP20::ITIP20Calls::burnBlocked(_)
+                | ITIP20::ITIP20Calls::burnAt(_) => {
                     CallCheck::Revert(Unauthorized {}.abi_encode().into())
                 }
                 ITIP20::ITIP20Calls::name(_)
@@ -119,6 +110,7 @@ impl CallRules for TIP20Rules {
                 | ITIP20::ITIP20Calls::UNPAUSE_ROLE(_)
                 | ITIP20::ITIP20Calls::ISSUER_ROLE(_)
                 | ITIP20::ITIP20Calls::BURN_BLOCKED_ROLE(_)
+                | ITIP20::ITIP20Calls::BURN_AT_ROLE(_)
                 | ITIP20::ITIP20Calls::approve(_)
                 | ITIP20::ITIP20Calls::permit(_)
                 | ITIP20::ITIP20Calls::DOMAIN_SEPARATOR(_) => CallCheck::Continue,
@@ -438,7 +430,7 @@ mod tests {
         );
         assert_unauthorized(
             &rules,
-            ITIP1006::burnAtCall {
+            ITIP20::burnAtCall {
                 from: account,
                 amount: U256::ONE,
             },
@@ -864,7 +856,7 @@ mod tests {
             ZONE_OUTBOX_ADDRESS,
         ] {
             for amount in [U256::ZERO, U256::ONE, U256::MAX] {
-                let calldata = ITIP1006::burnAtCall {
+                let calldata = ITIP20::burnAtCall {
                     from: harness.alice,
                     amount,
                 }
@@ -893,7 +885,7 @@ mod tests {
     #[test]
     fn malformed_burn_at_calldata_uses_upstream_dispatch() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
-        let calldata = ITIP1006::burnAtCall {
+        let calldata = ITIP20::burnAtCall {
             from: harness.alice,
             amount: U256::ONE,
         }
