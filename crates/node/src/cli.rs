@@ -276,6 +276,7 @@ async fn configure_sequencing(
         "--shadow-prover.pcrs requires an rpc_only follower; it is not a settlement policy"
     );
 
+    let batch_anchor_config = BatchAnchorConfig::default().with_force_ancestry(args.force_ancestry);
     if should_sequence_blocks {
         let sequencer_signer = load_sequencer_signer(args.sequencer_key_file.as_deref()).await?;
         node = node.with_sequencer(ZoneSequencerAddOnsConfig {
@@ -289,7 +290,7 @@ async fn configure_sequencing(
                 .and_then(P2pConfig::block_attestation_signer),
             zone_id,
             zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-            batch_anchor_config: BatchAnchorConfig::default(),
+            batch_anchor_config,
             withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
             withdrawal_batch_limits: WithdrawalBatchLimits {
                 max_batch_gas: args.withdrawal_max_batch_gas,
@@ -301,7 +302,7 @@ async fn configure_sequencing(
     } else if args.enable_prover {
         node = node.with_shadow_prover(ZoneShadowProverAddOnsConfig {
             zone_id,
-            batch_anchor_config: BatchAnchorConfig::default(),
+            batch_anchor_config,
             prover_runtime: prover_addresses
                 .map_or(ProverRuntime::InProcess, ProverRuntime::Remote),
             proof_verifier: args.shadow_prover_pcrs.clone(),
@@ -582,6 +583,11 @@ pub struct ZoneArgs {
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
 
+    /// Test-only flag to force ancestry settlement anchors for every batch.
+    /// Waits for L1 to advance past the batch's Tempo checkpoint.
+    #[arg(long = "sequencer.force-ancestry", env = "SEQUENCER_FORCE_ANCESTRY")]
+    pub force_ancestry: bool,
+
     /// Route to an immutable prover release for each exact live L1 hardfork. Repeat per hardfork.
     #[arg(
         long = "sequencer.prover-address",
@@ -807,17 +813,20 @@ mod tests {
     }
 
     #[test]
-    fn checker_mode_defaults_to_off() {
-        let args = ZoneArgsParser::try_parse_from([
+    fn checker_mode_and_force_ancestry_default_to_off() {
+        let common = [
             "tempo-zone",
-            "--l1.rpc-url",
-            "ws://localhost:8546",
-            "--l1.portal-address",
-            "0x0000000000000000000000000000000000000001",
-        ])
-        .unwrap()
-        .zone;
-        assert_eq!(args.checker_mode, zone_checker::CheckerMode::Off);
+            "--l1.rpc-url=ws://localhost:8546",
+            "--l1.portal-address=0x0000000000000000000000000000000000000001",
+        ];
+        let parse = |extra: &[&str]| {
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(extra.iter().copied()))
+                .unwrap()
+                .zone
+        };
+        let (args, args_with_ancestry) = (parse(&[]), parse(&["--sequencer.force-ancestry"]));
+        assert!(args.checker_mode == zone_checker::CheckerMode::Off && !args.force_ancestry);
+        assert!(args_with_ancestry.force_ancestry);
     }
 
     #[test]

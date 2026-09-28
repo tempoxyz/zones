@@ -200,6 +200,8 @@ pub struct BatchAnchorConfig {
     /// Number of most-recent L1 blocks to avoid when choosing an anchor, reducing
     /// the chance that an anchor ages out before the on-chain transaction lands.
     safety_margin: u64,
+    /// Select ancestry even while the Tempo checkpoint remains in the direct window.
+    force_ancestry: bool,
 }
 
 impl BatchAnchorConfig {
@@ -218,7 +220,14 @@ impl BatchAnchorConfig {
         Ok(Self {
             history_window,
             safety_margin,
+            force_ancestry: false,
         })
+    }
+
+    /// Test-only opt-in to ancestry anchors without changing the protocol history window.
+    pub const fn with_force_ancestry(mut self, force_ancestry: bool) -> Self {
+        self.force_ancestry = force_ancestry;
+        self
     }
 
     /// Configured history window in L1 blocks.
@@ -242,6 +251,7 @@ impl Default for BatchAnchorConfig {
         Self {
             history_window: DEFAULT_EIP2935_HISTORY_WINDOW,
             safety_margin: DEFAULT_EIP2935_SAFETY_MARGIN,
+            force_ancestry: false,
         }
     }
 }
@@ -838,11 +848,9 @@ impl BatchSubmitter {
 
     /// Resolve the anchor mode for the given `tempo_block_number`.
     ///
-    /// - **Direct** (gap < configured effective window): the portal reads the
-    ///   hash directly from EIP-2935.
-    /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
-    ///   behind the configured safety margin is used as anchor. Ancestry headers
-    ///   are collected and validated for future prover integration.
+    /// - **Direct** (gap < effective window, unless forced): use the L1 block hash from EIP-2935.
+    /// - **Ancestry** (gap ≥ effective window, or forced): use a recent L1 anchor, collect, and
+    ///   validate ancestry headers.
     async fn resolve_batch_anchor(&self, tempo_block_number: u64) -> Result<BatchAnchor> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
@@ -852,10 +860,15 @@ impl BatchSubmitter {
                  (tip={current_l1_block}), will retry after L1 advances"
             ));
         }
+        if self.anchor_config.force_ancestry && tempo_block_number == current_l1_block {
+            return Err(eyre::eyre!(
+                "Forced ancestry requires an L1 block newer than ({tempo_block_number}). Will retry after L1 advances."
+            ));
+        }
 
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
-        if gap < self.anchor_config.effective_window() {
+        if !self.anchor_config.force_ancestry && gap < self.anchor_config.effective_window() {
             // The cache is only useful during ancestry recovery. Replace it
             // instead of clearing it so the hash table's allocation is freed.
             let has_cached_headers = !self.ancestry_header_cache.read().is_empty();
@@ -873,7 +886,10 @@ impl BatchSubmitter {
             return Ok(BatchAnchor::Direct { block_hash });
         }
 
-        let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
+        let mut anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
+        if self.anchor_config.force_ancestry {
+            anchor_block = anchor_block.max(tempo_block_number + 1);
+        }
         let ancestry_headers = self
             .fetch_ancestry_headers(tempo_block_number, anchor_block)
             .await?;
@@ -885,7 +901,7 @@ impl BatchSubmitter {
             gap,
             header_count = ancestry_headers.len(),
             total_bytes = ancestry_headers.iter().map(|h| h.len()).sum::<usize>(),
-            "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
+            "using ancestry anchor for batch settlement"
         );
 
         let block_hash = self
@@ -2559,6 +2575,41 @@ mod tests {
         assert_eq!(anchor.block_hash(), hash);
         assert!(anchor.ancestry_headers().is_empty());
         assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn forced_ancestry_waits_or_anchors_after_tempo_block() {
+        for (tip, expected_anchor) in [(100_u64, None), (101, Some(101)), (120, Some(116))] {
+            let asserter = Asserter::new();
+            let submitter = BatchSubmitter::with_anchor_config(
+                Address::ZERO,
+                mock_l1(asserter.clone()),
+                test_chain_spec(),
+                BatchAnchorConfig::new(100, 4)
+                    .unwrap()
+                    .with_force_ancestry(true),
+            );
+            asserter.push_success(&tip);
+            if let Some(expected_anchor) = expected_anchor {
+                let mut parent_hash = B256::ZERO;
+                for number in 100..expected_anchor {
+                    let (header, hash) = mock_l1_header(number, parent_hash);
+                    asserter.push_success(&header);
+                    parent_hash = hash;
+                }
+                let (anchor_header, anchor_hash) = mock_l1_header(expected_anchor, parent_hash);
+                asserter.push_success(&anchor_header);
+                asserter.push_success(&anchor_header);
+                let anchor = submitter.resolve_batch_anchor(100).await.unwrap();
+                assert_eq!(anchor.block_number(100), expected_anchor);
+                assert_eq!(anchor.block_hash(), anchor_hash);
+                assert!(!anchor.ancestry_headers().is_empty());
+            } else {
+                let err = submitter.resolve_batch_anchor(100).await.unwrap_err();
+                assert!(err.to_string().contains("retry after L1 advances"));
+            }
+            assert!(asserter.read_q().is_empty());
+        }
     }
 
     #[tokio::test]
