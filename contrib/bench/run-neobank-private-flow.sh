@@ -723,6 +723,15 @@ if [[ -n "${ZONES_BENCH_SETTLEMENT_START_FILE:-}" ]]; then
         '{batch_index:$batch_index,timestamp:$timestamp}' \
         >"$ZONES_BENCH_SETTLEMENT_START_FILE"
 fi
+# Optional prover-benchmark snapshot, after setup and before measured traffic.
+if [[ -n "${ZONES_BENCH_METRICS_BEFORE_FILE:-}" ]]; then
+    mkdir -p "$(dirname -- "$ZONES_BENCH_METRICS_BEFORE_FILE")"
+    curl --fail --silent --show-error \
+        "${ZONES_BENCH_METRICS_URL:-http://127.0.0.1:9201/metrics}" \
+        >"$ZONES_BENCH_METRICS_BEFORE_FILE"
+    [[ -s "$ZONES_BENCH_METRICS_BEFORE_FILE" ]] ||
+        die "Zone metrics were empty before the measured private flow"
+fi
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
