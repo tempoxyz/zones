@@ -43,6 +43,10 @@ async fn test_t12_to_t13_tip1096_activation() -> eyre::Result<()> {
         .config
         .extra_fields
         .insert_value("t13Time".into(), activation)?;
+    genesis
+        .config
+        .extra_fields
+        .insert_value("t14Time".into(), u64::MAX)?;
     let spec = ZoneChainSpec::from_genesis(genesis.clone())?;
     assert_eq!(spec.tempo_hardfork_at(activation - 1), TempoHardfork::T12);
     assert_eq!(spec.tempo_hardfork_at(activation), TempoHardfork::T13);
